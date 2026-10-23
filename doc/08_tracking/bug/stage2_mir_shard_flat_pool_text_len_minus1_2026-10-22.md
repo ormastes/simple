@@ -970,3 +970,18 @@ can only come from the runtime reclaim itself (scope-GC / string-flag
 interaction documented above). The parse-scope promote coverage is kept: it
 is correct hardening and removes one entire death class, but the gate cure
 is the runtime reclaim fix alone.
+
+## Annotation 2026-10-24 (lane D, ABI finding): reserved has no free bits - the scope stamp needs a struct field
+
+RtCoreString.reserved (runtime_native.c:1445) is fully allocated: bit 0 =
+RT_CORE_STRING_FLAG_SHARED (deliberately overlaps the cp-count field, see the
+rt_string_char_code_at note at :3934), bits [29:0] = cp-count, plus
+RT_CORE_STRING_FLAG_TRANSIENT (bit 1) and SIMD_CACHE_FLAG_IS_ASCII. There is
+NO spare bit field for a creating-scope id, so cure candidate (a) cannot be a
+bit-pack; it requires adding `uint32_t transient_scope_id` to RtCoreString
+(safe within one build - the runtime is compiled into the seed and the
+candidates together, no cross-version ABI - but it shifts data[] and touches
+the hottest struct in the runtime). Candidate (b) (per-scope tracked-object
+lists instead of the single global rt_core_transient_heap_scope_objects) is
+the layout-preserving alternative. Both are owner-lane runtime changes; the
+compiler side remains fully contained as of lane 55.
