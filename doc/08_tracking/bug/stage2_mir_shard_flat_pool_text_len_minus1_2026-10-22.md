@@ -1055,3 +1055,13 @@ mismatch on the ad-hoc entry. So the seed-JIT-correct / candidate-AOT-broken
 differential stands but cannot be cheaply closed seed-side; the owner can
 complete it after the TextSpan/SCV seed nits, or debug the candidate-AOT
 decode read directly (candidate + the minimal warm-cache-hit repro above).
+
+Crash pattern (lane B log, 4 events): the SIGBUS site MOVES with each
+generation -- gen0 claimed=212 near lib.common.json.tokenizer /
+lib.common.ui.action; gen1 claimed=2 near app.ui.render.capability /
+gpu.engine2d.backend; gen2 claimed=84 near compiler.common.native_output_intent
+/ compiler.backend.feature_caps_types; gen3 claimed=24. No single
+reproducible module: consistent with accumulating heap corruption (the
+crash address follows allocation state, not a fixed bad access). HIR
+progress is monotonic regardless (1877+/2934 after 4 crashes) because the
+hir-cache stores each completed module before the next crash.
