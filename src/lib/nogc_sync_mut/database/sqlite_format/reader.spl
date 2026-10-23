@@ -1,0 +1,72 @@
+# SQLite format reader — public probe and typed table-read entry points.
+#
+# sqlite_format_probe: header validation only (fast L0 introspection).
+# sqlite_format_read_table: full schema + b-tree decode of one table into
+# typed DbRow values (L1 typed row read). Both fail closed with SqliteError;
+# file reads go through the existing noGC sync-mut File facade.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{
+    SqliteError, SqliteFileInfo, SQLITE_HEADER_LEN
+}
+use std.nogc_sync_mut.database.sqlite_format.header.{sqlite_header_parse}
+use std.nogc_sync_mut.database.sqlite_format.pager.{SqlitePager}
+use std.nogc_sync_mut.database.sqlite_format.schema.{
+    sqlite_schema_scan, find_table_schema
+}
+use std.nogc_sync_mut.database.sqlite_format.btree.{table_btree_scan}
+use std.nogc_sync_mut.database.sqlite_format.record.{sqlite_record_decode}
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+use std.io_runtime.{file_read_bytes_result}
+
+# Read a whole file as bytes, mapped to a typed Io error.
+fn _read_file_bytes(path: text) -> Result<[u8], SqliteError>:
+    match file_read_bytes_result(path):
+        Ok(b): Ok(b)
+        Err(_): Err(SqliteError.Io(message: "cannot read '{path}'"))
+
+# L0: validate the 100-byte header and page-count/file-size consistency.
+fn sqlite_format_probe(path: text) -> Result<SqliteFileInfo, SqliteError>:
+    val bytes = _read_file_bytes(path)?
+    sqlite_header_parse(bytes)
+
+# L1: read one ordinary rowid table fully, in ascending rowid order, with
+# typed values. Column names come from the CREATE TABLE statement; rows wider
+# than the column list are an error, narrower rows are padded with NULL (the
+# SQLite record can be shorter than the table's column count).
+fn sqlite_format_read_table(path: text, table_name: text) -> Result<[DbRow], SqliteError>:
+    val bytes = _read_file_bytes(path)?
+    sqlite_format_read_table_bytes(bytes, table_name)
+
+# Bytes-based variant: same decode over an in-memory image (used by the
+# writer gate to re-read its own output without file I/O).
+fn sqlite_format_read_table_bytes(bytes: [u8], table_name: text) -> Result<[DbRow], SqliteError>:
+    val info = sqlite_header_parse(bytes)?
+    val pager = SqlitePager.open( bytes, info.page_size, info.page_count, info.reserved_bytes)
+    val entries = sqlite_schema_scan(pager, info.text_encoding)?
+    val def = find_table_schema(entries, table_name)?
+    val raw_rows = table_btree_scan(pager, def.rootpage)?
+    var out: [DbRow] = []
+    for raw in raw_rows:
+        var values = sqlite_record_decode(raw.1, info.text_encoding)?
+        if def.ipk >= 0 and def.ipk < values.len():
+            # INTEGER PRIMARY KEY columns are rowid aliases: the record holds
+            # a NULL placeholder and the value lives in the b-tree key.
+            values[def.ipk] = DbValue.Integer(value: raw.0)
+        # REAL affinity: SQLite stores integral reals as integers in the
+        # record and converts on read; mirror that here.
+        var ci: i64 = 0
+        while ci < values.len() and ci < def.affinity.len():
+            if def.affinity[ci] == 2:
+                match values[ci]:
+                    DbValue.Integer(iv):
+                        values[ci] = DbValue.Real(value: iv as f64)
+                    _:
+                        val _ = 0
+            ci = ci + 1
+        if values.len() > def.columns.len():
+            return Err(SqliteError.RowWidthMismatch( table: def.name, expected: def.columns.len(), actual: values.len()))
+        while values.len() < def.columns.len():
+            values.push(DbValue.Null)
+        out.push(DbRow(columns: def.columns, values: values))
+    Ok(out)
+

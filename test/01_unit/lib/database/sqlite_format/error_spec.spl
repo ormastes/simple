@@ -1,0 +1,98 @@
+# Fail-closed error path specs: truncated file, wrong magic, unknown serial
+# type, bad page size, missing table, WAL-main probe, nonexistent path.
+# All crafted inputs go through the bytes-level APIs (no file writes needed).
+
+use std.spec
+use std.nogc_sync_mut.database.sqlite_format.{
+    sqlite_format_probe, sqlite_format_read_table, sqlite_format_read_table_bytes, sqlite_verify_bytes
+}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.nogc_sync_mut.database.sqlite_format.record.{sqlite_record_decode}
+use std.io_runtime.{file_read_bytes_result}
+
+val FIXTURE: text = "test/fixtures/database/sqlite/messenger.sqlite"
+val WAL_MAIN: text = "test/fixtures/database/sqlite/walsample-kept.sqlite"
+
+fn fixture_bytes() -> [u8]:
+    match file_read_bytes_result(FIXTURE):
+        Ok(bytes):
+            bytes
+        Err(_):
+            []
+
+describe "sqlite_format error paths":
+
+    it "probe on a nonexistent path is a typed Io error":  # oracle: path does not exist
+        match sqlite_format_probe("test/fixtures/database/sqlite/no-such-file-20261022.sqlite"):
+            Ok(info):
+                expect(info.page_size).to_equal(-1)
+            Err(SqliteError.Io(message: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "read_table on a truncated file fails closed":  # oracle: first 5000 bytes of a 24576-byte file
+        val full = fixture_bytes()
+        var cut: [u8] = []
+        var i: i64 = 0
+        while i < 5000:
+            cut.push(full[i])
+            i = i + 1
+        match sqlite_format_read_table_bytes(cut, "room"):
+            Ok(rows):
+                expect(rows.len()).to_equal(-1)
+            Err(SqliteError.TruncatedFile(expected: 24576, actual: 5000)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "read_table with a corrupted magic fails closed":  # oracle: byte 0 flipped from 'S' to 'T'
+        val full = fixture_bytes()
+        full[0] = 0x54u8
+        match sqlite_format_read_table_bytes(full, "room"):
+            Ok(rows):
+                expect(rows.len()).to_equal(-1)
+            Err(SqliteError.BadMagic(found: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "a record whose text body is truncated is rejected":  # oracle: serial 99 declares a 43-byte text, 3 present
+        var buf: [u8] = [2u8, 99u8, 0x00u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(buf, 1):
+            Ok(v):
+                expect(v.len()).to_equal(-1)
+            Err(SqliteError.MalformedRecord(message: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "read_table on a missing table fails closed":  # oracle: fixture has no table named missing
+        val full = fixture_bytes()
+        match sqlite_format_read_table_bytes(full, "missing"):
+            Ok(rows):
+                expect(rows.len()).to_equal(-1)
+            Err(SqliteError.SchemaNotFound(table: "missing")):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "verify rejects a file with a corrupt page type byte":  # oracle: page 2 (room root) type byte set to 0x07
+        val full = fixture_bytes()
+        full[4096] = 0x07u8
+        match sqlite_verify_bytes(full):
+            Ok(info):
+                expect(info.page_size).to_equal(-1)
+            Err(SqliteError.UnknownPageType(page: 2, kind: 7)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "probe refuses a pre-checkpoint WAL main file":  # oracle: schema format 0 in the WAL fixture main file; WAL overlay is a later gate (plan 3.4)
+        match sqlite_format_probe(WAL_MAIN):
+            Ok(info):
+                expect(info.schema_format).to_equal(0)
+            Err(SqliteError.CorruptPage(message: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")

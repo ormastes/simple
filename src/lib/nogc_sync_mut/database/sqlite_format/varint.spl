@@ -1,0 +1,90 @@
+# SQLite varint codec (1..9 bytes, big-endian continuation bits — NOT LEB128).
+#
+# Encoding rule (sqlite.org/fileformat2): the first up-to-8 bytes each carry
+# 7 payload bits in their low bits and a continuation flag in bit 7; when the
+# value needs a 9th byte, the first 8 bytes carry 56 bits (7 each, continuation
+# set) and the 9th byte carries the final 8 payload bits with no continuation.
+#
+# All decode offsets are checked against the caller's buffer; a varint that
+# would run past the buffer end is MalformedVarint, never an out-of-bounds read.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+
+# Decode one SQLite varint at buf[offset].
+# Returns Ok((value, bytes_consumed)); Err(MalformedVarint) on truncation.
+fn sqlite_varint_decode(buf: [u8], offset: i64) -> Result<(u64, i64), SqliteError>:
+    if offset < 0 or offset >= buf.len():
+        return Err(SqliteError.MalformedVarint(offset: offset))
+
+    var result: u64 = 0u64
+    var i: i64 = 0
+    while i < 9:
+        val idx = offset + i
+        if idx >= buf.len():
+            return Err(SqliteError.MalformedVarint(offset: offset))
+        val b = buf[idx]
+        if i == 8:
+            # 9th byte: all 8 bits are payload, no continuation flag.
+            result = (result << 8) | (b as u64)
+            return Ok((result, 9))
+        result = (result << 7) | ((b & 0x7F) as u64)
+        if (b & 0x80) == 0:
+            return Ok((result, i + 1))
+        i = i + 1
+
+    Err(SqliteError.MalformedVarint(offset: offset))
+
+# Number of bytes sqlite_varint_encode writes for value.
+fn sqlite_varint_len(value: u64) -> i64:
+    if value < (1u64 << 7):
+        return 1
+    if value < (1u64 << 14):
+        return 2
+    if value < (1u64 << 21):
+        return 3
+    if value < (1u64 << 28):
+        return 4
+    if value < (1u64 << 35):
+        return 5
+    if value < (1u64 << 42):
+        return 6
+    if value < (1u64 << 49):
+        return 7
+    if value < (1u64 << 56):
+        return 8
+    9
+
+# Encode a u64 as a SQLite varint byte array.
+fn sqlite_varint_encode(value: u64) -> [u8]:
+    var groups: [u8] = []
+    var rest = value
+    var count: i64 = 0
+    while count < 8:
+        groups.push((rest & 0x7Fu64) as u8)
+        rest = rest >> 7
+        count = count + 1
+        if rest == 0u64:
+            break
+
+    var out: [u8] = []
+    if rest == 0u64:
+        var i = groups.len() - 1
+        while i >= 0:
+            var b = groups[i]
+            if i != 0:
+                b = b | 0x80u8
+            out.push(b)
+            i = i - 1
+        return out
+
+    # 9-byte form (SQLite): the first 8 bytes carry bits 8..63 as 7-bit
+    # groups (continuation set), and the 9th byte carries bits 0..7 raw.
+    val low8 = (value & 0xFFu64) as u8
+    val upper = value >> 8
+    var j: i64 = 7
+    while j >= 0:
+        out.push(((((upper >> (j * 7) as u64) & 0x7Fu64) as u8) | 0x80u8))
+        j = j - 1
+    out.push(low8)
+    out
+
