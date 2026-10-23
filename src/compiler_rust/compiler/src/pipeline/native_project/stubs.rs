@@ -972,6 +972,20 @@ pub(crate) fn generate_stub_object(
     selected_runtime_libs: &[&std::path::Path],
     imports: &ModuleImports,
 ) -> Result<PathBuf, String> {
+    generate_stub_object_with_system_libs(temp_dir, object_paths, main_o, selected_runtime_libs, imports, &[])
+}
+
+/// As [`generate_stub_object`], plus link-line system libraries that only
+/// contribute DEFINED symbols (their own undefined refs, e.g. libmingw32's
+/// WinMain/__ImageBase, are resolved by the linker, never stubbed).
+pub(crate) fn generate_stub_object_with_system_libs(
+    temp_dir: &std::path::Path,
+    object_paths: &[PathBuf],
+    main_o: &std::path::Path,
+    selected_runtime_libs: &[&std::path::Path],
+    imports: &ModuleImports,
+    system_libs: &[PathBuf],
+) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
     let mut defined = HashSet::new();
@@ -1042,8 +1056,9 @@ pub(crate) fn generate_stub_object(
 
     let target = effective_target();
     let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&target);
-    for lib_path in &plat_config.system_scan_libs {
-        if std::path::Path::new(lib_path).exists() {
+    let scan_libs = plat_config.system_scan_libs.iter().map(PathBuf::from).chain(system_libs.iter().cloned());
+    for lib_path in &scan_libs.collect::<Vec<_>>() {
+        if lib_path.exists() {
             let mut nm_cmd = nm_command()?;
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
