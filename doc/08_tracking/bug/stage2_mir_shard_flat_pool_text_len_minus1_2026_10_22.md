@@ -27,3 +27,34 @@ trace data exists under SIMPLE_POOLDBG=1; the discriminating next probe is
 a pool-element liveness check at scope pause vs end in the child).
 Lane A stops here per the cycle cap -- over to the flat-pool owner lane
 with the full evidence chain.
+
+## Handoff 2 (2026-10-23, lane A): all pool owners promoted; defect is cumulative-pool lifetime in the child
+
+Landed and validated this round: decl pools (1b8136dd) then extend/pending
+pools (b326b1b9) promoted across the transient scope. The 10 s repro
+fingerprint (repro6) is unchanged in structure: a small text pool right
+after the parser_state tail still carries a dangling element while its
+siblings are valid, and desugar_module still SIGSEGVs.
+
+Analysis at the limit of the workaround approach:
+1. Every pool owner on the dump path is now promoted (par slots, 13 type
+   pools, 44 decl pools, 13 extend/pending pools) and the promote chain
+   reports parser_ok=true -- yet elements still dangle AT the capture
+   dump, which runs while the parse scope is only PAUSED.
+2. reset_all_pools clears ONLY the 56 types.spl pools. The decl/expr/
+   stmt/extend/pending pools are NOT cleared between modules; the flat
+   AST is cumulative per process with module boundaries tracked by slot
+   counters (ast_decl_count_slot et al). A pool can therefore hold
+   elements from an EARLIER module whose scope has ended, next to the
+   current module's valid elements -- exactly the fingerprint (item0
+   dangling, siblings valid; blob sizes far larger than p2_add alone).
+3. Promoting a pool root only preserves the backing as of promote time;
+   if the cumulative design expects per-module slices, the delegated
+   child's extra scope boundaries reclaim slices the single-process
+   design did not.
+
+Conclusion: the fix belongs to the flat-pool owners -- either per-module
+pool clearing before each parse/restore in the child, or a scope-lifetime
+contract for cumulative pools. The sanitize/refusal/promotion workarounds
+remain landed (they convert crashes into cache misses and removed three
+crash layers) but cannot repair the module graph the consumer walks.
