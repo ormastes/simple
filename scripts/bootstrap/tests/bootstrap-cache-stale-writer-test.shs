@@ -1,0 +1,19 @@
+#!/bin/sh
+# Regression: a held writer marker is never reclaimed automatically, and the
+# refusal always names the marker and the recorded pid's liveness.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stale-writer.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+expect() { # <cache> <expected substring>
+  out=$(bootstrap_cache_writer_acquire "$1" 2>&1) && fail "marker $1.writer was acquired over a held marker"
+  case "$out" in *"bootstrap-cache-error: active or unresolved writer: $1.writer ($2"*) ;; *) fail "wrong error: $out" ;; esac
+  [ -d "$1.writer" ] || fail "marker $1.writer was removed"
+}
+sh -c 'exit 0' & dead=$!; wait "$dead"
+c="$tmp/dead"; mkdir "$c.writer"; echo "$dead" > "$c.writer/pid"; expect "$c" "recorded pid $dead is not alive"
+c="$tmp/live"; mkdir "$c.writer"; echo "$$" > "$c.writer/pid"; expect "$c" "recorded pid $$ is alive"
+c="$tmp/nopid"; mkdir "$c.writer"; expect "$c" "no pid recorded"
+echo "PASS: held writer marker refused with liveness diagnostic (3 cases)"
