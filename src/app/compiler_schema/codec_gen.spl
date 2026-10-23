@@ -49,8 +49,7 @@ fn codec_decl_sources() -> [text]:
         "src/compiler/00.common/dynamic_identity/closure.spl",
         "src/compiler/00.common/_Attributes/decl_attrs.spl",
         "src/compiler/30.types/_TypeLayout/layout_core.spl",
-        "src/compiler/10.frontend/parser_types_expr.spl",
-        "src/lib/common/facet_abi.spl"
+        "src/compiler/10.frontend/parser_types_expr.spl"
     ]
 
 fn codec_opaque_types() -> [text]:
@@ -85,7 +84,6 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.types.type_layout.{{LayoutAttr, TypeLayoutKind}}\n"
     out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
-    out = out + "use common.facet_abi.*\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
     out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
     out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
@@ -492,6 +490,13 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
+fn _emit_nil_scalar_reject(u: CodecUniverse, type_text: text, target: text, indent: text) -> text:
+    """A non-optional scalar slot must never hold the wire nil sentinel: refuse the blob."""
+    val cat = u.classify(type_text).cat
+    if cat == "prim_i64" or cat == "prim_bool" or cat == "prim_text":
+        return indent + "if " + target + " == nil:\n" + indent + "    r.reject_malformed(\"nil_in_non_optional_scalar\")\n"
+    ""
+
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
         required_node: bool = false) -> text:
     """Statements that read one value of `type_text` into a new local `target`."""
@@ -670,7 +675,7 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
                 field_index = field_index + 1
             idx = idx + 1
-        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
@@ -717,6 +722,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     nil_indices.push(field_index)
                 else:
                     parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                    parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "        "))
                 names.push("f_" + f.binder)
                 field_index = field_index + 1
             if fields.len() == 0:
@@ -744,6 +750,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
         parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
+        parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    "))
         names.push(f.binder + ": f_" + f.binder)
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
@@ -753,7 +760,8 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
     parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
     parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
-    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push("# satisfies the seed's match checker. Encoders reject the cache entry;\n")
+    parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
     for name in order:
