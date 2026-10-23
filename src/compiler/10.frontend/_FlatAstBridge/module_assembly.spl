@@ -1673,6 +1673,16 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             rt_transient_heap_promote(built_module)
         if not module_promoted:
             panic("transient parser graph promotion failed for {path}")
+        # The captured cache blob was joined inside this scope too; without
+        # promotion the scope-end reclaim frees it and the caller's take()
+        # reads a dead handle (lane-44..50 take=-1 heisenbug: survival was
+        # allocation-timing luck). Promote it with the module so the capture
+        # survives deterministically.
+        if _fab_captured_blob != "":
+            val blob_promoted = unsafe(capabilities: [ffi]):
+                rt_transient_heap_promote(_fab_captured_blob)
+            if not blob_promoted:
+                _fab_captured_blob = ""
         # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
         # owners. Both cleanup functions allocate fresh process-lifetime arrays;
         # inside the scope those replacements are stamped with its id and then
