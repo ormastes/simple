@@ -1204,7 +1204,7 @@ bootstrap_stage3_target_c_compiler() {
             ;;
         x86_64-pc-windows-gnu)
             bootstrap_stage3_windows_gnu_clang_path \
-                "${CC_x86_64_pc_windows_gnu:-clang}" || return 1
+                "${CC_x86_64_pc_windows_gnullvm:-clang}" || return 1
             "$bootstrap_stage3_gnu_tool_path" \
                 --target=x86_64-w64-windows-gnu --version >/dev/null 2>&1
             ;;
@@ -1325,13 +1325,13 @@ bootstrap_stage3_windows_gnu_cargo_tools() {
     bootstrap_stage3_gnu_cc=$(bootstrap_stage3_windows_gnu_clang_path \
         "$bootstrap_stage3_gnu_cc") || return 1
     bootstrap_stage3_gnu_linker=$(bootstrap_stage3_windows_gnu_clang_path \
-        "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-$bootstrap_stage3_gnu_cc}" \
+        "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER:-$bootstrap_stage3_gnu_cc}" \
         ) || return 1
     bootstrap_stage3_gnu_target_cc=$(bootstrap_stage3_windows_gnu_clang_path \
-        "${CC_x86_64_pc_windows_gnu:-$bootstrap_stage3_gnu_cc}" \
+        "${CC_x86_64_pc_windows_gnullvm:-$bootstrap_stage3_gnu_cc}" \
         ) || return 1
     bootstrap_stage3_gnu_ar=$(bootstrap_stage3_windows_gnu_llvm_ar_path \
-        "${AR_x86_64_pc_windows_gnu:-llvm-ar}") || return 1
+        "${AR_x86_64_pc_windows_gnullvm:-llvm-ar}") || return 1
     [ -x "$bootstrap_stage3_gnu_linker" ] || return 1
     [ -x "$bootstrap_stage3_gnu_target_cc" ] || return 1
     [ -x "$bootstrap_stage3_gnu_ar" ] || return 1
@@ -2218,10 +2218,20 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 *) echo "llvm authority: Windows bootstrap requires LLVM 23.x, found ${bootstrap_stage3_llvm_version}" >&2
                    return 1 ;;
             esac
+            # The gnu lane (MSYS2 CLANG64) ships libLLVM-<major> instead of
+            # LLVM-C and no clang-cl; its C compiler is llvm-mingw clang.
+            bootstrap_stage3_llvm_windows_abi=${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}
+            if [ "$bootstrap_stage3_llvm_windows_abi" = gnu ]; then
+                bootstrap_stage3_llvm_c_import_requested=\
+"$bootstrap_stage3_llvm_prefix/lib/libLLVM-${bootstrap_stage3_llvm_major}.dll.a"
+                bootstrap_stage3_llvm_c_runtime_requested=\
+"$bootstrap_stage3_llvm_prefix/bin/libLLVM-${bootstrap_stage3_llvm_major}.dll"
+            else
             bootstrap_stage3_llvm_c_import_requested=\
 "$bootstrap_stage3_llvm_prefix/lib/LLVM-C.lib"
             bootstrap_stage3_llvm_c_runtime_requested=\
 "$bootstrap_stage3_llvm_prefix/bin/LLVM-C.dll"
+            fi
             bootstrap_stage3_llvm_c_import=$(
                 bootstrap_stage3_canonical_file \
                     "$bootstrap_stage3_llvm_c_import_requested"
@@ -2236,6 +2246,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 echo "llvm authority: LLVM 23.1.1 Windows package is missing its C API runtime DLL: ${bootstrap_stage3_llvm_c_runtime_requested}" >&2
                 return 1
             }
+            if [ "$bootstrap_stage3_llvm_windows_abi" != gnu ]; then
             bootstrap_stage3_llvm_clang_cl_requested=\
 "$bootstrap_stage3_llvm_prefix/bin/clang-cl.exe"
             if [ ! -f "$bootstrap_stage3_llvm_clang_cl_requested" ]; then
@@ -2268,6 +2279,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 *) echo "llvm authority: Windows bootstrap requires clang-cl 23.x, found ${bootstrap_stage3_llvm_clang_cl_version:-unknown}" >&2
                    return 1 ;;
             esac
+            fi
             printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
                 "$bootstrap_stage3_llvm_version" \
                 "$bootstrap_stage3_llvm_major"
@@ -2284,6 +2296,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 "$bootstrap_stage3_llvm_c_runtime" \
                 "$(bootstrap_stage3_hash_file \
                     "$bootstrap_stage3_llvm_c_runtime")"
+            [ "$bootstrap_stage3_llvm_windows_abi" = gnu ] ||
             printf 'llvm-clang-cl-path=%s\nllvm-clang-cl-sha256=%s\nllvm-clang-cl-version=%s\n' \
                 "$bootstrap_stage3_llvm_clang_cl" \
                 "$(bootstrap_stage3_hash_file \
@@ -2609,7 +2622,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                     # what actually linked -- the same guarantee as the
                     # MSVC/LIB branch, for hosts without an MSVC SDK.
                     bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
-                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnu:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnullvm:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
                     case "$bootstrap_stage3_llvm_gnu_resolved" in
                         /*|[A-Za-z]:[\\/]*)
                             # gcc answers with a native Windows path, which
@@ -6238,11 +6251,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         if [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-gnu ]; then
             printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\ntarget-cflags=%s\ntarget-rustflags=%s\n' \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}" \
-                "${CC_x86_64_pc_windows_gnu:-clang}" \
-                "${AR_x86_64_pc_windows_gnu:-llvm-ar}" \
-                "${CFLAGS_x86_64_pc_windows_gnu:---target=x86_64-w64-windows-gnu}" \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:--C link-arg=--target=x86_64-w64-windows-gnu}" \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER:-clang}" \
+                "${CC_x86_64_pc_windows_gnullvm:-clang}" \
+                "${AR_x86_64_pc_windows_gnullvm:-llvm-ar}" \
+                "${CFLAGS_x86_64_pc_windows_gnullvm:---target=x86_64-w64-windows-gnu}" \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS:--C link-arg=--target=x86_64-w64-windows-gnu}" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
         elif [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-msvc ]; then
