@@ -29,7 +29,8 @@ Two workflows implement the first slice of
 1. Finds the lane's highest phase in the earlier rungs' handoffs (`<platform>-p<N>/`).
 2. Stages it as `build/bootstrap/stage<N>/simple`, so the resolver
    (`resolve-bootstrap-compiler.shs`, `config/bootstrap.sdn` `compiler: auto`) picks it.
-   Rung 1 has no handoff, so the resolver takes the newest RC instead.
+   Rung 1 has no handoff, so the resolver takes the newest RC instead; when no RC
+   package qualifies, the step builds phase 1 with the Rust seed (the `release.yml` commands).
 3. Builds phase N+1 with `build-next-phase-ci.shs` (capped at 4).
 4. Requires the new compiler to build and run a hello world. `--version` alone is not enough.
 5. Writes `<out-dir>/<platform>-p<N+1>/{simple,PHASE}` as the next rung's input.
@@ -54,9 +55,10 @@ gh workflow run phase-ladder.yml --ref release/1.0.0                      # all 
 gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64,linux-riscv64 -f publish=false
 ```
 
-Rung 1 needs a proven compiler: an RC package for the lane, or a local stage
-binary. With neither, run `release.yml`, which builds phase 1 from the Rust seed
-and drops an RC. The ladder deliberately does not rebuild the seed.
+Rung 1 starts from an RC package for the lane or a local stage binary. With
+neither, it builds the Rust seed and phase 1 itself, so a lane with no RC package
+still climbs. The rung installs what that needs: clang/lld/llvm on Linux, Homebrew
+LLVM on macOS, rustup in the FreeBSD VM. Later rungs never use the seed.
 
 ### freebsd-riscv64 (local lane)
 

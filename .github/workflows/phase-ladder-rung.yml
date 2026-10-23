@@ -67,6 +67,20 @@ jobs:
             "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/riscv64-ports.sources
           sudo apt-get update -qq
           sudo apt-get install -y -qq libsqlite3-dev:riscv64 zlib1g-dev:riscv64 libzstd-dev:riscv64 libncurses-dev:riscv64
+      # A first rung with no qualified RC builds phase 1 with the Rust seed,
+      # which needs the same tools as release.yml's seed steps.
+      - name: Build tools (linux-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev
+      - name: Install LLVM (macOS)
+        if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'darwin-')
+        run: |
+          brew install llvm
+          prefix=$(brew --prefix llvm)
+          echo "DYLD_LIBRARY_PATH=$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
       - name: Climb one phase
         if: steps.sel.outputs.on == 'true'
         env:
@@ -105,9 +119,12 @@ jobs:
           usesh: true
           mem: 12288
           envs: GH_TOKEN
-          prepare: pkg install -y bash git gmake pkgconf zstd llvm gh
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf zstd llvm gh
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
           run: |
             set -eu
+            . "$HOME/.cargo/env"
             mkdir -p build/ladder/in build/ladder/out
             sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out 2
       - uses: actions/upload-artifact@v4

@@ -602,3 +602,34 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_WORKER=1 gdb -q -batch \
   -ex run -ex 'x/1i $pc' -ex 'info registers' \
   -ex 'p $_siginfo._sifields._sigfault.si_addr' --args <argv from step 1>
 ```
+
+## 2026-10-23: second fault site — HIR visitor in the representation-manifest pass
+
+Candidate: the CI-rejected Stage 2 from run 39952437987 (Linux cranelift, head
+104d628cd57: release with #4225 merged, before #4232). On that candidate
+p2_add, scv_prime and mir_retention pass; `stage2_module_path_naming` fails
+with `raw rc=117`. Both MIR shard workers die with SIGSEGV, and so does the
+in-process fallback worker. Reproduces locally with the probe env (cold HOME,
+`SIMPLE_BOOTSTRAP=0`, `--mode one-binary --backend cranelift
+--runtime-bundle core-c-bootstrap`). The MIR-shard worker, under gdb with the
+strace-captured argv+env:
+
+```
+#0 compiler.hir.generated.hir_visitor.walk_hir_type +225   cmovne (%r10),%r11
+#1 walk_hir_expr  #2 walk_hir_stmt  #3 walk_hir_block
+#4 representation_boundary.unsafe_observations.representation_observe_function_v1
+#5 representation_missing_manifest_observations_v1
+#6 hir_semantic_consumer_v1.collect_module_representation_receipt_v1
+#7 driver_hir_pipeline_passes.run_representation_manifest_pass   (driver_hir_pipeline_lowering.spl:2418)
+#8 CompilerDriver.lower_and_check_retained_owner_impl
+#9 CompilerDriver.compile_with_reverse_reference_owner_v1
+```
+
+`r10 = 0xf198715900000000`. It is the payload field (+8) of the object
+`walk_hir_type` was given, whose words are `0x0000001800000007
+0xf198715900000001`: a tag-1 value whose pointer half is hash-like bytes. The
+walker reads a `HirType` payload slot that holds something else (type
+confusion or a reused slot). It is reached after HIR succeeded (`any-escape
+pass: 0 diagnostic(s)` printed, then the `enum_contract` phase label). This is
+a different site from the codec-encoder bind above. Re-test it on a candidate
+that carries #4232 before treating it as a separate defect.
