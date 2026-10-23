@@ -13,6 +13,13 @@
 # handoff of the previous rung (phase k host -> phase k+1 target), sanity
 # checked under qemu-user. Phases cap at 4. Writes phase=<N> and
 # climbed=true|false to $GITHUB_OUTPUT; exit 1 on a failed build or sanity.
+#
+# Essentials: after a native climb the new phase also builds the essential
+# binaries (simple_cli = src/app/cli/main.spl, simple_test_runner,
+# simple_build_runner) into <handoff>/essentials/, one status line each in
+# essentials/STATUS (ok | failed | not-built: <reason>). A failed essential is
+# recorded, never hidden, and does not stop the compiler climbing; writes
+# essentials=<ok>/<total> to $GITHUB_OUTPUT.
 set -eu
 platform=${1:?platform} in_dir=${2:?in-dir} out_dir=${3:?out-dir} threads=${4:-4}
 exe=
@@ -41,8 +48,43 @@ emit() { # <phase> <binary> <climbed>
   echo "phase-ladder: $platform phase $1 (climbed=$3) -> $dest"
 }
 
+# <compiler> <handoff-dir>: build the essential binaries with that compiler.
+build_essentials() {
+  ess=$2/essentials
+  mkdir -p "$ess"
+  : > "$ess/STATUS"
+  ok=0 total=0
+  for spec in simple_cli:src/app/cli/main.spl \
+              simple_test_runner:src/app/test_runner_new/main.spl \
+              simple_build_runner:src/app/buildrunner/main.spl; do
+    name=${spec%%:*} entry=${spec#*:} out=$ess/$name$exe
+    total=$((total + 1))
+    rc=0
+    RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+      "$1" native-build --source src/compositions/kernel_llvm_cranelift --source src \
+      --entry-closure --entry "$entry" --mode dynload --threads "$threads" \
+      --output "$out" > "$ess/$name.log" 2>&1 || rc=$?
+    result=failed
+    if [ "$rc" -eq 0 ] && [ -s "$out" ] && [ -x "$out" ]; then
+      result=ok
+      # The full CLI must at least start; the runners have no --version contract.
+      if [ "$name" = simple_cli ] && ! "$out" --version >> "$ess/$name.log" 2>&1; then result=failed; fi
+    fi
+    [ "$result" = ok ] && ok=$((ok + 1)) || rm -f "$out"
+    echo "$name=$result" >> "$ess/STATUS"
+    echo "phase-ladder: essential $name $result (rc=$rc, log $ess/$name.log)"
+  done
+  echo "essentials=$ok/$total" >> "${GITHUB_OUTPUT:-/dev/null}"
+}
+
 if [ "$have" -ge 4 ]; then
   emit 4 "$have_dir/simple$exe" false
+  # Carry the phase-4 essentials forward; build them if an earlier rung did not.
+  if [ -f "$have_dir/essentials/STATUS" ]; then
+    cp -r "$have_dir/essentials" "$out_dir/$platform-p4/"
+  elif [ "$platform" != linux-riscv64 ]; then
+    build_essentials "$(cd "$have_dir" && pwd)/simple$exe" "$out_dir/$platform-p4"
+  fi
   exit 0
 fi
 
@@ -64,6 +106,10 @@ if [ "$platform" = linux-riscv64 ]; then
   next=$(cat build/cross/linux-riscv64/PHASE)
   [ "$next" -gt "$have" ] || { echo "phase-ladder: riscv64 cross-build did not climb above $have" >&2; exit 1; }
   emit "$next" build/cross/linux-riscv64/simple true
+  mkdir -p "$out_dir/$platform-p$next/essentials"
+  for name in simple_cli simple_test_runner simple_build_runner; do
+    echo "$name=not-built: cross lane builds the compiler only" >> "$out_dir/$platform-p$next/essentials/STATUS"
+  done
   exit 0
 fi
 
@@ -90,3 +136,4 @@ printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.sp
 "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"
 "$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
 emit "$next" "$bin" true
+build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"
