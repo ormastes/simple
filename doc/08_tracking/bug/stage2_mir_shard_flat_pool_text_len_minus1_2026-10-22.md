@@ -905,3 +905,31 @@ the doc-#4228 diagnosis: compiler-side mitigation reduces exposure; only the
 runtime scope-stamp reclaim / promote-payload fix removes it. The stashed
 caller-tag arm trace (work/release-tip-20261023 stash "caller-tag-trace")
 names any remaining armer in one lane if the owner wants it.
+
+## Annotation 2026-10-24 (lane D, lanes 52-54): containment exhausted - runtime mid-scope reclaim of globals-referenced strings is the sole cure
+
+Lane 52 fixed the companion defects: hir-cache stores now succeed
+(stores=1 io_failed=0, first time in 15+ lanes) and the miss path is fully
+clean. The caller-tagged capture trace (lane-52/54 candidates) named the last
+refusing armer: tag=frontend-miss in the DELEGATED WORKER's first p2_add
+parse. Fixes landed and verified in-lane: (1) the loading-path parse streams
+(driver_source_pipeline_loading:176), (2) the hir bootstrap_entry reparse
+streams (driver_hir_pipeline_lowering:1916). Lane 54's trace confirms both
+took effect - the worker's refusing dump-gate now prints stream=true -
+yet the refusal PERSISTS at the same pool/site/item.
+
+Conclusion: the pool strings die DURING the parse, inside the parse's own
+transient scope, before the dump and before any scope end or promote. The
+only mechanism left is the runtime's allocation-triggered transient reclaim
+freeing strings that are referenced exclusively from module-global pool
+arrays (the scope GC roots the stack, not the globals - matching the
+lane-48b heisenbug where one extra allocation flipped survival). This is not
+compiler-fixable: containment (dedup, dump_all, blob promote, streaming at
+every identified site) is now complete and the crash persists.
+
+Owner-lane cure (runtime, src/runtime/runtime_native.c): the transient
+scope's reclaim/GC must treat module-global array slots as roots (or the
+decl/expr/stmt/extend/pending pool arrays must be registered as root
+owners), so scope-referenced strings survive until promote/scope-end.
+Repro: the 9 s p2_add repro on any lane-52+ candidate; the refusal fires
+deterministically in the delegated worker regardless of scope mode.
