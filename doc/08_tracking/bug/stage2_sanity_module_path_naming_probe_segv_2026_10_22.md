@@ -633,3 +633,40 @@ confusion or a reused slot). It is reached after HIR succeeded (`any-escape
 pass: 0 diagnostic(s)` printed, then the `enum_contract` phase label). This is
 a different site from the codec-encoder bind above. Re-test it on a candidate
 that carries #4232 before treating it as a separate defect.
+
+## Update 2026-10-24 (x86_64 Linux): `[]` literal SIGSEGV — ROOT CAUSE is the generated fold walker
+
+After #4217 (codec fail-closed) and #4230 (link fix), CI run 39952380127 (release/1.0.0 @
+`a5aa33bc618`, linux-cranelift) still failed Stage 2 sanity on this probe, now later:
+
+```
+#0 compiler.hir.generated.hir_visitor.walk_hir_type
+#1 walk_hir_expr      (ArrayLit arm)
+#2 walk_hir_stmt / #3 walk_hir_block
+#4 representation_boundary.unsafe_observations.representation_observe_function_v1
+#7 driver_hir_pipeline_passes.run_representation_manifest_pass
+```
+
+Bisected with the CI's rejected Stage 2 binary down to `fn main(): var out: [text] = []`. Every
+empty array literal crashes it (the empty path is where lowering stores `Some(default)` as the
+element type).
+
+Root cause, from gdb memory at the fault: the object `walk_hir_type` receives has a heap header
+in its first two words (`0x0000001800000007`, `0xf198715900000001`) and the real `HirType`
+pointer as payload at +16. In other words, it is the `Some` box. The generated fold walker
+`hir_visitor.spl` (from `src/app/compiler_schema/fold_gen.spl` `_fold_lines`) emitted
+`acc = walk_hir_type<C>(b_type_, acc, f)` for `ArrayLit(elements, type_: HirType?)`, passing the
+Option straight into a `HirType` parameter. Its sibling `hir_visit.spl` (`visitor_gen.spl`)
+already unwraps with `match b_type_: case Some(opt1): ...`. The interpreter tolerates the
+un-unwrapped form, so only native Stage 2 faults.
+
+Fix: `_fold_lines` unwraps optional NODE payloads the same way, and both fold walkers are
+regenerated. That covers every optional node child in `hir_visitor.spl` and `ast_visitor.spl`:
+ArrayLit/ArrayRepeat/DictLit element types, optional `else` blocks and optional values. The
+pin is `hir_generated_optional_child_spec` "fold walker source unwraps the optional ArrayLit
+element type" (fails on the old output, passes on the new).
+
+Two earlier hypotheses were disproven by CI and dropped (PR #4235, closed): first rewriting the
+nested optional if-expression that builds `elem_type` as statements (run 39963503260), then
+building the default `HirType` at the use site with the live span (run 39969828508). Both still
+SIGSEGVed at the same PC.

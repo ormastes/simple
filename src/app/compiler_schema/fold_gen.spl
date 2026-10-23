@@ -488,6 +488,16 @@ fn _one_fold_call(d: Dialect, type_name: text, v: text) -> text:
 fn _fold_lines(u: DeclUniverse, d: Dialect, type_text: text, v: text, indent: text, idx: i64) -> text:
     """Recursion into ONE field value `v`, folding `acc` through every child."""
     val c = u.classify(type_text)
+    if c.cat == "node" and type_text.trim().ends_with("?"):
+        # An OPTIONAL node payload (e.g. `ArrayLit(elements, type_: HirType?)`)
+        # holds a `Some` box, not the node: unwrap it like visitor_gen does.
+        # Passing it straight to the walk fn made native Stage 2 read the box
+        # header as a HirType and SIGSEGV on every `[]` literal.
+        var out = indent + "match " + v + ":\n"
+        out = out + indent + "    case Some(opt{idx}):\n"
+        out = out + indent + "        " + _one_fold_call(d, c.a, "opt{idx}") + "\n"
+        out = out + indent + "    case nil: pass\n"
+        return out
     if c.cat == "node":
         return indent + _one_fold_call(d, c.a, v) + "\n"
     if c.cat == "list":
