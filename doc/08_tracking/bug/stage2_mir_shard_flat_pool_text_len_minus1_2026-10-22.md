@@ -799,3 +799,42 @@ only pools the just-finished parse populated; skip dump when this call did
 not run parse_module_body), or (b) extend the promote coverage to the
 identified tail pools. (a) is preferred: re-caching a cache-hit module is
 wasted work even when the pools are valid.
+
+## Annotation 2026-10-23 (lane D, lane 46 capture-trace candidate): TWO distinct defects separated
+
+SIMPLE_CAPTURE_TRACE=1 + SIMPLE_POOLDBG=1 repro on the lane-46 candidate
+(preserved at .simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/
+simple.exe.rejected) prints arm/take/dump-gate per parse. Sequence per process:
+
+```
+arm
+dump-gate p2_add armed=1 stream=false borrowed=true  -> dump_all path
+take bytes=4582                                    <- VALID blob (borrowed path works)
+arm
+dump-gate p2_add armed=1 stream=false borrowed=false -> dump_for_cache path
+take bytes=-1                                      <- INVALID BLOB (rt_string_len -1!)
+arm
+dump-gate p2_add armed=1 stream=false borrowed=false -> dump_for_cache path
+[flat-pool] capture refused site=text.value item=0 (pools dead at this gate)
+take bytes=0
+```
+
+Defects separated:
+A. The UNSCOPED capture path (module_assembly.spl:1619-1622 else-branch ->
+   flat_pools_dump_for_cache) can produce a blob whose OWN handle is invalid
+   (take reads len=-1) even with NO sanitize refusal in that dump - the
+   serialization-scope wrap (dump_for_cache:1289-1302: begin scope, dump,
+   pause, promote, end) loses the blob. The borrowed/transient path
+   (dump_all direct) is clean (4582 bytes). An unscoped caller that actually
+   consumed that -1 blob would crash or store garbage.
+B. A later dump gate sees dead pools (the original all-(-1) refusal) - stale
+   or scope-killed pool elements at an unscoped gate after the hir-entry
+   boundary, matching the armed-capture hypothesis from the lane-45 note.
+
+Next actions: (1) name the unscoped caller(s) (extend the dump-gate print
+with a caller tag or a stack probe); (2) fix A by either making
+flat_pools_dump_for_cache return an owned blob verified by rt_string_len >= 0
+(retry without the serialization scope, or promote via a checked copy) or
+skipping unscoped captures; (3) fix B by binding the dump to the parse that
+populated the pools (skip when this call did not run parse_module_body).
+Repro: the 9 s p2_add repro with SIMPLE_CAPTURE_TRACE=1.
