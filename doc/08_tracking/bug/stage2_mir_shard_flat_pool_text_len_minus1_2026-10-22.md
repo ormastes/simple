@@ -957,3 +957,16 @@ scope id and check it in the reclaim loop (mirror the array branch); or
 outlive their creating scope via registry transfer. Verify with the 9 s
 p2_add repro: the delegated worker's first frontend-miss dump must stop
 refusing with stream=true gates.
+
+## Annotation 2026-10-24 (lane D, lane 55): pool-family promotes succeed; refusal persists - runtime-only
+
+Lane 55 restored the lost blob promote AND added parser/decl/extend/pending +
+type pool-family promotes to the parse scope (the full promote-reachability
+gap). Result: NO "pool promote incomplete" warnings (all promotes succeeded),
+yet the delegated worker's capture refuses identically. The promote-
+reachability hypothesis is refuted as the cause; with dedup + dump_all +
+blob promote + streaming + pool promotes all in place, the dead pool handles
+can only come from the runtime reclaim itself (scope-GC / string-flag
+interaction documented above). The parse-scope promote coverage is kept: it
+is correct hardening and removes one entire death class, but the gate cure
+is the runtime reclaim fix alone.
