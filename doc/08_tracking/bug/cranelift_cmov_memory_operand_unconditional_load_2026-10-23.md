@@ -237,3 +237,29 @@ Until the producer is found, any guard here is treating a symptom. Suggested
 cheapest next move: an env-gated diagnostic in the copy-in rejection path that
 prints the offending tagged word and the enclosing type name, so one stage-2 run
 names the producer instead of another round of inference.
+
+## 2026-10-24 (final): the registry predicate is NOT LINKABLE from the seed
+
+Second correction to the fix path above, and this one is a hard constraint
+rather than an ordering problem.
+
+`src/compiler_rust/compiler/src/codegen/instr/fields.rs` carries a committed
+block explaining that **`rt_struct_receiver_valid` lives only in
+`runtime_native.c`, a translation unit the seed crate cannot link** (duplicate
+`rt_host_gpu_*` symbols) — which is why the field-receiver guard there is
+disabled by default behind `SIMPLE_SEED_FIELD_GUARD`.
+
+So routing `emit_aggregate_block_copy` through that predicate is not available
+in the lane that builds Stage 2 at all. The two-part plan recorded above
+(register with `rt_struct_alloc`, then validate) is still correctly *ordered*,
+but part 2 cannot be implemented until the symbol is seed-linkable.
+
+That also explains why this predicate is a tag heuristic in the first place: the
+authoritative check is unreachable from this crate. A sound fix needs either the
+seed-linkable symbol (the "guard lane" that comment refers to, not yet landed)
+or a target-agnostic predicate requiring no runtime call — and the obvious
+candidate there, an address range, is already recorded above as harmful because
+SimpleOS links higher-half.
+
+Filed separately with its provenance:
+`doc/08_tracking/bug/seed_field_receiver_guard_neutralized_and_predicate_unlinkable_2026-10-24.md`.
