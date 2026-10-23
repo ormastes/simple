@@ -36,16 +36,12 @@ case "${PLATFORM_OS}" in
   macos)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-apple-darwin" ;;
   freebsd)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-freebsd" ;;
   windows)
-    # Single source of truth for the Windows ABI default: msvc, matching
-    # bootstrap-from-scratch.sh's explicit `export SIMPLE_WINDOWS_ABI=msvc`
-    # before it sources this file, and matching the tracked release artifacts
-    # (bin/release/x86_64-pc-windows-msvc/**), which are msvc-built. Git Bash
-    # always sets MSYSTEM=MINGW64 regardless of which ABI the host actually
-    # builds/ships, so keying the default off MSYSTEM (the previous behavior)
-    # picked "gnu" on every ordinary Windows dev box and disagreed with every
-    # other caller. An explicit SIMPLE_WINDOWS_ABI=gnu (or a future --mingw
-    # flag that sets it) is the only way to opt into the gnu ABI.
-    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-msvc}"
+    # Single source of truth for the Windows ABI default: gnu (MinGW UCRT, the
+    # repo-managed llvm-mingw toolchain). MSVC is opt-in via
+    # SIMPLE_WINDOWS_ABI=msvc (bootstrap-windows.sh --msvc). Git Bash always
+    # sets MSYSTEM=MINGW64 regardless of ABI, so the default is this explicit
+    # value, never keyed off MSYSTEM.
+    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-gnu}"
     case "${PLATFORM_ABI}" in
       gnu|msvc) ;;
       *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; return 1 2>/dev/null || exit 1 ;;
@@ -106,6 +102,16 @@ _llvm_libdirs() {
   esac
 }
 
+# Repo-managed per-user toolchain store (scripts/setup/host-env.shs also reads it).
+: "${SIMPLE_TOOLCHAINS_ROOT:=${HOME:-/nonexistent}/.simple/toolchains}"
+
+# Print existing dirs matching "$SIMPLE_TOOLCHAINS_ROOT/$1[/$2]", newest first.
+_simple_toolchain_prefixes() {
+  for _stp in "${SIMPLE_TOOLCHAINS_ROOT}"/$1${2:+/$2}; do
+    [ -d "${_stp}" ] && printf '%s\n' "${_stp}"
+  done | sort -r
+}
+
 # Well-known install prefixes (newline-separated, so paths may contain spaces),
 # by OS, for major version $1.
 _llvm_prefixes() {
@@ -119,7 +125,9 @@ _llvm_prefixes() {
     freebsd)
       printf '%s\n' "/usr/local/llvm$1" "/usr/local" ;;
     windows)
-      printf '%s\n' "${LLVM_HOME:-}" "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM" ;;
+      printf '%s\n' "${LLVM_HOME:-}"
+      _simple_toolchain_prefixes "llvm-msvc-$1.*" "clang+llvm-$1.*-x86_64-pc-windows-msvc"
+      printf '%s\n' "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM" ;;
     *)
       : ;;
   esac
@@ -246,3 +254,25 @@ if [ "${LLVM_FOUND}" = "1" ]; then
   [ -n "${SIMPLE_LLVM_PATH:-}" ] || [ -z "${LLVM_LIB}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
 fi
 export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB LLVM_PROVIDER_KIND
+
+# Windows gnu lane (the default): locate the repo-managed llvm-mingw UCRT
+# toolchain ($SIMPLE_TOOLCHAINS_ROOT/llvm-mingw-*-ucrt-x86_64, newest first) and
+# put its bin/ first on PATH so clang/llvm-ar resolve there rather than to MSYS2.
+# Honors a pre-set SIMPLE_MINGW_ROOT. Sets: SIMPLE_MINGW_ROOT ("" if not found).
+if [ "${PLATFORM_OS}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
+  if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
+    for _mw in $(_simple_toolchain_prefixes "llvm-mingw-*-ucrt-x86_64" ""); do
+      if [ -x "${_mw}/bin/x86_64-w64-mingw32-gcc.exe" ] && [ -x "${_mw}/bin/clang.exe" ]; then
+        SIMPLE_MINGW_ROOT="${_mw}"; break
+      fi
+    done
+  fi
+  if [ -n "${SIMPLE_MINGW_ROOT:-}" ]; then
+    case ":${PATH}:" in
+      *":${SIMPLE_MINGW_ROOT}/bin:"*) ;;
+      *) PATH="${SIMPLE_MINGW_ROOT}/bin:${PATH}" ;;
+    esac
+    export PATH
+  fi
+  export SIMPLE_MINGW_ROOT="${SIMPLE_MINGW_ROOT:-}"
+fi

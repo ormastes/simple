@@ -1789,6 +1789,10 @@ int main(int argc, char** argv) {
             // handles both. Emitted BEFORE any SIMPLE_LINKER override below so
             // an explicit request still wins (clang takes the last -fuse-ld).
             cmd.arg("-fuse-ld=lld");
+            // LLVM runtime, never libgcc/libgcc_eh: llvm-mingw ships compiler-rt
+            // builtins + libunwind (+ libc++), not GCC's runtime.
+            cmd.arg("--rtlib=compiler-rt");
+            cmd.arg("--unwindlib=libunwind");
         }
         // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
         // the linker binary directly because this is the HOSTED link: the C

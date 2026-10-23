@@ -131,7 +131,7 @@ matters, not `rustup default`:
 env -i PATH="$PATH" RUSTUP_TOOLCHAIN=stable rustc --print sysroot   # must end in -gnu
 ```
 
-Once the host is gnu, linking goes through `gcc`/`ld` and MSYS's `link.exe` is
+Once the host is gnu, linking goes through llvm-mingw `clang` + `ld.lld` (never GCC) and MSYS's `link.exe` is
 irrelevant.
 
 ## 1. Run phase 1

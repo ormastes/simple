@@ -478,6 +478,58 @@ fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> Mi
         case _:
             nil
 
+# Canonical emission order for module contents. On the native runtime,
+# Dict<SymbolId, _> iterates in key-ADDRESS hash order (rt_core_dict_hash
+# falls back to the pointer word for heap keys), so emission order permuted
+# between identical native-build runs: four byte-identical planner builds of
+# the same source/cache produced four distinct binaries with the module's
+# functions laid out in different orders (2026-10-19, release_phase3 stage2
+# planner admission). Sort by name so emitted bytes are reproducible; the
+# symbol id breaks the (impossible for valid MIR) same-name tie.
+pub fn mir_module_functions_sorted(module: MirModule) -> [MirFunction]:
+    var ids: [i64] = []
+    var funcs: [MirFunction] = []
+    for symbol in module.functions.keys():
+        ids = ids.push(symbol.id)
+        funcs = funcs.push(module.functions[symbol])
+    var i = 0
+    while i < funcs.len():
+        var j = i + 1
+        while j < funcs.len():
+            if funcs[j].name < funcs[i].name or
+                    (funcs[j].name == funcs[i].name and ids[j] < ids[i]):
+                val tmp_fn = funcs[i]
+                funcs[i] = funcs[j]
+                funcs[j] = tmp_fn
+                val tmp_id = ids[i]
+                ids[i] = ids[j]
+                ids[j] = tmp_id
+            j = j + 1
+        i = i + 1
+    funcs
+
+pub fn mir_module_statics_sorted(module: MirModule) -> [MirStatic]:
+    var ids: [i64] = []
+    var statics: [MirStatic] = []
+    for symbol in module.statics.keys():
+        ids = ids.push(symbol.id)
+        statics = statics.push(module.statics[symbol])
+    var i = 0
+    while i < statics.len():
+        var j = i + 1
+        while j < statics.len():
+            if statics[j].name < statics[i].name or
+                    (statics[j].name == statics[i].name and ids[j] < ids[i]):
+                val tmp_static = statics[i]
+                statics[i] = statics[j]
+                statics[j] = tmp_static
+                val tmp_id = ids[i]
+                ids[i] = ids[j]
+                ids[j] = tmp_id
+            j = j + 1
+        i = i + 1
+    statics
+
 # Keep MirModule last.  The bootstrap parser currently leaves declaration
 # parsing in expression mode after generic Dict fields, which corrupts the
 # declaration immediately following the struct.
@@ -493,3 +545,4 @@ struct MirModule:
     enum_semantic_declarations: [MirEnumDeclarationIdentityV1] = []
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop
+export mir_module_functions_sorted, mir_module_statics_sorted
