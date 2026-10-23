@@ -2914,32 +2914,14 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
     echo "error: incomplete Windows GNU Cargo tool authority" >&2
     exit 1
   }
-  # Rust's x86_64-pc-windows-gnu std always asks the linker for -lgcc_eh and
-  # -lgcc. llvm-mingw (clang + lld, compiler-rt + libunwind) has neither and
-  # GCC is never installed, so serve those two names from LLVM runtime: an
-  # empty libgcc.a (compiler-rt builtins come from Rust's compiler_builtins)
-  # and libgcc_eh.a = llvm-mingw's libunwind.a. Link through lld.
-  mingw_unwind_a="$(dirname -- "${mingw_cc}")/../${mingw_target%%-*}-w64-mingw32/lib/libunwind.a"
-  if [ -f "${mingw_unwind_a}" ]; then
-    mingw_shim_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT:-${output_dir}}/rust-gnu-runtime-shim"
-    mkdir -p "${mingw_shim_dir}" &&
-      rm -f "${mingw_shim_dir}/libgcc.a" "${mingw_shim_dir}/libgcc_eh.a" &&
-      "${mingw_ar}" rc "${mingw_shim_dir}/libgcc.a" &&
-      cp "${mingw_unwind_a}" "${mingw_shim_dir}/libgcc_eh.a" || {
-        echo "error: cannot create LLVM runtime shim in ${mingw_shim_dir}" >&2
-        exit 1
-      }
-    mingw_shim_native=$(cygpath -m "${mingw_shim_dir}" 2>/dev/null || printf '%s' "${mingw_shim_dir}")
-    mingw_rustflags="${mingw_rustflags} -C link-arg=-fuse-ld=lld -L native=${mingw_shim_native}"
-  else
-    echo "error: llvm-mingw libunwind.a not found at ${mingw_unwind_a} (gnu lane needs clang+lld with compiler-rt/libunwind; no GCC)" >&2
-    exit 1
-  fi
-  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}"
-  export CC_x86_64_pc_windows_gnu="${mingw_cc}"
-  export AR_x86_64_pc_windows_gnu="${mingw_ar}"
-  export CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}"
-  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}"
+  # Cargo builds the seed as x86_64-pc-windows-gnullvm (PLATFORM_RUST_TRIPLE):
+  # its std links compiler-rt + libunwind natively, so no libgcc is needed.
+  mingw_rustflags="${mingw_rustflags} -C link-arg=-fuse-ld=lld"
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}"
+  export CC_x86_64_pc_windows_gnullvm="${mingw_cc}"
+  export AR_x86_64_pc_windows_gnullvm="${mingw_ar}"
+  export CFLAGS_x86_64_pc_windows_gnullvm="${mingw_cflags}"
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="${mingw_rustflags}"
   # Normal bootstrap and --full-bootstrap share the same Windows GNU linker
   # owner. Bind CC before fingerprinting so both modes reach the canonical
   # Clang C-driver authority.
@@ -3035,11 +3017,11 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     }
   fi
   if [ "${os}" != windows ] || [ "${PLATFORM_ABI}" != gnu ]; then
-    mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}"
-    mingw_cc="${CC_x86_64_pc_windows_gnu:-clang}"
-    mingw_ar="${AR_x86_64_pc_windows_gnu:-llvm-ar}"
-    mingw_cflags="${CFLAGS_x86_64_pc_windows_gnu:-}"
-    mingw_rustflags="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:-}"
+    mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER:-clang}"
+    mingw_cc="${CC_x86_64_pc_windows_gnullvm:-clang}"
+    mingw_ar="${AR_x86_64_pc_windows_gnullvm:-llvm-ar}"
+    mingw_cflags="${CFLAGS_x86_64_pc_windows_gnullvm:-}"
+    mingw_rustflags="${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS:-}"
   fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
@@ -3366,11 +3348,11 @@ run_rust_authority_command() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
-        CC_x86_64_pc_windows_gnu="${mingw_cc}" \
-        AR_x86_64_pc_windows_gnu="${mingw_ar}" \
-        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
-        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}" \
+        CC_x86_64_pc_windows_gnullvm="${mingw_cc}" \
+        AR_x86_64_pc_windows_gnullvm="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnullvm="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" TMP="${windows_temp}" \
@@ -3386,11 +3368,11 @@ run_rust_authority_command() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
-        CC_x86_64_pc_windows_gnu="${mingw_cc}" \
-        AR_x86_64_pc_windows_gnu="${mingw_ar}" \
-        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
-        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}" \
+        CC_x86_64_pc_windows_gnullvm="${mingw_cc}" \
+        AR_x86_64_pc_windows_gnullvm="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnullvm="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" TMP="${windows_temp}" \
@@ -3407,11 +3389,11 @@ run_rust_authority_command() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
-      CC_x86_64_pc_windows_gnu="${mingw_cc}" \
-      AR_x86_64_pc_windows_gnu="${mingw_ar}" \
-      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
-      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}" \
+      CC_x86_64_pc_windows_gnullvm="${mingw_cc}" \
+      AR_x86_64_pc_windows_gnullvm="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnullvm="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
       SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
@@ -3424,11 +3406,11 @@ run_rust_authority_command() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
-      CC_x86_64_pc_windows_gnu="${mingw_cc}" \
-      AR_x86_64_pc_windows_gnu="${mingw_ar}" \
-      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
-      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}" \
+      CC_x86_64_pc_windows_gnullvm="${mingw_cc}" \
+      AR_x86_64_pc_windows_gnullvm="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnullvm="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
       SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
