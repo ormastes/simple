@@ -222,3 +222,20 @@ individually, mirroring the ModuleSurfaceParserOwner flatten).
 Gate state: stage2 compile 1487/1487 clean; sanity passes ALL surface phases;
 p2_add HIR lowering RUNS to completion; blocked ONLY at the reverse-reference
 batch publication above.
+
+## Update: frontier moved past publish (2026-10-23, post scalar-mirror)
+
+With the parallel session's scalar-mirror workaround (ab07dfa3567) in, the
+p2_add worker now completes the retained HIR lowering (52.9 s for the tiny
+module — pathological slowness remains) and stores it to the hir-cache, then
+fails at:
+
+  NOGC-POLICY-001: cached HIR ownership policy disagrees with its declaring
+  source
+
+A second state-dependent failure mode is a spinlock hang
+(`__aarch64_swp4_rel` atomic-swap loop, gdb SIGINT stop) in the HIR shard
+worker when the flock-based shard-recovery queue dir is in a stale state —
+fresh queue dirs avoid it. Frontier blockers now: (1) NOGC-POLICY-001 policy
+gate (parallel session's active lane), (2) shard-recovery spinlock hang,
+(3) 52.9 s pathological HIR time for a 487-byte module.
