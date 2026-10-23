@@ -2869,7 +2869,20 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
     if value.is_heap() {
         let root_ptr = value.as_heap_ptr();
         if super::heap::is_registered_heap_ptr(root_ptr) {
-            return true;
+            // Registered is not the same as persistent: scope-owned arrays and
+            // dicts are registered too. Only a root the paused scope does NOT
+            // own is already persistent; an owned root must be walked and
+            // removed from `scope.objects` or scope end frees it while a
+            // module global (layer_eq_registry_views, ...) still points at it.
+            // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
+            let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|scope| scope.paused && scope.objects.iter().any(|object| object.0 == value.0))
+            });
+            if !scope_owned {
+                return true;
+            }
         }
     }
     let mut root_words = std::ptr::null();
