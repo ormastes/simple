@@ -39,10 +39,22 @@ esac
 # pending link.  `git submodule update` uses the superproject's recorded
 # commit; it does not follow a remote branch and leaves a dirty initialized
 # checkout alone when Git refuses an unsafe update.
-git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
-  echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
-  exit 1
-}
+#
+# .spipe/spipe is only a submodule at commits that record it as a gitlink
+# (mode 160000); at later commits it is gone and `git submodule update` dies
+# with "pathspec did not match", so skip when it is not registered.
+spipe_gitlink=0
+case "$(git -C "${repo_root}" ls-files -s -- .spipe/spipe 2>/dev/null)" in
+  160000*) spipe_gitlink=1 ;;
+esac
+if [ "${spipe_gitlink}" = 1 ]; then
+  git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
+    echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
+    exit 1
+  }
+else
+  echo "note: .spipe/spipe is not a registered submodule at this commit; skipping gitlink init"
+fi
 # Settle the fresh gitlink's index. A just-cloned checkout has unsettled stat
 # data, so the Stage 3 consumer's hermetic `git status` (GIT_CONFIG_NOSYSTEM=1
 # hides Git for Windows' system core.autocrlf=true; GIT_OPTIONAL_LOCKS=0 never
@@ -51,8 +63,10 @@ git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
 # ordinary status refreshes the stat cache; real content changes still report.
 # The sleep clears Git's racy-clean window: a status in the checkout's own
 # second leaves the entries unverified (measured: 289 dirty without it, 0 with).
-sleep 2
-git -C "${repo_root}/.spipe/spipe" status --porcelain >/dev/null 2>&1 || true
+if [ "${spipe_gitlink}" = 1 ]; then
+  sleep 2
+  git -C "${repo_root}/.spipe/spipe" status --porcelain >/dev/null 2>&1 || true
+fi
 
 # Preparation and receipt validation belong to the canonical startup owner.
 # Preserve any caller-supplied receipt so stale authority fails closed there.

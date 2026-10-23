@@ -248,11 +248,11 @@ impl PlatformLinkConfig {
                 "uxtheme",
                 "winmm",
                 "shlwapi",
-                "gcc_eh",
+                // No explicit gcc_eh/gcc: the clang driver (llvm-mingw: compiler-rt +
+                // libunwind) supplies its own runtime; libgcc does not exist there.
                 "msvcrt",
                 "mingwex",
                 "mingw32",
-                "gcc",
             ],
             library_search_paths: vec![],
             system_scan_libs: vec![],
@@ -402,6 +402,13 @@ mod tests {
         for library in ["z", "zstd", "tinfo"] {
             assert!(config.libraries.contains(&library));
         }
+    }
+
+    #[test]
+    fn windows_mingw_does_not_link_libgcc() {
+        let config = PlatformLinkConfig::windows_mingw();
+        assert!(!config.libraries.contains(&"gcc"));
+        assert!(!config.libraries.contains(&"gcc_eh"));
     }
 
     #[test]
