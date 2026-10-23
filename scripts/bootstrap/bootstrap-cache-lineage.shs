@@ -280,8 +280,22 @@ bootstrap_cache_native_environment() (
     END { for(i=1;i<=count;i++) { name=names[i]; if(observed[name]) print name "=" length(values[name]) ":" values[name]; else print name "=@absent" } }
   ' "$bc_names" "$bc_names.values"
 )
+bootstrap_cache_writer_liveness() {
+  # Diagnostic only: the recorded pid is the acquiring wrapper's, and a compiler
+  # child can outlive it, so a dead pid never authorizes removing the marker.
+  bcw_pid=$(cat "$1/pid" 2>/dev/null) || { echo "no pid recorded"; return 0; }
+  case "$bcw_pid" in ''|*[!0-9]*) echo "unreadable pid record"; return 0 ;; esac
+  if kill -0 "$bcw_pid" 2>/dev/null || [ -d "/proc/$bcw_pid" ]; then
+    echo "recorded pid $bcw_pid is alive"
+  else
+    echo "recorded pid $bcw_pid is not alive; check for an orphaned native-build worker using this cache, then remove $1"
+  fi
+}
 bootstrap_cache_writer_acquire() {
-  mkdir "$1.writer" 2>/dev/null || bootstrap_cache_error "active or unresolved writer: $1.writer; wrapper-only crash records cannot authorize repair; genuine execution-owner evidence required; objects preserved" || return 1
+  if ! mkdir "$1.writer" 2>/dev/null; then
+    bootstrap_cache_error "active or unresolved writer: $1.writer ($(bootstrap_cache_writer_liveness "$1.writer")); wrapper-only crash records cannot authorize repair; genuine execution-owner evidence required; objects preserved"
+    return 1
+  fi
   printf '%s\n' "$$" > "$1.writer/pid" || return 1
   printf '%s\n' "$(date -u '+%Y%m%dT%H%M%S')-$$" > "$1.writer/nonce" || return 1
   printf '%s\n' "$(id -u)" > "$1.writer/owner" || return 1

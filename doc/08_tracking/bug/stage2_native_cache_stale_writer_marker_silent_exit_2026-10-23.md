@@ -33,3 +33,21 @@ Move the cache and its `.writer` marker aside, or run on a copy of the cache.
 - If the writer is alive or liveness cannot be determined, fail with the
   existing `bootstrap-cache-error` text rather than a silent exit 1.
 - Find why variant 1 skips the error print (silent exit path).
+
+## Fix
+
+- `scripts/bootstrap/bootstrap-cache-lineage.shs`: when `mkdir <cache>.writer`
+  fails, the `bootstrap-cache-error: active or unresolved writer` refusal now names
+  the recorded pid and its liveness (`alive`, `not alive; check for an orphaned
+  native-build worker using this cache, then remove <path>`, or `no pid recorded`).
+- Automatic reclaim was considered and REJECTED on review: the recorded pid is the
+  acquiring wrapper's, and a compiler child can outlive it
+  (`interrupted_bootstrap_cache_writer_recovery_unavailable_2026-10-14.md`), so a
+  dead pid would let a second writer into a cache an orphan is still writing.
+  Removing the marker stays a manual step after checking for orphans.
+- Silent exit 1 (variant 1): `scripts/bootstrap/clean-bootstrap-cache.shs` ended
+  with `bootstrap_cache_clean ... || exit 1`, and its repair-idle-writer branch
+  exited with the bare status; both now print a `bootstrap-cache-error:` line.
+  This is the best-located silent path; the lane behind runs 12/B/D was not
+  reproduced, so variant 1 is not confirmed closed.
+- Check: `sh scripts/bootstrap/tests/bootstrap-cache-stale-writer-test.shs`.
