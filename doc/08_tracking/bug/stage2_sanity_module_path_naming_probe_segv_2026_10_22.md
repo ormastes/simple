@@ -239,3 +239,23 @@ worker when the flock-based shard-recovery queue dir is in a stale state —
 fresh queue dirs avoid it. Frontier blockers now: (1) NOGC-POLICY-001 policy
 gate (parallel session's active lane), (2) shard-recovery spinlock hang,
 (3) 52.9 s pathological HIR time for a 487-byte module.
+
+## Update: publish deadlock FIXED (2026-10-23, PR #4189)
+
+The deterministic phase=hir hang was gdb-caught as a spinlock:
+`__aarch64_cas4_acq <- Mutex<i64>::lock <- is_registered_heap_ptr <-
+validate_heap_obj <- rt_array_get <- reverse_reference_module_publish_v1`.
+The promoted batch Option's scalar limbs were mirrored (ab07dfa3567) but
+its ARRAY limbs still referenced reclaimed transient slots; publish's
+merge loop read them and spun in the runtime heap registry mutex. Fix:
+seal promotes each array limb pre-scope-end (handles still valid) and
+mirrors the persistent handles into module globals; publish merges from
+the mirrors. Verified: the worker that hung now completes HIR (65 s —
+pathological slowness persists) and exits normally.
+
+Remaining frontier for the stage2 smoke (exit 124): the hir-cache STORE
+fails at rt_file_write_text (io-write, even to a private cache dir), so
+the module is re-lowered on the next pass — doubling an already ~65 s
+HIR phase and blowing the smoke's per-probe budget. This is the parallel
+lane's documented io-write/encode-pool defect; see
+stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
