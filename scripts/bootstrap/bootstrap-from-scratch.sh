@@ -2914,6 +2914,27 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
     echo "error: incomplete Windows GNU Cargo tool authority" >&2
     exit 1
   }
+  # Rust's x86_64-pc-windows-gnu std always asks the linker for -lgcc_eh and
+  # -lgcc. llvm-mingw (clang + lld, compiler-rt + libunwind) has neither and
+  # GCC is never installed, so serve those two names from LLVM runtime: an
+  # empty libgcc.a (compiler-rt builtins come from Rust's compiler_builtins)
+  # and libgcc_eh.a = llvm-mingw's libunwind.a. Link through lld.
+  mingw_unwind_a="$(dirname -- "${mingw_cc}")/../${mingw_target%%-*}-w64-mingw32/lib/libunwind.a"
+  if [ -f "${mingw_unwind_a}" ]; then
+    mingw_shim_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT:-${output_dir}}/rust-gnu-runtime-shim"
+    mkdir -p "${mingw_shim_dir}" &&
+      rm -f "${mingw_shim_dir}/libgcc.a" "${mingw_shim_dir}/libgcc_eh.a" &&
+      "${mingw_ar}" rc "${mingw_shim_dir}/libgcc.a" &&
+      cp "${mingw_unwind_a}" "${mingw_shim_dir}/libgcc_eh.a" || {
+        echo "error: cannot create LLVM runtime shim in ${mingw_shim_dir}" >&2
+        exit 1
+      }
+    mingw_shim_native=$(cygpath -m "${mingw_shim_dir}" 2>/dev/null || printf '%s' "${mingw_shim_dir}")
+    mingw_rustflags="${mingw_rustflags} -C link-arg=-fuse-ld=lld -L native=${mingw_shim_native}"
+  else
+    echo "error: llvm-mingw libunwind.a not found at ${mingw_unwind_a} (gnu lane needs clang+lld with compiler-rt/libunwind; no GCC)" >&2
+    exit 1
+  fi
   export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}"
   export CC_x86_64_pc_windows_gnu="${mingw_cc}"
   export AR_x86_64_pc_windows_gnu="${mingw_ar}"
