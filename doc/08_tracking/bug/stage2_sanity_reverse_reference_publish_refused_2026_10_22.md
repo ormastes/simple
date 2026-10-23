@@ -104,3 +104,21 @@ flat-pool bug (`stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md`,
 annotation 2026-10-23). The stage-2 gate therefore stays red on that bug;
 further whack-a-mole on this lane stops here (cycle cap) — the runtime
 class-layout fix and the flat-pool lifetime fix are the cures.
+
+## Sibling line release/1.0.0 (ported from d819cb542b9)
+
+The release/1.0.0 line hit the same refusal at a different probe and ported
+this lane's scalar-global mirror as d819cb542b9. Its observations, merged here:
+
+- Failing probe there: `hello_world_positional` in the SIMPLE_BOOTSTRAP=1
+  frontend pass (`transient HIR scope end failed for
+  src/compiler/bootstrap_admission/hello_world.spl`, raw rc=1), on merged
+  963358b7f31 post PR #4172; attempt 20261023T005842, sanity checks_run=5.
+- The bootstrap=0 pass ran all four probes clean (p2_add,
+  stage2_mir_retention, stage2_module_path_naming, hello_world_positional).
+- A manual fresh-cache replay of the identical argv/bootstrap/backend shape
+  PASSED — heap-layout-sensitive, consistent with the by-value/aggregate
+  transport corruption family, not a deterministic gate disagreement.
+- d819cb542b9's code is a subset of what this line already carries
+  (ab07dfa3567 scalar mirror + ff1f69fd931 array-limb mirror), so only this
+  evidence section was ported.
