@@ -116,3 +116,5 @@ with a control that must produce a hit.
 Every behavioural change here was sabotage-probed: break impl → observe RED →
 revert → observe GREEN. A GC/cache test that cannot fail proves nothing, because
 the failure mode is silent data loss.
+
+- 2026-10-24: authoritative build/cache design is `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md` (per-file jobs, `SourceReader`, single-flight, no locks, cache limits); additive semantic-cache package `doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`.
