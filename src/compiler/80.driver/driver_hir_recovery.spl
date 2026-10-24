@@ -8,8 +8,10 @@ fn hir_shard_claim_valid(record: text) -> bool:
     val fields = record.split("\n")
     fields.len() == 4 and fields[0] != "" and fields[1] != "" and fields[2] != "" and fields[3] == ""
 
-pub fn hir_shard_recovery_can_replace(fail_fast: bool, exit_code: i64, new_claims: i64) -> bool:
-    not fail_fast and exit_code != 0 and new_claims > 0
+# A replacement is only useful while inventory rows remain unclaimed; every
+# claimed row is terminal after the seal, so relaunching would reload HIR for nothing.
+pub fn hir_shard_recovery_can_replace(fail_fast: bool, exit_code: i64, new_claims: i64, unclaimed: i64) -> bool:
+    not fail_fast and exit_code != 0 and new_claims > 0 and unclaimed > 0
 
 pub fn hir_shard_aggregate_exit(failed_workers: i64, failed_modules: i64) -> i64:
     if failed_workers != 0 or failed_modules != 0: 1 else: 0
@@ -151,3 +153,23 @@ pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
             return -1
         index = index + 1
     unfinished
+
+# Inventory rows with no claim yet; -1 when the inventory is unreadable.
+pub fn hir_shard_recovery_unclaimed_count(queue: text) -> i64:
+    val inventory = file_read("{queue}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "": return -1
+    var unclaimed: i64 = 0
+    var index: i64 = 1
+    while index < inventory.len():
+        val path = inventory[index]
+        if path == "": return -1
+        if not file_exists("{hir_shard_record_base(queue, path)}.claim"):
+            unclaimed = unclaimed + 1
+        index = index + 1
+    unclaimed
+
+# Replacements wait until every worker from the current generation has stopped.
+# Recheck the queue at that boundary because another worker may have claimed
+# the last row after the failed worker was reaped.
+pub fn hir_shard_recovery_replacements_dispatchable(queue: text, queued_replacements: i64) -> bool:
+    queued_replacements > 0 and hir_shard_recovery_unclaimed_count(queue) > 0
