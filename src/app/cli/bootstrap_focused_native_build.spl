@@ -4,7 +4,9 @@
 # so exact Stage4 provider composition stays on the localized
 # compiler-backfill + core-runtime lane.
 
-use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed}
+use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed_v2}
+use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
+    selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
 use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 pub use app.cli.bootstrap_focused_native_build_args.{
@@ -29,8 +31,8 @@ pub fn focused_native_build_error(args: [text]) -> text:
     if mode != "" and mode != "dynload" and mode != "one-binary":
         return "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
     val sources = focused_native_build_sources(args)
-    if sources.len() > 5:
-        return "Error: focused native-build accepts at most five --source roots"
+    if sources.len() > 6:
+        return "Error: focused native-build accepts at most six --source roots"
     if focused_native_build_arg_value(args, "--entry") == "":
         return "Error: focused native-build requires --entry"
     if (focused_native_build_arg_value(args, "--output") == "" and
@@ -71,6 +73,14 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
         print plan_error
         return 1
 
+    # Exact Stage3/Stage4 dispatch returns here before bootstrap_main's
+    # positional-route installation. Admit the selected composition before
+    # the direct driver constructs its backend session or we mutate run env.
+    if not install_selected_k1_backend_table_v1():
+        print "PLUG-E-K1-POLICY: focused native-build backend composition admission failed (selected policy '{selected_k1_backend_policy_v1()}')"
+        print "  k1-table: {selected_k1_backend_table_diagnostic_v1()}"
+        return 1
+
     val sources = focused_native_build_effective_sources(args, exact_stage4_capsule)
     val entry = focused_native_build_arg_value(args, "--entry")
     var output = focused_native_build_arg_value(args, "--output")
@@ -103,12 +113,13 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     if runtime_bundle != "":
         env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
 
-    val result = aot_native_project_with_backend_fixed(
+    val result = aot_native_project_with_backend_fixed_v2(
         focused_native_build_source_at(sources, 0),
         focused_native_build_source_at(sources, 1),
         focused_native_build_source_at(sources, 2),
         focused_native_build_source_at(sources, 3),
         focused_native_build_source_at(sources, 4),
+        focused_native_build_source_at(sources, 5),
         sources.len(),
         entry,
         output,

@@ -27,7 +27,10 @@ typedef uint64_t RuntimeValue;
  * standalone C builds (no seed runtime, no packing) link without it. On
  * Windows the hook is a no-op, so the Rust runtime never packs there
  * (`pack_tagged_words_in_place` checks `cfg!(windows)`). */
-#if defined(__GNUC__) && !defined(_WIN32)
+/* Only the final C-only composition may omit this Rust packing callback.
+ * SIMPLE_CORE_C_STANDALONE is also used by mixed-runtime supplements, so it
+ * cannot establish that ownership. Keep the callback by default. */
+#if defined(__GNUC__) && !defined(_WIN32) && !defined(SIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING)
 extern void simple_note_user_threads_started(void) __attribute__((weak));
 #define SPL_NOTE_USER_THREADS() \
     do { if (simple_note_user_threads_started) simple_note_user_threads_started(); } while (0)

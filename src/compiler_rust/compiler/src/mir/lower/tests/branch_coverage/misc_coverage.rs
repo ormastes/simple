@@ -146,6 +146,21 @@ fn coverage_for_each_index_get() {
 }
 
 #[test]
+fn for_each_u8_uses_layout_aware_raw_read_then_narrow() {
+    let mir = compile_to_mir(
+        "fn test(bytes: [u8]) -> u8:\n    var last: u8 = 0u8\n    for byte in bytes:\n        last = byte\n    return last\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_at"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::UnitNarrow { from_bits: 64, to_bits: 8, signed: false, .. })
+    }));
+}
+
+#[test]
 fn coverage_for_each_dict_keeps_generic_index_get() {
     // A non-array iterable (dict -> entries array via rt_for_iterable) keeps
     // the generic IndexGet path.

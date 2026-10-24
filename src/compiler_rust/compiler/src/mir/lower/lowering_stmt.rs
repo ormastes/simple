@@ -2114,8 +2114,14 @@ impl<'a> MirLowerer<'a> {
                 let typed_i64_read =
                     iterable_is_array && element_ty == crate::hir::TypeId::I64 && self.signed_word_lane;
                 let typed_word_read = typed_u64_read || typed_i64_read;
-                // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
-                // element types so the loop variable's value gets the correct narrow TypeId.
+                // Match lower_index_expr for `[u8]`: the typed accessor reads
+                // both packed bytes and tagged slots as a raw byte. The core-C
+                // rt_array_get returns packed bytes raw, so UnboxInt after it
+                // corrupts multiples of eight (e.g. 'p' = 112 becomes 14).
+                let typed_u8_read = iterable_is_array && element_ty == crate::hir::TypeId::U8;
+                let typed_raw_read = typed_word_read || typed_u8_read;
+                // Narrow raw byte reads or unboxed narrow integers so the
+                // loop variable's value gets the correct narrow TypeId.
                 let narrow_to_signed: Option<(u8, bool)> = match element_ty {
                     crate::hir::TypeId::U8 => Some((8, false)),
                     crate::hir::TypeId::U16 => Some((16, false)),
@@ -2133,14 +2139,18 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_word_read {
+                    let element = if typed_u8_read
+                        || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read)
+                    {
                         func.new_vreg()
                     } else {
                         raw_element
                     };
-                    // For narrow int element types, UnboxInt -> intermediate i64,
-                    // then UnitNarrow -> element so element gets the narrow TypeId.
-                    let unboxed_intermediate = if narrow_to_signed.is_some() {
+                    // A typed byte read is already raw; other narrow integers
+                    // first unbox into an intermediate i64 before UnitNarrow.
+                    let unboxed_intermediate = if typed_u8_read {
+                        raw_element
+                    } else if narrow_to_signed.is_some() {
                         func.new_vreg()
                     } else {
                         element
@@ -2171,6 +2181,8 @@ impl<'a> MirLowerer<'a> {
                                 "rt_typed_words_i64_at"
                             } else if typed_u64_read {
                                 "rt_typed_words_u64_at"
+                            } else if typed_u8_read {
+                                "rt_typed_bytes_u8_at"
                             } else {
                                 "rt_array_get"
                             }),
@@ -2191,12 +2203,14 @@ impl<'a> MirLowerer<'a> {
                         });
                     }
 
-                    // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
+                    // Generic reads need unboxing; typed byte reads only narrow.
                     if needs_int_unbox && !typed_word_read {
-                        block.instructions.push(MirInst::UnboxInt {
-                            dest: unboxed_intermediate,
-                            value: raw_element,
-                        });
+                        if !typed_u8_read {
+                            block.instructions.push(MirInst::UnboxInt {
+                                dest: unboxed_intermediate,
+                                value: raw_element,
+                            });
+                        }
                         // FR-DRIVER-0002b: narrow to actual element width when needed.
                         if let Some((to_bits, signed)) = narrow_to_signed {
                             block.instructions.push(MirInst::UnitNarrow {
