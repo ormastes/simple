@@ -1,0 +1,38 @@
+"""
+## Purpose
+A `{...}` interpolation region is sub-parsed as its own source. Its spans must
+be rebased onto the enclosing string literal, otherwise every expression at a
+region start reports `:1:1` (bug mir_unresolved_method_inferred_receiver,
+core_codegen `unresolved method call: len at core_codegen.spl:1:1`).
+"""
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{flat_bridge_build_string_interps, parse_and_build_module}
+use std.spec.step
+
+describe "interpolation fragment spans":
+    it "rebases a region receiver onto the literal's line and column":
+        step("Warm fragment parser state")
+        val warm = parse_and_build_module("fn warm() -> i64:\n    1\n", "warm.spl")
+        expect(warm.functions.contains("warm")).to_equal(true)
+        step("Literal at line 7 col 9 (offset 120); region inner starts at value index 5")
+        val span = Span(start: 120, end: 150, line: 7, col: 9, file: "probe.spl", length: 30)
+        val left = "{"
+        val right = "}"
+        val interps = flat_bridge_build_string_interps("ab (" + left + "items.len()" + right + ")", span)
+        expect(interps.len()).to_equal(1)
+        val got = interps[0].expr.span
+        expect(got.line).to_equal(7)
+        # quote at col 9, value[0] at col 10, inner first char (value index 5) at col 15
+        expect(got.col).to_equal(15)
+        expect(got.start).to_equal(126)
+
+    it "rebases a region after an embedded newline onto the following line":
+        val span = Span(start: 0, end: 40, line: 3, col: 5, file: "probe.spl", length: 40)
+        val left = "{"
+        val right = "}"
+        val interps = flat_bridge_build_string_interps("top\n  " + left + "count" + right, span)
+        expect(interps.len()).to_equal(1)
+        val got = interps[0].expr.span
+        expect(got.line).to_equal(4)
+        expect(got.col).to_equal(4)
