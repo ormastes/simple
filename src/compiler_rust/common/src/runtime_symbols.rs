@@ -430,6 +430,34 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_at",
     "rt_at",
     "rt_array_data_ptr_text",
+    // [u8] packed-backing validation + checked-copy providers
+    // (runtime/src/value/collections.rs; contracts in
+    // compiler/src/codegen/runtime_sffi.rs since 8ba019e7781). Without these
+    // names the JIT cannot resolve the symbols, demotes every call to the
+    // hybrid interp splice, and the bridge re-decodes a packed `[u8]` heap
+    // array into a boxed element array — which the rt_array_bytes_* twins
+    // reject with -22, so stdlib byte writes (std.io_runtime.file_write_bytes
+    // via nogc_sync_mut.sffi.file_bytes) silently no-op'd under the seed.
+    // See doc/08_tracking/bug/seed_parser_nondeterminism_and_array_bytes_gap_2026-10-23.md
+    // and the seed_file_write_bytes no-op record.
+    "rt_array_bytes_validate",
+    "rt_array_bytes_copy_checked",
+    "rt_array_bytes_basis_len",
+    "rt_array_bytes_basis_ptr",
+    // FileTextSession descriptor family (std.nogc_sync_mut.io file sessions):
+    // the Rust runtime exports these (value/sffi/file_io/io_file.rs) but the
+    // JIT provider could not resolve them without table entries, so session
+    // reads were spliced through the interp bridge and returned nil — the seed
+    // half of the file_read/timeout-directive gap (see the bug record dated
+    // 2026-10-24 in doc/08_tracking/bug/). The rt_io_file_open_read/_write/
+    // _append names landed with the seed-file-read-twins lane (#4283); the
+    // descriptor members below are the ones this change adds.
+    "rt_io_file_read",
+    "rt_io_file_read_all",
+    "rt_io_file_close",
+    "rt_io_file_seek",
+    "rt_io_file_flush",
+    "rt_io_file_meta_size",
     "rt_array_set",
     "rt_array_set_text",
     "rt_array_set_len_known_text",

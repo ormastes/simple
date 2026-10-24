@@ -416,10 +416,19 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
         return 0
     1
 
+# Direct spec-header read for effective_timeout_secs: bypasses the stdlib
+# text-read chain (see the note at the directive mirror below).
+@unsafe(reason: "raw nullable file-text read for the header directive; nil is read as absent", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _spec_header_text_direct(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path) ?? ""
+
 # Mirror test_runner_single.spl's slow_it floor so the outer bounded wait
 # never undercuts the inner runner's raised per-file bound.
 fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
-    val content = read_file_text(path)
+    val content = _spec_header_text_direct(path)
     var effective = timeout_secs
     if effective < 600 and content.contains("slow_it "):
         effective = 600
@@ -427,6 +436,13 @@ fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
     # test_runner_single.spl / test_runner_main.spl. Without the directive
     # half of this mirror, a spec declaring more than 600s is still cut off
     # out here and reports a timeout instead of a real verdict.
+    # The spec header is read through the DIRECT rt_file_read_text extern
+    # (the same admission test_runner_single's directive parser uses): the
+    # stdlib read_file_text chain has co-compiled same-name definitions whose
+    # flattened-unit winner under the seed lane comes back empty, which made
+    # the directive invisible on the seed and pinned the bound at the default
+    # budget (doc/08_tracking/bug/
+    # seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md).
     val declared = _spec_timeout_secs_directive_text(content)
     if declared > effective:
         effective = declared

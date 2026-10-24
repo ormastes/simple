@@ -1,0 +1,53 @@
+# Regression evidence for the seed file_write_bytes no-op defect
+# (observed 2026-10-23 integration lane; bug record:
+# doc/08_tracking/bug/seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md).
+# Under the Rust seed, std.io_runtime.file_write_bytes returned success/false
+# without creating the file, and std.io_runtime.file_read returned "" for
+# existing files. Both must round-trip here.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write_bytes, file_exists, file_read_bytes, getpid}
+use std.nogc_sync_mut.fs.{host_path_native}
+
+val TMP_ROOT: text = "C:/Users/user/AppData/Local/Temp"
+
+fn probe_path(tag: text) -> text:
+    val pid = getpid()
+    val native = host_path_native("{TMP_ROOT}/seed_file_write_bytes_{tag}_{pid}.bin")
+    native
+
+fn _bytes(vals: [i64]) -> [u8]:
+    var out: [u8] = []
+    for v in vals:
+        out = out.push(v as u8)
+    out
+
+describe "seed io_runtime byte round-trip":
+    it "file_write_bytes creates the file and file_read_bytes reads it back":
+        val path = probe_path("wb")
+        val payload = _bytes([0, 104, 105, 255, 128])
+        val ok = file_write_bytes(path, payload)
+        expect(ok).to_equal(true)
+        expect(file_exists(path)).to_equal(true)
+        val back = file_read_bytes(path)
+        expect(back.len()).to_equal(5)
+        expect(back[1]).to_equal(104u8)
+        expect(back[2]).to_equal(105u8)
+        expect(back[3]).to_equal(255u8)
+
+    it "file_write_bytes overwrites an existing file":
+        val path = probe_path("ow")
+        val _ = file_write_bytes(path, _bytes([65, 66]))
+        val ok = file_write_bytes(path, _bytes([67]))
+        expect(ok).to_equal(true)
+        val back = file_read_bytes(path)
+        expect(back.len()).to_equal(1)
+        expect(back[0]).to_equal(67u8)
+
+    it "written bytes read back as the same text bytes":
+        val path = probe_path("rt")
+        val _ = file_write_bytes(path, _bytes([104, 105]))
+        val back = file_read_bytes(path)
+        expect(back.len()).to_equal(2)
+        expect(back[0]).to_equal(104u8)
+        expect(back[1]).to_equal(105u8)
