@@ -1,0 +1,153 @@
+# P4/P6: drive the static forward weave through per-directory pointcut match
+# shards (cache_contract/aspect_match_shard_v1) with single-flight production
+# (cache/daemon/cache_single_flight_v1).
+#
+# doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md §5.
+#
+# Per compile: HIR modules are grouped into DirectoryJoinPointFactsV1 by the
+# directory of their path; each (selector, directory facts) shard is acquired
+# from the persistent match cache, and on a miss produced once by the
+# single-flight leader. Only modules that own a matched join point are visited,
+# and each visit is the UNCHANGED per-claim weaver
+# (aspect_weave.weave_forward_advice_claim_in_module_v1), so the live
+# forwarder-shape check is never bypassed. An unsupported selector or
+# incomplete facts falls back to visiting every module (the legacy result).
+#
+# No locks: the state is owned by the driver's single event loop, the match
+# cache is a persistent value, and the single-flight table hands waiters the
+# leader's result instead of producing again.
+#
+# Function attributes come from frontend/join_point_attr_registry (recorded
+# during HIR lowering, keyed by the lowering filename == HirModule.path).
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
+use compiler.semantics.aspect_validation.{aspect_module_identity_index}
+use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1,
+    aspect_forward_weave_claims_v1, weave_forward_advice_claim_in_module_v1}
+use compiler.semantics.join_point_model.{forward_join_points}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_names_of}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    DirectoryJoinPointFactsV1, PointcutMatchCacheV1, PointcutMatchShardV1,
+    directory_join_point_facts_v1, pointcut_selector_parse_v1, pointcut_match_key_v1,
+    pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1}
+use std.common.string_core.{text_to_bytes}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
+
+class AopMatchDriverStateV1:
+    cache: PointcutMatchCacheV1
+    flights: CacheSingleFlightV1
+    shard_hits: i64
+    shard_misses: i64
+    fallbacks: i64
+
+    static fn create() -> AopMatchDriverStateV1:
+        AopMatchDriverStateV1(cache: pointcut_match_cache_new_v1(),
+            flights: CacheSingleFlightV1.create(), shard_hits: 0, shard_misses: 0, fallbacks: 0)
+
+fn _dir_of(path: text) -> text:
+    val i = path.rfind("/")
+    if i == nil: return ""
+    path.slice(0, i!)
+
+fn module_key_path(module_key: text, module: HirModule) -> text:
+    if module.path != "": return module.path
+    module_key
+
+fn _module_file(module_key: text, module: HirModule) -> text:
+    if module.path != "": return module.path.replace("\\", "/")
+    module_key
+
+# Complete per-directory inventory of `forward` join points. Every module in
+# `modules` is enumerated, so each directory's facts are complete for this
+# compilation's module set.
+pub fn aop_directory_facts_from_hir_v1(modules: Dict<text, HirModule>) -> [DirectoryJoinPointFactsV1]:
+    var files_of: Dict<text, [text]> = {}
+    var points_of: Dict<text, [JoinPointFactV1]> = {}
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        val file = _module_file(module_key, module)
+        val dir = _dir_of(file)
+        if not files_of.contains_key(dir):
+            files_of[dir] = []
+            points_of[dir] = []
+        var files = files_of[dir]
+        files.push(file)
+        files_of[dir] = files
+        var points = points_of[dir]
+        for jp in forward_join_points_for_module_v1(module, 1):
+            points.push(JoinPointFactV1(id: "{module_key}::{jp.source_symbol}", kind: jp.kind,
+                symbol: jp.source_symbol,
+                attrs: join_point_attr_names_of(module_key_path(module_key, module), jp.source_symbol),
+                owner_file: file, base_body_digest: ""))
+        points_of[dir] = points
+    var out: [DirectoryJoinPointFactsV1] = []
+    for dir in files_of.keys():
+        out.push(directory_join_point_facts_v1(dir, files_of[dir], points_of[dir], [], true))
+    out
+
+fn _encode_ids(ids: [text]) -> [u8]:
+    var s = ""
+    for id in ids:
+        s = s + id + "\n"
+    text_to_bytes(s)
+
+# Acquire one shard: cache hit, or single-flight leader production. The
+# driver loop is single-threaded, so the leader completes before any waiter
+# polls; a waiter that still sees no result re-acquires from the cache.
+pub fn aop_match_shard_acquire_v1(state: AopMatchDriverStateV1, selector: text,
+        facts: DirectoryJoinPointFactsV1, request_id: text) -> PointcutMatchShardV1:
+    val sel = pointcut_selector_parse_v1(selector)
+    val key = cache_single_flight_key_v1("aop.match", pointcut_match_key_v1(sel, facts))
+    val (role, _flight) = state.flights.join(key, request_id)
+    val r = pointcut_match_cache_acquire_v1(state.cache, sel, facts)
+    state.cache = r.cache
+    if r.hit:
+        state.shard_hits = state.shard_hits + 1
+    else:
+        state.shard_misses = state.shard_misses + 1
+    if not r.cacheable: state.fallbacks = state.fallbacks + 1
+    if role == SINGLE_FLIGHT_LEADER_V1:
+        val _done = state.flights.complete(key, request_id, _encode_ids(r.shard.sorted_matching_ids))
+    r.shard
+
+# Cached replacement for aspect_weave.weave_forward_advice: same claims, same
+# per-module weaver, but module visits are driven by the matched shard ids.
+pub fn aop_weave_with_match_cache_v1(state: AopMatchDriverStateV1,
+        modules: Dict<text, HirModule>) -> i64:
+    var woven: i64 = 0
+    val module_ids = aspect_module_identity_index(modules)
+    val claims = aspect_forward_weave_claims_v1(module_ids, forward_join_points(modules))
+    if claims.len() == 0: return woven
+    val dirs = aop_directory_facts_from_hir_v1(modules)
+    for claim in claims:
+        var visit: Dict<text, bool> = {}
+        var fallback = false
+        for facts in dirs:
+            val shard = aop_match_shard_acquire_v1(state, claim.selector, facts, claim.registry_key)
+            if not shard.complete: fallback = true
+            for id in shard.sorted_matching_ids:
+                val sep = id.rfind("::")
+                if sep != nil: visit[id.slice(0, sep!)] = true
+        for module_key in modules.keys():
+            if not fallback and not visit.contains_key(module_key): continue
+            val (module, n) = weave_forward_advice_claim_in_module_v1(
+                module_key, modules[module_key], module_ids, claim)
+            woven = woven + n
+            if n > 0: modules[module_key] = module
+    woven
+
+export AopMatchDriverStateV1, aop_directory_facts_from_hir_v1
+export aop_match_shard_acquire_v1, aop_weave_with_match_cache_v1
+
+# Driver-loop-owned state: shards survive across compiles in one process
+# (daemon / LSP / watch), so a later advice-body or pointcut edit reuses every
+# unaffected directory shard.
+var _aop_match_driver_state_v1 = AopMatchDriverStateV1.create()
+
+pub fn aop_weave_forward_advice_cached_v1(modules: Dict<text, HirModule>) -> i64:
+    aop_weave_with_match_cache_v1(_aop_match_driver_state_v1, modules)
+
+export aop_weave_forward_advice_cached_v1
