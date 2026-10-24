@@ -1,0 +1,108 @@
+# Host IO platform layer — CPU topology and thread pinning surface.
+#
+# Single platform-neutral owner proposed in
+# doc/05_design/compiler/incremental_build/cache_build_review_and_portability_2026-10-24.md §4.2
+# (`cpu_topology / pin_thread` row). Compiler, cache and build-runner code use
+# these functions instead of branching on the host OS. Runtime twins:
+# C `src/runtime/runtime_core_host_services.c`, Rust `runtime/src/cpu_topology.rs`.
+#
+# Windows: every processor group is enumerated (hosts with > 64 logical CPUs
+# have several, and a thread only leaves its process's initial group when it
+# is pinned explicitly). Linux: sched affinity + sysfs package/NUMA ids.
+# macOS has no affinity API: pinning returns false and callers carry on.
+
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+
+extern fn rt_cpu_topology_count() -> i64
+extern fn rt_cpu_topology_field(index: i64, field: i64) -> i64
+extern fn rt_thread_pin_current(index: i64) -> bool
+extern fn rt_thread_current_cpu() -> i64
+extern fn rt_par_atomic_add_i64(addr: i64, value: i64) -> i64
+
+struct HostCpuV1:
+    index: i64
+    group: i64
+    number: i64
+    socket: i64
+    numa: i64
+
+struct HostCpuTopologyV1:
+    cpus: [HostCpuV1]
+    socket_count: i64
+    group_count: i64
+    numa_count: i64
+
+fn host_cpu_topology() -> HostCpuTopologyV1:
+    """Every logical CPU of the host, in (group, number) order."""
+    var cpus: [HostCpuV1] = []
+    var max_socket = -1
+    var max_group = -1
+    var max_numa = -1
+    val n = rt_cpu_topology_count()
+    for i in 0..n:
+        val cpu = HostCpuV1(index: i, group: rt_cpu_topology_field(i, 0), number: rt_cpu_topology_field(i, 1),
+                            socket: rt_cpu_topology_field(i, 2), numa: rt_cpu_topology_field(i, 3))
+        if cpu.socket > max_socket: max_socket = cpu.socket
+        if cpu.group > max_group: max_group = cpu.group
+        if cpu.numa > max_numa: max_numa = cpu.numa
+        cpus = cpus.push(cpu)
+    HostCpuTopologyV1(cpus: cpus, socket_count: max_socket + 1, group_count: max_group + 1, numa_count: max_numa + 1)
+
+fn host_worker_sockets(t: HostCpuTopologyV1) -> [i64]:
+    """Socket id per worker (one worker per logical CPU), the input
+    `fiber_sched_new` takes."""
+    var sockets: [i64] = []
+    for cpu in t.cpus: sockets = sockets.push(cpu.socket)
+    sockets
+
+fn host_pin_current_thread(index: i64) -> bool:
+    """Pin the calling OS thread to topology entry `index`; false where the
+    host has no affinity API or the index is out of range."""
+    rt_thread_pin_current(index)
+
+fn host_current_cpu() -> i64:
+    """(group << 16) | number of the CPU running the caller, -1 if unknown."""
+    rt_thread_current_cpu()
+
+fn _host_occupancy_worker(cpu_index: i64, counters: i64) -> i64:
+    val pinned = rt_thread_pin_current(cpu_index)
+    var spin = 0
+    var acc = 0
+    while spin < 20000:
+        acc = acc + spin
+        spin = spin + 1
+    val where = rt_thread_current_cpu()
+    if pinned and where >= 0:
+        rt_par_atomic_add_i64(counters + (where / 65536) * 8, 1)
+    if acc < 0: return -1
+    if pinned: 1 else: 0
+
+struct HostOccupancyV1:
+    threads: i64
+    pinned: i64
+    per_group: [i64]
+
+fn host_measure_group_occupancy(t: HostCpuTopologyV1) -> HostOccupancyV1:
+    """Spawn one thread per logical CPU, pin it, and count which processor
+    group each one actually ran in. A healthy multi-group host shows every
+    group occupied; an unpinned pool would show only one."""
+    val groups = if t.group_count > 0: t.group_count else: 1
+    val counters = rt_alloc(groups * 8)
+    for g in 0..groups: rt_ptr_write_i64(counters, g * 8, 0)
+    var handles = []
+    for cpu in t.cpus:
+        handles = handles.push(thread_spawn_with_args(cpu.index, counters, \i, c: _host_occupancy_worker(i, c)))
+    var pinned = 0
+    for h in handles:
+        var handle = h
+        val r = handle.join() ?? 0
+        pinned = pinned + r
+    var per_group: [i64] = []
+    for g in 0..groups: per_group = per_group.push(rt_ptr_read_i64(counters, g * 8))
+    rt_free(counters)
+    HostOccupancyV1(threads: t.cpus.len(), pinned: pinned, per_group: per_group)
+
+export HostCpuV1, HostCpuTopologyV1, HostOccupancyV1
+export host_cpu_topology, host_worker_sockets, host_pin_current_thread, host_current_cpu
+export host_measure_group_occupancy

@@ -74,6 +74,7 @@ pub mod process_observation_v4_twins;
 pub mod debug;
 pub mod directx_submission_twins;
 pub mod executor;
+pub mod cpu_topology;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;

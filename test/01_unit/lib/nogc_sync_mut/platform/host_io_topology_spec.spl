@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Verify the host_io CPU topology + thread pinning surface, including
+that pinned threads occupy every Windows processor group.
+Audience: build-runner engineers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Hosts with no affinity API (macOS: current cpu = -1) accept `false` pins.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3
+"""
+use std.nogc_sync_mut.platform.host_io.{host_cpu_topology, host_worker_sockets, host_pin_current_thread, host_current_cpu, host_measure_group_occupancy}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+
+fn _pin_probe(index: i64, want: i64) -> i64:
+    # 1 = pinned and running on the wanted CPU, 0 = no affinity API, -1 = wrong CPU
+    if not host_pin_current_thread(index): return 0
+    if host_current_cpu() == want: 1 else: -1
+
+describe "host_io cpu topology":
+    it "enumerates every logical CPU with in-range ids":
+        val t = host_cpu_topology()
+        expect(t.cpus.len() >= 1).to_be(true)
+        expect(t.socket_count >= 1).to_be(true)
+        expect(t.group_count >= 1).to_be(true)
+        for cpu in t.cpus:
+            expect(cpu.group >= 0).to_be(true)
+            expect(cpu.number >= 0).to_be(true)
+            expect(cpu.socket >= 0 and cpu.socket < t.socket_count).to_be(true)
+        expect(host_worker_sockets(t).len()).to_equal(t.cpus.len())
+
+    it "pins a worker thread to the last CPU and it runs there":
+        val t = host_cpu_topology()
+        val last = t.cpus[t.cpus.len() - 1]
+        var h = thread_spawn_with_args(last.index, last.group * 65536 + last.number, \i, w: _pin_probe(i, w))
+        val r = h.join() ?? -9
+        if host_current_cpu() < 0:
+            expect(r).to_equal(0)
+        else:
+            expect(r).to_equal(1)
+
+    it "refuses an out-of-range CPU index":
+        val t = host_cpu_topology()
+        expect(host_pin_current_thread(t.cpus.len())).to_be(false)
+        expect(host_pin_current_thread(-1)).to_be(false)
+
+    it "pinned worker threads occupy every processor group":
+        val t = host_cpu_topology()
+        val occ = host_measure_group_occupancy(t)
+        print "occupancy: threads={occ.threads} pinned={occ.pinned} per_group={occ.per_group} sockets={t.socket_count} groups={t.group_count}"
+        expect(occ.threads).to_equal(t.cpus.len())
+        if host_current_cpu() >= 0:
+            expect(occ.pinned).to_equal(occ.threads)
+            for g in 0..t.group_count:
+                expect(occ.per_group[g] > 0).to_be(true)
