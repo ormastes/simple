@@ -18,7 +18,8 @@
 #   branches and the negation of earlier siblings; it is evaluated with the
 #   preprocessor's own condition evaluator. Invocations inside an inactive
 #   branch are kept as inactive records (so a guard flip re-resolves them);
-#   macro definitions inside an inactive branch are not seen (named gap).
+#   macro definitions inside an inactive branch are read from the source too
+#   (single-line headers) and kept as non-resolving def-table entries.
 # - effects: there is no effect-declaration syntax for macros. A `const`
 #   parameter declares compile-time evaluation (ctfe:const-eval, admitted); a
 #   body calling an ambient host API declares that ambient effect, which
@@ -121,6 +122,7 @@ pub struct MacroGuardScanV1:
     inactive_use_names: [text]
     inactive_use_args: [text]
     inactive_use_lines: [i64]     # 1-based
+    inactive_defs: _InactiveDefsV1
 
 fn _paren_cond(line: text) -> text:
     val open = line.find("(")
@@ -161,6 +163,106 @@ fn _scan_bang_calls(line: text, names: [text], args: [text], lines: [i64], line_
 fn _eval(cond: text) -> bool:
     cond != "" and _pp_eval_condition(cond)
 
+fn _indent_of(line: text) -> i64:
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if ch != " " and ch != "\t": return i
+        i = i + 1
+    i
+
+# `n: Int const, x: Int` -> ["n=const", "x"] (top-level commas only).
+fn _header_params(inner: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var cur = ""
+    var i = 0
+    while i <= inner.len():
+        val ch = if i < inner.len(): inner.substring(i, i + 1) else: ","
+        if ch == "(" or ch == "[" or ch == "{": depth = depth + 1
+        if ch == ")" or ch == "]" or ch == "}": depth = depth - 1
+        if ch == "," and depth == 0:
+            val seg = cur.trim()
+            if seg != "":
+                val colon = seg.find(":")
+                val name = if colon > 0: seg.substring(0, colon).trim() else: seg
+                out.push(if seg.ends_with(" const"): name + "=const" else: name)
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    out
+
+# Macro definitions found in INACTIVE @when branches, read from the original
+# source (the parser never sees them). Single-line headers only
+# (`macro NAME(params) -> (contract):`); the body is the following lines
+# indented deeper than the header.
+class _InactiveDefsV1:
+    names: [text]
+    params: [text]       # comma-joined, `n=const` for CTFE params
+    contracts: [text]
+    bodies: [text]
+    nested: [text]       # comma-joined `n!(` names in the body
+    lines: [i64]
+    open: bool
+    indent: i64
+
+    static fn create() -> _InactiveDefsV1:
+        _InactiveDefsV1(names: [], params: [], contracts: [], bodies: [], nested: [],
+            lines: [], open: false, indent: 0)
+
+    me close():
+        self.open = false
+
+    # true when the line belongs to an inactive macro (header or body).
+    me take_line(line: text, line_no: i64) -> bool:
+        val t = line.trim()
+        val ind = _indent_of(line)
+        if self.open and (t == "" or ind > self.indent):
+            val i = self.bodies.len() - 1
+            self.bodies[i] = self.bodies[i] + line + "\n"
+            var ns: [text] = []
+            var as_: [text] = []
+            var ls: [i64] = []
+            _scan_bang_calls(line, ns, as_, ls, line_no)
+            for n in ns:
+                val cur = self.nested[i]
+                if not ("," + cur + ",").contains("," + n + ","):
+                    self.nested[i] = if cur == "": n else: cur + "," + n
+            return true
+        self.open = false
+        if not t.starts_with("macro "): return false
+        val open = t.find("(")
+        if open < 0: return false
+        val name = t.substring(6, open).trim()
+        var depth = 0
+        var close = -1
+        var i = open
+        while i < t.len():
+            val ch = t.substring(i, i + 1)
+            if ch == "(": depth = depth + 1
+            if ch == ")":
+                depth = depth - 1
+                if depth == 0:
+                    close = i
+                    break
+            i = i + 1
+        if close < 0 or name == "": return false
+        val rest = t.substring(close + 1, t.len()).trim()
+        var contract = ""
+        if rest.starts_with("->"):
+            contract = rest.substring(2, rest.len()).trim()
+            if contract.ends_with(":"): contract = contract.substring(0, contract.len() - 1).trim()
+        self.names.push(name)
+        self.params.push(_header_params(t.substring(open + 1, close)).join(","))
+        self.contracts.push(contract)
+        self.bodies.push("")
+        self.nested.push("")
+        self.lines.push(line_no)
+        self.open = true
+        self.indent = ind
+        true
+
 pub fn macro_guard_scan_v1(source: text) -> MacroGuardScanV1:
     val lines = source.replace("\r\n", "\n").split("\n")
     var line_guard: [text] = []
@@ -175,6 +277,7 @@ pub fn macro_guard_scan_v1(source: text) -> MacroGuardScanV1:
     var names: [text] = []
     var args: [text] = []
     var use_lines: [i64] = []
+    var cap = _InactiveDefsV1.create()
     var line_no = 0
     for line in lines:
         line_no = line_no + 1
@@ -225,11 +328,16 @@ pub fn macro_guard_scan_v1(source: text) -> MacroGuardScanV1:
         if chain.len() > 0 and not (is_when or is_elif or is_else or is_end):
             line_guard.push(guard_id_v1("when", chain[chain.len() - 1]).digest)
             if not active[active.len() - 1] and not t.starts_with("#"):
-                _scan_bang_calls(line, names, args, use_lines, line_no)
+                if not cap.take_line(line, line_no):
+                    _scan_bang_calls(line, names, args, use_lines, line_no)
+            else:
+                cap.close()
         else:
+            cap.close()
             line_guard.push("")
+    cap.close()
     MacroGuardScanV1(line_guard: line_guard, evals: evals, inactive_use_names: names,
-        inactive_use_args: args, inactive_use_lines: use_lines)
+        inactive_use_args: args, inactive_use_lines: use_lines, inactive_defs: cap)
 
 fn _line_guard(scan: MacroGuardScanV1, line: i64) -> text:
     if line < 1 or line > scan.line_guard.len(): return ""
@@ -270,6 +378,24 @@ pub fn macro_module_source_from_parse_guarded_v1(package: text, module: text,
             declared_effects: macro_effects_of_source_v1(raw_params, body),
             guard_ids: guards, is_public: true))
         i = i + 1
+    # Definitions inside inactive @when branches: recorded with their guard so
+    # the projector retains them (non-resolving) and a guard flip is visible.
+    val cap = scan.inactive_defs
+    var x = 0
+    while x < cap.names.len():
+        val raw_params = _split_csv(cap.params[x])
+        var guards: [GuardIdV1] = []
+        val g = _line_guard(scan, cap.lines[x])
+        if g != "":
+            guards.push(_guard_of(scan, g))
+        val def = MacroDef(name: cap.names[x], params: _param_names(raw_params),
+            contract_intros: macro_contract_intros_v1(cap.contracts[x]), contract_injects: [])
+        defs.push(MacroSourceDefV1(def: def, namespace: "macro",
+            body_text: cap.contracts[x] + "\n" + cap.bodies[x],
+            nested_macro_names: _split_csv(cap.nested[x]),
+            declared_effects: macro_effects_of_source_v1(raw_params, cap.bodies[x]),
+            guard_ids: guards, is_public: true))
+        x = x + 1
     var u_names: [text] = []
     var u_args: [text] = []
     var u_lines: [i64] = []
