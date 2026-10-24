@@ -6,10 +6,13 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_hash_sha256, file_read_
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
 use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1, compiler_source_authority_acquire_v1}
 use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
-use compiler.common.driver_core_types.{CompileMode, driver_core_compile_options_default}
+use compiler.common.driver_core_types.{CompileMode, CompileOptions, driver_core_compile_options_default}
 use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
-use compiler.common.structural_contracts.environment_variant_policy_v1.{EnvironmentVariantAdminRestrictionsV1}
-use compiler.driver.driver.{compiler_driver_create_with_environment_variant_policy_v1}
+use compiler.common.structural_contracts.environment_variant_policy_v1.{EnvironmentVariantAdminRestrictionsV1, environment_variant_policy_resolve_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver, compiler_driver_next_identity_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{frontend_advisory_policy_from_environment_decision_v1}
 use compiler.driver.driver_source_pipeline_loading.*
 use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1, native_entry_closure_request_open_v1}
@@ -45,6 +48,25 @@ fn fixture_policy() -> Result<EnvironmentVariantPolicyCollectionV1, text>:
         case Ok(value): Ok(value)
         case Err(_): Err("fixture policy collection refused")
 
+# Same construction/policy operations as driver.spl:139-170; omit its backend facade.
+fn fixture_driver(options: CompileOptions,
+        collection: EnvironmentVariantPolicyCollectionV1) -> Result<CompilerDriver, text>:
+    val driver = CompilerDriver(
+        identity_id: compiler_driver_next_identity_v1(),
+        ctx: CompileContext.create(options),
+        streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
+        streaming_surface_owner_ready: false,
+        streaming_entry_source_index_owner: -1)
+    val decision = environment_variant_policy_resolve_v1(collection.policy_inputs)?
+    driver.ctx.frontend_advisory_policy =
+        frontend_advisory_policy_from_environment_decision_v1(decision)
+    driver.ctx.environment_variant_policy_digest = decision.policy_digest
+    driver.ctx.environment_variant_frontend_owner_id = 0u64
+    driver.ctx.environment_variant_frontend_session_id = 0u64
+    driver.ctx.environment_variant_frontend_generation = 0u64
+    driver.ctx.environment_variant_frontend_cache_identity = decision.policy_digest
+    Ok(driver)
+
 fn issue_request(root: text, authority: CompilerSourceAuthorityV1,
         binding: NativeEntryClosureBindingV1, identities: [text], receipt: text
 ) -> Result<NativeEntryClosureRequestV1, text>:
@@ -66,7 +88,7 @@ fn observe_rejection(request: NativeEntryClosureRequestV1,
     var options = driver_core_compile_options_default()
     options.mode = CompileMode.Check
     options.low_memory = true
-    val driver = match compiler_driver_create_with_environment_variant_policy_v1(options, collection):
+    val driver = match fixture_driver(options, collection):
         case Ok(value): value
         case Err(_): return Err("fixture driver policy refused")
     if not env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", prior):
@@ -99,7 +121,7 @@ fn rejection_cases() -> Result<[(text, text, text, bool, i64, bool)], text>:
     val authority = compiler_source_authority_acquire_v1(root, root + "/build/scv", ["src"], true)
     if not authority.valid: return Err("fixture authority refused: " + authority.reason)
     val collection = fixture_policy()?
-    val probe_driver = match compiler_driver_create_with_environment_variant_policy_v1(
+    val probe_driver = match fixture_driver(
             driver_core_compile_options_default(), collection):
         case Ok(value): value
         case Err(_): return Err("fixture policy resolution refused")
