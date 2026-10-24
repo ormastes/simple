@@ -1,0 +1,83 @@
+# Single-flight table for module artifact production in the cache daemon.
+#
+# Modelled on the test daemon's dedup (src/app/test_daemon/daemon.spl, the
+# `active_requests` dedup_key -> redirect step): the first request for a key
+# becomes the LEADER and is told to produce; every concurrent request for the
+# same key gets the leader's future handle instead of producing again. The
+# leader (a compiler process) parses and publishes through the SourceReader's
+# update_src / update_tldr; the daemon then completes the key's future, which
+# every participant observes on its next poll.
+#
+# No parse lease and no mutex: the daemon serves its request queue on one
+# event loop, so the table is only ever touched by that loop, and the
+# published artifacts themselves are temp + rename. This replaces the
+# 2026-10-10 plan's synchronous parse lease.
+use std.async.future.{Future}
+
+pub val SINGLE_FLIGHT_LEADER_V1: i64 = 1
+pub val SINGLE_FLIGHT_WAITER_V1: i64 = 0
+
+pub fn cache_single_flight_key_v1(kind: text, digest: text) -> text:
+    kind + "\u0000" + digest
+
+# Flights are identified by an id; a participant's future handle is minted
+# from the table on each poll (`future`), so completion is observed through
+# the table itself rather than through a shared mutable Future object.
+class CacheSingleFlightV1:
+    next_flight: i64
+    flight_of: Dict<text, i64>
+    leaders: Dict<text, text>
+    participants: Dict<text, i64>
+    done: Dict<text, [u8]?>
+
+    static fn create() -> CacheSingleFlightV1:
+        CacheSingleFlightV1(next_flight: 1, flight_of: {}, leaders: {}, participants: {}, done: {})
+
+    # (role, flight id): SINGLE_FLIGHT_LEADER_V1 when this request must produce.
+    me join(key: text, request_id: text) -> (i64, i64):
+        if self.flight_of.contains_key(key):
+            val existing = self.flight_of[key]
+            self.participants["{existing}"] = self.participants["{existing}"] + 1
+            return (SINGLE_FLIGHT_WAITER_V1, existing)
+        val flight = self.next_flight
+        self.next_flight = flight + 1
+        self.flight_of[key] = flight
+        self.leaders[key] = request_id
+        self.participants["{flight}"] = 1
+        (SINGLE_FLIGHT_LEADER_V1, flight)
+
+    # A participant's handle: ready once the leader completed the flight. Each
+    # participant takes its ready result once; the entry is dropped after the
+    # last one.
+    me future(flight: i64) -> Future<[u8]?>:
+        val id = "{flight}"
+        if not self.done.contains_key(id):
+            return Future.pending()
+        val blob = self.done[id]
+        val left = self.participants[id] - 1
+        if left <= 0:
+            self.done.remove(id)
+            self.participants.remove(id)
+        else:
+            self.participants[id] = left
+        Future.from_value(blob)
+
+    fn leader_of(key: text) -> text:
+        if self.leaders.contains_key(key): self.leaders[key] else: ""
+
+    # Only the key's leader may complete it; nil completes a failed production
+    # (participants then produce in process). Returns false otherwise.
+    me complete(key: text, request_id: text, blob: [u8]?) -> bool:
+        if not self.flight_of.contains_key(key) or self.leader_of(key) != request_id:
+            return false
+        val flight = self.flight_of[key]
+        self.done["{flight}"] = blob
+        self.flight_of.remove(key)
+        self.leaders.remove(key)
+        true
+
+    fn inflight_count() -> i64:
+        self.flight_of.len()
+
+export SINGLE_FLIGHT_LEADER_V1, SINGLE_FLIGHT_WAITER_V1
+export cache_single_flight_key_v1, CacheSingleFlightV1
