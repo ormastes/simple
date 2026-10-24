@@ -1,7 +1,8 @@
 # In-memory id scopes: global / per-file / local.
 #
 # Every id derives from the value's xxh3-128 key. Inside a scope the key is
-# truncated to a short id (32 bits global, 16 bits per-file and local) so hot
+# truncated to a short id (32 bits per-file, 16 bits local; the global scope
+# keeps the full 128-bit key, per doc src_based_tldr_build_v1.md) so hot
 # tables index small integers. A bloom filter over the short ids answers
 # "possibly seen"; only on a positive is the owning 128-bit key compared, and
 # when a DIFFERENT key already owns that short id the value falls back to its
@@ -12,8 +13,8 @@
 # Anything that crosses a process or host boundary uses the full key.
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
-pub val ID_SCOPE_GLOBAL_BITS_V1: i64 = 32
-pub val ID_SCOPE_FILE_BITS_V1: i64 = 16
+pub val ID_SCOPE_GLOBAL_BITS_V1: i64 = 128
+pub val ID_SCOPE_FILE_BITS_V1: i64 = 32
 pub val ID_SCOPE_LOCAL_BITS_V1: i64 = 16
 val ID_SCOPE_BLOOM_BITS_V1: i64 = 65536
 
@@ -53,6 +54,8 @@ class IdScopeV1:
 
     # "s:<short>" for a scope-unique short id, "f:<128-bit key>" on fallback.
     me id_of_key(full_key: text) -> text:
+        if self.width_bits >= 128:
+            return "f:" + full_key
         val short_id = id_scope_truncate_v1(full_key, self.width_bits)
         val (a, b) = self._slots(short_id)
         val slot = "{short_id}"
