@@ -54,3 +54,21 @@ Not a MIR-phase leak: RSS at MIR entry grows ~linearly with closure size
 204-module point), and MIR then never runs. Whether MIR lowering itself
 retains per module is unmeasured until this hang is gone (see the
 2026-10-20 retention record for the bootstrap-fixed lane).
+
+## Proof (same `pa.spl`, 204 modules, same env, `--threads 4`, unsharded MIR)
+
+| | before (c7d429f2a02f…) | after (8bbf1585d6a1…, d2afa7fa643) |
+|---|---|---|
+| warm_names | never done (>8 min, killed) | 40 ms |
+| MIR modules lowered | 0 | 203/204 in ~87 s |
+| RSS across MIR | 2.97 GB flat (stall) | 3.56 -> 3.72 GB (~0.8 MB/module) |
+| peak RSS / wall | 3.0 GB / killed | 8.56 GB (borrow_check) / 339 s |
+
+After build: `build/bootstrap-p2shard-2/stage2/aarch64-unknown-linux-gnu/simple`
+(sha256 8bbf1585d6a19c965a9ca218ab16578ab359dedc8b986a81000666b2ecbafb34).
+
+Newly exposed, NOT fixed here (the lane never reached them before):
+- MIR: `lib.common.sdn.parser` "unresolved method call: bytes" at parser.spl:67:21.
+- borrow_check: 6x "loan liveness work budget exhausted"; RSS 3.7 -> 8.6 GB
+  inside borrow_check for 203 modules — the next memory hot spot to measure
+  at full scale.
