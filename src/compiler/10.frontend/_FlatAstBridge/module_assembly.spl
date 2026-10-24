@@ -56,7 +56,7 @@ use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1, flat_pool_validate_texts_arm_v1, flat_pool_validate_texts_disarm_v1}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1, flat_pool_validate_texts_arm_v1, flat_pool_validate_texts_disarm_v1, flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1}
 use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
 use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
 use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
@@ -1316,14 +1316,33 @@ pub fn flat_pools_dump_all() -> text:
     if representation_parser_has_metadata_v1():
         return ""
     var out = FLAT_POOL_CODEC_VERSION + "\n"
+    flat_pool_type_trace_family_v1(1)
     out = out + flat_decl_pools_dump()
+    flat_pool_type_trace_family_v1(2)
     out = out + flat_expr_pools_dump()
+    flat_pool_type_trace_family_v1(3)
     out = out + flat_stmt_pools_dump()
+    flat_pool_type_trace_family_v1(4)
     out = out + flat_type_pools_dump()
+    flat_pool_type_trace_family_v1(5)
     out = out + flat_parser_state_dump()
+    flat_pool_type_trace_family_v1(6)
     out = out + flat_extend_pools_dump()
+    flat_pool_type_trace_family_v1(7)
     out = out + flat_pending_pools_dump()
     out
+
+# Live line chunks of every CLEAR pool, in dump order (flat_pool_packed_v1.spl
+# renders them in place of the process-local values it never stores).
+pub fn flat_pools_clear_chunks_v1() -> [text]:
+    var chunks: [text] = []
+    for c in flat_decl_pools_clear_chunks_v1():
+        chunks.push(c)
+    for c in flat_expr_pools_clear_chunks_v1():
+        chunks.push(c)
+    for c in flat_stmt_pools_clear_chunks_v1():
+        chunks.push(c)
+    chunks
 
 # Returns false when the blob is truncated, malformed, or written by a
 # different codec version. A false here MUST be treated as a cache miss and a
@@ -1396,6 +1415,13 @@ pub fn flat_parse_module_body_calls() -> i64:
 
 var _fab_capture_pools: i64 = 0
 var _fab_captured_blob: text = ""
+# Shape tag per pool of _fab_captured_blob (flat_pool_packed_v1.spl).
+var _fab_captured_trace: [i64] = []
+
+pub fn flat_pool_capture_take_trace() -> [i64]:
+    val trace = _fab_captured_trace
+    _fab_captured_trace = []
+    trace
 # Paths already captured this process. Re-capturing an identical path is
 # always redundant (the blob is content-identical) and each repeat dump
 # re-exposes the transient-scope reclaim window that poisons the capture
@@ -1653,7 +1679,9 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         # borrowed gate produces a valid 4582-byte blob). Death localization
         # is via the blob-built vs take capture-trace lines.
         flat_pool_capture_sanitize_arm_v1()
+        flat_pool_type_trace_arm_v1()
         _fab_captured_blob = flat_pools_dump_all()
+        _fab_captured_trace = flat_pool_type_trace_take_v1()
         if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
             eprint("[capture-trace] blob-built len={_fab_captured_blob.len()} poisoned={flat_pool_capture_poisoned_v1()}\n")
         flat_pool_capture_sanitize_disarm_v1()

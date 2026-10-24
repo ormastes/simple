@@ -1,0 +1,135 @@
+use std.spec
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION, flat_pool_type_trace_arm_v1,
+    flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1, flat_pool_enc_i64,
+    flat_pool_enc_bool, flat_pool_enc_text, flat_pool_enc_i64_list, flat_pool_enc_text_list,
+    flat_pool_enc_text_list_list, flat_pool_enc_scalar_i64, flat_pool_enc_scalar_bool,
+    flat_pool_enc_scalar_text}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_v1, flat_packed_decode_lines_v1,
+    flat_packed_view_v1, flat_packed_admit_v1, module_artifact_path_v1, SpabDigestV1}
+
+# Fixtures for packed_binary_ast_v1.md §5 specs 5-8 (validation, hash
+# negotiation, namespace isolation, unknown algorithms).
+val SRC_SHA: text = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+val SRC_B3: text = "1111111111111111111111111111111111111111111111111111111111111111"
+val CMP_SHA: text = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+val MODULE_KEY: text = "0123456789abcdef0123456789abcdef"
+
+fn digests() -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 1, hex: SRC_SHA),
+     SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)]
+
+fn sample() -> (text, [i64]):
+    flat_pool_type_trace_arm_v1()
+    var parts: [text] = [FLAT_POOL_CODEC_VERSION + "\n"]
+    flat_pool_type_trace_family_v1(1)
+    parts.push(flat_pool_enc_i64([0, 1, -7, 9223372036854775807, -9223372036854775807]))
+    parts.push(flat_pool_enc_bool([true, false, true]))
+    parts.push(flat_pool_enc_text(["a", "", "two\nlines", "back\\slash", "a", "üñï"]))
+    flat_pool_type_trace_family_v1(2)
+    parts.push(flat_pool_enc_i64_list([[1, 2], [], [3]]))
+    parts.push(flat_pool_enc_text_list([["x"], [], ["y", "x"]]))
+    flat_pool_type_trace_family_v1(4)
+    parts.push(flat_pool_enc_text_list_list([[["p"], []], []]))
+    flat_pool_type_trace_family_v1(5)
+    parts.push(flat_pool_enc_scalar_i64(42))
+    parts.push(flat_pool_enc_scalar_bool(false))
+    parts.push(flat_pool_enc_scalar_text("tail"))
+    (parts.join(""), flat_pool_type_trace_take_v1())
+
+fn flip(bytes: [u8], at: i64) -> [u8]:
+    var out = bytes
+    out[at] = if out[at] == 0u8: 1u8 else: 0u8
+    out
+
+describe "flat_pool_packed_v1 (.spab)":
+    it "round-trips every pool shape byte for byte and is deterministic":
+        val (lines, trace) = sample()
+        expect(trace).to_equal([17, 18, 19, 36, 37, 70, 87, 88, 89])
+        val packed = flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY)
+        expect(packed.len() > 64).to_equal(true)
+        expect(flat_packed_decode_lines_v1(packed, [])).to_equal(lines)
+        expect(flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY)).to_equal(packed)
+
+    it "lays out a 64-byte header and 64-byte aligned sections sorted by id":
+        val (lines, trace) = sample()
+        val view = flat_packed_view_v1(flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY))
+        expect(view.valid).to_equal(true)
+        expect(view.module_key_hex).to_equal(MODULE_KEY)
+        var last = -1
+        for s in view.sections:
+            expect(s.offset % 64).to_equal(0)
+            expect(s.id > last).to_equal(true)
+            last = s.id
+        expect(view.sections[0].id).to_equal(0)
+        expect(view.section(1).length).to_equal(5 * 8)
+        expect(view.section(512).length).to_equal(3 * 8)
+
+    it "stores each string once, sorted by (length, bytes)":
+        val (lines, trace) = sample()
+        val view = flat_packed_view_v1(flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY))
+        var prev = ""
+        var i = 0
+        while i < view.string_count:
+            val s = view.string_at(i)
+            if i > 0:
+                expect(s.len() >= prev.len()).to_equal(true)
+                expect(s != prev).to_equal(true)
+            prev = s
+            i = i + 1
+        expect(view.string_count).to_equal(9)
+
+    it "refuses identity without a known algorithm or with a wrong length":
+        val (lines, trace) = sample()
+        expect(flat_packed_encode_v1(lines, trace, [SpabDigestV1(subject: 1, algo: 32767, hex: "00"),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)], MODULE_KEY).len()).to_equal(0)
+        expect(flat_packed_encode_v1(lines, trace, [SpabDigestV1(subject: 1, algo: 1, hex: "00"),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)], MODULE_KEY).len()).to_equal(0)
+        expect(flat_packed_encode_v1(lines, [17, 18], digests(), MODULE_KEY).len()).to_equal(0)
+
+    it "negotiates digests: common algorithm hits, none or a tampered one misses":
+        val (lines, trace) = sample()
+        val packed = flat_packed_encode_v1(lines, trace, [SpabDigestV1(subject: 1, algo: 1, hex: SRC_SHA),
+            SpabDigestV1(subject: 1, algo: 2, hex: SRC_B3), SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)], MODULE_KEY)
+        expect(flat_packed_admit_v1(packed, [SpabDigestV1(subject: 1, algo: 2, hex: SRC_B3),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)])).to_equal("")
+        expect(flat_packed_admit_v1(packed, [SpabDigestV1(subject: 1, algo: 3, hex: SRC_B3),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)])).to_equal("no-common-digest-algorithm for subject 1")
+        expect(flat_packed_admit_v1(packed, [SpabDigestV1(subject: 1, algo: 1, hex: SRC_B3),
+            SpabDigestV1(subject: 1, algo: 2, hex: SRC_B3),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA)]).starts_with("digest mismatch")).to_equal(true)
+
+    it "treats an unknown digest algorithm as absent":
+        val (lines, trace) = sample()
+        val packed = flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY)
+        val view = flat_packed_view_v1(packed)
+        val table = view.section(0)
+        # First entry is (subject 1, sha256); rewrite its algo id to 0x7FFF.
+        var unknown = packed
+        unknown[table.offset + 2] = 255u8
+        unknown[table.offset + 3] = 127u8
+        # The digest table checksum now fails, so the blob is a miss; it never matches.
+        expect(flat_packed_view_v1(unknown).valid).to_equal(false)
+
+    it "namespaces paths by algorithm":
+        val a = module_artifact_path_v1("c", SpabDigestV1(subject: 1, algo: 1, hex: SRC_SHA),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA))
+        val b = module_artifact_path_v1("c", SpabDigestV1(subject: 1, algo: 2, hex: SRC_SHA),
+            SpabDigestV1(subject: 2, algo: 1, hex: CMP_SHA))
+        expect(a).to_equal("c/artifacts/v1/sha256/00/" + SRC_SHA + "-sha256-" + CMP_SHA + ".spab")
+        expect(a != b).to_equal(true)
+
+    it "fails closed on damaged blobs with a reason":
+        val (lines, trace) = sample()
+        val packed = flat_packed_encode_v1(lines, trace, digests(), MODULE_KEY)
+        var truncated: [u8] = []
+        var i = 0
+        while i < packed.len() - 1:
+            truncated.push(packed[i])
+            i = i + 1
+        expect(flat_packed_view_v1(truncated).reason).to_equal("blob length mismatch")
+        expect(flat_packed_view_v1(flip(packed, 0)).reason).to_equal("bad magic")
+        expect(flat_packed_view_v1(flip(packed, packed.len() - 1)).valid).to_equal(false)
+        val view = flat_packed_view_v1(packed)
+        # Misaligned offset of the second section entry.
+        expect(flat_packed_view_v1(flip(packed, 64 + 32 + 8)).valid).to_equal(false)
+        expect(flat_packed_decode_lines_v1(flip(packed, view.section(512).offset), []).len()).to_equal(0)
