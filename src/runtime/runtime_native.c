@@ -19240,7 +19240,21 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     n = rt_array_len(a);
     buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
-    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    /* rt_array_get returns the RAW byte for byte-packed arrays but a TAGGED
+     * value (n << 3 | TAG_INT) for boxed-element arrays; masking the tagged
+     * word wrote 0x53 as 0x98. Untag boxed ints, refuse non-ints (Rust twin:
+     * byte_array_bytes). */
+    {
+        int packed = rt_array_is_byte_packed(a);
+        for (i = 0; i < n; i++) {
+            int64_t v = rt_array_get(a, i);
+            if (!packed) {
+                if (!rt_core_is_int(v)) { free(buf); return 0; }
+                v = rt_core_as_int(v);
+            }
+            buf[i] = (unsigned char)(v & 0xFF);
+        }
+    }
     {
         char* cpath = rt_core_string_to_cpath(path);
         if (cpath == NULL) { free(buf); return 0; }
