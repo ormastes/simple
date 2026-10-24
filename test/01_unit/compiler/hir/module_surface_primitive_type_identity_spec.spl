@@ -1,0 +1,47 @@
+# Regression: doc/08_tracking/bug/module_surface_projection_blind_to_primitive_param_types_2026-10-24.md
+# The module surface projection must change when ONLY a parameter, return or
+# field type changes between primitive types. Root cause: the generated
+# ast_semantic encoder updated a COPY of its SHA-256 stream, so every
+# type/expr/stmt digest was the empty-input hash on the seed.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend_preprocessed_with_scope}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection}
+use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed, ast_semantic_hash_finish}
+
+fn surface(src: text) -> text:
+    match parse_full_frontend_preprocessed_with_scope(src, "fx.spl", "fx", Logger(level: 0), false, false,
+            FrontendAdvisoryPreprocessPolicyV1.Reference, 0u64, 0u64, 0u64, "", "", "", "", false):
+        case Ok(p): module_surface_semantic_projection(p[0])
+        case Err(_): "parse-error"
+
+fn pairs() -> [(text, text)]:
+    [("i64", "i32"), ("u8", "u64"), ("f32", "f64"), ("text", "[u8]"), ("i32", "u32"), ("bool", "u8")]
+
+describe "module surface identity distinguishes primitive types":
+    it "is not the empty-input digest":
+        val empty = ast_semantic_hash_finish(ast_semantic_hash_seed())
+        expect(surface("pub fn add(a: i64) -> i64:\n    a\n") == empty).to_equal(false)
+
+    it "changes when only a parameter type changes":
+        for p in pairs():
+            val a = surface("pub fn f(x: {p.0}) -> bool:\n    true\n")
+            val b = surface("pub fn f(x: {p.1}) -> bool:\n    true\n")
+            expect(a == "parse-error" or b == "parse-error").to_equal(false)
+            expect(a == b).to_equal(false)
+
+    it "changes when only a return type changes":
+        for p in pairs():
+            val a = surface("pub fn f() -> {p.0}:\n    nil\n")
+            val b = surface("pub fn f() -> {p.1}:\n    nil\n")
+            expect(a == b).to_equal(false)
+
+    it "changes when only a field type changes":
+        for p in pairs():
+            val a = surface("pub struct S:\n    v: {p.0}\n")
+            val b = surface("pub struct S:\n    v: {p.1}\n")
+            expect(a == b).to_equal(false)
+
+    it "is stable for identical source":
+        expect(surface("pub fn f(x: i32) -> i64:\n    0\n")).to_equal(surface("pub fn f(x: i32) -> i64:\n    0\n"))
