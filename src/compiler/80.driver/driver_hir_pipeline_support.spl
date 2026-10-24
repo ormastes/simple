@@ -27,12 +27,15 @@ use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
 use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array, validate_rt_criticality_diagnostics_blobs}
 use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
-    driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
+    DriverHirGateLayoutReportV1, driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
     driver_hir_gate_census_report_v1, driver_hir_gate_publish_census_v1,
     driver_hir_gate_rt_report_v1, driver_print_post_hir_validation_fatal}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use compiler.driver.driver_log_helpers.{log_phase}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
@@ -475,6 +478,73 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
     ctx.hir_modules = modules
     ctx.validation_module_array = admission.modules
 
+# Bug native_build_hir_phase_scopes_2026_10_24: the closure-wide validators
+# below walk every module with no transient scope, so their scratch stays
+# immortal in the no-GC runtime. Each returns only rendered text and writes no
+# global or ctx state (registry READS only), so each runs in its own scope and
+# only its result is promoted; publication, the `errors` pushes and every
+# log_phase stay outside. Not scoped: the RT-criticality step (already scopes
+# each blob, and rt_bound_manifest_clear() writes a global) and advice weaving
+# (writes rewritten modules back into hir_modules).
+# SIMPLE_HIR_VALIDATE_SCOPE=0 restores the unscoped walk.
+fn hir_validate_scope_enabled_v1() -> bool:
+    (env_get("SIMPLE_HIR_VALIDATE_SCOPE") ?? "") != "0"
+
+fn _hir_validate_scope_open_v1(step: text) -> bool:
+    if not hir_validate_scope_enabled_v1(): return false
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        eprint("[hir-validate-scope] WARNING transient scope refused; running {step} UNSCOPED, arena retained")
+        return false
+    true
+
+fn _hir_validate_scope_failed_v1(step: text, paused: bool, owned: bool, ended: bool):
+    eprint("[hir-validate-scope] WARNING result promotion failed (paused={paused} owned={owned} ended={ended}); re-running {step} UNSCOPED")
+
+fn _hir_validate_layout_report_scoped_v1(module_keys: [text],
+        module_values: [ValueStructLayoutModuleV1], cycle_mode: text) -> DriverHirGateLayoutReportV1:
+    if not _hir_validate_scope_open_v1("value_struct_layouts"):
+        return driver_hir_gate_layout_report_v1(module_keys, module_values, cycle_mode)
+    val report = driver_hir_gate_layout_report_v1(module_keys, module_values, cycle_mode)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(report)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return report
+    _hir_validate_scope_failed_v1("value_struct_layouts", paused, owned, ended)
+    driver_hir_gate_layout_report_v1(module_keys, module_values, cycle_mode)
+
+fn _hir_validate_layer_eq_scoped_v1(hir_modules: Dict<text, HirModule>) -> [text]:
+    if not _hir_validate_scope_open_v1("layer_eq"):
+        return validate_layer_eq_types(hir_modules)
+    val found = validate_layer_eq_types(hir_modules)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(found)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return found
+    _hir_validate_scope_failed_v1("layer_eq", paused, owned, ended)
+    validate_layer_eq_types(hir_modules)
+
+fn _hir_validate_effects_scoped_v1(hir_modules: Dict<text, HirModule>) -> [text]:
+    if not _hir_validate_scope_open_v1("effects"):
+        return validate_effect_contracts(hir_modules)
+    val found = validate_effect_contracts(hir_modules)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(found)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return found
+    _hir_validate_scope_failed_v1("effects", paused, owned, ended)
+    validate_effect_contracts(hir_modules)
+
+fn _hir_validate_aspects_scoped_v1(hir_modules: Dict<text, HirModule>) -> [text]:
+    if not _hir_validate_scope_open_v1("aspects"):
+        return validate_aspect_contracts(hir_modules)
+    val found = validate_aspect_contracts(hir_modules)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(found)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return found
+    _hir_validate_scope_failed_v1("aspects", paused, owned, ended)
+    validate_aspect_contracts(hir_modules)
+
 pub fn driver_validate_value_struct_layout_declarations_v1(
     module_keys: [text],
     module_values: [ValueStructLayoutModuleV1],
@@ -496,7 +566,7 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
     # validator's internal errors are never downgraded. DIAGNOSTIC-ONLY: the
     # build then continues into layout and codegen with a struct that has no
     # finite size, so whatever it produces must not be trusted or shipped.
-    val layout_report = driver_hir_gate_layout_report_v1(module_keys, module_values,
+    val layout_report = _hir_validate_layout_report_scoped_v1(module_keys, module_values,
         env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"))
     driver_hir_gate_publish_warnings_v1(layout_report.warnings)
     for error in layout_report.errors: errors = errors.push(error)
@@ -513,11 +583,11 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
         driver_print_post_hir_validation_fatal(errors)
         return errors
     log_phase("phase3:hir:validate:layer_eq:start")
-    for layer_eq_error in validate_layer_eq_types(hir_modules):
+    for layer_eq_error in _hir_validate_layer_eq_scoped_v1(hir_modules):
         errors = errors.push(layer_eq_error)
     log_phase("phase3:hir:validate:layer_eq:done errors={errors.len()}")
     log_phase("phase3:hir:validate:effects:start")
-    for effect_error in validate_effect_contracts(hir_modules):
+    for effect_error in _hir_validate_effects_scoped_v1(hir_modules):
         errors = errors.push(effect_error)
     log_phase("phase3:hir:validate:effects:done errors={errors.len()}")
     log_phase("phase3:hir:validate:rt_criticality:start")
@@ -526,7 +596,7 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
         errors = errors.push(rt_error)
     log_phase("phase3:hir:validate:rt_criticality:done errors={errors.len()}")
     log_phase("phase3:hir:validate:aspects:start")
-    val aspect_errors = validate_aspect_contracts(hir_modules)
+    val aspect_errors = _hir_validate_aspects_scoped_v1(hir_modules)
     for aspect_error in aspect_errors:
         errors = errors.push(aspect_error)
     log_phase("phase3:hir:validate:aspects:done errors={errors.len()}")
