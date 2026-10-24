@@ -1120,3 +1120,19 @@ before attaching to the newest). cdb attach pauses the worker; set
 The worker PID was successfully caught (28432) - the remaining gap is purely
 attach-latency vs the ~2 s worker lifetime; an interactive session or a
 pre-positioned debugger (IFEO on the specific rejected path) closes it.
+
+## Addendum 2026-10-24 (lane D): debuggers prevent the bug - use print-bisection instead
+
+Five cdb approaches this session all failed to catch the AV, and the runs
+under cdb produced NO refusal at all (0 refusals, clean exit): the corruption
+is allocation-order sensitive (lane 48b proved one extra allocation flips
+survival) and cdb's per-process debug-thread injection perturbs the heap
+enough to prevent it. BUT the lane-58 candidate carried 160 extra split-field
+prints and still reproduced - print instrumentation does NOT prevent it.
+Conclusion: the close-path is debugger-free print-bisection, ~2-3 lane
+cycles, fully scriptable: (1) in the dump gate (module_assembly.spl:1584) and
+right after flat_pools_restore_all (:1456), print rt_string_len of the SAME
+refusing pool's element 0 (env-gated). If restore-time=0 and dump-time=-1,
+(2) add midpoint prints (parse end :1524, desugar :1562, pause :1572), each
+lane bisecting the window until the corrupting line is named. No debugger,
+Heisenbug-compatible, and each step produces a PR-grade evidence lane.
