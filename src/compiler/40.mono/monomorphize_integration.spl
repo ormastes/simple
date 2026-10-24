@@ -489,6 +489,7 @@ impl MonomorphizationPass:
             self.build_root_discovery_index_v1()
         var roots_total = 0
         var roots_rewritten = 0
+        val const_discovery = discovery and mono_const_discovery_env_v1()
 
         # Step 2: roots -> requests -> specializations -> fixed point.
         # Roots are walked in module-key order, then ascending symbol id, so
@@ -543,6 +544,14 @@ impl MonomorphizationPass:
             for const_key in const_keys:
                 val const: HirConst = consts[const_key]
                 if const.value == nil:
+                    continue
+                # Discovery (bug native_build_hir_phase_scopes_2026_10_24): an
+                # initializer with no mono-relevant node rewrites to an identical
+                # value with no side effect on requests, symbol ids or
+                # diagnostics (same argument as `mono_root_is_relevant_v1`), so
+                # keep it instead of rebuilding it and leaking the rebuild.
+                # SIMPLE_MONO_CONST_DISCOVERY=0 restores the full rewrite.
+                if const_discovery and not self.mono_relevant_expr_v1(const.value):
                     continue
                 # Hoist the empty statement list to a typed local: the seed
                 # parser rejects an inline `[]` literal in constructor-call
@@ -4756,6 +4765,11 @@ fn mono_diag_enabled() -> bool:
 # SIMPLE_MONO_ROOT_DISCOVERY=0 restores the full walk.
 fn mono_root_discovery_env_v1() -> bool:
     env_get("SIMPLE_MONO_ROOT_DISCOVERY") != "0"
+
+# Same discovery, applied to module constant initializers (default on with
+# discovery). SIMPLE_MONO_CONST_DISCOVERY=0 restores their full rewrite.
+fn mono_const_discovery_env_v1() -> bool:
+    env_get("SIMPLE_MONO_CONST_DISCOVERY") != "0"
 
 fn mono_key_last_member_v1(key: text) -> text:
     """`"<identity>::<member>"` -> `"<member>"` (identities may hold `::`)."""
