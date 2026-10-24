@@ -85,6 +85,12 @@ jobs:
           lanes="${{ matrix.platform }}"
           [ "$lanes" = linux-riscv64 ] && lanes="linux-riscv64 linux-x86_64"
           sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in $lanes
+      - name: Earlier diagnostic receipts (not admitted handoffs)
+        if: steps.sel.outputs.on == 'true' && inputs.rung > 1
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-ladder-receipts-${{ matrix.platform }}-r*
+          path: build/ladder/diagnostics
       - name: Rust toolchain (riscv64 cross runtime)
         if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-riscv64'
         run: |
@@ -135,14 +141,39 @@ jobs:
           SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
           SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
           SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_NATIVE_FILE_TIMING: 1
         run: |
           if [ "${{ matrix.platform }}" = windows-x86_64 ]; then
             . scripts/setup/windows-gitbash-bootstrap-env.shs
             clang --version | head -1
             ld.lld --version
           fi
-          mkdir -p build/ladder/in build/ladder/out
-          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}"
+          mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
+          rc=0
+          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}" 2>&1 | tee build/ladder/evidence/step.log || rc=$?
+          exit "$rc"
+      - name: Retain tiny attempt receipts (no compiler or cache)
+        if: always() && steps.sel.outputs.on == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-ladder-receipts-${{ matrix.platform }}-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence/attempt.sdn
+            build/ladder/evidence/seed-native-failure.sdn
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Retain diagnostic logs, exact producer and native cache
+        if: always() && steps.sel.outputs.on == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-ladder-diagnostics-${{ matrix.platform }}-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence
+            build/ladder/producer
+            build/ladder/cache
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
       # Upload even when a later step failed: a phase that passed sanity is kept.
       - uses: actions/upload-artifact@v4
         if: always() && steps.sel.outputs.on == 'true'
@@ -187,6 +218,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in freebsd-x86_64
+      - name: Earlier diagnostic receipts (not admitted handoffs)
+        if: inputs.rung > 1
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-ladder-receipts-freebsd-x86_64-r*
+          path: build/ladder/diagnostics
       - name: Climb one phase in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         env:
@@ -197,10 +234,11 @@ jobs:
           SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
           SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
           SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_NATIVE_FILE_TIMING: 1
         with:
           usesh: true
           mem: 12288
-          envs: GH_TOKEN BUILD_JOBS PHASE_LADDER_SELFHOST_THREADS CARGO_BUILD_JOBS SIMPLE_HOST_MAX_THREADS SIMPLE_HOST_MAX_BUILD_JOBS SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS
+          envs: GH_TOKEN BUILD_JOBS PHASE_LADDER_SELFHOST_THREADS CARGO_BUILD_JOBS SIMPLE_HOST_MAX_THREADS SIMPLE_HOST_MAX_BUILD_JOBS SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS SIMPLE_NATIVE_FILE_TIMING
           prepare: |
             pkg install -y bash curl git gmake pkgconf zstd llvm gh
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
@@ -212,12 +250,35 @@ jobs:
             # The synced checkout is owned by another uid; without this git refuses it
             # ("dubious ownership") and SCV fails with git-event-source-unavailable.
             git config --global --add safe.directory "$(pwd -P)"
-            mkdir -p build/ladder/in build/ladder/out
+            mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
             # Record the verdict instead of failing the VM run: the action copies
             # build/ files back to the host only when the run succeeds.
             rc=0
-            sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out "$BUILD_JOBS" || rc=$?
+            sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out "$BUILD_JOBS" > build/ladder/evidence/step.log 2>&1 || rc=$?
+            cat build/ladder/evidence/step.log
             echo "$rc" > build/ladder/rc
+      - name: Retain tiny attempt receipts (no compiler or cache)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-ladder-receipts-freebsd-x86_64-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence/attempt.sdn
+            build/ladder/evidence/seed-native-failure.sdn
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Retain diagnostic logs, exact producer and native cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-ladder-diagnostics-freebsd-x86_64-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence
+            build/ladder/producer
+            build/ladder/cache
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: always()
         with:
