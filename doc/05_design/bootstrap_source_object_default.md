@@ -100,7 +100,7 @@ commits and process documentation. The held a3ea
 compiler campaign inputs remain immutable. Parent Hello success is required
 before a dependent provisional generation, and formal admission remains distinct.
 
-## Acceptance evidence required before landing
+## Acceptance evidence required before landing the implementation
 
 - Actual overlapping work shows unit A's native object committed while another
   independently ready unit still has source/HIR/MIR work outstanding.
