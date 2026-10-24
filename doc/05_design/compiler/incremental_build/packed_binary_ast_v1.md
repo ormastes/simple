@@ -415,7 +415,25 @@ field.
 5. **`0x0503` schema text** (the flat-pool codec version) and **`0x0504`
    cleared-pool rows** `(u32 id, u32 shape)`; a line-restore adapter renders
    the reader process's own live values for those ids.
-6. **Publication:** temp `.{pid}.{xxh3}.tmp` → read-back compare → rename.
+. **`0x0104` reference table (as built):** one 52-byte row per imported name of
+   every top-level `use` (glob `use` = one row, name ""): `module_key[16]`
+   (xxh3-128 of the imported module path), `u32 decl_id` = `0xFFFFFFFF`,
+   `target_content_key[16]` = zero, `u32 name` str_index, `u32 module_path`
+   str_index, `u32 owning decl index`, `u32` 0. Saved UNFILLED; a row with a
+   filled decl id or target key is a miss. `decl_imports` itself stays an
+   ordinary `[[text]]` pool section because it is overloaded (AOP pointcuts,
+   CLI directives, export lists) -- the table is an index over its `use` rows.
+8. **`0x0900` set-once map (as built):** entries `u32 section id, u32 element
+   count, bitset` (padded to 8). v1 marks every `0x0104` row fillable once; the
+   fill lives in a RAM side array, never in the mapped bytes.
+9. **The four "verify before deciding" id pools (verified 2026-10-24):**
+   `named_type_layout_owners`, `generic_param_ids` and
+   `named_generic_instance_ids` are dense per-parse indices into the same file's
+   type pools (minted by `named_type_register` / `generic_param_register`,
+   reset per parse) -- **K**. `custom_primitive_symbol_ids` holds HIR
+   `SymbolId`s bound after the parse (`declaration_lowering.spl`,
+   `custom_primitive_bind_symbol`); it is always the `-1` placeholder at capture
+   -- **CLEAR**, never stored (cleared-pool row in `0x0504`).
 
 ## 8. Hash agility (cross-cutting rule; also recorded in `src_based_tldr_build_v1.md`)
 
