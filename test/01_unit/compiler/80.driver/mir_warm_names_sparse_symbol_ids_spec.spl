@@ -1,0 +1,48 @@
+# Purpose and audience: regression evidence for the MIR logical-name warm-up hang.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/mir_warm_names_dense_symbol_walk_hang_2026_10_24.md
+
+use std.spec.step
+
+use std.spec
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+val MONO_LANE_RAW_ID: i64 = 1125899906842624
+
+fn probe_symbol(raw: i64, name: text, module: text?) -> HirSymbol:
+    HirSymbol(
+        id: SymbolId(id: raw),
+        name: name,
+        kind: SymbolKind.Function,
+        type_: nil,
+        scope: ScopeId(id: 0),
+        span: Span(start: 0, end: 1, line: 1, col: 1, file: "probe.spl", length: 1),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_mutable: false,
+        defining_module: module
+    )
+
+describe "MIR warm-up walks real symbol ids, not 0..next_symbol_id":
+    it "a mono-lane preserved symbol makes next_symbol_id sparse":
+        # @req REQ-SSPEC-COMPILER
+        step("register an ordinary symbol and a 2^50 mono-lane specialization")
+        val table = SymbolTable.new()
+        table.register_preserved_symbol(probe_symbol(3, "plain_fn", Some("m.alpha")))
+        table.register_preserved_symbol(probe_symbol(MONO_LANE_RAW_ID, "spec_fn", Some("m.beta")))
+        # oracle: the counter jumps past the mono lane, so a dense walk is ~2^50 steps
+        assert_true(table.next_symbol_id > MONO_LANE_RAW_ID)
+        # oracle: the real id set the warm-up must walk has exactly two rows
+        val raw_ids: [i64] = table.symbols.keys()
+        expect(raw_ids.len()).to_equal(2)
+        var owners: [text] = []
+        var raw_index: i64 = 0
+        while raw_index < raw_ids.len():
+            owners.push(table.symbol_defining_module_scalar_raw(raw_ids[raw_index]))
+            raw_index = raw_index + 1
+        # oracle: both owners (including the mono-lane one) are reached
+        expect(owners.contains("m.alpha")).to_equal(true)
+        expect(owners.contains("m.beta")).to_equal(true)
