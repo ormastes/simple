@@ -78,7 +78,7 @@ val MONO_MAX_TYPE_DEPTH: i64 = 16
 #      this range); its counter is then set to the pass's FINAL counter, so
 #      what MIR mints there afterwards is past every specialization of the
 #      pass, not just past the ones this module owns.
-val MONO_SYMBOL_BASE: i64 = 1125899906842624
+pub val MONO_SYMBOL_BASE: i64 = 1125899906842624
 
 # Nominal ids are local to a symbol table. Inference between a template and
 # its caller compares declaration owners, including nested type arguments.
@@ -258,7 +258,7 @@ class MonomorphizationPass:
     archive_requests: [MonoSpecializationRequestV1] = mono_default_archive_requests_v1()
     # Filled only from completed FIFO emission records during archive assembly.
     archive_emitted_templates: Dict<text, text> = {}
-    # Root discovery (opt-in, SIMPLE_MONO_ROOT_DISCOVERY=1 or set directly):
+    # Root discovery (default on; SIMPLE_MONO_ROOT_DISCOVERY=0 disables it):
     # a read-only pre-walk proves a root body holds no mono-relevant node and
     # passes it through instead of rebuilding it. See
     # `mono_root_is_relevant_v1` for the soundness argument.
@@ -489,6 +489,7 @@ impl MonomorphizationPass:
             self.build_root_discovery_index_v1()
         var roots_total = 0
         var roots_rewritten = 0
+        val const_discovery = discovery and mono_const_discovery_env_v1()
 
         # Step 2: roots -> requests -> specializations -> fixed point.
         # Roots are walked in module-key order, then ascending symbol id, so
@@ -543,6 +544,14 @@ impl MonomorphizationPass:
             for const_key in const_keys:
                 val const: HirConst = consts[const_key]
                 if const.value == nil:
+                    continue
+                # Discovery (bug native_build_hir_phase_scopes_2026_10_24): an
+                # initializer with no mono-relevant node rewrites to an identical
+                # value with no side effect on requests, symbol ids or
+                # diagnostics (same argument as `mono_root_is_relevant_v1`), so
+                # keep it instead of rebuilding it and leaking the rebuild.
+                # SIMPLE_MONO_CONST_DISCOVERY=0 restores the full rewrite.
+                if const_discovery and not self.mono_relevant_expr_v1(const.value):
                     continue
                 # Hoist the empty statement list to a typed local: the seed
                 # parser rejects an inline `[]` literal in constructor-call
@@ -4671,7 +4680,7 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
 # every downstream reader. A module global carries the dict by reference
 # (pointer copy, the registry transport class); scalars/diagnostics stay in
 # the 3-tuple. Reset on every entry; single-threaded per lane.
-var mono_report_modules_owner: Dict<text, HirModule> = {}
+pub var mono_report_modules_owner: Dict<text, HirModule> = {}
 
 # The global is a one-shot transport, never a retained owner: the consumer takes
 # the dict and the global is cleared in the same step, so no second reference to
@@ -4745,8 +4754,24 @@ fn mono_diag_enabled() -> bool:
         mono_diag_refresh_v1()
     _mono_diag_enabled_state == 1
 
+# Default ON (bug=native_build_per_worker_baseline_rss_2026_10_24): the full
+# root walk rebuilds every non-template function body, and in this no-GC
+# runtime the replaced bodies are never freed. Measured on the p2shard-9
+# Stage 2 producer: mono+MIR-setup plateau 3151 -> 2807 MB at 204 modules
+# (roots_rewritten 4179 -> 2), same go-to-end verdicts; the mono step grows
+# superlinearly (+0.5 GB at 204, +3.45 GB at 472, ~+17 GB at 1471) and is
+# re-run by every MIR shard worker. Output identity is asserted by
+# test/01_unit/compiler/mono/mono_root_discovery_determinism_spec.spl (written
+# with the feature, not yet executed: no full-CLI binary on this host); the
+# soundness argument is at `build_root_discovery_index_v1`.
+# SIMPLE_MONO_ROOT_DISCOVERY=0 restores the full walk.
 fn mono_root_discovery_env_v1() -> bool:
-    env_get("SIMPLE_MONO_ROOT_DISCOVERY") == "1"
+    env_get("SIMPLE_MONO_ROOT_DISCOVERY") != "0"
+
+# Same discovery, applied to module constant initializers (default on with
+# discovery). SIMPLE_MONO_CONST_DISCOVERY=0 restores their full rewrite.
+fn mono_const_discovery_env_v1() -> bool:
+    env_get("SIMPLE_MONO_CONST_DISCOVERY") != "0"
 
 fn mono_key_last_member_v1(key: text) -> text:
     """`"<identity>::<member>"` -> `"<member>"` (identities may hold `::`)."""

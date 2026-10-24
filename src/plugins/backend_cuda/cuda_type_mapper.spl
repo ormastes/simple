@@ -133,9 +133,7 @@ impl TypeMapper for CudaTypeMapper:
         val (major, _) = self.compute_capability
         major == major
 
-impl CudaTypeMapper:
-    # === CUDA-specific methods ===
-
+    # @workaround bug=trait_default_inherent_override_duplicate_symbol_2026-10-24 reason=inherent-impl override of a trait default emitted a duplicate Owner::method body; moved into the trait impl
     fn map_struct(fields: [(text, MirType)]) -> text:
         """
         Map struct type to CUDA representation.
@@ -173,6 +171,84 @@ impl CudaTypeMapper:
         val param_types = params.map(self.map_type(_))
         val ret_type = self.map_type(ret)
         "{ret_type} (*)({param_types.join(', ')})"
+
+    fn size_of(ty: MirType) -> i64:
+        """
+        Get size in bytes of a type (CUDA rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Unit: 0
+            case Ptr(_, _): 8  # 64-bit pointers
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var struct_total = 0
+                            var struct_index = 0
+                            while struct_index < fields.len():
+                                struct_total = struct_total + self.size_of(fields[struct_index].type_)
+                                struct_index = struct_index + 1
+                            struct_total
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
+            case Array(elem, size):
+                self.size_of(elem) * size
+            case Tuple(elements):
+                var tuple_total = 0
+                var tuple_index = 0
+                while tuple_index < elements.len():
+                    tuple_total = tuple_total + self.size_of(elements[tuple_index])
+                    tuple_index = tuple_index + 1
+                tuple_total
+            case _:
+                panic("Cannot compute size of {ty}")
+
+    fn align_of(ty: MirType) -> i64:
+        """
+        Get alignment in bytes of a type (CUDA rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64 | Ptr(_, _): 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var max_align = 1
+                            for field in fields:
+                                val alignment = self.align_of(field.type_)
+                                if alignment > max_align:
+                                    max_align = alignment
+                            max_align
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    8
+            case Array(elem, _):
+                self.align_of(elem)
+            case Tuple(elements):
+                var max_align = 1
+                for element in elements:
+                    val alignment = self.align_of(element)
+                    if alignment > max_align:
+                        max_align = alignment
+                max_align
+            case _:
+                1
+
+impl CudaTypeMapper:
+    # === CUDA-specific methods ===
 
     fn map_kernel_signature(name: text, params: [MirType]) -> text:
         """
@@ -268,83 +344,6 @@ impl CudaTypeMapper:
     fn warp_size() -> i64:
         """Get warp size (always 32 for NVIDIA GPUs)."""
         32
-
-    # === Size and alignment (CUDA-specific) ===
-
-    fn size_of(ty: MirType) -> i64:
-        """
-        Get size in bytes of a type (CUDA rules).
-        """
-        match ty.kind:
-            case I64 | U64 | F64: 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
-            case Unit: 0
-            case Ptr(_, _): 8  # 64-bit pointers
-            case Struct(sym):
-                if self.type_defs.contains_key(sym):
-                    val type_def: MirTypeDef = self.type_defs[sym]
-                    match type_def.kind:
-                        case MirTypeDefKind.Struct(fields):
-                            var struct_total = 0
-                            var struct_index = 0
-                            while struct_index < fields.len():
-                                struct_total = struct_total + self.size_of(fields[struct_index].type_)
-                                struct_index = struct_index + 1
-                            struct_total
-                        case _: 8
-                else:
-                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
-                    # symbol absent from the table: legacy pointer-passed slot
-                    8
-            case Array(elem, size):
-                self.size_of(elem) * size
-            case Tuple(elements):
-                var tuple_total = 0
-                var tuple_index = 0
-                while tuple_index < elements.len():
-                    tuple_total = tuple_total + self.size_of(elements[tuple_index])
-                    tuple_index = tuple_index + 1
-                tuple_total
-            case _:
-                panic("Cannot compute size of {ty}")
-
-    fn align_of(ty: MirType) -> i64:
-        """
-        Get alignment in bytes of a type (CUDA rules).
-        """
-        match ty.kind:
-            case I64 | U64 | F64 | Ptr(_, _): 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
-            case Struct(sym):
-                if self.type_defs.contains_key(sym):
-                    val type_def: MirTypeDef = self.type_defs[sym]
-                    match type_def.kind:
-                        case MirTypeDefKind.Struct(fields):
-                            var max_align = 1
-                            for field in fields:
-                                val alignment = self.align_of(field.type_)
-                                if alignment > max_align:
-                                    max_align = alignment
-                            max_align
-                        case _: 8
-                else:
-                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
-                    8
-            case Array(elem, _):
-                self.align_of(elem)
-            case Tuple(elements):
-                var max_align = 1
-                for element in elements:
-                    val alignment = self.align_of(element)
-                    if alignment > max_align:
-                        max_align = alignment
-                max_align
-            case _:
-                1
 
 # ============================================================================
 # Export
