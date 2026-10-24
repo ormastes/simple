@@ -21,6 +21,9 @@
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, HASH_ALGO_SHA256_V1,
+    DIGEST_SET_MATCH_V1, digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok,
+    digest_set_match_v1}
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1,
     active_guard_root_admissible_v1}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
@@ -98,7 +101,7 @@ fn _h(domain: text, parts: [text]) -> text:
     var framed = "{domain}\u0000"
     for p in parts:
         framed = framed + "{p.len()}:{p}\u0000"
-    "sha256/" + sha256_u8_hex(text_to_bytes(framed))
+    _sha256_digest(sha256_u8_hex(text_to_bytes(framed)))
 
 fn _sorted_texts(values: [text]) -> [text]:
     var out: [text] = []
@@ -429,7 +432,7 @@ pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPo
     # (conservative), never a mislabelled digest.
     val all = [f.facts_key, f.negative_root, shard.match_digest, sel.selector_digest]
     for d in all:
-        if aop_digest_algo_v1(d) != "sha256": return []
+        if not _is_sha256(d): return []
     var coverage = SemanticCoverageV1.Conservative
     if shard.complete: coverage = SemanticCoverageV1.Complete
     val facts_q = SemanticQueryKeyV1(kind: "aop.directory_facts", stable_entity_id: f.scope_id,
@@ -474,43 +477,42 @@ pub fn pointcut_match_universe_v1(sel: PointcutSelectorV1, dirs: [DirectoryJoinP
 
 export PointcutSelNodeV1, PointcutUniverseMatchV1, pointcut_match_universe_v1
 
-# Hash agility (doc/05_design/compiler/incremental_build/packed_binary_ast_v1.md
-# §8): every digest here is `<algo>/<hex>`. Persisted identity may only use a
-# collision-resistant registry algorithm (sha256=1, blake3=2, sha3-256=3; at
-# most three in use). This producer writes sha256. An unknown or fast-class
-# algorithm (xxh3-*, crc32) is ABSENT: never a match, never cacheable.
-pub fn aop_digest_algos_v1() -> [text]:
-    ["sha256", "blake3", "sha3-256"]
+# Hash agility: every digest here is DigestV1 text `<algo>:<hex>` from the
+# shared registry (cache_contract/hash_algorithm_registry_v1). Persisted
+# identity requires a collision-resistant algorithm; an unknown or fast-class
+# digest is ABSENT: never a match, never cacheable. This producer writes sha256.
+fn _sha256_digest(hex: text) -> text:
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
 
-pub fn aop_digest_algo_v1(d: text) -> text:
-    val i = d.find("/")
-    if i == nil: return ""
-    d.slice(0, i!)
+fn _is_sha256(d: text) -> bool:
+    match digest_v1_parse(d):
+        case Some(v): v.algo_id == HASH_ALGO_SHA256_V1
+        case nil: false
 
 fn _hex(d: text) -> text:
-    val i = d.find("/")
-    if i == nil: return ""
-    d.slice(i! + 1, d.len())
+    match digest_v1_parse(d):
+        case Some(v): v.hex
+        case nil: ""
 
 pub fn aop_digest_known_v1(d: text) -> bool:
-    if not aop_digest_algos_v1().contains(aop_digest_algo_v1(d)): return false
-    val h = _hex(d)
-    if h.len() != 64: return false
-    for ch in h.chars():
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")): return false
-    true
+    match digest_v1_parse(d):
+        case Some(v): digest_v1_identity_ok(v)
+        case nil: false
 
-# Negotiation over 1..3 digests per identity: a hit needs at least one KNOWN
-# algorithm present on both sides AND every such common digest equal.
+fn _parse_set(values: [text]) -> [DigestV1]:
+    var out: [DigestV1] = []
+    for x in values:
+        match digest_v1_parse(x):
+            case Some(v): out.push(v)
+            case nil: pass
+    out
+
+# 1..3 digests per identity; registry negotiation over identity-class
+# algorithms only (no common known algorithm => miss).
 pub fn aop_digest_tables_match_v1(a: [text], b: [text]) -> bool:
     if a.len() == 0 or a.len() > 3 or b.len() == 0 or b.len() > 3: return false
-    var common = 0
-    for x in a:
-        if not aop_digest_known_v1(x): continue
-        for y in b:
-            if aop_digest_known_v1(y) and aop_digest_algo_v1(x) == aop_digest_algo_v1(y):
-                if x != y: return false
-                common = common + 1
-    common > 0
+    digest_set_match_v1(_parse_set(a), _parse_set(b), true) == DIGEST_SET_MATCH_V1
 
-export aop_digest_algos_v1, aop_digest_algo_v1, aop_digest_known_v1, aop_digest_tables_match_v1
+export aop_digest_known_v1, aop_digest_tables_match_v1
