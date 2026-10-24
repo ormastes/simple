@@ -4,12 +4,14 @@
 # whole post-mono state (25-29 GB on the self-hosted closure) before lowering
 # one module, and nothing frees it. With SIMPLE_MIR_FORK_WORKERS=N the
 # coordinator (src/app/cli/native_build_main.spl) spawns ONE ordinary shard
-# worker (spec 0/1, the "root"). The root reaches aot_compile_mir_shard_v1
-# with that state complete and forks N children from it; each child is an
+# worker (spec 0/1, the "root"). The root runs lower_to_mir's shared setup
+# (warm names, enum/composite inventories, MIR schedule, ledger inventory and
+# exclusion publication, LPT order) once, then forks N children right before
+# the per-module claim loop; each child is an
 # ordinary shard worker "i/N" with its own ledger owner, so claims, per-PASS
 # sidecars, seals and the link child are the unchanged native_mir_shard.spl
 # protocol. The root waits, seals any child that died holding claims, and
-# re-forks an unfinished child's share from its own post-mono heap (at most
+# re-forks an unfinished child's share from that same post-setup point (at most
 # NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1 times per share). It marks its owner
 # done and exits once nothing is unclaimed; otherwise it exits unfinished and
 # the coordinator's replacement path takes over.
@@ -23,7 +25,7 @@ use std.nogc_sync_mut.io.pipe.{stdout_flush}
 use std.nogc_sync_mut.sffi.process.{fork_shared_heap_v1, fork_child_exit, fork_shared_heap_wait_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_recovery_complete,
     hir_shard_recovery_finished, hir_shard_recovery_unclaimed_count, hir_shard_recovery_block,
-    hir_shard_recovery_blocked, HIR_SHARD_FORK_OWNER_MARK_V1}
+    hir_shard_recovery_blocked, hir_shard_recovery_withdraw_inventory_v1, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_ENV_V1,
     NATIVE_MIR_SHARD_OWNER_ENV_V1}
 
@@ -80,6 +82,42 @@ pub fn native_mir_fork_exit_v1(code: i64):
     if _native_mir_fork_child_v1:
         fork_child_exit(code)
     exit(code)
+
+# Arming: aot_compile_mir_shard_v1 arms the fork for its own lower_to_mir call;
+# the fork itself happens at the claim loop (native_mir_fork_at_claim_loop_v1,
+# driver_pipeline_lowering.spl), after the whole lowering setup and the ledger
+# inventory publication, so the root does that setup once and every child
+# inherits it copy-on-write. Only an armed call forks: no other lower_to_mir
+# caller (explicit targets, selective, resident cohorts) can reach the fork.
+var _native_mir_fork_armed_queue_v1: text = ""
+var _native_mir_fork_armed_owner_v1: text = ""
+
+pub fn native_mir_fork_arm_v1(queue: text, root_owner: text):
+    if queue == "" or _native_mir_fork_child_v1 or native_mir_fork_workers_v1() == 0:
+        return
+    _native_mir_fork_armed_queue_v1 = queue
+    _native_mir_fork_armed_owner_v1 = root_owner
+
+pub fn native_mir_fork_armed_v1() -> bool:
+    _native_mir_fork_armed_queue_v1 != ""
+
+# Clears the arm; true when it was still armed (the fork point was not reached).
+pub fn native_mir_fork_disarm_v1() -> bool:
+    val was_armed = _native_mir_fork_armed_queue_v1 != ""
+    _native_mir_fork_armed_queue_v1 = ""
+    _native_mir_fork_armed_owner_v1 = ""
+    was_armed
+
+# The post-setup fork point. Same contract as native_mir_fork_shards_v1, and
+# ("off", 0) when not armed. Disarms first, so it forks at most once per
+# process; children inherit the cleared arm. Re-fork rounds stay inside
+# native_mir_fork_shards_v1, so the root re-forks from this same point.
+pub fn native_mir_fork_at_claim_loop_v1() -> (text, i64):
+    val queue = _native_mir_fork_armed_queue_v1
+    val root_owner = _native_mir_fork_armed_owner_v1
+    if not native_mir_fork_disarm_v1():
+        return ("off", 0)
+    native_mir_fork_shards_v1(queue, root_owner)
 
 # Returns ("off", 0): experiment off; the caller is an ordinary shard worker.
 #         ("child", 0): this process is child i; spec and owner env are set.
@@ -210,8 +248,13 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
 # Nothing forked. Lowering the whole schedule in the root would be the
 # single-process MIR peak this experiment exists to avoid, so exit with no
 # claims: the coordinator reads that as "fallback" and the complete worker
-# owns the build, exactly as when sharding declines.
+# owns the build, exactly as when sharding declines. The fork point sits after
+# the inventory publication, so withdraw the (still unclaimed) inventory first:
+# left in place, the coordinator's inventory close would seal every row
+# BLOCKED and read "fail" instead of "fallback".
 fn native_mir_fork_decline_v1(queue: text, root_owner: text) -> (text, i64):
+    if not hir_shard_recovery_withdraw_inventory_v1(queue):
+        print "[mir-fork] decline: inventory could not be withdrawn; coordinator will read fail"
     val _completed = hir_shard_recovery_complete(queue, root_owner)
     print "[mir-fork] no child forked; root claims nothing (coordinator fallback)"
     stdout_flush()

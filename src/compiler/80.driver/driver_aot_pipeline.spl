@@ -36,7 +36,7 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
-use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_shards_v1, native_mir_fork_exit_v1}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
@@ -616,17 +616,15 @@ impl CompilerDriver:
             val _completed = hir_shard_recovery_complete(queue, root_owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
         # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N (driver_build/native_mir_fork_v1.spl):
-        # post-mono state is complete and identical for every shard here, so
-        # fork N copy-on-write children instead of re-running the front end in
-        # N spawned workers. A child returns with its own spec and owner
-        # installed and continues below as an ordinary shard worker; the root
-        # only reaps, seals and exits. Never for selective.
+        # arm the fork for this worker's lower_to_mir. The fork itself happens
+        # inside lower_to_mir_with_target_context right before the per-module
+        # claim loop, after the shared MIR setup and the ledger inventory
+        # publication, so the root runs that setup once and N copy-on-write
+        # children inherit it. A child returns from the fork with its own spec
+        # and owner installed and continues as an ordinary shard worker; the
+        # root only reaps, seals, re-forks and exits there. Never for selective.
         if not driver_mir_selective_enabled_v1():
-            val (fork_role, fork_code) = native_mir_fork_shards_v1(queue, root_owner)
-            if fork_role == "root":
-                native_mir_fork_exit_v1(fork_code)
-                return CompileResult.Success(None)
-        val owner = native_mir_shard_owner_v1()
+            native_mir_fork_arm_v1(queue, root_owner)
         # Cold-HIR receipts stay: the worker records capsule identities for the
         # modules it claims and publishes them in the ledger; only the link child
         # persists (driver_cold_hir_persist is skipped while shard_queue is set).
@@ -634,15 +632,15 @@ impl CompilerDriver:
         shard_state.active = true
         shard_state.shard_queue = queue
         self.native_staged_codegen = shard_state
-        log_phase("aot:mir_shard:start owner={owner}")
+        log_phase("aot:mir_shard:start owner={root_owner}")
         # Export summaries (opt-in): admission only. Lowering still reads the
         # full post-mono HIR; a refusal is reported and changes nothing.
         if native_mir_shard_export_enabled_v1() and not driver_mir_selective_enabled_v1():
             val export_admitted = driver_mir_shard_export_admit_v1(self)
             if export_admitted.is_ok():
-                print "[mir-shard] export summaries admitted owner={owner} records={export_admitted.unwrap()} lowering=full-hir"
+                print "[mir-shard] export summaries admitted owner={root_owner} records={export_admitted.unwrap()} lowering=full-hir"
             else:
-                print "[mir-shard] export summaries refused owner={owner} fallback=full-hir reason={export_admitted.unwrap_err()}"
+                print "[mir-shard] export summaries refused owner={root_owner} fallback=full-hir reason={export_admitted.unwrap_err()}"
         var codegen_ok = false
         var module_functions: {text: i64} = {}
         var module_statics: {text: i64} = {}
@@ -651,6 +649,15 @@ impl CompilerDriver:
             self.lower_selective_to_mir_v1()
         else:
             self.lower_to_mir()
+        # A forked child installed its own owner inside lower_to_mir; read it
+        # only now so the seal/complete below are the child's, never the root's.
+        val owner = native_mir_shard_owner_v1()
+        if native_mir_fork_disarm_v1():
+            # The fork point (the claim loop) was never reached: an early
+            # return or a lowering failure. Nothing forked; this process stays
+            # the ordinary 0/1 worker it was spawned as.
+            print "[mir-fork] fork point not reached owner={owner} lowered={shard_lowered}; no child forked"
+            stdout_flush()
         val skip_post_chain = driver_mir_selective_enabled_v1() and driver_mir_selective_skip_post_chain_v1()
         if shard_lowered and not skip_post_chain and not self.borrow_check():
             shard_borrow_failed = true

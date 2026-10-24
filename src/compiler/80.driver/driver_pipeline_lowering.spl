@@ -26,6 +26,7 @@ use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNAT
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
     native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_excluded}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_at_claim_loop_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -1254,7 +1255,7 @@ impl CompilerDriver:
             # schedule as the ledger inventory, then lower only claimed modules.
             val mir_shard_queue = self.native_staged_codegen.shard_queue
             val mir_shard_key = self.ctx.native_sources_fingerprint
-            val mir_shard_cap = native_mir_shard_claim_cap_v1(
+            var mir_shard_cap = native_mir_shard_claim_cap_v1(
                 native_mir_shard_spec_v1(), staged_source_names.len())
             if mir_shard_queue != "":
                 if mir_shard_key == "" or not hir_shard_recovery_inventory(
@@ -1342,6 +1343,22 @@ impl CompilerDriver:
                                 self.ctx.set_bootstrap_entry_mir(prelower_skip_name, prelower_skip_mir)
                         if not self.publish_runtime_std_mir_emissions_v1(): return false
                         return self.ctx.error_count_value == 0
+            # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS fork point (armed only by
+            # aot_compile_mir_shard_v1; driver_build/native_mir_fork_v1.spl).
+            # Everything above is identical for every shard and has run once,
+            # in the root: warm names, feed, enum/composite inventories, MIR
+            # schedule, ledger inventory + exclusion publication, LPT order.
+            # The root forks here, reaps, re-forks from here, and exits. A child
+            # recomputes only its claim cap (the cap above came from the root's
+            # 0/1 spec) and runs the claim loop below.
+            if mir_shard_queue != "":
+                val (fork_role, fork_code) = native_mir_fork_at_claim_loop_v1()
+                if fork_role == "root":
+                    native_mir_fork_exit_v1(fork_code)
+                    return false
+                if fork_role == "child":
+                    mir_shard_cap = native_mir_shard_claim_cap_v1(
+                        native_mir_shard_spec_v1(), staged_source_names.len())
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()

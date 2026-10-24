@@ -2,7 +2,7 @@
 # driver_hir_cache: PASS is a lowering outcome, never permission to load bytes.
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_optional, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_list_optional, getpid}
 
 fn hir_shard_claim_valid(record: text) -> bool:
     val fields = record.split("\n")
@@ -172,6 +172,29 @@ pub fn hir_shard_recovery_excluded(queue: text, identity: text, names: [text]) -
         published = hir_shard_record_publish("{queue}/excluded", record)
     val _released = file_unlock(fd)
     published
+
+# Withdraw a published inventory (and its exclusion record) while no row has
+# been claimed, returning the ledger to its pre-inventory shape. Used when the
+# MIR fork root declines after publishing (native_mir_fork_v1.spl): with the
+# inventory left in place the coordinator's inventory close would seal every
+# row BLOCKED and read "fail" instead of "fallback". False when any row is
+# already claimed (nothing is withdrawn) or the ledger cannot be locked/read.
+pub fn hir_shard_recovery_withdraw_inventory_v1(queue: text) -> bool:
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return false
+    var withdrawn = false
+    val listing = dir_list_optional(queue)
+    if listing != nil:
+        var claimed = false
+        for name in listing.unwrap():
+            if name.ends_with(".claim"):
+                claimed = true
+        if not claimed:
+            val inventory_gone = not file_exists("{queue}/inventory") or file_delete("{queue}/inventory")
+            val excluded_gone = not file_exists("{queue}/excluded") or file_delete("{queue}/excluded")
+            withdrawn = inventory_gone and excluded_gone
+    val _released = file_unlock(fd)
+    withdrawn
 
 # Coordinator only, after every child has stopped. Acquire only unclaimed
 # inventory rows; existing worker claims and their terminals stay immutable.
