@@ -1,0 +1,283 @@
+# P4 static-AOP directory match cache contract (P1 piece).
+#
+# doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md
+# sections 3.2 (DirFactsKey / PointcutMatchKey / AdviceApplyKey), 5 and 11
+# (A-01..A-04).
+#
+# Pure DTO + key + match contract. No filesystem, no locks, no leases: every
+# value is immutable, the match cache is a persistent value (insert returns a
+# new cache), and publication/single-flight belong to the driver
+# (80.driver/cache/daemon/cache_single_flight_v1.spl). Keys are SHA-256 over
+# domain-separated, length-framed canonical text; any xxh3 index over them is
+# an in-memory accelerator only (80.driver/cache/id_scope_v1.spl).
+#
+# Selection is split from implementation: PointcutMatchKey never reads the
+# advice body, AdviceApplyKey does. Only selectors this file can evaluate
+# completely (`execution(name)`, `execution(prefix*)`, `attr(name)`, bare
+# exact name = the existing forward-selector form) and only static
+# `before`/`after` advice are cacheable; everything else reports
+# `supported/cacheable = false` and stays on the existing weave path, which
+# still re-checks the live forwarder shape (35.semantics/aspect_weave.spl).
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, SemanticQueryReadV1}
+
+pub struct JoinPointFactV1:
+    id: text
+    kind: text
+    symbol: text
+    attrs: [text]
+    owner_file: text
+    base_body_digest: text
+
+pub struct DirectoryJoinPointFactsV1:
+    scope_id: text
+    sorted_member_files: [text]
+    sorted_join_points: [JoinPointFactV1]
+    sorted_child_roots: [text]
+    complete: bool
+    negative_root: text
+    facts_key: text
+
+pub struct PointcutSelectorV1:
+    source: text
+    form: text
+    operand: text
+    supported: bool
+    selector_digest: text
+
+pub struct PointcutMatchShardV1:
+    selector_digest: text
+    dir_facts_key: text
+    sorted_matching_ids: [text]
+    complete: bool
+    match_digest: text
+
+pub struct AdviceFacetsV1:
+    advice_fn: text
+    mode: text
+    activation: text
+    signature_digest: text
+    effects_digest: text
+    body_digest: text
+    order: i64
+
+pub struct PointcutMatchCacheV1:
+    shards: Dict<text, PointcutMatchShardV1>
+    computations: i64
+
+pub struct PointcutMatchAcquireV1:
+    cache: PointcutMatchCacheV1
+    key: text
+    shard: PointcutMatchShardV1
+    hit: bool
+    cacheable: bool
+
+pub struct WeavePlanDeltaV1:
+    weave: [text]
+    unweave: [text]
+    reweave: [text]
+    reuse: [text]
+
+fn _h(domain: text, parts: [text]) -> text:
+    var framed = "{domain}\u0000"
+    for p in parts:
+        framed = framed + "{p.len()}:{p}\u0000"
+    sha256_u8_hex(text_to_bytes(framed))
+
+fn _sorted_texts(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1] > v:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _sorted_points(values: [JoinPointFactV1]) -> [JoinPointFactV1]:
+    var out: [JoinPointFactV1] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1].id > v.id:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _join(values: [text]) -> text:
+    var s = ""
+    for v in values:
+        s = s + "{v.len()}:{v};"
+    s
+
+fn _point_fact_text(p: JoinPointFactV1) -> text:
+    # Selector-visible facts only; the base body digest is an AdviceApplyKey
+    # input, so a body-only edit cannot dirty the match shard.
+    "{p.id}|{p.kind}|{p.symbol}|{p.owner_file}|{_join(_sorted_texts(p.attrs))}"
+
+# Negative/completeness witness: the full sorted id universe of this scope.
+# Any add/delete/rename changes it even when no old positive match existed.
+fn _negative_root(scope_id: text, files: [text], points: [JoinPointFactV1], complete: bool) -> text:
+    var ids: [text] = []
+    for p in points:
+        ids.push(p.id)
+    _h("aop-dir-negative/v1", [scope_id, _join(files), _join(ids), "{complete}"])
+
+pub fn directory_facts_key_v1(f: DirectoryJoinPointFactsV1) -> text:
+    var facts: [text] = []
+    for p in f.sorted_join_points:
+        facts.push(_point_fact_text(p))
+    _h("aop-dir-facts/v1", [f.scope_id, _join(f.sorted_member_files), _join(facts),
+        _join(f.sorted_child_roots), f.negative_root, "{f.complete}"])
+
+pub fn directory_join_point_facts_v1(scope_id: text, member_files: [text],
+        join_points: [JoinPointFactV1], child_roots: [text], complete: bool) -> DirectoryJoinPointFactsV1:
+    val files = _sorted_texts(member_files)
+    val points = _sorted_points(join_points)
+    val f = DirectoryJoinPointFactsV1(scope_id: scope_id, sorted_member_files: files,
+        sorted_join_points: points, sorted_child_roots: _sorted_texts(child_roots),
+        complete: complete, negative_root: _negative_root(scope_id, files, points, complete),
+        facts_key: "")
+    DirectoryJoinPointFactsV1(..f, facts_key: directory_facts_key_v1(f))
+
+fn _is_ident(s: text) -> bool:
+    if s.len() == 0: return false
+    for ch in s.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+            (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok: return false
+    true
+
+fn _selector(source: text, form: text, operand: text, supported: bool) -> PointcutSelectorV1:
+    PointcutSelectorV1(source: source, form: form, operand: operand, supported: supported,
+        selector_digest: _h("aop-selector/v1", [form, operand]))
+
+pub fn pointcut_selector_parse_v1(source: text) -> PointcutSelectorV1:
+    val s = source.trim()
+    if _is_ident(s): return _selector(source, "exact", s, true)
+    if s.starts_with("execution(") and s.ends_with(")"):
+        val inner = s.slice(10, s.len() - 1).trim()
+        if inner.ends_with("*") and _is_ident(inner.slice(0, inner.len() - 1)):
+            return _selector(source, "prefix", inner.slice(0, inner.len() - 1), true)
+        if _is_ident(inner): return _selector(source, "exact", inner, true)
+    if s.starts_with("attr(") and s.ends_with(")"):
+        val inner = s.slice(5, s.len() - 1).trim()
+        if _is_ident(inner): return _selector(source, "attr", inner, true)
+    # `!`, `&`, `|`, `within`, cross-directory wildcards: not enumerated here.
+    _selector(source, "unsupported", s, false)
+
+fn _selector_matches(sel: PointcutSelectorV1, p: JoinPointFactV1) -> bool:
+    if p.kind != "forward": return false
+    if sel.form == "exact": return p.symbol == sel.operand
+    if sel.form == "prefix": return p.symbol.starts_with(sel.operand)
+    if sel.form == "attr": return p.attrs.contains(sel.operand)
+    false
+
+pub fn pointcut_match_key_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
+    _h("aop-match/v1", [sel.selector_digest, f.facts_key])
+
+pub fn pointcut_match_shard_compute_v1(sel: PointcutSelectorV1,
+        f: DirectoryJoinPointFactsV1) -> PointcutMatchShardV1:
+    var ids: [text] = []
+    for p in f.sorted_join_points:
+        if _selector_matches(sel, p):
+            ids.push(p.id)
+    val complete = sel.supported and f.complete
+    PointcutMatchShardV1(selector_digest: sel.selector_digest, dir_facts_key: f.facts_key,
+        sorted_matching_ids: ids, complete: complete,
+        match_digest: _h("aop-match-result/v1", [sel.selector_digest, f.facts_key, _join(ids),
+            "{complete}"]))
+
+pub fn pointcut_match_cache_new_v1() -> PointcutMatchCacheV1:
+    PointcutMatchCacheV1(shards: {}, computations: 0)
+
+# Reuse an admitted shard for the exact (selector, facts) key; otherwise
+# compute it. Incomplete inventories and unsupported selectors are computed
+# but never admitted (`cacheable = false`) so the caller keeps the existing
+# fallback. Returns a new cache value; the input cache is never mutated.
+pub fn pointcut_match_cache_acquire_v1(cache: PointcutMatchCacheV1, sel: PointcutSelectorV1,
+        f: DirectoryJoinPointFactsV1) -> PointcutMatchAcquireV1:
+    val key = pointcut_match_key_v1(sel, f)
+    val cacheable = sel.supported and f.complete
+    if cacheable and cache.shards.contains_key(key):
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: cache.shards[key],
+            hit: true, cacheable: true)
+    val shard = pointcut_match_shard_compute_v1(sel, f)
+    if not cacheable:
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: shard, hit: false,
+            cacheable: false)
+    var shards: Dict<text, PointcutMatchShardV1> = {}
+    for k in cache.shards.keys():
+        shards[k] = cache.shards[k]
+    shards[key] = shard
+    PointcutMatchAcquireV1(
+        cache: PointcutMatchCacheV1(shards: shards, computations: cache.computations + 1),
+        key: key, shard: shard, hit: false, cacheable: true)
+
+pub fn aspect_advice_mode_cacheable_v1(mode: text, activation: text) -> bool:
+    activation == "static" and (mode == "before" or mode == "after")
+
+# Weave identity of one matched join point: match result, ordered advice
+# signature/effects/body, and the immutable BASE body of the join point.
+pub fn advice_apply_key_v1(match_digest: text, advice: AdviceFacetsV1,
+        base_body_digest: text) -> text:
+    _h("aop-apply/v1", [match_digest, advice.advice_fn, advice.mode, advice.activation,
+        advice.signature_digest, advice.effects_digest, advice.body_digest, "{advice.order}",
+        base_body_digest])
+
+# old ∪ new is the minimum invalidation set: old-only ids are unwoven,
+# new-only woven, intersection reused only when its apply key is unchanged.
+pub fn aspect_weave_plan_delta_v1(old_shard: PointcutMatchShardV1, old_apply: Dict<text, text>,
+        new_shard: PointcutMatchShardV1, new_apply: Dict<text, text>) -> WeavePlanDeltaV1:
+    var weave: [text] = []
+    var unweave: [text] = []
+    var reweave: [text] = []
+    var reuse: [text] = []
+    for id in old_shard.sorted_matching_ids:
+        if not new_shard.sorted_matching_ids.contains(id):
+            unweave.push(id)
+    for id in new_shard.sorted_matching_ids:
+        if not old_shard.sorted_matching_ids.contains(id):
+            weave.push(id)
+        elif old_apply.contains_key(id) and new_apply.contains_key(id) and
+                old_apply[id] == new_apply[id]:
+            reuse.push(id)
+        else:
+            reweave.push(id)
+    WeavePlanDeltaV1(weave: weave, unweave: unweave, reweave: reweave, reuse: reuse)
+
+export JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1, PointcutMatchShardV1
+export AdviceFacetsV1, PointcutMatchCacheV1, PointcutMatchAcquireV1, WeavePlanDeltaV1
+export directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1
+export pointcut_match_key_v1, pointcut_match_shard_compute_v1
+export pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1
+export aspect_advice_mode_cacheable_v1, advice_apply_key_v1, aspect_weave_plan_delta_v1
+
+# Forward reads in the .rr schema v2 vocabulary (reverse_reference_projection_v2:
+# aop.directory_facts -> "directory-scope", aop.match -> "aop-match-membership").
+# Two reads per shard: the match query's membership read of the directory facts
+# (witness = negative root, so add/delete/rename reaches it) and the weave
+# query's positive read of the match result.
+pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1,
+        shard: PointcutMatchShardV1, profile_digest: text) -> [SemanticQueryReadV1]:
+    var coverage = SemanticCoverageV1.Conservative
+    if shard.complete: coverage = SemanticCoverageV1.Complete
+    val facts_q = SemanticQueryKeyV1(kind: "aop.directory_facts", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: f.facts_key)
+    val match_q = SemanticQueryKeyV1(kind: "aop.match", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: pointcut_match_key_v1(sel, f))
+    val weave_q = SemanticQueryKeyV1(kind: "aop.weave", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: shard.match_digest)
+    [SemanticQueryReadV1(producer: facts_q, consumer: match_q, facet: "membership:join-points",
+        ordinal: 0, consumed_fingerprint: f.facts_key, witness_digest: f.negative_root,
+        partition_id: f.scope_id, completeness: coverage),
+     SemanticQueryReadV1(producer: match_q, consumer: weave_q, facet: "aop-match",
+        ordinal: 1, consumed_fingerprint: shard.match_digest, witness_digest: sel.selector_digest,
+        partition_id: f.scope_id, completeness: coverage)]
+
+export aspect_match_forward_reads_v1
