@@ -8,6 +8,7 @@ use compiler.mir_opt.optimizer_plugin.{
 }
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.driver.driver_source_loading.{_format_nll_error}
 use std.io_runtime.{env_get_opt}
 
@@ -17,6 +18,25 @@ impl CompilerDriver:
             log_warn("borrow check skipped (--no-borrow-check)")
             return true
         log_debug("running borrow check")
+        if go_to_end_enabled_v1():
+            # go-to-end: a module failing borrow check is recorded and evicted so
+            # every other module still emits objects (mirrors the HIR/MIR stages).
+            # Link is already skipped under go-to-end, so dependents need no
+            # separate exclusion: they just lack a sibling object in a build that
+            # never links.
+            var failed_names: [text] = []
+            for name in self.ctx.mir_modules.keys():
+                val errors = check_mir_module(self.ctx.mir_modules[name])
+                if errors.len() > 0:
+                    for err in errors:
+                        self.go_to_end.record("borrow", name, _format_nll_error(err))
+                    self.go_to_end.exclude(name)
+                    failed_names = failed_names.push(name)
+            for failed_name in failed_names:
+                self.ctx.evict_mir_module(failed_name)
+            if failed_names.len() > 0:
+                print "[go-to-end] borrow: {failed_names.len()} module(s) failed; continuing with {self.ctx.mir_modules.len()}"
+            return not self.ctx.has_errors()
         for name in self.ctx.mir_modules.keys():
             val errors = check_mir_module(self.ctx.mir_modules[name])
             for err in errors:
