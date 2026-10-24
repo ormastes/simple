@@ -34,6 +34,32 @@ val REVERSE_REFERENCE_FAMILIES_V1: [text] = [
     "module-scc-artifact",
     "emitted-symbol-relocation"
 ]
+# Schema 2 is additive: every v1 mandatory family stays mandatory, and the
+# macro/AOP-membership/directory families become mandatory as well. A v1
+# receipt is migrated by marking each new family "@unknown-family", so its
+# lookups answer conservatively instead of "zero dependents".
+val REVERSE_REFERENCE_RECEIPT_SCHEMA_V2: i64 = 2
+val REVERSE_REFERENCE_FAMILIES_V2: [text] = [
+    "direct-import-export",
+    "trait-type-implementation",
+    "unresolved-method-candidate",
+    "annotation-consumer",
+    "generic-specialization",
+    "aop-consumer",
+    "runtime-provider",
+    "initializer-dependent",
+    "module-scc-artifact",
+    "emitted-symbol-relocation",
+    "macro-definition-consumer",
+    "macro-name-resolution",
+    "macro-name-absence",
+    "aop-match-membership",
+    "directory-scope"
+]
+
+fn reverse_reference_families_for_schema_v2(schema: i64) -> [text]:
+    if schema == REVERSE_REFERENCE_RECEIPT_SCHEMA_V2: REVERSE_REFERENCE_FAMILIES_V2
+    else: REVERSE_REFERENCE_FAMILIES_V1
 
 struct ReverseReferenceProjectionV1:
     key: ReverseReferenceKeyV1
@@ -86,7 +112,8 @@ fn reverse_reference_projection_lines_v1(receipt: ReverseReferenceGenerationRece
     reverse_reference_sorted_v1(lines)
 
 fn reverse_reference_receipt_encode_v1(receipt: ReverseReferenceGenerationReceiptV1) -> text:
-    if receipt.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V1:
+    if receipt.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V1 and
+            receipt.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V2:
         return ""
     if not reverse_reference_receipt_text_valid_v1(receipt.owner_generation):
         return ""
@@ -97,8 +124,8 @@ fn reverse_reference_receipt_encode_v1(receipt: ReverseReferenceGenerationReceip
         return ""
     # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
     reverse_reference_text_concat_copy_v1([
-        "simple-reverse-reference-generation-receipt-v1",
-        "schema=1",
+        "simple-reverse-reference-generation-receipt-v{receipt.schema_version}",
+        "schema={receipt.schema_version}",
         "owner={receipt.owner_generation}",
         "root={receipt.root_generation}",
         "count={lines.len()}"
@@ -147,9 +174,16 @@ fn reverse_reference_projection_decode_v1(line: text) -> ReverseReferenceProject
 
 fn reverse_reference_receipt_decode_v1(content: text) -> ReverseReferenceReceiptReadV1:
     val lines = content.split("\n")
-    if lines.len() < 5 or lines[0] != "simple-reverse-reference-generation-receipt-v1":
+    if lines.len() < 5:
         return ReverseReferenceReceiptReadV1(false, "corrupt-header", nil)
-    if lines[1] != "schema=1":
+    var schema: i64 = 0
+    if lines[0] == "simple-reverse-reference-generation-receipt-v1":
+        schema = REVERSE_REFERENCE_RECEIPT_SCHEMA_V1
+    elif lines[0] == "simple-reverse-reference-generation-receipt-v2":
+        schema = REVERSE_REFERENCE_RECEIPT_SCHEMA_V2
+    else:
+        return ReverseReferenceReceiptReadV1(false, "corrupt-header", nil)
+    if lines[1] != "schema={schema}":
         return ReverseReferenceReceiptReadV1(false, "unsupported-schema", nil)
     if not lines[2].starts_with("owner=") or not lines[3].starts_with("root="):
         return ReverseReferenceReceiptReadV1(false, "corrupt-generation", nil)
@@ -176,8 +210,8 @@ fn reverse_reference_receipt_decode_v1(content: text) -> ReverseReferenceReceipt
         projections = projections.push(projection!)
         previous = lines[index]
         index = index + 1
-    val receipt = ReverseReferenceGenerationReceiptV1(1, owner, root, projections)
-    for family in REVERSE_REFERENCE_FAMILIES_V1:
+    val receipt = ReverseReferenceGenerationReceiptV1(schema, owner, root, projections)
+    for family in reverse_reference_families_for_schema_v2(schema):
         var covered = false
         for projection in projections:
             if projection.key.projection_kind == family:
@@ -283,7 +317,8 @@ fn reverse_reference_consumers_v1(read: ReverseReferenceReceiptReadV1,
         subject_identity: text, projection_kind: text) -> ReverseReferenceConsumersV1:
     if not read.valid or read.receipt == nil:
         return ReverseReferenceConsumersV1(false, read.reason, [])
-    if not REVERSE_REFERENCE_FAMILIES_V1.contains(projection_kind):
+    if not reverse_reference_families_for_schema_v2(
+            read.receipt!.schema_version).contains(projection_kind):
         return ReverseReferenceConsumersV1(
             false, "unknown-projection-family:{projection_kind}", [])
     var consumers: [text] = []
@@ -393,7 +428,31 @@ fn reverse_reference_bind_admitted_published_keys_v1(
         expected_receipt_digest, expected_owner_generation,
         expected_root_generation, key_frames, consumer_identities)
 
-export REVERSE_REFERENCE_FAMILIES_V1
+fn reverse_reference_receipt_migrate_v1_to_v2(
+        receipt: ReverseReferenceGenerationReceiptV1) -> ReverseReferenceGenerationReceiptV1:
+    if receipt.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V1:
+        return receipt
+    var projections: [ReverseReferenceProjectionV1] = []
+    for projection in receipt.projections:
+        projections.push(projection)
+    for family in REVERSE_REFERENCE_FAMILIES_V2:
+        if not REVERSE_REFERENCE_FAMILIES_V1.contains(family):
+            projections.push(ReverseReferenceProjectionV1(
+                key: ReverseReferenceKeyV1(
+                    registry_kind: "semantic",
+                    owner_generation: receipt.owner_generation,
+                    root_generation: receipt.root_generation,
+                    subject_identity: "@unknown-family",
+                    projection_kind: family,
+                    projection_digest: sha256_text("migrated-v1:" + family),
+                    schema_version: 1),
+                consumer_identity: "@migrated-v1"))
+    ReverseReferenceGenerationReceiptV1(REVERSE_REFERENCE_RECEIPT_SCHEMA_V2,
+        receipt.owner_generation, receipt.root_generation, projections)
+
+export REVERSE_REFERENCE_FAMILIES_V1, REVERSE_REFERENCE_FAMILIES_V2
+export REVERSE_REFERENCE_RECEIPT_SCHEMA_V2
+export reverse_reference_receipt_migrate_v1_to_v2
 export ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1
 export ReverseReferenceReceiptReadV1, ReverseReferenceConsumersV1
 export reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1
