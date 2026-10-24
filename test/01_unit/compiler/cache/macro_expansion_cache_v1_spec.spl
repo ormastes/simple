@@ -1,37 +1,65 @@
 # Purpose: P5 macro expansion cache keyed by MacroExpandKey, coalesced through
-# the daemon single-flight table (plan 2026-10-24 §3.2, §9.6).
+# the daemon single-flight table (plan 2026-10-24 §3.2, §9.6). Leaders always
+# complete their flight (success or nil); abandoned leaders are re-driven.
 # @req M-04 X-02
 
 use std.spec.*
 use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_content_digest_v1}
 use compiler.driver.cache.macro_expansion_cache_v1.{MacroExpansionCacheV1}
 
+fn expand_ok(key: text) -> Result<text, text>: Ok("1 + 1")
+fn expand_fail(key: text) -> Result<text, text>: Err("ctfe panic")
+
 describe "macro expansion cache":
     it "coalesces concurrent identical requests and reuses the result":
         val key = macro_content_digest_v1("expand-key")
         var cache = MacroExpansionCacheV1.create()
-        expect(cache.begin(key, "w1")).to_equal("leader")
-        expect(cache.begin(key, "w2")).to_equal("waiter")
+        expect(cache.begin(key, "w1", 100)).to_equal("leader")
+        expect(cache.begin(key, "w2", 101)).to_equal("waiter")
         expect(cache.inflight_count()).to_equal(1)
-        expect(cache.publish(key, "w1", "1 + 1")).to_equal(true)
+        expect(cache.lead(key, "w1", expand_ok)).to_equal(true)
         expect(cache.inflight_count()).to_equal(0)
-        expect(cache.begin(key, "w3")).to_equal("hit")
+        expect(cache.begin(key, "w3", 102)).to_equal("hit")
         expect(cache.value_of(key)).to_equal("1 + 1")
         expect(cache.computations).to_equal(1)
+
+    it "a failing leader completes with nil so waiters are never parked":
+        val key = macro_content_digest_v1("fails")
+        var cache = MacroExpansionCacheV1.create()
+        expect(cache.begin(key, "w1", 100)).to_equal("leader")
+        expect(cache.begin(key, "w2", 101)).to_equal("waiter")
+        expect(cache.lead(key, "w1", expand_fail)).to_equal(false)
+        expect(cache.inflight_count()).to_equal(0)
+        expect(cache.value_of(key)).to_equal("")
+        expect(cache.begin(key, "w2", 102)).to_equal("leader")
+        expect(cache.lead(key, "w2", expand_ok)).to_equal(true)
+        expect(cache.begin(key, "w3", 103)).to_equal("hit")
+
+    it "an abandoned leader is re-driven to the oldest waiter":
+        val key = macro_content_digest_v1("abandoned")
+        var cache = MacroExpansionCacheV1.create()
+        expect(cache.begin(key, "w1", 100)).to_equal("leader")
+        expect(cache.begin(key, "w2", 110)).to_equal("waiter")
+        expect(cache.redrive(500, 1000).len()).to_equal(0)
+        expect(cache.redrive(1200, 1000)).to_equal(["w2"])
+        expect(cache.publish(key, "w1", "late")).to_equal(false)
+        expect(cache.lead(key, "w2", expand_ok)).to_equal(true)
+        expect(cache.inflight_count()).to_equal(0)
+        expect(cache.value_of(key)).to_equal("1 + 1")
 
     it "quarantines a key whose producer is nondeterministic":
         val k = macro_content_digest_v1("k")
         var cache = MacroExpansionCacheV1.create()
-        expect(cache.begin(k, "w1")).to_equal("leader")
+        expect(cache.begin(k, "w1", 1)).to_equal("leader")
         expect(cache.publish(k, "w1", "v1")).to_equal(true)
         expect(cache.publish(k, "w1", "v1")).to_equal(true)
         expect(cache.publish(k, "w1", "v2")).to_equal(false)
-        expect(cache.begin(k, "w2")).to_equal("quarantined")
+        expect(cache.begin(k, "w2", 2)).to_equal("quarantined")
         expect(cache.value_of(k)).to_equal("")
 
     it "an untagged or fast-fingerprint key is never cached":
         var cache = MacroExpansionCacheV1.create()
-        expect(cache.begin("deadbeef", "w1")).to_equal("uncacheable")
-        expect(cache.begin("xxh3-128:0123456789abcdef0123456789abcdef", "w1")).to_equal("uncacheable")
+        expect(cache.begin("deadbeef", "w1", 1)).to_equal("uncacheable")
+        expect(cache.begin("xxh3-128:0123456789abcdef0123456789abcdef", "w1", 1)).to_equal("uncacheable")
         expect(cache.publish("deadbeef", "w1", "v")).to_equal(false)
         expect(cache.computations).to_equal(0)
