@@ -14,8 +14,11 @@ macro references) is
 [`generic_aop_macro_semantic_cache_plan_2026-10-24.md`](../../../03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md).
 
 Status words: **implemented** = landed on `release/1.0.0` with the cited
-path:line; **partial** = a piece exists but the contract is not met;
-**planned** = no code yet. Line numbers are at `b4051cdeb1c`.
+path:line and a live caller; **implemented, uncalled** = the module landed but
+nothing in `src/` outside its own package calls it yet; **partial** = a piece
+exists but the contract is not met; **planned** = no code yet. Line numbers are
+at `b4051cdeb1c`, except rows marked (2026-10-24b), which are at `13ee5797f3c`
+after #4367 #4370 #4372 #4373 #4378 #4379 #4382 landed.
 
 ## 1. Architecture rules (non-negotiable)
 
@@ -34,6 +37,11 @@ path:line; **partial** = a piece exists but the contract is not met;
    the artifact; branch/path/time are hints only.
 5. **One reader interface** shared by the standalone compiler, `simple tldr`,
    the build runner and the test runner (§3).
+6. **The parse cache entry IS the AST.** A parse-cache entry must be the final
+   immutable binary AST, used in place (mmap or equivalent, no replay, no
+   rebuild). A replay log — anything that has to be re-executed, re-bridged or
+   re-assembled into node structures on every hit — is not a cache. (User rule,
+   2026-10-24; today's flat-pool capture is non-compliant, see §4.)
 
 ## 2. Per-file src→obj jobs (no stage barrier)
 
@@ -58,7 +66,7 @@ trait SourceReader:
 |---|---|---|
 | Trait | as above; callers depend only on the trait | **implemented** — #4360 (`5bc6a2374c5`) `src/compiler/80.driver/cache/source_reader_v1.spl:28-32` (`trait SourceReader`), consumer `src/app/cli/tldr_entry.spl` |
 | `FileReader` | direct file + private/shared parse-cache implementation | **implemented** — `source_reader_v1.spl:34-58` (`FileReader`, `file_source_reader_v1`) over `src/compiler/10.frontend/frontend.spl:115` (`frontend_parse_or_restore`) and `module_artifacts_v1.spl:165` |
-| `CacheReader` | daemon/build-runner-backed implementation: returns the AST from the shared binary cache or **fails**; the compiler then parses and hands the AST back through `update_src`/`update_tldr`; a `FileReader` may no-op on `update_*` when the file is already current | **planned** — daemon admission exists (`src/compiler/80.driver/cache/daemon/cache_daemon_lifecycle.spl`, availability only) and the gateway seam exists (`cache/gateway/cache_gateway_adapter.spl`), but no AST protocol |
+| `CacheReader` | daemon/build-runner-backed implementation: returns the AST from the shared binary cache or **fails**; the compiler then parses and hands the AST back through `update_src`/`update_tldr`; a `FileReader` may no-op on `update_*` when the file is already current | **implemented, uncalled** (2026-10-24b) — #4370 (`f1f60b72c72`) `src/compiler/80.driver/cache/reader/cache_reader_v1.spl:25-54` (`trait CacheBlobPortV1` over `CacheGatewayAdapterV1`, `cache_reader_read_v1` gated by `CacheDaemonLifecycle`, blob kinds `simple.module.flat-pool-ast.v1` / `simple.module.tldr-companion.v4`). Zero callers in `src/`; it does not yet implement `SourceReader`, and no compile path constructs it |
 | Async signatures | both readers return futures (`src/lib/nogc_async_mut/async/{future,promise,io}.spl`); the sync trait above is the v1 shape and must grow `-> Future<...>` without a second trait | **planned** — v1 trait is synchronous; the Windows "synchronous native parse lease" (kernel mutex) explored in the 10-10 plan is **dropped**, not landed |
 | Miss path | `read_tldr` miss → `read_src` (parse) → build TLDR → `update_tldr` publishes atomically | **implemented** — `module_artifacts_v1.spl:165-182` (`module_artifacts_emit_v1`): freshness `:110` (`module_tldr_companion_fresh_v1`, embedded source sha256), publish `:150` |
 
@@ -70,6 +78,9 @@ trait SourceReader:
 | TLDR content (v4) | `summary` section = view of `PublicSummaryV1`; `generic`/`inline` body sections; `sif:` text; header `simple-tldr-companion: 4` | **implemented** — #4354 (`49ea04c8a54`) + #4355; `module_artifacts_v1.spl:50,71-109` |
 | Parser spans/attrs | struct/class spans built from the declaration (`_FlatAstBridge/module_assembly.spl`); `inline` kept on function attributes (`core/_ParserDecls/enum_module_body.spl`) | **implemented** — #4371 (`616afdec054`); remaining line-0 spans on enums/traits/aliases/consts are named in `module_tldr_ast_sections_v1.spl` |
 | `.tldr` ownership | compiler-written, non-importable companion of `PublicSummaryV1`, under an explicit `--out` root; never shadows a source, never replaces the package `.tld` / `PackageTldrHeaderV1` | **implemented** — decided in `doc/04_architecture/compiler_semantic_cache_manager.md` items 10-12 (#4366 `a5bb914ffcd`) |
+| **Parse cache entry = final binary AST, used in place** (rule 6) | the cached bytes are the immutable AST that the compiler reads directly (mmap / zero-copy view); a hit performs no decode-into-pools, no bridge pass and no node re-assembly | **non-compliant today** (2026-10-24b) — the private and shared parse caches store the flat-pool **capture** (`src/compiler/10.frontend/core/flat_pool_codec.spl:1-22`: "a cache hit restores the pools verbatim and then runs the existing bridge (`flat_ast_to_module`) to rebuild the identical `ParserModule`"); the hit path `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:1444` (`build_module_from_flat_pool_blob`) does `reset_all_pools()` → decode → bridge, i.e. a **replay/rebuild**, and the capture arm/record/take globals (`:1407-1428`) are mutable process state. Measured 2026-08-21 the bridge is 1-4% of parse cost, which is why it was accepted; under rule 6 it is a replay log, not a cache. **Required change:** make the flat-pool blob (or a successor layout) the in-place AST representation the frontend consumes, with set-once fields (§8) for resolution results, so a hit is a map + digest check only |
+| HIR cache decode diagnostics | a refused HIR cache hit names the failing field | **implemented** (2026-10-24b) — #4379 (`47bd123bf37`) `src/compiler/20.hir/hir_codec.spl` `hir_module_decode_reason`, surfaced in `driver_hir_cache.spl` as `reason=decode … cause=…` |
+| Seed bug records | `public_summary_projector_cannot_order`, `…missing_rt_io_file_open_read` | **recorded** — #4367 (`4d1b28ea510`), `doc/08_tracking/bug/*_2026-10-24.md` |
 
 ## 5. Publication: temp file + atomic rename
 
@@ -87,7 +98,7 @@ trait SourceReader:
 |---|---|---|
 | Contract | the first request for a key creates a future and runs the work; later requests for the same key await that future and receive its result (success or failure); an abandoned future is re-driven by the next requester — no lease, no owner-death protocol | design |
 | Test daemon | `src/app/test_daemon/daemon.spl:153-161` — `active_requests[hash_text(test_path)]`, later callers get `TRESP_QUEUED` + `redirect` | **implemented** (results, not ASTs) |
-| Compiler / cache reader | per-key future table in the daemon and in-process in the standalone compiler | **planned** — today N concurrent producers all parse and publish identical bytes (`module_artifacts_v1.spl:21-31`) |
+| Compiler / cache reader | per-key future table in the daemon and in-process in the standalone compiler | **implemented, uncalled** (2026-10-24b) — #4372 (`710cb72288c`) `src/compiler/80.driver/cache/daemon/cache_single_flight_v1.spl` (`cache_single_flight_key_v1(kind, digest)`, leader/waiter roles `SINGLE_FLIGHT_LEADER_V1`/`_WAITER_V1`) wired into `cache/daemon/cache_daemon_main.spl` (host admission + daemon ops). The compile path never reaches it: `CacheReader` has no caller, so today N concurrent producers still all parse and publish identical bytes (`module_artifacts_v1.spl:21-31`) |
 | TLDR pointer fill (§7) | dereferencing an unset cross-module pointer goes through the same single-flight table | **planned** |
 
 ## 7. TLDR as forward declaration; lazy async pointers; shared TLDR table
@@ -115,7 +126,7 @@ trait SourceReader:
 | Immutability | the flat-pool AST blob is immutable; cache cells are no-replace | **implemented** — `frontend_shared_parse_cas_v1.spl:5`, `flat_pool_codec.spl` |
 | Set-once fields | a field that is empty at construction may be assigned exactly once (lazy resolution results, pointer fills); a second assignment is a fault | **planned** |
 | Attribute storage | per attribute kind, choose dense array vs hash side-table by measured usage frequency (hot = dense indexed by node id; rare = sparse map); the `collection_feedback` profile hook supplies the frequencies | **planned** — `src/compiler/10.frontend/core/collection_feedback.spl` is a profile hook only; see `doc/05_design/compiler/profile_switchable_container_algorithms.md` |
-| Sharing | compilers, LSP, lint and the test runner map the same binary blob; nobody reparses | **partial** — shared CAS exists, opt-in via `SIMPLE_SHARED_PARSE_CAS_ROOT`; LSP/lint not wired |
+| Sharing | compilers, LSP, lint and the test runner map the same binary blob; nobody reparses | **partial** — shared CAS exists, opt-in via `SIMPLE_SHARED_PARSE_CAS_ROOT`; LSP/lint not wired; and the shared blob is a replay capture, not an in-place AST (rule 6, §4) |
 
 ## 9. In-memory id scopes (never persisted)
 
@@ -133,8 +144,14 @@ trait SourceReader:
 - **Never persisted**: cross-host/shared artifacts carry only full digests
   (phase3 rule "cross-host serialization excludes process-local IDs").
 
-Status: **planned** — no truncation, bloom filter or scope model in the
-frontend today (the only `bloom` in the compiler is the ELF linker).
+Status: **implemented, uncalled** (2026-10-24b) — #4373 (`d91c82221c7`)
+`src/compiler/80.driver/cache/id_scope_v1.spl` (`id_scope_truncate_v1(full_key,
+bits)`, 65,536-bit bloom, `id_scope_global_v1` 32-bit / `id_scope_file_v1` 16-bit
+/ `id_scope_local_v1` 16-bit). Zero callers in `src/`: the frontend still mints
+no truncated ids, so nothing is persisted either. **Deviation to fix:** the
+module's per-file scope is 16-bit and global is 32-bit, while this design (and
+the user) assign 32 bits to the per-file scope and keep the global scope at the
+full 128-bit key; align the constants before the first caller lands.
 
 ## 10. Test-runner route policy
 
@@ -163,11 +180,11 @@ planned — `pointcut` appears only in `cache/schema/cache_protocol.sdn`);
 
 | Limit | Meaning | Status |
 |---|---|---|
-| memory max | resident AST/TLDR table bytes; eviction only recomputes | **planned** |
-| storage max | bytes under the one cache root | **implemented** — `src/compiler/80.driver/cache/metadata/cache_limits.spl:12-45` (`SIMPLE_CACHE_MAX_BYTES`, 10 GiB default, watermarks) |
-| max main branches | number of main-line generations retained | **planned** |
-| per-branch versions per source file | max cache entries kept per `(branch, source path)` — **not** a per-branch byte cap | **planned** |
-| over-limit behaviour | **reject** the new write (fail closed, recompute later), never queue | decided 2026-10-24 (AOP formal §18.6 wording superseded) |
+| memory max | resident AST/TLDR table bytes; eviction only recomputes | **implemented, uncalled** (2026-10-24b) — #4378 (`322dfce08c0`) `cache/metadata/cache_limits.spl` `CacheRetentionLimitsV1` via `cache_retention_limits_load_v1` (`DEFAULT_MEMORY_MAX_BYTES` 1 GiB; precedence `SIMPLE_CACHE_*` env → `scripts/setup/host-env.shs` host config → default) |
+| storage max | bytes under the one cache root | **implemented** — `cache_limits.spl:12-45` (`SIMPLE_CACHE_MAX_BYTES`, 10 GiB default, watermarks); shared by `CacheRetentionLimitsV1` (#4378) |
+| max main branches | number of main-line generations retained | **implemented, uncalled** (2026-10-24b) — #4378 `DEFAULT_MAX_BRANCHES = 4`, plus a configured kept-branch list |
+| per-branch versions per source file | max cache entries kept per `(branch, source path)` — **not** a per-branch byte cap | **implemented, uncalled** (2026-10-24b) — #4378 `DEFAULT_VERSIONS_PER_SOURCE = 3`; eviction order in `cache/gc/cache_eviction_plan_v1.spl:55` (`cache_eviction_plan_v1`, newest-first per source, branch last-used) |
+| over-limit behaviour | **reject** the new write (fail closed, recompute later), never queue | **implemented, uncalled** (2026-10-24b) — `cache_eviction_plan_v1.spl:159` (`cache_eviction_admit_write_v1`); recorded as `compiler_semantic_cache_manager.md` item 13. No GC or publish path calls the plan yet (only `cache_limits.spl` imports it) |
 
 Cache root: one canonical root via `$SIMPLE_CACHE`
 (`src/compiler/80.driver/cache/cache_root.spl:31-35`); per-lane
@@ -186,6 +203,7 @@ admitted.
 | `cache/lease/lease.spl`, `cache/hir_body_typecheck_lease_v1.spl`, `cache/gc/reader_pin_gc_guard.spl` | process leases via `rt_process_exists` | generation pins as immutable tombstones; GC reclaims only unreferenced generations |
 | 10-10 plan "synchronous native parse lease" (Windows kernel mutex) | design only, not landed | **dropped**; single-flight futures (§6) |
 | `frontend.spl:115-140`, `frontend_parse_cache.spl:138` | blocking reads inside parse | async io wrappers; parse as a task |
+| `_FlatAstBridge/module_assembly.spl:1407-1428,1444` | flat-pool capture globals + replay/rebuild on every hit | in-place immutable AST blob (rule 6); no pool reset, no bridge on a hit |
 | `module_artifacts_v1.spl:52` `_module_artifact_tmp_seq_v1` | global counter | `{pid}.{xxh3(content)}` temp names (as #4364 did) |
 | `frontend_parse_cache.spl:59-77,203`, `frontend_shared_parse_cas_v1.spl:30-35`, `driver_hir_cache.spl:85-99,205,343,524` | global mutable counters/tables | per-task immutable context; counters as an append-only event log |
 | `bootstrap_builder/phase_admission.spl:530-635` | phase barriers | dependency-only joins on futures |
@@ -218,3 +236,5 @@ admitted.
 | Sync parse lease | dropped in favour of single-flight futures |
 | Who parses on a miss | the compiler (daemon is a storage service, not a worker pool) |
 | Hashes | xxh3_128 for in-memory keys and private caches; sha256 for embedded source identity; truncated ids never leave memory |
+| Parse cache representation (2026-10-24b) | the entry is the final immutable binary AST used in place; the flat-pool capture + bridge replay is non-compliant and is to be replaced, not tuned |
+| Id scope widths (2026-10-24b) | per-file = 32 bits, local = 16 bits, global = full 128-bit key; `id_scope_v1.spl` constants (global 32 / file 16) are to be aligned before first use |
