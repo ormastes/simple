@@ -1136,3 +1136,22 @@ refusing pool's element 0 (env-gated). If restore-time=0 and dump-time=-1,
 (2) add midpoint prints (parse end :1524, desugar :1562, pause :1572), each
 lane bisecting the window until the corrupting line is named. No debugger,
 Heisenbug-compatible, and each step produces a PR-grade evidence lane.
+
+## Annotation 2026-10-24 (lane D, lane 59 bisect probe 1): kill is INSIDE parse_module_body, heap-state-dependent across parses
+
+The sanitized early-dump probe (immediately after parse_module_body,
+module_assembly.spl:~1584, env SIMPLE_BISECT=1) on the lane-59 candidate:
+- parse 1 (worker driver miss): post-parse dump CLEAN (4582 bytes, poisoned=false)
+- parse 2 (hir re-parse): CLEAN (4582, false)
+- parse 3: POISONED (4588 bytes - dump completed with 6 extra bytes before/at
+  the poison - then poisoned=true)
+- parse 4: POISONED (4352, truncated by the refusal)
+The refusal and AV follow. So the pool strings are VALID at the end of
+parse_module_body for the first two parses and DEAD by the end of the third
+parse's parse_module_body in the same worker process. The kill is INSIDE
+parse_module_body and is nondeterministic - heap-context-dependent, building
+across repeated parses (parses 1-2 clean, 3-4 poisoned). This characterizes
+the defect as a parser-heap interaction that corrupts fresh allocations by
+parse 3, not a deterministic per-call bug. Probe 2 goes inside
+parse_module_body (lexer tokenize vs decl-loop midpoints); the parser-owner
+lane is best placed for that bisection.
