@@ -131,9 +131,63 @@ selftest() {
         || { echo "FAIL — selftest: removed bound symbol was not detected"; exit 1; }
     rm -rf "$_d"
     selftest_predates
+    selftest_link_guard
 }
 
 # Fixtures 5-7: a branch that predates the binding file (CI run 40095859587).
+# Latent linker gaps guard. live_object_key.sdn counts linker_binary_version,
+# system_library_content and import_lib_export_sets as gaps that are LATENT:
+# no link output is ever reused, so they cannot cause a stale hit. The moment
+# link-output reuse appears in the link/driver layers while any of those gaps
+# is still counted, this FAILs: close the gaps (key the linker binary, system
+# libraries and import libraries) first. Markers are identifiers a link-output
+# cache would need; a deliberate implementation can also declare itself with
+# a `link-output-reuse:` comment.
+LIVE_SCHEMA=src/compiler/80.driver/cache/schema/live_object_key.sdn
+LINK_GAPS="linker_binary_version system_library_content import_lib_export_sets"
+LINK_REUSE_RE='link_output_cache|link_cache|cached_link|reuse_link|skip_relink|relink_skip|link_reuse|link-output-reuse:|cached_binary|binary_cache|cached_executable'
+LINK_REUSE_PATHS='src/compiler/70.backend/linker src/compiler/80.driver src/app/build src/app/cli'
+
+# link_reuse_guard REV -> prints a status phrase; rc 1 = violation.
+link_reuse_guard() {
+    if [ -n "$1" ]; then
+        _lg_schema=$(git show "$1:$LIVE_SCHEMA" 2>/dev/null) || _lg_schema=""
+        # shellcheck disable=SC2086
+        _lg_hits=$(git grep -n -i -E "$LINK_REUSE_RE" "$1" -- $LINK_REUSE_PATHS 2>/dev/null | grep '\.spl:' | head -3)
+    else
+        _lg_schema=$(cat "$LIVE_SCHEMA" 2>/dev/null) || _lg_schema=""
+        # shellcheck disable=SC2086
+        _lg_hits=$(grep -rn -i -E "$LINK_REUSE_RE" $LINK_REUSE_PATHS --include='*.spl' 2>/dev/null | head -3)
+    fi
+    _lg_open=""
+    for _g in $LINK_GAPS; do
+        printf '%s\n' "$_lg_schema" | grep -q "{ id: $_g," && _lg_open="$_lg_open $_g"
+    done
+    if [ -n "$_lg_hits" ] && [ -n "$_lg_open" ]; then
+        echo "link-output reuse appeared while latent linker gaps are still counted ($_lg_open ): $(printf '%s' "$_lg_hits" | tr '\n' ' ')— close those gaps in $LIVE_SCHEMA first"
+        return 1
+    fi
+    if [ -n "$_lg_hits" ]; then echo "link-output reuse present, linker gaps closed"; else echo "no link-output reuse (linker gaps stay latent:$_lg_open )"; fi
+    return 0
+}
+
+selftest_link_guard() {
+    _lg_d=$(mktemp -d) || err "mktemp failed"
+    (
+        cd "$_lg_d" || exit 1
+        mkdir -p src/compiler/80.driver/cache/schema src/compiler/80.driver
+        printf '  known_gaps:\n    - { id: linker_binary_version, row: "x" }\n' > "$LIVE_SCHEMA"
+        printf 'fn build():\n    0\n' > src/compiler/80.driver/a.spl
+        link_reuse_guard "" >/dev/null || { echo "fixture 8: clean tree failed"; exit 1; }
+        printf 'fn build():\n    val hit = link_output_cache_lookup()\n' > src/compiler/80.driver/a.spl
+        link_reuse_guard "" >/dev/null && { echo "fixture 9: reuse with open gap passed"; exit 1; }
+        printf '  known_gaps:\n' > "$LIVE_SCHEMA"
+        link_reuse_guard "" >/dev/null || { echo "fixture 10: reuse with closed gaps failed"; exit 1; }
+        exit 0
+    ) || { rm -rf "$_lg_d"; echo "FAIL — selftest: link-reuse guard"; exit 1; }
+    rm -rf "$_lg_d"
+}
+
 selftest_predates() {
     _r=$(mktemp -d) || err "mktemp failed"
     (
@@ -163,7 +217,7 @@ selftest_predates() {
 REV=""; MODE=check; BASE_REV="${BASE_SHA:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --selftest) selftest; echo "PASS — selftest: 7 fixture(s)"; exit 0 ;;
+        --selftest) selftest; echo "PASS — selftest: 10 fixture(s)"; exit 0 ;;
         --rev) [ -n "${2:-}" ] || err "--rev needs a revision"; REV=$2; shift 2 ;;
         --base) [ -n "${2:-}" ] || err "--base needs a revision"; BASE_REV=$2; shift 2 ;;
         --update) MODE=update; shift ;;
@@ -219,5 +273,6 @@ if [ -n "$MISSING$BAD" ]; then
     echo "FAIL — $CHECKED binding(s) checked; bound cache-key code changed without a model review:${BAD:+ changed:$BAD}${MISSING:+ missing:$MISSING} (update src/verification/cache_protocol and re-pin with --update)"
     exit 1
 fi
-echo "PASS — $CHECKED binding(s) checked, cache-key source matches the reviewed formal model binding${REV:+ at $REV}"
+LINK_GUARD=$(link_reuse_guard "$REV") || { echo "FAIL — $LINK_GUARD"; exit 1; }
+echo "PASS — $CHECKED binding(s) checked, cache-key source matches the reviewed formal model binding${REV:+ at $REV}; $LINK_GUARD"
 exit 0
