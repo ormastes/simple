@@ -120,3 +120,27 @@ describe "process-run extern text ABI (pure-Simple MIR twin of process_c_runtime
         assert_true(line != "", "expected a call to rt_stderr_write")
         assert_equal(1, top_level_arg_count(line, "rt_stderr_write("), "one tagged word: " + line)
         assert_equal(0, count_calls(output, "rt_interp_cstr("), "the tagged value must not be stripped to a C string")
+
+    it "hands rt_file_read_text_at_checked the tagged path value":
+        # runtime_native.c decodes path with rt_core_string_to_cpath; the char*
+        # bridge made every checked read return nil (2026-10-25 parity audit).
+        val source = "extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?\n\nfn probe(p: text) -> text?:\n    rt_file_read_text_at_checked(p, 0, 8)\n"
+        val output = lower_to_llvm(source, "read_text_at_checked_abi_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        val line = call_line(output, "rt_file_read_text_at_checked(")
+        assert_true(line != "", "expected a call to rt_file_read_text_at_checked")
+        assert_equal(3, top_level_arg_count(line, "rt_file_read_text_at_checked("), "tagged path + two scalars: " + line)
+        assert_equal(0, count_calls(output, "rt_interp_cstr("), "the tagged path must not be stripped to a C string")
+
+    it "splits the one-text rt_dir_glob facade although its row lists (dir, pattern)":
+        # runtime_native.c rt_dir_glob(pattern_ptr, pattern_len). Out-of-range
+        # row indices are skipped (seed semantics) instead of disabling the split.
+        val source = "extern fn rt_dir_glob(pattern: text) -> [text]\n\nfn probe(p: text) -> [text]:\n    rt_dir_glob(p)\n"
+        val output = lower_to_llvm(source, "dir_glob_one_text_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        val line = call_line(output, "rt_dir_glob(")
+        assert_true(line != "", "expected a call to rt_dir_glob")
+        assert_equal(2, top_level_arg_count(line, "rt_dir_glob("), "pattern must cross as (ptr, len): " + line)
+        assert_equal(0, count_calls(output, "rt_interp_cstr("), "no one-word pointer bridge on a pair-split pattern")
