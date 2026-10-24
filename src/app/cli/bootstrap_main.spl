@@ -27,7 +27,8 @@ use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir,
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
-use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1}
+use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1,
+    native_build_focused_capsule_shards_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -147,6 +148,34 @@ fn run_bootstrap_stage3_process_route(args: [text]) -> i64:
     val result = run_native_build_worker(worker_args)
     env_set(marker, old_marker)
     result
+
+# Exact focused capsules shard by re-executing this binary with the same argv
+# plus `--hir-shard=i/n` / `--mir-shard=i/n` (native_build_main.spl
+# native_build_focused_capsule_shards_v1). The child turns the flag into the
+# driver's shard environment and runs the unchanged capsule; the capsule's own
+# argument readers ignore the extra flag.
+pub fn bootstrap_capsule_shard_child_env(args: [text]):
+    for arg in args:
+        if arg.starts_with("--hir-shard="):
+            env_set("SIMPLE_HIR_SHARD", arg.substring(12))
+        elif arg.starts_with("--mir-shard="):
+            env_set("SIMPLE_MIR_SHARD", arg.substring(12))
+
+# Runs the capsule's shard workers before the in-process build. On a sealed
+# MIR ledger it installs SIMPLE_MIR_SHARD_LINK, so the in-process build links
+# the workers' objects and lowers nothing. False only when the MIR aggregate
+# failed (the link is blocked, as on the coordinator lane).
+fn bootstrap_capsule_shard_prepass(args: [text], allow_mir: bool) -> bool:
+    var base: [text] = ["native-build"]
+    for arg in bootstrap_native_build_worker_args(args):
+        base = base.push(arg)
+    val ledger = native_build_focused_capsule_shards_v1(base, base, allow_mir)
+    if ledger == "fail":
+        print "error: MIR shard aggregate failure; link and artifact publication blocked"
+        return false
+    if ledger != "":
+        env_set("SIMPLE_MIR_SHARD_LINK", ledger)
+    true
 
 fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     val worker_args = bootstrap_native_build_worker_args(args)
@@ -316,7 +345,18 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         return 1
     val explicit_entry = native_build_entry_from_args(args, 0)
     if explicit_entry != "":
+        if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1" or env_get("SIMPLE_BOOTSTRAP_STAGE4") == "1":
+            bootstrap_capsule_shard_child_env(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":
+            # MIR sharding stays off: Stage3 (SIMPLE_BOOTSTRAP=1, entry
+            # bootstrap_main, no STAGE4) dispatches AOT to
+            # bootstrap_compile_context_to_native_local, which reads the whole
+            # MIR context and emits ONE object (driver_aot_pipeline.spl
+            # aot_compile + native_staged_codegen_eligible_reason_v1). Only
+            # the HIR warm-up is lane-independent.
+            if explicit_entry == "src/app/cli/bootstrap_main.spl" and mode == "dynload":
+                if not bootstrap_capsule_shard_prepass(args, false):
+                    return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
             return run_bootstrap_native_build_coordinator(args)
@@ -329,6 +369,10 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
+        # HIR then MIR+codegen run in per-module shard workers first; the
+        # in-process capsule below links their objects (SIMPLE_MIR_SHARD_LINK).
+        if not bootstrap_capsule_shard_prepass(args, true):
+            return 1
         return run_exact_stage4_focused_capsule(args)
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
