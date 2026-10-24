@@ -3,7 +3,9 @@
 # Pure planning over entry usage records; the daemon applies the plan. Order:
 #   1. per branch, per source file: keep the `versions_per_source` most
 #      recently used versions of that source's artifacts (AST / TLDR / object
-#      versions are separate artifact kinds of one version key), LRU the rest;
+#      versions are separate artifact kinds of one version key), LRU the rest,
+#      then cap that source's bytes: per_source_max_disk_bytes (evict) and
+#      per_source_max_memory_bytes (unload), newest versions kept first;
 #   2. drop whole branches beyond `max_branches`, always keeping the configured
 #      `kept_branches` (main + release lines) first, then the most recently
 #      used others;
@@ -89,6 +91,26 @@ pub fn cache_eviction_plan_v1(entries: [CacheEntryUseV1], limits: CacheRetention
             if rank >= limits.versions_per_source and entries[index].live_views <= 0:
                 alive[index] = false
                 evict.push(index)
+
+        # 1b. Per-source byte caps on disk and in memory, newest kept first.
+        var disk_sum: i64 = 0
+        var memory_sum: i64 = 0
+        for index in _newest_first_v1(entries, members):
+            if not alive[index]:
+                continue
+            if disk_sum + entries[index].disk_bytes > limits.per_source_max_disk_bytes and
+                    entries[index].live_views <= 0:
+                alive[index] = false
+                evict.push(index)
+                continue
+            disk_sum = disk_sum + entries[index].disk_bytes
+            if in_memory[index]:
+                if memory_sum + entries[index].memory_bytes > limits.per_source_max_memory_bytes and
+                        entries[index].live_views <= 0:
+                    in_memory[index] = false
+                    unload.push(index)
+                else:
+                    memory_sum = memory_sum + entries[index].memory_bytes
 
     # 2. Branch count: kept branches first, then most recently used.
     var branches: [text] = []
