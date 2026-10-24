@@ -1,0 +1,296 @@
+# Generic template TLDR section + concrete-view contract (plan P1/P3).
+#
+# One generic declaration has ONE symbolic template entry in an indexed
+# section; a reference `Pair<i64, f64>` is served by an immutable
+# `ConcreteTldrAstViewV1` (generation-pinned, set-once, no lease) keyed by the canonical `ConcreteTldrKey`.
+#
+# Identity: TemplateId / ArgsId / ConcreteTldrKey are domain-separated,
+# length-framed SHA-256 digests (the persistent canonical hash). XXH3 is used
+# only as an in-memory bucket index by the acquisition table, and every
+# bucket hit is verified against the full canonical key.
+#
+# Type terms are stored as the structural key text of
+# compiler.mono.model.generic_subst_model (`mt_key_type`), so this layer has
+# no dependency on 40.mono; substitution itself lives there (one engine).
+# Generic parameters are binder-indexed (`<symbol>#<index>`), so renaming a
+# binder does not change the template identity (alpha-invariance, T4).
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub val GENERIC_TLDR_VIEW_SCHEMA_V1 = "generic-tldr-view/v1"
+pub val GENERIC_TEMPLATE_SECTION_MAGIC_V1 = "generic-template-section/v1"
+
+pub val GENERIC_PARAM_KIND_TYPE = "type"
+pub val GENERIC_PARAM_KIND_CONST = "const"
+
+# A Concrete view has no free generic variable in any reachable field.
+# Partial: some argument is open (IDE/hover only; never codegen input).
+# Unresolved: missing evidence, arity/kind mismatch, unknown symbol, or a
+# guard (depth) failure; `error` names the reason.
+pub val GENERIC_CLOSURE_CONCRETE = "Concrete"
+pub val GENERIC_CLOSURE_PARTIAL = "Partial"
+pub val GENERIC_CLOSURE_UNRESOLVED = "Unresolved"
+
+pub val GENERIC_INSTANTIATION_DEPTH_LIMIT = 32
+
+pub struct GenericParamV1:
+    index: i64
+    kind: text
+    binder_id: text   # "<symbol_id>#<index>" — identity
+    display_name: text   # source spelling — presentation only, not identity
+
+pub struct GenericTemplateFieldV1:
+    name: text
+    type_key: text   # structural key (generic_subst_model.mt_key_type)
+    generic: bool    # true iff the type mentions a template binder
+
+pub struct GenericTemplateEntryV1:
+    symbol_id: text   # module-qualified nominal identity, e.g. "pkg_a.Pair"
+    source_digest: text
+    visibility_root: text
+    active_guard_root: text
+    language_schema: text
+    params: [GenericParamV1]
+    fields: [GenericTemplateFieldV1]
+
+pub struct GenericTemplateSectionV1:
+    entries: [GenericTemplateEntryV1]   # sorted by symbol_id, unique (indexed)
+    digest: text
+
+pub struct GenericTemplateSectionDecodeV1:
+    ok: bool
+    section: GenericTemplateSectionV1
+    error: text
+
+pub struct ConcreteTldrOverrideV1:
+    field_index: i64
+    type_key: text
+
+pub struct ConcreteTldrAstViewV1:
+    """Immutable view. Fields not listed in `overrides` are the shared
+    template field nodes (sparse overlay); overrides are written once at
+    admission and never mutated."""
+    view_id: text   # process-local short id (id_scope_v1); never persisted
+    semantic_key: text
+    template_id: text
+    args_id: text
+    arg_keys: [text]   # positional structural argument keys (mt_key_type)
+    snapshot_pin: text
+    template: GenericTemplateEntryV1
+    overrides: [ConcreteTldrOverrideV1]
+    closure_status: text
+    error: text
+
+# Ordinary typed-AST accessors: consumers read fields the same way for a
+# generic and a non-generic declaration (no `is_generic` branch).
+pub fn concrete_tldr_field_count(view: ConcreteTldrAstViewV1) -> i64:
+    view.template.fields.len()
+
+pub fn concrete_tldr_field_name(view: ConcreteTldrAstViewV1, index: i64) -> text:
+    view.template.fields[index].name
+
+pub fn concrete_tldr_field_type_key(view: ConcreteTldrAstViewV1, index: i64) -> text:
+    for o in view.overrides:
+        val oo: ConcreteTldrOverrideV1 = o
+        if oo.field_index == index:
+            return oo.type_key
+    view.template.fields[index].type_key
+
+# ----------------------------------------------------------------------------
+# Canonical keys
+# ----------------------------------------------------------------------------
+
+fn _frame_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+pub fn generic_template_summary_digest_v1(entry: GenericTemplateEntryV1) -> text:
+    """Digest of the semantic template content. Display names are excluded."""
+    var acc = _frame_v1("tldr-template-summary/v1") + _frame_v1(entry.symbol_id)
+    acc = acc + _frame_v1("{entry.params.len()}")
+    for p in entry.params:
+        val pp: GenericParamV1 = p
+        acc = acc + _frame_v1("{pp.index}") + _frame_v1(pp.kind) + _frame_v1(pp.binder_id)
+    acc = acc + _frame_v1("{entry.fields.len()}")
+    for f in entry.fields:
+        val ff: GenericTemplateFieldV1 = f
+        acc = acc + _frame_v1(ff.name) + _frame_v1(ff.type_key)
+    sha256_text(acc)
+
+pub fn generic_template_id_v1(entry: GenericTemplateEntryV1) -> text:
+    sha256_text(_frame_v1("tldr-template/v1") + _frame_v1(entry.symbol_id) +
+        _frame_v1(generic_template_summary_digest_v1(entry)) +
+        _frame_v1(entry.visibility_root) + _frame_v1(entry.active_guard_root) +
+        _frame_v1(entry.language_schema))
+
+pub fn generic_args_id_v1(kinds: [text], value_keys: [text]) -> text:
+    """Ordered positional arguments: reversing them changes the id (T5)."""
+    var acc = _frame_v1("generic-args/v1") + _frame_v1("{value_keys.len()}")
+    var i = 0
+    while i < value_keys.len():
+        acc = acc + _frame_v1(kinds[i]) + _frame_v1(value_keys[i])
+        i = i + 1
+    sha256_text(acc)
+
+pub fn concrete_tldr_key_v1(template_id: text, args_id: text, constraint_root: text,
+                            profile_digest: text) -> text:
+    sha256_text(_frame_v1("tldr-concrete/v1") + _frame_v1(template_id) +
+        _frame_v1(args_id) + _frame_v1(constraint_root) + _frame_v1(profile_digest))
+
+# ----------------------------------------------------------------------------
+# Indexed section
+# ----------------------------------------------------------------------------
+
+fn _entry_body_v1(e: GenericTemplateEntryV1) -> text:
+    var acc = _frame_v1(e.symbol_id) + _frame_v1(e.source_digest) +
+        _frame_v1(e.visibility_root) + _frame_v1(e.active_guard_root) +
+        _frame_v1(e.language_schema) + _frame_v1("{e.params.len()}")
+    for p in e.params:
+        val pp: GenericParamV1 = p
+        acc = acc + _frame_v1(pp.kind) + _frame_v1(pp.binder_id) + _frame_v1(pp.display_name)
+    acc = acc + _frame_v1("{e.fields.len()}")
+    for f in e.fields:
+        val ff: GenericTemplateFieldV1 = f
+        val g = if ff.generic: "1" else: "0"
+        acc = acc + _frame_v1(ff.name) + _frame_v1(ff.type_key) + _frame_v1(g)
+    acc
+
+fn _section_body_v1(entries: [GenericTemplateEntryV1]) -> text:
+    var acc = _frame_v1(GENERIC_TEMPLATE_SECTION_MAGIC_V1) + _frame_v1("{entries.len()}")
+    for e in entries:
+        val ee: GenericTemplateEntryV1 = e
+        acc = acc + _entry_body_v1(ee)
+    acc
+
+pub fn build_generic_template_section_v1(entries: [GenericTemplateEntryV1]) -> GenericTemplateSectionV1:
+    """Sort by symbol_id (insertion sort; sections are small) and seal."""
+    var out: [GenericTemplateEntryV1] = []
+    for e in entries:
+        val ee: GenericTemplateEntryV1 = e
+        var placed: [GenericTemplateEntryV1] = []
+        var inserted = false
+        for o in out:
+            val oo: GenericTemplateEntryV1 = o
+            if not inserted and ee.symbol_id < oo.symbol_id:
+                placed = placed.push(ee)
+                inserted = true
+            placed = placed.push(oo)
+        if not inserted:
+            placed = placed.push(ee)
+        out = placed
+    GenericTemplateSectionV1(entries: out, digest: sha256_text(_section_body_v1(out)))
+
+pub fn generic_template_section_lookup_v1(section: GenericTemplateSectionV1, symbol_id: text) -> i64:
+    """Binary search over the sorted symbol index; -1 when absent."""
+    var lo = 0
+    var hi = section.entries.len() - 1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        val s = section.entries[mid].symbol_id
+        if s == symbol_id:
+            return mid
+        if s < symbol_id:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    -1
+
+pub fn generic_template_section_encode_v1(section: GenericTemplateSectionV1) -> text:
+    _frame_v1(section.digest) + _section_body_v1(section.entries)
+
+fn _read_frame_v1(data: text, pos: i64) -> [text]:
+    """Returns [value, next_pos] or [] on malformed input."""
+    var i = pos
+    var n = 0
+    var digits = 0
+    while i < data.len() and digits < 12:
+        val code = data.char_code_at(i)
+        if code == 58:   # ':'
+            break
+        if code < 48 or code > 57:
+            return []
+        n = n * 10 + (code - 48)
+        digits = digits + 1
+        i = i + 1
+    if digits == 0 or i >= data.len() or data.char_code_at(i) != 58 or i + 1 + n > data.len():
+        return []
+    [data.substring(i + 1, i + 1 + n), "{i + 1 + n}"]
+
+fn _empty_section_v1() -> GenericTemplateSectionV1:
+    GenericTemplateSectionV1(entries: [], digest: "")
+
+fn _decode_fail_v1(error: text) -> GenericTemplateSectionDecodeV1:
+    GenericTemplateSectionDecodeV1(ok: false, section: _empty_section_v1(), error: error)
+
+fn _take_v1(data: text, pos: i64) -> [text]:
+    _read_frame_v1(data, pos)
+
+fn _count_v1(value: text) -> i64:
+    if value.len() == 0 or value.len() > 12:
+        return -1
+    var n = 0
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 48 or code > 57:
+            return -1
+        n = n * 10 + (code - 48)
+        i = i + 1
+    n
+
+pub fn generic_template_section_decode_v1(data: text) -> GenericTemplateSectionDecodeV1:
+    """Strict decode: framing, magic, counts and the sealed digest must all
+    verify; anything else fails closed (never an empty section)."""
+    var toks: [text] = []
+    var pos = 0
+    while pos < data.len():
+        val t = _take_v1(data, pos)
+        if t.len() != 2:
+            return _decode_fail_v1("malformed frame")
+        toks = toks.push(t[0])
+        pos = _count_v1(t[1])
+    if toks.len() < 3 or toks[1] != GENERIC_TEMPLATE_SECTION_MAGIC_V1:
+        return _decode_fail_v1("bad magic")
+    val n = _count_v1(toks[2])
+    if n < 0:
+        return _decode_fail_v1("bad entry count")
+    var k = 3
+    var entries: [GenericTemplateEntryV1] = []
+    var e = 0
+    while e < n:
+        if k + 6 > toks.len():
+            return _decode_fail_v1("truncated entry")
+        val np = _count_v1(toks[k + 5])
+        if np < 0 or k + 6 + np * 3 + 1 > toks.len():
+            return _decode_fail_v1("bad param count")
+        var params: [GenericParamV1] = []
+        var j = 0
+        while j < np:
+            val b = k + 6 + j * 3
+            params = params.push(GenericParamV1(index: j, kind: toks[b], binder_id: toks[b + 1], display_name: toks[b + 2]))
+            j = j + 1
+        val fc_at = k + 6 + np * 3
+        val nf = _count_v1(toks[fc_at])
+        if nf < 0 or fc_at + 1 + nf * 3 > toks.len():
+            return _decode_fail_v1("bad field count")
+        var fields: [GenericTemplateFieldV1] = []
+        j = 0
+        while j < nf:
+            val b = fc_at + 1 + j * 3
+            fields = fields.push(GenericTemplateFieldV1(name: toks[b], type_key: toks[b + 1], generic: toks[b + 2] == "1"))
+            j = j + 1
+        entries = entries.push(GenericTemplateEntryV1(symbol_id: toks[k], source_digest: toks[k + 1],
+            visibility_root: toks[k + 2], active_guard_root: toks[k + 3], language_schema: toks[k + 4],
+            params: params, fields: fields))
+        k = fc_at + 1 + nf * 3
+        e = e + 1
+    if k != toks.len():
+        return _decode_fail_v1("trailing data")
+    val digest = sha256_text(_section_body_v1(entries))
+    if digest != toks[0]:
+        return _decode_fail_v1("section digest mismatch")
+    var i = 1
+    while i < entries.len():
+        if not (entries[i - 1].symbol_id < entries[i].symbol_id):
+            return _decode_fail_v1("section index not sorted/unique")
+        i = i + 1
+    GenericTemplateSectionDecodeV1(ok: true, section: GenericTemplateSectionV1(entries: entries, digest: digest), error: "")

@@ -101,6 +101,21 @@ var _mono_diag_enabled_state: i64 = -1
 # `phase4:monomorphize:breakdown` marker. One text, overwritten per pass.
 pub var mono_last_phase_profile_v1: text = ""
 
+# Per-instance wall time (ms) of the last `process_modules`: mangled
+# specialization -> substitution (request_specialization) + body rewrite
+# (drain_worklist). Measures specialize cost per instance; codegen per
+# instance is measured downstream (MIR/LLVM run per module).
+pub var mono_instance_profile_v1: Dict<text, i64> = {}
+
+fn mono_instance_profile_summary_v1() -> text:
+    var total = 0
+    var max_ms = 0
+    for k in mono_instance_profile_v1.keys():
+        val ms: i64 = mono_instance_profile_v1[k]
+        total = total + ms
+        if ms > max_ms: max_ms = ms
+    "instances={mono_instance_profile_v1.len()} instance_ms_total={total} instance_ms_max={max_ms}"
+
 # WORKAROUND(mir_provider_optional_type_wrapper_segv_2026-10-14): the old
 # A174 producer passes ArrayLit optional metadata to a concrete HirType ABI
 # while relocating imported class defaults. Keep fresh allocation in ordinary
@@ -469,6 +484,7 @@ impl MonomorphizationPass:
             self.root_discovery = mono_root_discovery_env_v1()
         val discovery = self.root_discovery and self.template_body_mode == MonoTemplateBodyModeV1.Retained
         val t_start = self.invocation_clock_v1()
+        mono_instance_profile_v1 = {}
         val mod_keys = modules.keys()
 
         # Step 1: Collect generic definitions
@@ -655,7 +671,7 @@ impl MonomorphizationPass:
             rewritten.remove(name)
 
         val t_placed = self.invocation_clock_v1()
-        if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery}"
+        if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery} {mono_instance_profile_summary_v1()}"
         if publish_placements and placement_valid and self.diagnostics.len() == 0 and not self.invocation_failed_v1():
             mono_selective_emission_publish_v1(placements)
         result
@@ -1097,7 +1113,10 @@ impl MonomorphizationPass:
             val mangled: text = self.spec_queue[i]
             val spec: HirFunction = self.specialized_functions[mangled]
             self.current_module = self.spec_module[mangled]
+            val t_rewrite = self.invocation_clock_v1()
             self.specialized_functions[mangled] = self.rewrite_function(spec)
+            val prior: i64 = if mono_instance_profile_v1.has(mangled): mono_instance_profile_v1[mangled] else: 0
+            mono_instance_profile_v1[mangled] = prior + self.invocation_clock_v1() - t_rewrite
             i = i + 1
 
     me mangled_name(func_name: text, type_args: [HirType]) -> text:
@@ -1344,7 +1363,9 @@ impl MonomorphizationPass:
             if self.template_recipes.has(func_name):
                 template = mono_apply_template_recipe_v1(template, self.template_recipes[func_name], self.invocation_budget != nil, self.invocation_budget)
             if template == nil or self.invocation_failed_v1(): return -1
+            val t_spec = self.invocation_clock_v1()
             var specialized: HirFunction = specialize_function_with_types(template, local_type_args, self.invocation_budget != nil, self.invocation_budget)
+            mono_instance_profile_v1[mangled] = self.invocation_clock_v1() - t_spec
             if specialized == nil or self.invocation_failed_v1(): return -1
             specialized.name = mangled
             specialized.symbol = SymbolId.new(sym)

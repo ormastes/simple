@@ -601,3 +601,106 @@ fn mf_substitute_inputs(kind: text, s: MSubst, inputs: [MType]) -> [MType]:
             out = out.push(ms_apply(s, t))
         i = i + 1
     out
+
+# ----------------------------------------------------------------------------
+# TLDR template instantiation (plan P3: concrete generic TLDR view)
+# ----------------------------------------------------------------------------
+# A template TLDR stores each field type as its structural key
+# (`mt_key_type`). The view acquirer decodes that key, substitutes the
+# positional binders with THIS model's `ms_apply`, and classifies the result;
+# no second substitution engine exists.
+
+struct MKeyParse:
+    t: MType
+    pos: i64
+    ok: bool
+
+fn _mk_bad() -> MKeyParse:
+    MKeyParse(t: mt_unknown(), pos: -1, ok: false)
+
+fn _mk_number(key: text, pos: i64) -> [i64]:
+    """[value, position after ':'] or [] when malformed."""
+    var i = pos
+    var n = 0
+    var digits = 0
+    while i < key.len() and digits < 12:
+        val code = key.char_code_at(i)
+        if code == 58:
+            break
+        if code < 48 or code > 57:
+            return []
+        n = n * 10 + (code - 48)
+        digits = digits + 1
+        i = i + 1
+    if digits == 0 or i >= key.len() or key.char_code_at(i) != 58:
+        return []
+    [n, i + 1]
+
+fn _mk_parse(key: text, pos: i64) -> MKeyParse:
+    if pos >= key.len():
+        return _mk_bad()
+    val tag = key.char_at(pos)
+    val num = _mk_number(key, pos + 1)
+    if num.len() != 2 or num[1] + num[0] > key.len():
+        return _mk_bad()
+    val name = key.substring(num[1], num[1] + num[0])
+    var next = num[1] + num[0]
+    if tag == "v":
+        return MKeyParse(t: MType.Var(name), pos: next, ok: true)
+    if tag == "c":
+        return MKeyParse(t: MType.Con(name), pos: next, ok: true)
+    if tag != "a" or next >= key.len() or key.char_at(next) != "l":
+        return _mk_bad()
+    val count = _mk_number(key, next + 1)
+    if count.len() != 2:
+        return _mk_bad()
+    next = count[1]
+    var args: [MType] = []
+    var k = 0
+    while k < count[0]:
+        val p = _mk_parse(key, next)
+        if not p.ok:
+            return _mk_bad()
+        args = args.push(p.t)
+        next = p.pos
+        k = k + 1
+    MKeyParse(t: MType.App(name, args), pos: next, ok: true)
+
+fn mt_from_key(key: text) -> MKeyParse:
+    """Inverse of `mt_key_type`; `ok` is false on malformed or trailing input."""
+    val p = _mk_parse(key, 0)
+    if not p.ok or p.pos != key.len():
+        return _mk_bad()
+    p
+
+pub val MI_STATUS_CLOSED = "closed"
+pub val MI_STATUS_OPEN = "open"
+pub val MI_STATUS_DEPTH = "depth"
+pub val MI_STATUS_MALFORMED = "malformed"
+
+struct MInstantiated:
+    t: MType
+    status: text
+
+fn ms_from_positional(binders: [text], args: [MType]) -> MSubst:
+    """Positional binder -> argument substitution (caller checks arity)."""
+    var s = ms_empty()
+    var i = 0
+    while i < binders.len() and i < args.len():
+        s = ms_bind(s, binders[i], args[i])
+        i = i + 1
+    s
+
+fn mt_instantiate_key(field_key: text, binders: [text], args: [MType], depth_limit: i64) -> MInstantiated:
+    """Substitute a template field's binders. Classification: `depth` when
+    the result nests deeper than `depth_limit` (instantiation guard), `open`
+    when a free variable remains, otherwise `closed`."""
+    val parsed = mt_from_key(field_key)
+    if not parsed.ok:
+        return MInstantiated(t: mt_unknown(), status: MI_STATUS_MALFORMED)
+    val t = ms_apply(ms_from_positional(binders, args), parsed.t)
+    if mt_depth(t) > depth_limit:
+        return MInstantiated(t: t, status: MI_STATUS_DEPTH)
+    if not mt_is_closed(t):
+        return MInstantiated(t: t, status: MI_STATUS_OPEN)
+    MInstantiated(t: t, status: MI_STATUS_CLOSED)

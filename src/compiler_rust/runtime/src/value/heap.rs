@@ -212,7 +212,23 @@ const MIN_VALID_HEAP_ADDR: usize = 4096;
 /// semantics and table layout.
 pub(crate) type HeapPtrSet<K> = HashSet<K, std::hash::BuildHasherDefault<ahash::AHasher>>;
 
-static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapPtrSet<usize>>> = OnceLock::new();
+/// The allocation registry is split into address-hashed shards, each with
+/// its own lock and its own free epoch on its own cache lines. One global
+/// mutex serialized every allocation/free/validation miss across all worker
+/// threads (bouncing one line between sockets on the 2-socket build host),
+/// and one global free epoch meant a free on ANY thread invalidated EVERY
+/// thread's validation cache. Membership semantics are unchanged: an address
+/// lives in exactly one shard, chosen by the address alone.
+const HEAP_REGISTRY_SHARDS: usize = 64;
+
+#[repr(align(128))]
+struct HeapRegistryShard {
+    set: Mutex<HeapPtrSet<usize>>,
+    /// Bumped (under this shard's lock) by every erase in this shard.
+    epoch: AtomicU64,
+}
+
+static HEAP_ALLOCATION_REGISTRY: OnceLock<Box<[HeapRegistryShard]>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Byte-level accounting (header bytes only).
@@ -264,28 +280,40 @@ fn note_heap_free(kind: u8, bytes: u64) {
 /// registry lock (registered == live), used when user threads start.
 pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
     // A poisoned lock still guards a consistent set: packed arrays must be found.
-    let registry = heap_allocation_registry().lock().unwrap_or_else(|e| e.into_inner());
-    registry
-        .iter()
-        .copied()
-        .filter(|addr| unsafe {
+    let mut out = Vec::new();
+    for shard in heap_registry_shards() {
+        let registry = shard.set.lock().unwrap_or_else(|e| e.into_inner());
+        out.extend(registry.iter().copied().filter(|addr| unsafe {
             let header = *addr as *const HeapHeader;
             (*header).object_type == HeapObjectType::Array && (*header).gc_flags & gc_flags::LAZY_WORDS != 0
-        })
-        .collect()
+        }));
+    }
+    out
 }
 
-fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
-    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
+fn heap_registry_shards() -> &'static [HeapRegistryShard] {
+    HEAP_ALLOCATION_REGISTRY.get_or_init(|| {
+        (0..HEAP_REGISTRY_SHARDS)
+            .map(|_| HeapRegistryShard {
+                set: Mutex::new(HeapPtrSet::default()),
+                // Starts at 1 so the zeroed validation cache never matches.
+                epoch: AtomicU64::new(1),
+            })
+            .collect()
+    })
 }
 
-/// Bumped (under the registry lock) by every erase. A pointer that a locked
-/// probe found registered at epoch E is still registered while the epoch is
-/// E, so a per-thread `(addr, epoch)` cache answers repeat validations
-/// without the mutex or a probe into the ever-growing set. That probe was
-/// ~half of the Windows stage2 full-CLI parse and HIR profiles (cdb samples,
-/// 2026-10-18). Starts at 1 so the zeroed cache never matches.
-static HEAP_FREE_EPOCH: AtomicU64 = AtomicU64::new(1);
+#[inline]
+fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+    let mixed = ((addr >> 3) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    &heap_registry_shards()[(mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)]
+}
+
+/// A pointer that a locked probe found registered at its shard's epoch E is
+/// still registered while that shard's epoch is E, so a per-thread
+/// `(addr, epoch)` cache answers repeat validations without the mutex or a
+/// probe into the ever-growing set. That probe was ~half of the Windows
+/// stage2 full-CLI parse and HIR profiles (cdb samples, 2026-10-18).
 const VALIDATED_SLOTS: usize = 1 << 12;
 
 thread_local! {
@@ -310,16 +338,14 @@ fn validated_remember(addr: usize, epoch: u64) {
     let _ = VALIDATED.try_with(|cache| cache[validated_slot(addr)].set((addr, epoch)));
 }
 
-#[inline]
-fn heap_free_epoch_bump() {
-    HEAP_FREE_EPOCH.fetch_add(1, Ordering::AcqRel);
-}
 
 #[inline]
 pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
-        let inserted = heap_allocation_registry()
+        let shard = heap_registry_shard(ptr as usize);
+        let epoch = shard.epoch.load(Ordering::Acquire);
+        let inserted = shard
+            .set
             .lock()
             .map(|mut registry| registry.insert(ptr as usize))
             .unwrap_or(false);
@@ -336,12 +362,14 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
 #[inline]
 pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let removed = heap_allocation_registry()
+        let shard = heap_registry_shard(ptr as usize);
+        let removed = shard
+            .set
             .lock()
             .map(|mut registry| {
             let removed = registry.remove(&(ptr as usize));
             if removed {
-                heap_free_epoch_bump();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
             }
             removed
         })
@@ -369,12 +397,14 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     if ptr.is_null() {
         return false;
     }
-    let removed = heap_allocation_registry()
+    let shard = heap_registry_shard(ptr as usize);
+    let removed = shard
+        .set
         .lock()
         .map(|mut registry| {
             let removed = registry.remove(&(ptr as usize));
             if removed {
-                heap_free_epoch_bump();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
             }
             removed
         })
@@ -391,11 +421,13 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
 #[inline]
 pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
     let addr = ptr as usize;
-    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    let shard = heap_registry_shard(addr);
+    let epoch = shard.epoch.load(Ordering::Acquire);
     if addr != 0 && validated_cached(addr, epoch) {
         return true;
     }
-    let present = heap_allocation_registry()
+    let present = shard
+        .set
         .lock()
         .map(|registry| registry.contains(&addr))
         .unwrap_or(false);
@@ -411,18 +443,20 @@ pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
 /// no-GC compiler temporaries stay registered for the process lifetime.
 #[no_mangle]
 pub extern "C" fn rt_heap_registry_count() -> i64 {
-    heap_allocation_registry()
-        .lock()
-        .map(|registry| registry.len() as i64)
-        .unwrap_or(0)
+    heap_registry_shards()
+        .iter()
+        .map(|shard| shard.set.lock().map(|registry| registry.len() as i64).unwrap_or(0))
+        .sum()
 }
 
 pub fn clear_heap_allocation_registry() {
-    if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
-        let _ = registry.lock().map(|mut registry| {
-            registry.clear();
-            heap_free_epoch_bump();
-        });
+    if let Some(shards) = HEAP_ALLOCATION_REGISTRY.get() {
+        for shard in shards.iter() {
+            let _ = shard.set.lock().map(|mut registry| {
+                registry.clear();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
+            });
+        }
     }
     HEAP_LIVE_BYTES.store(0, Ordering::Relaxed);
     HEAP_TOTAL_ALLOCS.store(0, Ordering::Relaxed);
@@ -538,7 +572,7 @@ pub fn with_typed_ptr<T, R>(
     if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
         return None;
     }
-    let registry = heap_allocation_registry().lock().ok()?;
+    let registry = heap_registry_shard(addr).set.lock().ok()?;
     if !registry.contains(&addr) {
         return None;
     }
@@ -560,16 +594,18 @@ pub(crate) fn registered_heap_type(val: RuntimeValue) -> Option<HeapObjectType> 
     if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
         return None;
     }
-    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    let shard = heap_registry_shard(addr);
+    let epoch = shard.epoch.load(Ordering::Acquire);
     if validated_cached(addr, epoch) {
-        // Seqlock re-check: no erase (so no free) happened around the read.
+        // Seqlock re-check: no erase of this address (so no free) happened
+        // around the read; erases in other shards cannot free it.
         let object_type = unsafe { std::ptr::read_volatile(&(*ptr).object_type) };
         std::sync::atomic::fence(Ordering::Acquire);
-        if HEAP_FREE_EPOCH.load(Ordering::Relaxed) == epoch {
+        if shard.epoch.load(Ordering::Relaxed) == epoch {
             return Some(object_type);
         }
     }
-    let registry = heap_allocation_registry().lock().ok()?;
+    let registry = shard.set.lock().ok()?;
     if !registry.contains(&addr) {
         return None;
     }

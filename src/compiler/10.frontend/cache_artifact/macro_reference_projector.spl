@@ -26,7 +26,7 @@ use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
     macro_def_id_canonical_v1, macro_def_key_v1, macro_expand_key_v1,
     macro_absence_witness_v1, macro_hash_v1, macro_use_identity_v1,
     macro_use_status_tag_v1, macro_reference_schema_v1,
-    package_macro_name_index_build_v1}
+    package_macro_name_index_build_v1, macro_effect_admitted_v1}
 
 pub struct MacroSourceDefV1:
     def: MacroDef
@@ -68,6 +68,13 @@ pub struct MacroModuleProjectionV1:
     use_table: MacroUseTableV1
     generated_public_names: [text]
     generated_public_surface_digest: text
+    diagnostics: [MacroDiagnosticV1]
+    uncacheable_def_ids: [text]
+
+pub struct MacroDiagnosticV1:
+    code: text
+    subject: text
+    message: text
 
 pub struct MacroProjectionDiffV1:
     changed_def_ids: [text]
@@ -122,6 +129,7 @@ class _KeyCtxV1:
     names: [text]
     keys: [text]
     visiting: [text]
+    cyclic: [text]
 
 fn _local_def_id(src: MacroModuleSourceV1, d: MacroSourceDefV1) -> MacroDefIdV1:
     MacroDefIdV1(package: src.package, module: src.module, namespace: d.namespace, binder: d.def.name)
@@ -185,6 +193,11 @@ fn _key_of_local(ctx: _KeyCtxV1, idx: i64) -> text:
     if known >= 0: return ctx.keys[known]
     val id = macro_def_id_canonical_v1(_local_def_id(ctx.src, d))
     if _contains(ctx.visiting, d.def.name):
+        # Every macro on the stack from the re-entered one onward is in the cycle.
+        var on_cycle = false
+        for v in ctx.visiting:
+            if v == d.def.name: on_cycle = true
+            if on_cycle and not _contains(ctx.cyclic, v): ctx.cyclic.push(v)
         return macro_hash_v1("macro-cycle/v1", [id])
     ctx.visiting.push(d.def.name)
     var reads: [text] = []
@@ -200,6 +213,7 @@ fn _key_of_local(ctx: _KeyCtxV1, idx: i64) -> text:
                 reads.push("absent:" + macro_absence_witness_v1(n, _scope_root(ctx.src, ctx.imported)))
     val root = macro_hash_v1("macro-nested-read/v1", _sorted_unique(reads))
     val key = macro_def_key_v1(_entry_without_keys(ctx.src, ctx.imported, d), root)
+    ctx.visiting.pop()
     ctx.names.push(d.def.name)
     ctx.keys.push(key)
     key
@@ -222,7 +236,8 @@ pub fn package_macro_name_index_v1(package: text,
 
 pub fn project_macro_module_v1(src: MacroModuleSourceV1,
         imported: [MacroModuleProjectionV1]) -> MacroModuleProjectionV1:
-    var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [])
+    var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [],
+        cyclic: [])
     # Definitions, sorted by canonical scoped id.
     var ids: [text] = []
     for d in src.defs:
@@ -236,13 +251,20 @@ pub fn project_macro_module_v1(src: MacroModuleSourceV1,
         entries.push(_entry_without_keys(src, imported, d))
         def_keys.push(MacroDefKeyEntryV1(def_id: sid, macro_name: d.def.name,
             key: _key_of_local(ctx, idx)))
+    val uncacheable = _uncacheable_names(src, imported, ctx)
+    var uncacheable_ids: [text] = []
+    for n in uncacheable:
+        uncacheable_ids.push(macro_def_id_canonical_v1(_local_def_id(src, src.defs[_local_index(src, n)])))
     # Uses, sorted by (source, region).
     val scope_root = _scope_root(src, imported)
     var use_ids: [text] = []
     var uses: [MacroUseV1] = []
     var generated: [text] = []
     for inv in src.invocations:
-        val u = _use_of(src, imported, ctx, inv, scope_root)
+        var u = _use_of(src, imported, ctx, inv, scope_root)
+        if u.has_resolved_def and (_contains(uncacheable_ids, u.resolved_def_id) or
+                _imported_uncacheable(imported, u.resolved_def_id)):
+            u.coverage = "conservative"
         use_ids.push(macro_use_identity_v1(u))
         uses.push(u)
         if macro_use_status_tag_v1(u.status) == "resolved":
@@ -260,7 +282,9 @@ pub fn project_macro_module_v1(src: MacroModuleSourceV1,
         use_table: MacroUseTableV1(schema: macro_reference_schema_v1(), module_id: module_id,
             uses: sorted_uses),
         generated_public_names: gen_names,
-        generated_public_surface_digest: macro_hash_v1("macro-generated-surface/v1", gen_names))
+        generated_public_surface_digest: macro_hash_v1("macro-generated-surface/v1", gen_names),
+        diagnostics: _module_diagnostics(src, ctx, sorted_uses, imported),
+        uncacheable_def_ids: _sorted_unique(uncacheable_ids))
 
 fn _members_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], name: text) -> [text]:
     val li = _local_index(src, name)
@@ -394,3 +418,89 @@ pub fn macro_forward_users_of_v1(projections: [MacroModuleProjectionV1], package
             if u.has_resolved_def and _contains(closure, u.resolved_def_id):
                 users.push(macro_use_identity_v1(u))
     _sorted_unique(users)
+
+# ---------------------------------------------------------------------------
+# M-04: cycle, ambient-effect and hygiene diagnostics. A diagnosed macro is
+# UNCACHEABLE: its uses keep coverage "conservative", which
+# macro_use_cacheable_v1 refuses, so no expansion-cache hit can stand in for
+# a reference expansion.
+# ---------------------------------------------------------------------------
+
+fn _has_ambient_effect(d: MacroSourceDefV1) -> bool:
+    for e in d.declared_effects:
+        if not macro_effect_admitted_v1(e): return true
+    false
+
+fn _imported_uncacheable(imported: [MacroModuleProjectionV1], def_id: text) -> bool:
+    for p in imported:
+        if _contains(p.uncacheable_def_ids, def_id): return true
+    false
+
+# Cyclic or ambient-effect macros, plus everything that (transitively) expands
+# one of them, locally or through an uncacheable imported definition.
+fn _uncacheable_names(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1],
+        ctx: _KeyCtxV1) -> [text]:
+    var out: [text] = []
+    for d in src.defs:
+        if _contains(ctx.cyclic, d.def.name) or _has_ambient_effect(d):
+            out.push(d.def.name)
+    var grew = true
+    while grew:
+        grew = false
+        for d in src.defs:
+            if _contains(out, d.def.name): continue
+            for n in d.nested_macro_names:
+                var tainted = _contains(out, n)
+                if not tainted and _local_index(src, n) < 0:
+                    val cands = _imported_candidates(imported, n)
+                    if cands.len() == 1: tainted = _imported_uncacheable(imported, cands[0].def_id)
+                if tainted:
+                    out.push(d.def.name)
+                    grew = true
+                    break
+    _sorted_unique(out)
+
+fn _module_diagnostics(src: MacroModuleSourceV1, ctx: _KeyCtxV1, uses: [MacroUseV1],
+        imported: [MacroModuleProjectionV1]) -> [MacroDiagnosticV1]:
+    var keys: [text] = []
+    var diags: [MacroDiagnosticV1] = []
+    for name in _sorted_unique(ctx.cyclic):
+        keys.push("E-MACRO-CYCLE|" + name)
+        diags.push(MacroDiagnosticV1(code: "E-MACRO-CYCLE", subject: name,
+            message: "macro '{name}' expands itself through a nested-macro cycle"))
+    for d in src.defs:
+        for e in d.declared_effects:
+            if not macro_effect_admitted_v1(e):
+                keys.push("E-MACRO-AMBIENT-EFFECT|" + d.def.name + "|" + e)
+                diags.push(MacroDiagnosticV1(code: "E-MACRO-AMBIENT-EFFECT", subject: d.def.name,
+                    message: "macro '{d.def.name}' reads ambient input '{e}'; expansion is not cacheable"))
+    # Two expansions in one module introducing the same public name collide:
+    # contract intros are unhygienic by design (they are the public surface).
+    var seen: [text] = []
+    var owner: [text] = []
+    for u in uses:
+        if not u.has_resolved_def: continue
+        for n in _members_of(src, imported, u.requested_scoped_name):
+            val i = _index_of(seen, n)
+            if i < 0:
+                seen.push(n)
+                owner.push(macro_use_identity_v1(u))
+            else:
+                keys.push("E-MACRO-INTRO-COLLISION|" + n + "|" + macro_use_identity_v1(u))
+                diags.push(MacroDiagnosticV1(code: "E-MACRO-INTRO-COLLISION", subject: n,
+                    message: "'{n}' introduced by {owner[i]} and {macro_use_identity_v1(u)}"))
+    var sorted: [MacroDiagnosticV1] = []
+    for k in _sorted_unique(keys):
+        sorted.push(diags[_index_of(keys, k)])
+    sorted
+
+# Collisions between macro-introduced public names and the module's own
+# declarations (e.g. ParserModule symbol names).
+pub fn macro_symbol_collisions_v1(p: MacroModuleProjectionV1,
+        module_symbols: [text]) -> [MacroDiagnosticV1]:
+    var out: [MacroDiagnosticV1] = []
+    for n in p.generated_public_names:
+        if _contains(module_symbols, n):
+            out.push(MacroDiagnosticV1(code: "E-MACRO-INTRO-SHADOWS", subject: n,
+                message: "macro-introduced '{n}' shadows a declaration of module {p.module}"))
+    out

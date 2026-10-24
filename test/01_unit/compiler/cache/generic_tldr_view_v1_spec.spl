@@ -1,0 +1,195 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Concrete generic TLDR view (plan slice P3, acceptance G-01, laws T1/T5)
+
+A generic declaration has ONE symbolic template TLDR section entry; a
+reference `Pair<i64, f64>` acquires an immutable `ConcreteTldrAstViewV1`
+whose fields are ordinary closed types. Repeated identical references share
+one view (single-flight on the canonical `ConcreteTldrKey`); reversed
+arguments and a shadowed `Box<T>` in another module get distinct keys.
+
+Interpreter-lane evidence only: the native consumer/object path is UNRUN.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.mono.model.generic_subst_model.*
+use compiler.driver.cache.generic_tldr_view_table_v1.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_view_sections_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{semantic_query_read_manifest_valid_v1,
+    semantic_query_kind_known_v1}
+
+fn field_in(name: text, type_text: text) -> GenericFieldInputV1:
+    GenericFieldInputV1(name: name, type_text: type_text)
+
+fn decl(module_path: text, name: text, params: [text], fields: [GenericFieldInputV1]) -> GenericDeclInputV1:
+    var kinds: [text] = []
+    for p in params:
+        kinds = kinds.push(GENERIC_PARAM_KIND_TYPE)
+    GenericDeclInputV1(module_path: module_path, name: name, params: params,
+        param_kinds: kinds, fields: fields, visibility_root: "vis:pub",
+        active_guard_root: "guard:none", source_digest: "src:" + module_path + "." + name)
+
+fn pair_decl() -> GenericDeclInputV1:
+    decl("pkg_a", "Pair", ["First", "Second"],
+        [field_in("first", "First"), field_in("second", "Second")])
+
+fn box_decl(module_path: text) -> GenericDeclInputV1:
+    decl(module_path, "Box", ["T"], [field_in("value", "T"), field_in("count", "i64")])
+
+fn section_of(decls: [GenericDeclInputV1]) -> GenericTemplateSectionV1:
+    var entries: [GenericTemplateEntryV1] = []
+    for d in decls:
+        val r = project_generic_template_v1(d)
+        entries = entries.push(r.unwrap())
+    build_generic_template_section_v1(entries)
+
+fn std_section() -> GenericTemplateSectionV1:
+    section_of([pair_decl(), box_decl("pkg_a"), box_decl("pkg_b")])
+
+fn i64t() -> MType:
+    mt_con("i64")
+
+fn f64t() -> MType:
+    mt_con("f64")
+
+fn acquire(table: GenericTldrViewTableV1, symbol: text, args: [MType]) -> GenericConcreteAcquireV1:
+    acquire_concrete_tldr(table, std_section(), symbol, args, "snap:1", "profile:default")
+
+describe "generic TLDR view: G-01 Pair<i64,f64>":
+    it "projects one symbolic template with binder-indexed parameters":
+        val sym = acquire_symbolic_tldr(std_section(), "pkg_a.Pair")
+        expect(sym.found).to_equal(true)
+        expect(sym.entry.params.len()).to_equal(2)
+        expect(sym.entry.fields[0].type_key).to_equal(mt_key_type(mt_var("pkg_a.Pair#0")))
+
+    it "acquires exact concrete field types":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Pair", [i64t(), f64t()])
+        expect(r.view.closure_status).to_equal(GENERIC_CLOSURE_CONCRETE)
+        expect(mt_render(concrete_tldr_field_type(r.view, 0))).to_equal("i64")
+        expect(mt_render(concrete_tldr_field_type(r.view, 1))).to_equal("f64")
+        expect(concrete_tldr_field_name(r.view, 1)).to_equal("second")
+
+    it "gives reversed positional arguments a distinct key (T5)":
+        val t0 = generic_tldr_view_table_new()
+        val a = acquire(t0, "pkg_a.Pair", [i64t(), f64t()])
+        val b = acquire(t0, "pkg_a.Pair", [f64t(), i64t()])
+        expect(a.view.semantic_key == b.view.semantic_key).to_equal(false)
+        expect(mt_render(concrete_tldr_field_type(b.view, 0))).to_equal("f64")
+        expect(b.joined).to_equal(false)
+        expect(generic_tldr_view_table_size(t0)).to_equal(2)
+
+    it "shares one view for a repeated identical import (single-flight)":
+        val t0 = generic_tldr_view_table_new()
+        val a = acquire(t0, "pkg_a.Pair", [i64t(), f64t()])
+        val b = acquire(t0, "pkg_a.Pair", [i64t(), f64t()])
+        expect(a.joined).to_equal(false)
+        expect(b.joined).to_equal(true)
+        expect(b.view.semantic_key).to_equal(a.view.semantic_key)
+        expect(b.view.view_id).to_equal(a.view.view_id)
+        expect(generic_tldr_view_table_size(t0)).to_equal(1)
+
+    it "keeps a shadowed Box<T> in another module distinct":
+        val t0 = generic_tldr_view_table_new()
+        val a = acquire(t0, "pkg_a.Box", [i64t()])
+        val b = acquire(t0, "pkg_b.Box", [i64t()])
+        expect(a.view.template_id == b.view.template_id).to_equal(false)
+        expect(a.view.semantic_key == b.view.semantic_key).to_equal(false)
+        expect(b.joined).to_equal(false)
+
+describe "generic TLDR view: T1 closure and fail-closed results":
+    it "has zero free variables in every field of a Concrete view":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Pair",
+            [mt_app(MT_ARRAY, [i64t()]), mt_app(MT_OPTIONAL, [f64t()])])
+        expect(r.view.closure_status).to_equal(GENERIC_CLOSURE_CONCRETE)
+        var i = 0
+        while i < concrete_tldr_field_count(r.view):
+            expect(mt_free_vars(concrete_tldr_field_type(r.view, i)).len()).to_equal(0)
+            i = i + 1
+
+    it "shares non-generic template field nodes instead of overriding them":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Box", [f64t()])
+        expect(r.view.overrides.len()).to_equal(1)
+        expect(mt_render(concrete_tldr_field_type(r.view, 1))).to_equal("i64")
+
+    it "returns Partial, never Concrete, for an open argument":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Pair", [mt_var("U"), f64t()])
+        expect(r.view.closure_status).to_equal(GENERIC_CLOSURE_PARTIAL)
+
+    it "returns Unresolved for missing evidence, arity mismatch or unknown symbol":
+        val t0 = generic_tldr_view_table_new()
+        expect(acquire(t0, "pkg_a.Pair", [mt_unknown(), f64t()]).view.closure_status).to_equal(GENERIC_CLOSURE_UNRESOLVED)
+        expect(acquire(t0, "pkg_a.Pair", [i64t()]).view.closure_status).to_equal(GENERIC_CLOSURE_UNRESOLVED)
+        expect(acquire(t0, "pkg_z.Nope", [i64t()]).view.closure_status).to_equal(GENERIC_CLOSURE_UNRESOLVED)
+
+    it "rejects runaway nesting with the instantiation-depth guard":
+        var deep = i64t()
+        var i = 0
+        while i < GENERIC_INSTANTIATION_DEPTH_LIMIT + 1:
+            deep = mt_app("Named:pkg_a.Box", [deep])
+            i = i + 1
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Box", [deep])
+        expect(r.view.closure_status).to_equal(GENERIC_CLOSURE_UNRESOLVED)
+        expect(r.view.error).to_equal("instantiation-depth-exceeded")
+
+describe "generic TLDR view: indexed section codec":
+    it "round-trips the section and verifies its digest":
+        val s = std_section()
+        val bytes = generic_template_section_encode_v1(s)
+        val d = generic_template_section_decode_v1(bytes)
+        expect(d.ok).to_equal(true)
+        expect(d.section.digest).to_equal(s.digest)
+        expect(generic_template_section_lookup_v1(d.section, "pkg_b.Box")).to_be_greater_than(-1)
+
+    it "rejects a corrupted section":
+        val bytes = generic_template_section_encode_v1(std_section())
+        val bad = bytes.replace("pkg_b", "pkg_c")
+        expect(generic_template_section_decode_v1(bad).ok).to_equal(false)
+
+    it "is alpha-invariant: renaming binders keeps the template digest (T4)":
+        val a = project_generic_template_v1(pair_decl()).unwrap()
+        val b = project_generic_template_v1(decl("pkg_a", "Pair", ["A", "B"],
+            [field_in("first", "A"), field_in("second", "B")])).unwrap()
+        expect(generic_template_id_v1(a)).to_equal(generic_template_id_v1(b))
+
+val PAIR_SRC: text = "pub struct Pair<First, Second>:\n    first: First\n    second: Second\n\npub struct Point:\n    x: i64\n"
+
+fn produced_section() -> GenericTemplateSectionV1:
+    val parsed = parse_full_frontend(PAIR_SRC, "pkg_a.spl", "pkg_a", Logger(level: 0))
+    val (sections, refusal) = module_tldr_companion_view_sections_v1(parsed, "pkg_a.spl", PAIR_SRC, "pkg_a")
+    var body = ""
+    for s in sections:
+        if s.starts_with("generic-template|"):
+            body = s.substring(17)
+    generic_template_section_decode_v1(body).section
+
+describe "generic TLDR view: produced by the module TLDR companion":
+    it "emits one verified generic-template section for the generic struct only":
+        val section = produced_section()
+        expect(section.entries.len()).to_equal(1)
+        expect(section.entries[0].symbol_id).to_equal("pkg_a.Pair")
+
+    it "serves Pair<i64,f64> to two importers as one shared view":
+        val section = produced_section()
+        val t0 = generic_tldr_view_table_new()
+        val a = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default")
+        val b = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default")
+        expect(mt_render(concrete_tldr_field_type(a.view, 0))).to_equal("i64")
+        expect(mt_render(concrete_tldr_field_type(a.view, 1))).to_equal("f64")
+        expect(b.joined).to_equal(true)
+        expect(b.view.view_id).to_equal(a.view.view_id)
+
+    it "records a valid tldr.concrete forward read for the .rr projection":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Pair", [i64t(), f64t()])
+        val m = concrete_tldr_read_manifest_v1(r.view, "profile:default")
+        expect(semantic_query_kind_known_v1(m.consumer.kind)).to_equal(true)
+        expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
+        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(r.view.template_id)

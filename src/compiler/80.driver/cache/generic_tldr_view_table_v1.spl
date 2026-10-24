@@ -1,0 +1,195 @@
+# Concrete generic TLDR view acquisition boundary (plan P3).
+#
+#   acquire_symbolic_tldr(section, symbol)        -> the single template entry
+#   acquire_concrete_tldr(table, section, symbol, args, snapshot_pin, profile)
+#                                                 -> immutable ConcreteTldrAstViewV1
+#
+# No locks and no leases. Views are immutable values published set-once into
+# the table under their canonical `ConcreteTldrKey`; production of a key is
+# deduplicated by the cache daemon's single-flight table
+# (daemon/cache_single_flight_v1.spl). The in-memory index is the process-
+# local short id from id_scope_v1 (xxh3-128 truncated, bloom-guarded); every
+# hit is verified against the full canonical key, and the short id is never
+# persisted.
+#
+# Closure: a `Concrete` view has no free variable in any field; an open
+# argument yields `Partial` (IDE-only, never codegen input); missing evidence,
+# arity/kind mismatch, an unknown symbol, a malformed key or the
+# instantiation-depth guard yields `Unresolved` with the reason in `error`.
+# Unresolved results are not published.
+#
+# Named gaps: trait bounds / coherence are not checked yet (the constraint
+# root is a fixed schema token), and no HIR/MIR consumer reads views yet.
+
+use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
+    GenericTemplateSectionV1, GenericTemplateFieldV1, GenericParamV1,
+    ConcreteTldrAstViewV1, ConcreteTldrOverrideV1, generic_template_id_v1,
+    generic_args_id_v1, concrete_tldr_key_v1, generic_template_section_lookup_v1,
+    generic_template_summary_digest_v1,
+    concrete_tldr_field_type_key, GENERIC_PARAM_KIND_CONST,
+    GENERIC_CLOSURE_CONCRETE, GENERIC_CLOSURE_PARTIAL, GENERIC_CLOSURE_UNRESOLVED,
+    GENERIC_INSTANTIATION_DEPTH_LIMIT}
+use compiler.mono.model.generic_subst_model.{MType, mt_key_type, mt_is_unknown,
+    mt_is_closed, mt_depth, mt_unknown, mt_from_key, mt_instantiate_key,
+    MI_STATUS_CLOSED, MI_STATUS_OPEN, MI_STATUS_DEPTH}
+use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticQueryKeyV1,
+    SemanticQueryReadV1, SemanticQueryReadManifestV1, SemanticCoverageV1}
+
+pub val GENERIC_TLDR_CONSTRAINT_ROOT_V1 = "constraints:unchecked/v1"
+val _FLIGHT_KIND_V1 = "tldr.concrete"
+
+pub struct GenericSymbolicAcquireV1:
+    found: bool
+    entry: GenericTemplateEntryV1
+
+pub struct GenericConcreteAcquireV1:
+    view: ConcreteTldrAstViewV1
+    joined: bool   # true when an already-published view was shared
+
+class GenericTldrViewTableV1:
+    ids: IdScopeV1
+    flights: CacheSingleFlightV1
+    views: Dict<text, ConcreteTldrAstViewV1>
+    next_request: i64
+
+    static fn create() -> GenericTldrViewTableV1:
+        GenericTldrViewTableV1(ids: id_scope_global_v1(), flights: CacheSingleFlightV1.create(),
+            views: {}, next_request: 1)
+
+    fn size() -> i64:
+        self.views.len()
+
+    # Published view for `semantic_key`, verified against the FULL key.
+    me lookup(semantic_key: text) -> [ConcreteTldrAstViewV1]:
+        val id = self.ids.id_of(semantic_key)
+        if self.views.contains_key(id) and self.views[id].semantic_key == semantic_key:
+            return [self.views[id]]
+        []
+
+    # Single-flight production: the leader builds and publishes set-once;
+    # a request that joins an in-flight key reads the leader's publication.
+    me produce(semantic_key: text, build: ConcreteTldrAstViewV1) -> GenericConcreteAcquireV1:
+        val flight_key = cache_single_flight_key_v1(_FLIGHT_KIND_V1, semantic_key)
+        val request_id = "req-{self.next_request}"
+        self.next_request = self.next_request + 1
+        val (role, flight) = self.flights.join(flight_key, request_id)
+        if role != SINGLE_FLIGHT_LEADER_V1:
+            val published = self.lookup(semantic_key)
+            if published.len() == 1:
+                return GenericConcreteAcquireV1(view: published[0], joined: true)
+            return GenericConcreteAcquireV1(view: build, joined: false)
+        val id = self.ids.id_of(semantic_key)
+        var view = build
+        view.view_id = id
+        if not self.views.contains_key(id):
+            self.views[id] = view
+        self.flights.complete(flight_key, request_id, text_to_bytes(id))
+        val _drain = self.flights.future(flight)
+        GenericConcreteAcquireV1(view: self.views[id], joined: false)
+
+pub fn generic_tldr_view_table_new() -> GenericTldrViewTableV1:
+    GenericTldrViewTableV1.create()
+
+pub fn generic_tldr_view_table_size(table: GenericTldrViewTableV1) -> i64:
+    table.size()
+
+fn _empty_entry_v1() -> GenericTemplateEntryV1:
+    GenericTemplateEntryV1(symbol_id: "", source_digest: "", visibility_root: "",
+        active_guard_root: "", language_schema: "", params: [], fields: [])
+
+pub fn acquire_symbolic_tldr(section: GenericTemplateSectionV1, symbol_id: text) -> GenericSymbolicAcquireV1:
+    val at = generic_template_section_lookup_v1(section, symbol_id)
+    if at < 0:
+        return GenericSymbolicAcquireV1(found: false, entry: _empty_entry_v1())
+    GenericSymbolicAcquireV1(found: true, entry: section.entries[at])
+
+fn _unresolved_v1(entry: GenericTemplateEntryV1, snapshot_pin: text, error: text) -> GenericConcreteAcquireV1:
+    GenericConcreteAcquireV1(view: ConcreteTldrAstViewV1(view_id: "", semantic_key: "",
+        template_id: "", args_id: "", arg_keys: [], snapshot_pin: snapshot_pin, template: entry,
+        overrides: [], closure_status: GENERIC_CLOSURE_UNRESOLVED, error: error), joined: false)
+
+pub fn concrete_tldr_field_type(view: ConcreteTldrAstViewV1, index: i64) -> MType:
+    val parsed = mt_from_key(concrete_tldr_field_type_key(view, index))
+    if parsed.ok: parsed.t else: mt_unknown()
+
+pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemplateSectionV1,
+        symbol_id: text, args: [MType], snapshot_pin: text,
+        profile_digest: text) -> GenericConcreteAcquireV1:
+    val sym = acquire_symbolic_tldr(section, symbol_id)
+    if not sym.found:
+        return _unresolved_v1(sym.entry, snapshot_pin, "unknown-symbol")
+    val entry = sym.entry
+    if args.len() != entry.params.len():
+        return _unresolved_v1(entry, snapshot_pin, "arity-mismatch")
+    var kinds: [text] = []
+    var arg_keys: [text] = []
+    var binders: [text] = []
+    var open = false
+    var i = 0
+    while i < args.len():
+        val a: MType = args[i]
+        val p: GenericParamV1 = entry.params[i]
+        if mt_is_unknown(a):
+            return _unresolved_v1(entry, snapshot_pin, "missing-evidence")
+        if mt_depth(a) > GENERIC_INSTANTIATION_DEPTH_LIMIT:
+            return _unresolved_v1(entry, snapshot_pin, "instantiation-depth-exceeded")
+        if p.kind == GENERIC_PARAM_KIND_CONST and mt_depth(a) != 0:
+            return _unresolved_v1(entry, snapshot_pin, "const-kind-mismatch")
+        if not mt_is_closed(a):
+            open = true
+        kinds = kinds.push(p.kind)
+        arg_keys = arg_keys.push(mt_key_type(a))
+        binders = binders.push(p.binder_id)
+        i = i + 1
+    val template_id = generic_template_id_v1(entry)
+    val args_id = generic_args_id_v1(kinds, arg_keys)
+    val semantic_key = concrete_tldr_key_v1(template_id, args_id,
+        GENERIC_TLDR_CONSTRAINT_ROOT_V1, profile_digest)
+    val published = table.lookup(semantic_key)
+    if published.len() == 1:
+        return GenericConcreteAcquireV1(view: published[0], joined: true)
+    var overrides: [ConcreteTldrOverrideV1] = []
+    var f = 0
+    while f < entry.fields.len():
+        val field: GenericTemplateFieldV1 = entry.fields[f]
+        if field.generic:
+            val inst = mt_instantiate_key(field.type_key, binders, args, GENERIC_INSTANTIATION_DEPTH_LIMIT)
+            if inst.status == MI_STATUS_DEPTH:
+                return _unresolved_v1(entry, snapshot_pin, "instantiation-depth-exceeded")
+            if inst.status != MI_STATUS_CLOSED and inst.status != MI_STATUS_OPEN:
+                return _unresolved_v1(entry, snapshot_pin, "malformed-template-key")
+            if inst.status == MI_STATUS_OPEN:
+                open = true
+            overrides = overrides.push(ConcreteTldrOverrideV1(field_index: f, type_key: mt_key_type(inst.t)))
+        f = f + 1
+    val status = if open: GENERIC_CLOSURE_PARTIAL else: GENERIC_CLOSURE_CONCRETE
+    table.produce(semantic_key, ConcreteTldrAstViewV1(view_id: "", semantic_key: semantic_key,
+        template_id: template_id, args_id: args_id, arg_keys: arg_keys, snapshot_pin: snapshot_pin, template: entry,
+        overrides: overrides, closure_status: status, error: ""))
+
+# Forward read record (P2 schema, SQR1): the concrete view `tldr.concrete`
+# consumed the template `tldr.symbolic` summary. `.rr` maps this kind to the
+# `generic-specialization` family; it is never an input of the view's key.
+pub fn concrete_tldr_read_manifest_v1(view: ConcreteTldrAstViewV1,
+        profile_digest: text) -> SemanticQueryReadManifestV1:
+    val profile = sha256_text(profile_digest)
+    val symbol = view.template.symbol_id
+    val consumer = SemanticQueryKeyV1(kind: "tldr.concrete", stable_entity_id: symbol,
+        semantic_profile_digest: profile, parameter_digest: view.args_id)
+    val producer = SemanticQueryKeyV1(kind: "tldr.symbolic", stable_entity_id: symbol,
+        semantic_profile_digest: profile, parameter_digest: sha256_text("tldr.symbolic/no-arguments/v1"))
+    val read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "template-summary", ordinal: 0, consumed_fingerprint: view.template_id,
+        witness_digest: generic_template_summary_digest_v1(view.template),
+        partition_id: symbol, completeness: SemanticCoverageV1.Complete)
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [read])
+
+export GENERIC_TLDR_CONSTRAINT_ROOT_V1, GenericSymbolicAcquireV1, GenericConcreteAcquireV1
+export GenericTldrViewTableV1, generic_tldr_view_table_new, generic_tldr_view_table_size
+export acquire_symbolic_tldr, acquire_concrete_tldr, concrete_tldr_field_type
+export concrete_tldr_read_manifest_v1

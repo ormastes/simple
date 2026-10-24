@@ -1,0 +1,37 @@
+# file_write_bytes must write each element as its own byte value.
+#
+# Bug (windows-gnu self-hosted stage2): the C runtime's
+# rt_file_write_bytes_array masked the TAGGED word returned by rt_array_get
+# for boxed-element arrays (value << 3 | tag), so 0x53 was written as 0x98.
+# This corrupted any binary writer (e.g. the packed binary AST cache).
+
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes, file_delete}
+
+describe "file_write_bytes round trip":
+    it "round-trips all 256 byte values unchanged":
+        val path = "build/file_write_bytes_roundtrip_all256.bin"
+        var data: [u8] = []
+        var i = 0
+        while i < 256:
+            data.push(i as u8)
+            i = i + 1
+        expect(file_write_bytes(path, data)).to_equal(true)
+        val back = file_read_bytes(path)
+        expect(back.len()).to_equal(256)
+        var bad = 0
+        var j = 0
+        while j < 256:
+            if back[j] != j:
+                bad = bad + 1
+            j = j + 1
+        expect(bad).to_equal(0)
+        file_delete(path)
+
+    it "writes 0x53 as 0x53":
+        val path = "build/file_write_bytes_roundtrip_0x53.bin"
+        var data: [u8] = []
+        data.push(0x53)
+        expect(file_write_bytes(path, data)).to_equal(true)
+        val back = file_read_bytes(path)
+        expect(back[0]).to_equal(0x53)
+        file_delete(path)
