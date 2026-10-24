@@ -69,3 +69,23 @@ five-root API branch performs the corresponding admission itself. Normal
 six-root proof still enters the production focused path; no adapter, provider
 ABI, root or native oracle is replaced. Native verification of this repair is
 pending the next frozen proof; proof4 remains a failure.
+
+## Proof5 and cycle6 partial results
+
+Proof5's immutable harness compiled and ran the actual six-root case, printing
+`six-root-result=24681357`. Cycle6 reused that exact harness and unchanged
+source/runtime inputs. Missing-sixth and seventh-root controls both returned 1
+with their specific diagnostics and no artifacts. Their receipts remain local
+bootstrap diagnostics, not phase admission.
+
+The direct legacy five-root compile failed. Both files loaded, but ordinary
+parsing logged an invalid-array diagnostic and HIR lacked the helper's module
+surface. Read-only review found a separate entry-authority difference: focused
+dispatch publishes the entry, whereas the direct fixed API only places it in
+the input slots and does not publish compiler-owned entry authority. The
+existing public API does not document an ambient entry-environment prerequisite.
+This does not yet prove the invalid-array warning's cause. Do not add fixture
+ambient state to disguise the compatibility failure. No combined pass receipt
+was emitted; legacy compatibility remains a merge blocker. The six-cycle
+repository limit was reached, and further fix/verify cycles await an explicit
+user exception.
