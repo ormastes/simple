@@ -1084,45 +1084,12 @@ impl CompilerDriver:
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
         # lowering can see, and the key stays sound.
-        # Diagnostic-only decomposition of the original left-to-right cache gate.
-        # Each original predicate and digest operation runs at most once, and only
-        # when every preceding predicate passed.
-        val hir_identity_trace = (env_get_opt("SIMPLE_HIR_IDENTITY_DIAGNOSTIC") ?? "") == "1"
-        var hir_tldr_import_count: i64 = -1
-        var hir_tldr_gate = not self.ctx.tldr_entry_only
-        if not hir_tldr_gate:
-            hir_tldr_import_count = self.ctx.tldr_imports.len()
-            hir_tldr_gate = hir_tldr_import_count > 0
-        var hir_explicit_policy_checked = false
-        var hir_explicit_policy = false
-        if hir_tldr_gate:
-            hir_explicit_policy_checked = true
-            hir_explicit_policy = driver_hir_explicit_semantic_policy(self.ctx)
-        var hir_cache_checked = false
-        var hir_cache_enabled_value = false
-        if hir_tldr_gate and not hir_explicit_policy:
-            hir_cache_checked = true
-            hir_cache_enabled_value = hir_cache_enabled()
-        var hir_base_digest_len: i64 = -1
-        var hir_combined_digest_len: i64 = -1
-        var hir_closure_digest: text = ""
-        if hir_tldr_gate and hir_explicit_policy_checked and not hir_explicit_policy and
-                hir_cache_checked and hir_cache_enabled_value:
-            val hir_base_digest: text = hir_cache_closure_digest(surfaces)
-            if hir_identity_trace: hir_base_digest_len = hir_base_digest.len()
-            hir_closure_digest = hir_tldr_cache_closure_digest_v1(
-                hir_base_digest, self.ctx.tldr_imports)
-            if hir_identity_trace: hir_combined_digest_len = hir_closure_digest.len()
-        val hir_shard_mode_active = hir_shard_active()
-        val hir_shard_mode: bool = if hir_shard_mode_active:
-            hir_closure_digest != ""
+        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(surfaces), self.ctx.tldr_imports)
         else:
-            false
-        val hir_shards_requested = hir_shard_active()
-        if hir_shards_requested and not hir_shard_mode:
-            if hir_identity_trace:
-                val hir_closure_nonempty = hir_closure_digest != ""
-                eprint("[hir-id] failure route=streaming tldr_entry_only={self.ctx.tldr_entry_only} tldr_import_count={hir_tldr_import_count} tldr_gate={hir_tldr_gate} explicit_checked={hir_explicit_policy_checked} explicit_policy={hir_explicit_policy} cache_checked={hir_cache_checked} cache_enabled={hir_cache_enabled_value} base_digest_len={hir_base_digest_len} combined_digest_len={hir_combined_digest_len} shard_mode_active={hir_shard_mode_active} shard_requested={hir_shards_requested} closure_nonempty={hir_closure_nonempty}")
+            ""
+        val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
             return false
@@ -1818,49 +1785,17 @@ impl CompilerDriver:
             bootstrap_hir_modules_reset()
         # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
         # per build; a hit below replaces lowering for that module.
-        # Diagnostic-only decomposition; predicate and digest calls retain the
-        # original short-circuit order and occur at most once.
-        val hir_identity_trace = (env_get_opt("SIMPLE_HIR_IDENTITY_DIAGNOSTIC") ?? "") == "1"
-        var hir_tldr_import_count: i64 = -1
-        var hir_tldr_gate = not self.ctx.tldr_entry_only
-        if not hir_tldr_gate:
-            hir_tldr_import_count = self.ctx.tldr_imports.len()
-            hir_tldr_gate = hir_tldr_import_count > 0
-        var hir_explicit_policy_checked = false
-        var hir_explicit_policy = false
-        if hir_tldr_gate:
-            hir_explicit_policy_checked = true
-            hir_explicit_policy = driver_hir_explicit_semantic_policy(self.ctx)
-        var hir_cache_checked = false
-        var hir_cache_enabled_value = false
-        if hir_tldr_gate and not hir_explicit_policy:
-            hir_cache_checked = true
-            hir_cache_enabled_value = hir_cache_enabled()
-        var hir_base_digest_len: i64 = -1
-        var hir_combined_digest_len: i64 = -1
-        var hir_closure_digest: text = ""
-        if hir_tldr_gate and hir_explicit_policy_checked and not hir_explicit_policy and
-                hir_cache_checked and hir_cache_enabled_value:
-            val hir_base_digest: text = hir_cache_closure_digest(retained_module_surfaces)
-            if hir_identity_trace: hir_base_digest_len = hir_base_digest.len()
-            hir_closure_digest = hir_tldr_cache_closure_digest_v1(
-                hir_base_digest, self.ctx.tldr_imports)
-            if hir_identity_trace: hir_combined_digest_len = hir_closure_digest.len()
+        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(retained_module_surfaces), self.ctx.tldr_imports)
+        else:
+            ""
         # HIR shard child (SIMPLE_HIR_SHARD, see driver_hir_cache.spl): visit
         # the sources in dependency-LEVEL order, lower only what this shard
         # claims and is not already cached, store, and exit after the loop.
         # The sequential build keeps source order; the set of entries produced
         # is the same either way, so the real build's output cannot change.
-        val hir_shard_mode_active = hir_shard_active()
-        val hir_shard_mode: bool = if hir_shard_mode_active:
-            hir_closure_digest != ""
-        else:
-            false
-        val hir_shards_requested = hir_shard_active()
-        if hir_shards_requested and not hir_shard_mode:
-            if hir_identity_trace:
-                val hir_closure_nonempty = hir_closure_digest != ""
-                eprint("[hir-id] failure route=retained tldr_entry_only={self.ctx.tldr_entry_only} tldr_import_count={hir_tldr_import_count} tldr_gate={hir_tldr_gate} explicit_checked={hir_explicit_policy_checked} explicit_policy={hir_explicit_policy} cache_checked={hir_cache_checked} cache_enabled={hir_cache_enabled_value} base_digest_len={hir_base_digest_len} combined_digest_len={hir_combined_digest_len} shard_mode_active={hir_shard_mode_active} shard_requested={hir_shards_requested} closure_nonempty={hir_closure_nonempty}")
+        val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        if hir_shard_active() and not hir_shard_mode:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
             return false
