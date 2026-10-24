@@ -136,13 +136,16 @@ pub fn native_mir_shard_claim_v1(queue: text, module_name: text, key: text) -> i
 
 # Publish one claimed module's PASS: sidecar first, terminal last, so a PASS
 # terminal always has its link inputs.
+# `capsule_identity` is the native capsule identity of the published object (or
+# "" when the worker captured no cold-HIR receipts); the link child replays it
+# into the cold-HIR receipt maps so persistence runs once, on the coordinator.
 pub fn native_mir_shard_publish_pass_v1(queue: text, module_name: text,
-        object_path: text, functions: i64, statics: i64) -> bool:
-    if module_name == "" or object_path.contains("\n"):
+        object_path: text, functions: i64, statics: i64, capsule_identity: text) -> bool:
+    if module_name == "" or object_path.contains("\n") or capsule_identity.contains("\n"):
         return false
     val sidecar = native_mir_shard_record_base_v1(queue, module_name) + ".object"
     val temporary = "{sidecar}.{getpid()}.tmp"
-    if not file_write(temporary, "{object_path}\n{functions}\n{statics}\n") or
+    if not file_write(temporary, "{object_path}\n{functions}\n{statics}\n{capsule_identity}\n") or
             not file_rename(temporary, sidecar):
         return false
     hir_shard_recovery_terminal(queue, native_mir_shard_owner_v1(), module_name,
@@ -153,6 +156,10 @@ pub class NativeMirShardLinkInputsV1:
     # Index-aligned: the module that emitted each object.
     object_modules: [text]
     object_files: [text]
+    # Index-aligned with object_modules; "" when the worker recorded none.
+    capsule_identities: [text]
+    # Modules that published no object (export facades / parsed-objectless).
+    objectless_modules: [text]
     functions: i64
     statics: i64
     objectless: i64
@@ -170,7 +177,7 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
     if inventory.len() < 2 or inventory[0] != identity:
         return Err("MIR shard ledger inventory does not match this build's sources")
     var inputs = NativeMirShardLinkInputsV1(modules: [], object_modules: [], object_files: [],
-        functions: 0, statics: 0, objectless: 0)
+        capsule_identities: [], objectless_modules: [], functions: 0, statics: 0, objectless: 0)
     var index = 1
     while index < inventory.len():
         val name = inventory[index]
@@ -183,7 +190,7 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
                 terminal[3] != identity:
             return Err("MIR shard module did not PASS: {name}")
         val sidecar = file_read("{base}.object").split("\n")
-        if sidecar.len() != 4 or sidecar[3] != "":
+        if sidecar.len() != 5 or sidecar[4] != "":
             return Err("MIR shard module link record unreadable: {name}")
         val object_path = sidecar[0]
         val functions = sidecar[1].to_i64() ?? -1
@@ -194,11 +201,13 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
             if terminal[4] != "UNCACHED":
                 return Err("MIR shard objectless module record mismatch: {name}")
             inputs.objectless = inputs.objectless + 1
+            inputs.objectless_modules = inputs.objectless_modules.push(name)
         else:
             if terminal[4] != "CACHE_STORED" or not file_exists(object_path):
                 return Err("MIR shard module object missing: {name} ({object_path})")
             inputs.object_files = inputs.object_files.push(object_path)
             inputs.object_modules = inputs.object_modules.push(name)
+            inputs.capsule_identities = inputs.capsule_identities.push(sidecar[3])
         inputs.modules = inputs.modules.push(name)
         inputs.functions = inputs.functions + functions
         inputs.statics = inputs.statics + statics
