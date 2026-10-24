@@ -334,6 +334,22 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
  * safe to set purely internally in rt_tuple_new. */
 #define RT_CORE_ARRAY_FLAG_TUPLE 0x01U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
+#define RT_CORE_BYTE_ARRAY_MAX_CAP 1073741824LL
+
+/* Packed bytes have a bounded byte budget, not the tagged-slot element budget.
+ * Keep allocation, header admission, concat and growth on the same contract. */
+static int64_t rt_core_array_capacity_limit(uint8_t flags) {
+    return (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? RT_CORE_BYTE_ARRAY_MAX_CAP : RT_CORE_ARRAY_MAX_CAP;
+}
+
+static int rt_core_array_capacity_valid(int64_t cap, uint8_t flags) {
+    size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? sizeof(uint8_t) : sizeof(int64_t);
+    return cap >= 0 && cap <= rt_core_array_capacity_limit(flags) &&
+        cap <= INT64_MAX / (int64_t)elem_size &&
+        (uint64_t)cap <= SIZE_MAX / elem_size;
+}
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
 #define RT_HOST_GPU_PHASE_BEGIN 1
@@ -2717,7 +2733,8 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
         return NULL;
     }
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
-    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
+    if (a->len < 0 || a->len > a->cap ||
+        !rt_core_array_capacity_valid(a->cap, a->flags)) return NULL;
     return a;
 }
 
@@ -8313,8 +8330,7 @@ int64_t rt_strcmp(const char* a, const char* b) {
 
 static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
-    if (actual_cap < 0 || actual_cap > RT_CORE_ARRAY_MAX_CAP ||
-        actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+    if (!rt_core_array_capacity_valid(actual_cap, flags)) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)rt_observed_calloc_v1(1, sizeof(RtCoreArray));
@@ -9598,9 +9614,10 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     if (!left || !right || left->len > INT64_MAX - right->len) return NULL;
 
     int64_t total = left->len + right->len;
-    if (total > RT_CORE_ARRAY_MAX_CAP) return NULL;
     int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    if (!rt_core_array_capacity_valid(total,
+            left_bytes && right_bytes ? RT_CORE_ARRAY_FLAG_BYTES : 0)) return NULL;
     int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     if (left_u64 != right_u64) return NULL;
@@ -10004,12 +10021,14 @@ int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len) {
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
+    if (!rt_core_array_capacity_valid(min_cap, array->flags)) return 0;
     if (array->cap >= min_cap) return 1;
     int64_t new_cap = array->cap > 0 ? array->cap : 4;
+    int64_t limit = rt_core_array_capacity_limit(array->flags);
     while (new_cap < min_cap) {
-        if (new_cap > INT64_MAX / 2) return 0;
-        new_cap *= 2;
+        new_cap = new_cap > limit / 2 ? limit : new_cap * 2;
     }
+    if (!rt_core_array_capacity_valid(new_cap, array->flags)) return 0;
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
     void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
