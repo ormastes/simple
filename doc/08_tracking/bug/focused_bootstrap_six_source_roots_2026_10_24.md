@@ -49,3 +49,23 @@ Native proof, behavioral SPL execution, full compiler/lib checks and MCP/LSP cor
 checks are **PENDING** until that compatible rebuild is available. Shell syntax,
 patch whitespace and direct environment ownership guards passed; these limited
 checks do not imply native or bootstrap success.
+
+## Native proof4: focused backend admission
+
+The terminal `build/verify/six-root-native-proof-20261024-04/` run built and
+linked its harness, then loaded the actual entry and root6-only helper through
+parse, HIR, MIR and AOP. Codegen stopped with `PLUG-E-NOTFOUND: backend=llvm`;
+no six-root executable success was established.
+
+The harness and focused dispatcher entered the driver without installing the
+selected K1 backend table. `CodegenFactory.create` selects from that initially
+empty static table; this failure is before dynamic plugin artifact lookup.
+The same gap affects production: exact Stage3/Stage4 branches in
+`bootstrap_main.spl` return into focused dispatch before the positional route's
+K1 installation. The focused plan now admits the existing logical selected K1
+composition after argument validation and before run-environment mutation,
+reporting policy and table diagnostics on refusal. The fixture's direct legacy
+five-root API branch performs the corresponding admission itself. Normal
+six-root proof still enters the production focused path; no adapter, provider
+ABI, root or native oracle is replaced. Native verification of this repair is
+pending the next frozen proof; proof4 remains a failure.
