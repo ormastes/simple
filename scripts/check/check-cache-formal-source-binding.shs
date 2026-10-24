@@ -86,6 +86,29 @@ scan() {
     rm -f "$_tmp"
 }
 
+# predates_binding REV BASE -> sets PB_VERDICT (pass|fail|error) and PB_MSG.
+# Used when the bindings file is absent at REV: the branch predates the
+# binding (#4411). The merge result is base + branch, so the branch can only
+# break a pin by editing a bound source itself: compare merge-base(BASE,REV)..REV
+# over every bound path listed in BASE's binding file.
+predates_binding() {
+    PB_VERDICT=error; PB_MSG=""
+    _pb_list=$(git show "$2:$BINDINGS" 2>/dev/null) || { PB_MSG="no $BINDINGS at $1 nor at base $2"; return; }
+    _pb_mb=$(git merge-base "$2" "$1" 2>/dev/null) || { PB_MSG="no merge-base between $1 and base $2 (shallow history?)"; return; }
+    _pb_paths=$(printf '%s\n' "$_pb_list" | awk '!/^#/ && NF >= 2 { sub(/#.*/, "", $2); print $2 }' | sort -u)
+    [ -n "$_pb_paths" ] || { PB_MSG="0 bindings in $BINDINGS at base $2"; return; }
+    _pb_n=$(printf '%s\n' "$_pb_paths" | grep -c .)
+    # shellcheck disable=SC2086
+    _pb_changed=$(git diff --name-only "$_pb_mb" "$1" -- $_pb_paths 2>/dev/null) || { PB_MSG="git diff failed for $_pb_mb..$1"; return; }
+    if [ -n "$_pb_changed" ]; then
+        PB_VERDICT=fail
+        PB_MSG="binding file not present at $1 (branch predates it) and the branch changed bound source(s): $(printf '%s' "$_pb_changed" | tr '\n' ' ')— rebase onto base and re-pin with --update after a model review"
+    else
+        PB_VERDICT=pass
+        PB_MSG="binding file not present on branch; no bound sources changed ($_pb_n bound file(s) unchanged in $_pb_mb..$1; pins at base $2 stand for the merge result)"
+    fi
+}
+
 selftest() {
     _d=$(mktemp -d) || err "mktemp failed"
     mkdir -p "$_d/src"
@@ -107,21 +130,64 @@ selftest() {
     ( cd "$_d" && scan b.txt "" && [ -n "$MISSING" ] ) \
         || { echo "FAIL — selftest: removed bound symbol was not detected"; exit 1; }
     rm -rf "$_d"
+    selftest_predates
 }
 
-REV=""; MODE=check
-case "${1:-}" in
-    --selftest) selftest; echo "PASS — selftest: 4 fixture(s)"; exit 0 ;;
-    --rev) [ -n "${2:-}" ] || err "--rev needs a revision"; REV=$2 ;;
-    --update) MODE=update ;;
-    '') ;;
-    *) err "unknown argument $1" ;;
-esac
+# Fixtures 5-7: a branch that predates the binding file (CI run 40095859587).
+selftest_predates() {
+    _r=$(mktemp -d) || err "mktemp failed"
+    (
+        cd "$_r" || exit 1
+        git init -q . && git config user.email t@t && git config user.name t
+        mkdir -p src src/verification/cache_protocol
+        printf 'fn bound(a: i64) -> i64:\n    a + 1\n' > src/a.spl
+        printf 'x\n' > src/other.spl
+        git add -A && git commit -qm A
+        _a=$(git rev-parse HEAD)
+        printf '%s  src/a.spl#bound  fixture\n' 0000 > "$BINDINGS"
+        git add -A && git commit -qm B-binding
+        _b=$(git rev-parse HEAD)
+        git checkout -q -b br "$_a"
+        printf 'y\n' > src/other.spl && git commit -qam C-unrelated
+        predates_binding "$(git rev-parse HEAD)" "$_b"
+        [ "$PB_VERDICT" = pass ] || { echo "fixture 5: unrelated branch edit gave $PB_VERDICT ($PB_MSG)"; exit 1; }
+        printf 'fn bound(a: i64) -> i64:\n    a + 2\n' > src/a.spl && git commit -qam C-bound
+        predates_binding "$(git rev-parse HEAD)" "$_b"
+        [ "$PB_VERDICT" = fail ] || { echo "fixture 6: bound edit on predating branch gave $PB_VERDICT"; exit 1; }
+        predates_binding "$(git rev-parse HEAD)" "$_a"
+        [ "$PB_VERDICT" = error ] || { echo "fixture 7: base without bindings gave $PB_VERDICT"; exit 1; }
+    ) >/dev/null 2>"$_r.err" || { _e=$(cat "$_r.err"); rm -rf "$_r" "$_r.err"; echo "FAIL — selftest: predating-branch fixtures: $_e"; exit 1; }
+    rm -rf "$_r" "$_r.err"
+}
+
+REV=""; MODE=check; BASE_REV="${BASE_SHA:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; echo "PASS — selftest: 7 fixture(s)"; exit 0 ;;
+        --rev) [ -n "${2:-}" ] || err "--rev needs a revision"; REV=$2; shift 2 ;;
+        --base) [ -n "${2:-}" ] || err "--base needs a revision"; BASE_REV=$2; shift 2 ;;
+        --update) MODE=update; shift ;;
+        *) err "unknown argument $1" ;;
+    esac
+done
 
 selftest
 
 if [ -n "$REV" ]; then
     git rev-parse --verify --quiet "$REV^{commit}" >/dev/null || err "unknown revision $REV"
+    if ! git cat-file -e "$REV:$BINDINGS" 2>/dev/null; then
+        # Branch predates the binding: judge the merge result (base + branch).
+        # BASE comes from --base, or the BASE_SHA the required fast-gates step
+        # exports; without one there is nothing to compare against.
+        [ -n "$BASE_REV" ] || err "no $BINDINGS at $REV and no --base/BASE_SHA to judge the merge result"
+        git rev-parse --verify --quiet "$BASE_REV^{commit}" >/dev/null || err "unknown base revision $BASE_REV"
+        predates_binding "$REV" "$BASE_REV"
+        case "$PB_VERDICT" in
+            pass) echo "PASS — $PB_MSG"; exit 0 ;;
+            fail) echo "FAIL — $PB_MSG"; exit 1 ;;
+            *) err "$PB_MSG" ;;
+        esac
+    fi
     _bf=$(mktemp) || err "mktemp failed"
     git show "$REV:$BINDINGS" > "$_bf" 2>/dev/null || { rm -f "$_bf"; err "no $BINDINGS at $REV"; }
 else
