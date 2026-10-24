@@ -1,0 +1,76 @@
+#!/bin/sh
+# Run only with a freshly rebuilt producer whose CompileOptions layout includes slot 6.
+# No seed fallback: the caller must supply that producer explicitly.
+set -eu
+if [ "$#" -ne 2 ] || [ ! -x "$1" ] || [ ! -d "$2" ]; then
+    echo "usage: $0 /absolute/path/to/new-compatible-simple /absolute/path/to/compatible-runtime-dir" >&2
+    exit 2
+fi
+producer=$1
+runtime=$2
+case "$producer" in /*) ;; *) echo "producer path must be absolute" >&2; exit 2 ;; esac
+case "$runtime" in /*) ;; *) echo "runtime path must be absolute" >&2; exit 2 ;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo"
+mkdir -p "$repo/build"
+fixture=$(mktemp -d "$repo/build/six-source-roots.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+for n in 1 2 3 4 5 6 7; do
+    mkdir -p "$fixture/root$n"
+done
+cat > "$fixture/root6/sixth_only.spl" <<'SPL'
+pub fn six_roots_unique_value() -> i64:
+    24681357
+SPL
+cat > "$fixture/main.spl" <<'SPL'
+use sixth_only.{six_roots_unique_value}
+
+fn main():
+    print "six-root-result={six_roots_unique_value()}"
+SPL
+# Compile the actual patched focused closure into a dedicated dispatcher.
+# Building this harness can use the producer's generic coordinator; every proof
+# invocation below directly enters run_focused_native_build and fixed_v2.
+"$producer" native-build --source src/compiler --source src/app --source src/lib \
+    --entry test/fixtures/bootstrap_six_roots/focused_harness.spl \
+    --runtime-path "$runtime" --output "$fixture/focused-harness" \
+    > "$fixture/harness-build.log" 2>&1 || { cat "$fixture/harness-build.log"; exit 1; }
+# The unique helper has no copy in the entry directory or first five roots.
+"$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --source "$fixture/root6" --entry "$fixture/main.spl" --output "$fixture/six" \
+    > "$fixture/six.log" 2>&1 || { cat "$fixture/six.log"; exit 1; }
+actual=$("$fixture/six")
+[ "$actual" = "six-root-result=24681357" ]
+if "$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --entry "$fixture/main.spl" --output "$fixture/missing" > "$fixture/missing.log" 2>&1; then
+    echo "FAIL: omitting the only helper root unexpectedly compiled" >&2
+    exit 1
+else
+    missing_status=$?
+fi
+# A crash, unrelated compiler error or ambient resolution is not a valid control.
+[ "$missing_status" -eq 1 ]
+rg -qi "(unresolved|not found|no source file).*sixth_only|sixth_only.*(unresolved|not found|no source file)" "$fixture/missing.log"
+[ ! -e "$fixture/missing" ]
+if "$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
+    --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
+    --source "$fixture/root6" --source "$fixture/root7" --entry "$fixture/main.spl" \
+    --output "$fixture/seven" > "$fixture/seven.log" 2>&1; then
+    echo "FAIL: seven focused source roots unexpectedly compiled" >&2
+    exit 1
+else
+    seven_status=$?
+fi
+[ "$seven_status" -eq 1 ]
+[ ! -e "$fixture/seven" ]
+rg -q 'at most six --source roots' "$fixture/seven.log"
+# Exercise the compatibility symbol with the sole helper in its fifth root.
+SIMPLE_RUNTIME_PATH="$runtime" "$fixture/focused-harness" --legacy-five \
+    "$fixture/root1" "$fixture/root2" "$fixture/root3" "$fixture/root4" \
+    "$fixture/root6" "$fixture/main.spl" "$fixture/legacy-five" \
+    > "$fixture/legacy-five.log" 2>&1 || { cat "$fixture/legacy-five.log"; exit 1; }
+actual=$("$fixture/legacy-five")
+[ "$actual" = "six-root-result=24681357" ]
+echo 'PASS: focused sixth-root helper executed; omission and seventh root rejected; legacy five-root API executed'
