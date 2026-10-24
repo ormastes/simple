@@ -427,12 +427,14 @@ progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
-# Per-module stream-to-object defaults for the Stage 3 and Stage 4
+# Post-mono MIR-to-object batching requests for the Stage 3 and Stage 4
 # native-builds (doc/05_design/compiler/perf/per_module_stream_to_object_v1.md):
-# MIR is lowered, verified, borrow-checked and emitted in batches of
-# SIMPLE_NATIVE_STAGED_CODEGEN_BATCH modules whose MIR is released afterwards,
-# and go-to-end emits every producible object into the native cache, writes
-# <output>.go-to-end.sdn and fails the stage (never a partial link).
+# Whole-program HIR/type-check and mono still precede this work. The compiler
+# currently refuses staging for SIMPLE_BOOTSTRAP=1 without STAGE4, including
+# llvm-lib, so Stage 3's request does not enable batching. Eligible Stage 4
+# lowers/verifies/borrow-checks/emits MIR batches and evicts their references;
+# this is not evidence of reclaimed memory or ready-unit source-to-object work.
+# Go-to-end retains valid objects and fails a stage with required failures.
 #   SIMPLE_BOOTSTRAP_STREAM_OBJECTS=0   whole-program MIR (no staged batches)
 #   SIMPLE_BOOTSTRAP_STREAM_BATCH=<n>   modules per batch (default 32)
 #   SIMPLE_BOOTSTRAP_GO_TO_END=0        stop at the first failing phase
