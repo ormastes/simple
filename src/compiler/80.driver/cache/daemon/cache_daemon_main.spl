@@ -3,6 +3,9 @@
 use std.service.daemon_base
 use std.nogc_sync_mut.service.daemon_base.{daemon_base_start_owned, daemon_base_stop_owned}
 use compiler.driver.cache.daemon.cache_daemon_lifecycle
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
+use std.async.future.{Future}
 use common.cache_host_authority_v1.{CacheRootAuthorityV1}
 use common.cache_daemon_host_authority_v1
 use compiler.driver.cache.daemon.package_daemon_session.{
@@ -46,6 +49,7 @@ class CacheDaemonHost:
     package_sessions: [PackageDaemonSessionV1] = []
     package_admission_open: bool = false
     package_request_sequence: i64 = 0
+    artifact_flights: CacheSingleFlightV1 = CacheSingleFlightV1.create()
 
     static fn create(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
         CacheDaemonHost(
@@ -126,6 +130,30 @@ class CacheDaemonHost:
 
     # Called only after the host-authority layer has closed admission, drained
     # work, checkpointed, and released its opaque exclusive-writer receipt.
+    # Module artifact production (full AST / TLDR companion), single-flight.
+    # The leader request is counted as one daemon request from join until
+    # complete; participants only poll. Returns role -1 when not admitted.
+    me join_artifact(kind: text, digest: text, request_id: text, now_ms: i64) -> (i64, i64):
+        if not self.package_admission_open or not self.lifecycle.admission_open:
+            return (-1, 0)
+        val key = cache_single_flight_key_v1(kind, digest)
+        val (role, flight) = self.artifact_flights.join(key, request_id)
+        if role == SINGLE_FLIGHT_LEADER_V1:
+            if not self.lifecycle.begin_request(now_ms):
+                val _abandoned = self.artifact_flights.complete(key, request_id, nil)
+                return (-1, 0)
+        (role, flight)
+
+    me complete_artifact(kind: text, digest: text, request_id: text, blob: [u8]?, now_ms: i64) -> bool:
+        val completed = self.artifact_flights.complete(cache_single_flight_key_v1(kind, digest),
+            request_id, blob)
+        if completed:
+            self.lifecycle.end_request(now_ms)
+        completed
+
+    me poll_artifact(flight: i64) -> Future<[u8]?>:
+        self.artifact_flights.future(flight)
+
     me stop_after_authority_release() -> bool:
         if self.lifecycle.shutdown_state != CACHE_DAEMON_STOPPED:
             if not self.lifecycle.finish_shutdown():
