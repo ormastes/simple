@@ -134,6 +134,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod dynamic_sffi;
 pub mod host_dynlib;
+pub mod host_capacity;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
@@ -272,6 +273,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         };
     }
     insert_simple!("abs", math::abs);
+    insert_simple!("rt_host_memory_headroom_bytes_v1", host_capacity::memory_headroom);
+    insert_simple!("rt_host_commit_headroom_bytes_v1", host_capacity::commit_headroom);
+    insert_simple!("rt_host_disk_headroom_bytes_v1", host_capacity::disk_headroom);
     insert_simple!("rt_host_dynlib_open", host_dynlib::rt_host_dynlib_open);
     insert_simple!("rt_host_dynlib_symbol", host_dynlib::rt_host_dynlib_symbol);
     insert_simple!("rt_host_dynlib_close", host_dynlib::rt_host_dynlib_close);
@@ -3576,6 +3580,30 @@ pub(crate) fn call_extern_function_with_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_capacity_externs_dispatch_typed_snapshots() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        for (name, args) in [
+            ("rt_host_memory_headroom_bytes_v1", vec![]),
+            ("rt_host_commit_headroom_bytes_v1", vec![]),
+            ("rt_host_disk_headroom_bytes_v1", vec![Value::text(".")]),
+        ] {
+            let handler = EXTERN_DISPATCH.get(name).expect("capacity extern must bypass dynamic SFFI");
+            let value = handler(&args, &mut env, &mut functions, &mut classes, &enums, &impl_methods).unwrap();
+            let Value::Int(bytes) = value else { panic!("{name} returned a non-integer") };
+            #[cfg(windows)]
+            assert!(bytes > 0, "{name} returned unavailable capacity");
+            #[cfg(not(windows))]
+            assert_eq!(bytes, 0);
+        }
+        assert!(host_capacity::disk_headroom(&[]).is_err());
+        assert!(host_capacity::disk_headroom(&[Value::Int(1)]).is_err());
+    }
 
     #[test]
     fn env_snapshot_aliases_have_identical_typed_results_and_arity() {
