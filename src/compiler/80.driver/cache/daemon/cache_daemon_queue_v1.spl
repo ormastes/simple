@@ -15,7 +15,7 @@
 #                 -> ok (records ledger usage; wakes every parked waiter)
 #   op: open / close  branch source digest -> ok (reader view pin; a pinned
 #                 row is never evicted)
-#   op: use       branch source digest bytes memory_bytes path -> ok
+#   op: use       branch source digest bytes memory_bytes path [references] -> ok
 #   (complete and use account disk bytes and in-memory bytes per
 #   (branch, source, version): the ledger feeds both tiers of the plan)
 #   op: evict                                     -> evicted <paths, comma>
@@ -93,6 +93,16 @@ fn _evict_file_v1(path: text):
     if file_rename(path, moved):
         val _deleted = file_delete(moved)
 
+# Optional `references: <version key>,...` (same branch): the ledger edges
+# the eviction plan keeps closed (T-EV1).
+fn _references_v1(request: text) -> [text]:
+    var out: [text] = []
+    for part in cache_queue_field_v1(request, "references").split(","):
+        val item = part.trim()
+        if item != "":
+            out.push(item)
+    out
+
 fn _flight_timeout_ms_v1() -> i64:
     val raw = env_get_opt("SIMPLE_CACHE_FLIGHT_TIMEOUT_MS") ?? ""
     val parsed = raw.to_i64() ?? 0
@@ -132,7 +142,8 @@ pub fn cache_daemon_handle_request_v1(host: CacheDaemonHost, request: text,
                     version_key: cache_queue_field_v1(request, "digest"),
                     disk_bytes: bytes.len(),
                     memory_bytes: cache_queue_field_v1(request, "memory_bytes").to_i64() ?? 0,
-                    last_used_ms: now_ms), blob_path)
+                    last_used_ms: now_ms,
+                    references: _references_v1(request)), blob_path)
             case nil:
                 pass_do_nothing
         return _response_v1(["status: ok"])
@@ -148,7 +159,8 @@ pub fn cache_daemon_handle_request_v1(host: CacheDaemonHost, request: text,
             version_key: cache_queue_field_v1(request, "digest"),
             disk_bytes: cache_queue_field_v1(request, "bytes").to_i64() ?? 0,
             memory_bytes: cache_queue_field_v1(request, "memory_bytes").to_i64() ?? 0,
-            last_used_ms: now_ms), cache_queue_field_v1(request, "path"))
+            last_used_ms: now_ms,
+            references: _references_v1(request)), cache_queue_field_v1(request, "path"))
         return _response_v1(["status: ok"])
     if op == "evict":
         val removed = host.evict_artifacts(cache_retention_limits_load_v1())

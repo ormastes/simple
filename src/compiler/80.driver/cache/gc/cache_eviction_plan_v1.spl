@@ -17,7 +17,8 @@
 # (cache_eviction_admit_write_v1), per the AOP formal design's rule that
 # eviction falling behind rejects/skips writes rather than overshooting.
 #
-# Pinned entries (live_views > 0: a reader holds a view) are never evicted or
+# Reference-aware: an entry referenced by a kept entry is never evicted
+# (step 3b, the T-EV1 precondition). # Pinned entries (live_views > 0: a reader holds a view) are never evicted or
 # unloaded by any step; the plan may then stay over a cap, which the publish
 # path answers by rejecting new writes.
 # Bookkeeping is plain values computed by the daemon's single loop: no locks.
@@ -31,6 +32,7 @@ struct CacheEntryUseV1:
     memory_bytes: i64
     last_used_ms: i64
     live_views: i64 = 0   # open views (pins) reported by readers; never evicted or unloaded while > 0
+    references: [text] = []   # version keys (same branch) this entry needs, e.g. TLDR -> object
 
 struct CacheEvictionPlanV1:
     evict: [i64]       # entry indices removed from disk (and memory)
@@ -170,6 +172,35 @@ pub fn cache_eviction_plan_v1(entries: [CacheEntryUseV1], limits: CacheRetention
             memory = memory - entries[index].memory_bytes
             in_memory[index] = false
         cursor = cursor - 1
+
+    # 3b. Reference closure: an entry referenced by a kept entry (same
+    # branch, by version key -- e.g. a TLDR naming the object it describes)
+    # is kept too, to a fixpoint. Eviction never leaves a dangling reference;
+    # the plan may then stay over a cap, which the publish path rejects.
+    var changed = true
+    while changed:
+        changed = false
+        var k = 0
+        while k < entries.len():
+            if alive[k]:
+                for reference in entries[k].references:
+                    var r = 0
+                    while r < entries.len():
+                        if not alive[r] and entries[r].branch == entries[k].branch and
+                                entries[r].version_key == reference:
+                            alive[r] = true
+                            disk = disk + entries[r].disk_bytes
+                            if entries[r].memory_bytes > 0 and not unload.contains(r):
+                                in_memory[r] = true
+                                memory = memory + entries[r].memory_bytes
+                            changed = true
+                        r = r + 1
+            k = k + 1
+    var still_evicted: [i64] = []
+    for index in evict:
+        if not alive[index] and not still_evicted.contains(index):
+            still_evicted.push(index)
+    evict = still_evicted
 
     # 4. Memory bytes: unload LRU in-memory survivors.
     cursor = newest.len() - 1
