@@ -35,7 +35,7 @@ use std.nogc_sync_mut.path.{dirname, basename}
 # already records at :34-40 for `file_read_bytes`. See
 # doc/08_tracking/bug/std_file_system_write_mocks_return_true_without_writing_2026-09-06.md
 use compiler.backend.backend_helpers.{compile_module_with_backend,
-    compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
+    compile_module_with_backend_scoped_v1, get_effective_backend_name}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.llvm_capability.{find_archive_portable}
@@ -101,6 +101,7 @@ use compiler.driver.action_graph.persisted_graph.{
 use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1,
     coordinator_new_v1, coordinator_claim_v1, coordinator_complete_v1}
 use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
+use compiler.mir_opt.auto_vectorize_target.{auto_vectorize_target_level}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
@@ -2543,6 +2544,11 @@ impl CompilerDriver:
                     if not driver_source_matches_entry(ctx, pending_source, pending_name):
                         return CompileResult.CodegenError(
                             "entry-object dependency ObjectReady unavailable: " + pending_name)
+            # Resolve the auto-vectorize memo (a module-level text global)
+            # OUTSIDE the per-module codegen scope: first assigned inside one,
+            # it would be freed at that scope's end and read by every later
+            # module. See compile_module_with_backend_scoped_v1.
+            val _vectorize_level_memo = auto_vectorize_target_level()
             val capsules = ctx.freeze_native_module_capsules_v1(uncached_names,
                 object_base, effective_backend, native_target, native_cpu,
                 driver_opt_level, is_release, provider_receipt_hash,
@@ -4390,9 +4396,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         return Ok(obj_path)
     _finish_selected_module_compile(
-        compile_module_with_backend_target_cpu_storage_bindings(
+        compile_module_with_backend_scoped_v1(
             backend_name, mir_module, is_release, opt_level, frozen_target_cpu,
-            storage_snapshot.sites), output_base, name)
+            storage_snapshot.sites, nil, nil, nil, nil, []), output_base, name)
 
 fn _finish_selected_module_compile(
     compiled: Result<CompiledModule, CompileError>,
