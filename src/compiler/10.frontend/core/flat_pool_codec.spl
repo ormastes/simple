@@ -123,6 +123,17 @@ pub class FlatPoolReader:
     var maximum_depth: i64
     var charged_work_units: i64
     var audit_events: i64
+    # Token mode (packed .spab restore, flat_pool_packed_v1.spl): the same
+    # cursor API over typed tokens decoded straight from the packed sections --
+    # integers are never formatted or re-parsed. kinds: 0 integer, 1 text
+    # (texts are carried ESCAPED, so every existing decoder's unescape stays
+    # correct; escape/unescape return their input unchanged for plain text).
+    var tok_mode: bool = false
+    var tok_kinds: [i64] = []
+    var tok_ints: [i64] = []
+    var tok_texts: [text] = []
+    var tok_int_pos: i64 = 0
+    var tok_text_pos: i64 = 0
 
     pub static fn new(blob: text) -> FlatPoolReader:
         FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
@@ -148,8 +159,27 @@ pub class FlatPoolReader:
             reader.reject_malformed("missing_final_newline")
         reader
 
+    # Token-mode cursor (see the tok_* fields). Canonical: no trailing data.
+    pub static fn from_tokens(kinds: [i64], ints: [i64], texts: [text]) -> FlatPoolReader:
+        var reader: FlatPoolReader = FlatPoolReader(lines: [], pos: 0, ok: true,
+            bounded: false, canonical: true, failure_kind: "", failure_detail: "",
+            max_allocation_bytes: 0, max_nodes: 0, max_depth: 0,
+            max_work_units: 0, live_reserved_bytes: 0, entered_nodes: 0,
+            current_depth: 0, maximum_depth: 0, charged_work_units: 0,
+            audit_events: 0)
+        reader.tok_mode = true
+        reader.tok_kinds = kinds
+        reader.tok_ints = ints
+        reader.tok_texts = texts
+        reader
+
     me finish_canonical_frame() -> bool:
         if not self.ok:
+            return false
+        if self.tok_mode:
+            if self.pos == self.tok_kinds.len():
+                return true
+            self.reject_malformed("trailing_data")
             return false
         # split implementations may retain the final newline's empty field.
         if self.pos == self.lines.len():
@@ -266,6 +296,19 @@ pub class FlatPoolReader:
     me next() -> text:
         if not self.ok:
             return ""
+        if self.tok_mode:
+            if self.pos >= self.tok_kinds.len():
+                self.reject_malformed("truncated")
+                return ""
+            val kind = self.tok_kinds[self.pos]
+            self.pos = self.pos + 1
+            if kind == 1:
+                val t = self.tok_texts[self.tok_text_pos]
+                self.tok_text_pos = self.tok_text_pos + 1
+                return t
+            val v = self.tok_ints[self.tok_int_pos]
+            self.tok_int_pos = self.tok_int_pos + 1
+            return "{v}"
         if self.bounded and not self.charge_work(1):
             return ""
         if self.pos >= self.lines.len():
@@ -371,6 +414,16 @@ pub class FlatPoolReader:
             self.charge_work(total_bytes * 3 + 1)
 
     me next_i64() -> i64:
+        if self.tok_mode:
+            if not self.ok:
+                return 0
+            if self.pos >= self.tok_kinds.len() or self.tok_kinds[self.pos] != 0:
+                self.reject_malformed("integer")
+                return 0
+            self.pos = self.pos + 1
+            val v = self.tok_ints[self.tok_int_pos]
+            self.tok_int_pos = self.tok_int_pos + 1
+            return v
         val raw = self.next()
         if not self.ok:
             return 0
@@ -395,7 +448,8 @@ pub class FlatPoolReader:
             val n = self.next_i64()
             if not self.ok:
                 return 0
-            if (n < 0) or (n > (self.lines.len() - self.pos)):
+            val remaining = if self.tok_mode: self.tok_kinds.len() - self.pos else: self.lines.len() - self.pos
+            if (n < 0) or (n > remaining):
                 self.ok = false
                 return 0
             return n
