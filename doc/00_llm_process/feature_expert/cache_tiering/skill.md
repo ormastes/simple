@@ -118,3 +118,5 @@ revert → observe GREEN. A GC/cache test that cannot fail proves nothing, becau
 the failure mode is silent data loss.
 
 - 2026-10-24: authoritative build/cache design is `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md` (per-file jobs, `SourceReader`, single-flight, no locks, cache limits); additive semantic-cache package `doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`.
+
+- 2026-10-25: DigestV1 hash agility, GuardIdV1, `.spab`, single-flight, ledger/eviction and Lean cache gates landed; summary in `doc/07_guide/tooling/bootstrap_options.md`.

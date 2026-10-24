@@ -453,3 +453,13 @@ authority before emitting anything. The flag is REFUSED (exit 64) outside the
 trust-root Stage-2 lane rather than silently ignored, and a producer failure
 fails the run leaving no receipt. Pinned by
 `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`.
+
+## State 2026-10-25 (release/1.0.0)
+
+Stage 3 runs from a frozen admitted Stage 2; source fixes need a Stage 2
+rebuild. #4498 prescans all closure structs in the bootstrap-fixed MIR lane;
+#4499 fixes inner `/src/` module naming; Windows links `ws2_32` + `mswsock`
+(#4430). Per-file src to obj is the direction and is IN PROGRESS, not default.
+Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
+miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
+Never `git stash`; never GCC on Windows.

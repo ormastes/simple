@@ -209,3 +209,9 @@ describes a scoped Linux/WSL producer whose object directory follows the lexical
 cache parent, not TMPDIR alone. A reviewed RAM-parent alias may retain the same
 physical cache; it must preserve all normal fingerprints and single-writer
 authority. Storage indirection is not forced cache admission.
+
+## State as of 2026-10-25
+
+Shard knobs, the `.spab`/DigestV1/GuardIdV1/single-flight/ledger/eviction cache
+protocol and the Lean formal gates are summarised in
+[bootstrap options](bootstrap_options.md).

@@ -862,3 +862,5 @@ qualification or formal proof. See `doc/07_guide/tooling/native_incremental_adap
 `worker_mem_mib` (default 3300). Values come from `host-env.shs --get` in a
 child shell, so nothing new is exported into the `SIMPLE_*` native-build
 environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skill.md`.
+
+- 2026-10-25: Stage 3 runs from a frozen admitted Stage 2 (source fixes need a Stage 2 rebuild); #4498 closure-struct prescan, #4499 inner `/src/` naming, Windows `mswsock` link (#4430). Per-file src to obj is in progress. Knobs and cache protocol: `doc/07_guide/tooling/bootstrap_options.md`.
