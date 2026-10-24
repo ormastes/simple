@@ -49,6 +49,7 @@ use app.cli.native_build_streaming_request_owner.{native_build_streaming_surface
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -1103,12 +1104,22 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         # specialization bodies. No previous job's lazy canonical IDs or
         # promoted heap can affect the next emission's output or footprint.
         count = jobs.unwrap()
-    print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
+    # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N: spawn ONE root shard worker; it
+    # forks N copy-on-write MIR children after mono
+    # (compiler/80.driver/driver_build/native_mir_fork_v1.spl). K roots would
+    # each fork N children and each hold a full post-mono heap.
+    var run_parallel = parallel
+    val fork_workers = native_mir_fork_workers_of_v1(env_get("SIMPLE_MIR_FORK_WORKERS") ?? "")
+    if not selective and fork_workers > 0:
+        count = 1
+        run_parallel = 1
+        print "[mir-shard] fork_workers={fork_workers} (experimental): one root worker"
+    print "[mir-shard] shards={count} parallel={run_parallel} ledger={queue_dir}"
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
-        "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
+        "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, run_parallel,
         simple_bin, timeout_ms)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules,

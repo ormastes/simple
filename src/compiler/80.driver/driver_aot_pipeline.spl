@@ -36,6 +36,7 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_shards_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
@@ -563,14 +564,26 @@ impl CompilerDriver:
         print "[mir-shard] worker source entry queue={env_get_opt(\"SIMPLE_MIR_SHARD_QUEUE\") ?? \"\"}"
         stdout_flush()
         val queue = native_mir_shard_queue_v1()
-        val owner = native_mir_shard_owner_v1()
+        val root_owner = native_mir_shard_owner_v1()
         if queue == "":
             return CompileResult.CodegenError("MIR shard worker has no ledger ({NATIVE_MIR_SHARD_QUEUE_ENV_V1} unset)")
         if not self.native_mir_shard_eligible_v1():
             val _blocked = hir_shard_recovery_block(queue, "MIR sharding is unsupported for this build lane")
-            val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
-            val _completed = hir_shard_recovery_complete(queue, owner)
+            val _sealed = hir_shard_recovery_seal(queue, root_owner, "FAILED")
+            val _completed = hir_shard_recovery_complete(queue, root_owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
+        # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS=N (driver_build/native_mir_fork_v1.spl):
+        # post-mono state is complete and identical for every shard here, so
+        # fork N copy-on-write children instead of re-running the front end in
+        # N spawned workers. A child returns with its own spec and owner
+        # installed and continues below as an ordinary shard worker; the root
+        # only reaps, seals and exits. Never for selective.
+        if not driver_mir_selective_enabled_v1():
+            val (fork_role, fork_code) = native_mir_fork_shards_v1(queue, root_owner)
+            if fork_role == "root":
+                native_mir_fork_exit_v1(fork_code)
+                return CompileResult.Success(None)
+        val owner = native_mir_shard_owner_v1()
         # Cold-HIR receipts stay: the worker records capsule identities for the
         # modules it claims and publishes them in the ledger; only the link child
         # persists (driver_cold_hir_persist is skipped while shard_queue is set).
@@ -663,8 +676,7 @@ impl CompilerDriver:
         # Like the HIR shard child: everything after this point (verdict,
         # link, output publication) is the final worker's job, and exiting
         # here is what returns this worker's MIR to the OS.
-        stdout_flush()
-        exit(if shard_failed: 1 else: 0)
+        native_mir_fork_exit_v1(if shard_failed: 1 else: 0)
         CompileResult.Success(None)
 
     me aot_write_mir_shard_exports_v1() -> CompileResult:

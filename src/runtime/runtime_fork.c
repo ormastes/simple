@@ -51,6 +51,10 @@ void rt_fork_child_exit(int64_t exit_code) {
     exit((int)exit_code);
 }
 
+int64_t rt_fork_shared_heap_v1(void) {
+    return -3; /* EXPERIMENTAL MIR fork workers: no fork on Windows */
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -648,5 +652,53 @@ void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr
 void rt_fork_child_exit(int64_t exit_code) {
     _exit((int)exit_code);
 }
+
+/* EXPERIMENTAL (SIMPLE_MIR_FORK_WORKERS): fork WITHOUT stdio redirection, so
+ * several children can run at once and share the parent's post-mono heap
+ * copy-on-write. rt_fork_child_setup() cannot be used for that: it keeps ONE
+ * static pipe-read slot, so a second concurrent child's pipe is never drained
+ * and blocks once it fills. Fails closed instead of forking a multithreaded
+ * process (another thread may hold a mimalloc or stdio lock the child would
+ * then deadlock on). The child dies with the parent (PR_SET_PDEATHSIG), stays
+ * in the parent's process group, and must leave via rt_fork_child_exit().
+ *   >0 parent (child pid)   0 child
+ *   -1 fork failed   -2 more than one thread alive   -3 unsupported host
+ * Design: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md */
+#if defined(__linux__)
+#include <dirent.h>
+#include <sys/prctl.h>
+
+static int fork_shared_heap_thread_count(void) {
+    DIR* tasks = opendir("/proc/self/task");
+    if (!tasks) return -1;
+    int count = 0;
+    struct dirent* entry;
+    while ((entry = readdir(tasks)) != NULL) {
+        if (entry->d_name[0] != '.') count++;
+    }
+    closedir(tasks);
+    return count;
+}
+
+int64_t rt_fork_shared_heap_v1(void) {
+    if (fork_shared_heap_thread_count() != 1) return -2;
+    fflush(NULL);
+    pid_t expected_parent = getpid();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != expected_parent) {
+            _exit(127);
+        }
+        return 0;
+    }
+    return (int64_t)pid;
+}
+#else
+int64_t rt_fork_shared_heap_v1(void) {
+    /* No portable single-thread proof or parent-death signal here. */
+    return -3;
+}
+#endif
 
 #endif /* _WIN32 / POSIX */

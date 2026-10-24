@@ -1,0 +1,126 @@
+# EXPERIMENTAL copy-on-write MIR shard workers (SIMPLE_MIR_FORK_WORKERS=N).
+#
+# A spawned MIR shard worker re-runs parse/HIR/typecheck/mono and holds the
+# whole post-mono state (25-29 GB on the self-hosted closure) before lowering
+# one module, and nothing frees it. With SIMPLE_MIR_FORK_WORKERS=N the
+# coordinator (src/app/cli/native_build_main.spl) spawns ONE ordinary shard
+# worker (spec 0/1, the "root"). The root reaches aot_compile_mir_shard_v1
+# with that state complete and forks N children from it; each child is an
+# ordinary shard worker "i/N" with its own ledger owner, so claims, per-PASS
+# sidecars, seals and the link child are the unchanged native_mir_shard.spl
+# protocol. The root waits, seals any child that died holding claims, marks
+# its own owner done and exits, so the coordinator sees one finished owner.
+#
+# Unset, empty, "0" or "1" disables it and nothing changes.
+# Design and risks: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.io_runtime.{env_set, exit, getpid}
+use std.nogc_sync_mut.io.pipe.{stdout_flush}
+use std.nogc_sync_mut.sffi.process.{fork_shared_heap_v1, fork_child_exit, process_wait_raw}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_recovery_complete}
+use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_ENV_V1,
+    NATIVE_MIR_SHARD_OWNER_ENV_V1}
+
+pub const NATIVE_MIR_FORK_WORKERS_ENV_V1: text = "SIMPLE_MIR_FORK_WORKERS"
+pub const NATIVE_MIR_FORK_WORKERS_MAX_V1: i64 = 64
+
+var _native_mir_fork_child_v1: bool = false
+
+# Worker count of a SIMPLE_MIR_FORK_WORKERS value; 0 = disabled. Malformed or
+# out-of-range values disable the experiment rather than guess.
+pub fn native_mir_fork_workers_of_v1(raw: text) -> i64:
+    if raw == "":
+        return 0
+    val parsed = raw.to_i64() ?? 0
+    if parsed < 2 or parsed > NATIVE_MIR_FORK_WORKERS_MAX_V1:
+        return 0
+    parsed
+
+pub fn native_mir_fork_workers_v1() -> i64:
+    native_mir_fork_workers_of_v1(env_get_nullable(NATIVE_MIR_FORK_WORKERS_ENV_V1) ?? "")
+
+# Distinct from every coordinator owner ("<i>/<n>@<generation>"), so a root
+# replacement generation can never adopt a forked child's claims.
+pub fn native_mir_fork_child_owner_v1(root_owner: text, index: i64, count: i64) -> text:
+    "{root_owner}+fork{index}/{count}"
+
+pub fn native_mir_fork_is_child_v1() -> bool:
+    _native_mir_fork_child_v1
+
+# Terminate a shard process. A forked child must not run atexit handlers or
+# allocator teardown over the parent's shared heap pages.
+pub fn native_mir_fork_exit_v1(code: i64):
+    stdout_flush()
+    if _native_mir_fork_child_v1:
+        fork_child_exit(code)
+    exit(code)
+
+# Returns ("off", 0): experiment off; the caller is an ordinary shard worker.
+#         ("child", 0): this process is child i; spec and owner env are set.
+#         ("root", code): every child was reaped; the caller exits with code.
+pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
+    val count = native_mir_fork_workers_v1()
+    if count == 0 or _native_mir_fork_child_v1:
+        return ("off", 0)
+    # Never recurse: children see the experiment disabled.
+    if not env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""):
+        print "[mir-fork] refused: worker-count environment could not be cleared"
+        return native_mir_fork_decline_v1(queue, root_owner)
+    val parent_pid = getpid()
+    var pids: [i64] = []
+    var owners: [text] = []
+    var fork_failed = false
+    var index: i64 = 0
+    while index < count:
+        val owner = native_mir_fork_child_owner_v1(root_owner, index, count)
+        stdout_flush()
+        val pid = fork_shared_heap_v1()
+        if pid > 0:
+            pids = pids.push(pid)
+            owners = owners.push(owner)
+            index = index + 1
+        elif pid == 0 and getpid() != parent_pid:
+            _native_mir_fork_child_v1 = true
+            if not env_set(NATIVE_MIR_SHARD_ENV_V1, "{index}/{count}") or
+                    not env_set(NATIVE_MIR_SHARD_OWNER_ENV_V1, owner):
+                print "[mir-fork] child {index}/{count}: shard environment could not be installed"
+                native_mir_fork_exit_v1(1)
+            return ("child", 0)
+        else:
+            # 0 without a new pid means the host runtime does not back the
+            # extern (an unbacked extern reads as nil/0): nothing forked.
+            print "[mir-fork] fork {index}/{count} refused code={pid} (-2 = threads alive, -3 = unsupported host, 0 = primitive unbacked)"
+            fork_failed = true
+            break
+    if pids.len() == 0:
+        return native_mir_fork_decline_v1(queue, root_owner)
+    print "[mir-fork] root owner={root_owner} forked={pids.len()}/{count} queue={queue}"
+    stdout_flush()
+    var failed = fork_failed
+    var i: i64 = 0
+    while i < pids.len():
+        val code = process_wait_raw(pids[i], 0)
+        # Reaped (or unwaitable): seal every claim this child left without a
+        # terminal, so the coordinator's inventory close and link see it.
+        val state = if code < 0: "CRASH" else: "FAILED"
+        val sealed = hir_shard_recovery_seal(queue, owners[i], state)
+        if code != 0 or sealed != 0:
+            failed = true
+            print "[mir-fork] child owner={owners[i]} exit={code} sealed={sealed}"
+        i = i + 1
+    val completed = hir_shard_recovery_complete(queue, root_owner)
+    if not completed:
+        failed = true
+    print "[mir-fork] root done owner={root_owner} children={pids.len()} failed={failed}"
+    stdout_flush()
+    ("root", if failed: 1 else: 0)
+
+# Nothing forked. Lowering the whole schedule in the root would be the
+# single-process MIR peak this experiment exists to avoid, so exit with no
+# claims: the coordinator reads that as "fallback" and the complete worker
+# owns the build, exactly as when sharding declines.
+fn native_mir_fork_decline_v1(queue: text, root_owner: text) -> (text, i64):
+    val _completed = hir_shard_recovery_complete(queue, root_owner)
+    print "[mir-fork] no child forked; root claims nothing (coordinator fallback)"
+    stdout_flush()
+    ("root", 1)

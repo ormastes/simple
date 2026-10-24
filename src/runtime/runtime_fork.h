@@ -92,6 +92,14 @@ void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr
  */
 void rt_fork_child_exit(int64_t exit_code);
 
+/*
+ * EXPERIMENTAL (SIMPLE_MIR_FORK_WORKERS): fork without stdio redirection so
+ * several children share the parent's heap copy-on-write. Refuses (-2) when
+ * more than one thread is alive; -3 on hosts without the Linux proof.
+ * Returns child pid in the parent, 0 in the child, -1 on fork failure.
+ */
+int64_t rt_fork_shared_heap_v1(void);
+
 #ifdef __cplusplus
 }
 #endif
