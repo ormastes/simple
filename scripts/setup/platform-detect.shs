@@ -86,6 +86,7 @@ LLVM_PREFIX=""
 LLVM_LIBDIR=""
 LLVM_LIB=""
 LLVM_PROVIDER_KIND=""
+_llvm_gnu_missing_import=""
 
 # Shared-library basenames to look for, by OS, for major version $1.
 _llvm_lib_names() {
@@ -195,7 +196,10 @@ _llvm_try_prefix() {
   # gnu lane links the MinGW import lib; llvm-mingw ships only the DLL (and
   # lacks BPF/RISCV/WebAssembly), MSVC prefixes have neither.
   if [ "${PLATFORM_OS}:${PLATFORM_ABI}" = windows:gnu ]; then
-    [ -f "$1/lib/libLLVM-$2.dll.a" ] || return 1
+    if [ ! -f "$1/lib/libLLVM-$2.dll.a" ]; then
+      _llvm_gnu_missing_import="$1/lib/libLLVM-$2.dll.a"
+      return 1
+    fi
   fi
   for _ld in $(_llvm_libdirs); do
     for _name in $(_llvm_lib_names "$2"); do
@@ -252,6 +256,11 @@ for _v in ${LLVM_VERSIONS}; do
   IFS="${_oifs}"
   if [ "${LLVM_FOUND}" = "1" ]; then break; fi
 done
+
+if [ "${LLVM_FOUND}" != 1 ] && [ -n "${_llvm_gnu_missing_import}" ]; then
+  printf 'warning: Windows GNU LLVM version matched, but required MinGW import library is missing: %s\n' "${_llvm_gnu_missing_import}" >&2
+  printf '%s\n' 'Use an LLVM prefix with the GNU DLL and import library; an MSVC LLVM prefix cannot satisfy this lane.' >&2
+fi
 
 if [ "${LLVM_FOUND}" = "1" ]; then
   # Export the version-named prefix the Rust build expects, plus the resolved

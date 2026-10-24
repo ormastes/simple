@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+detector="$repo_root/scripts/setup/platform-detect.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-windows-llvm-prefix.XXXXXX")
+case "$tmp" in /*/simple-windows-llvm-prefix.*) ;; *) exit 1 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/msvc prefix/bin" "$tmp/msvc prefix/lib" "$tmp/gnu/bin" "$tmp/gnu/lib"
+printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/msvc prefix/bin/llvm-config"
+printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/gnu/bin/llvm-config"
+chmod +x "$tmp/msvc prefix/bin/llvm-config" "$tmp/gnu/bin/llvm-config"
+: > "$tmp/msvc prefix/bin/LLVM-C.dll"
+: > "$tmp/gnu/bin/libLLVM-23.dll"
+: > "$tmp/gnu/lib/libLLVM-23.dll.a"
+
+run_detector() (
+    # Hide the host's LLVM installations and host config. Model Windows while
+    # exercising the complete production detector with paths containing spaces.
+    uname() { case "$1" in -m) printf 'x86_64\n' ;; -s) printf 'MINGW64_NT\n' ;; esac; }
+    repo_root="$tmp"
+    SIMPLE_TOOLCHAINS_ROOT="$tmp/no-toolchains"
+    ProgramFiles="$tmp/no-program-files"
+    ProgramW6432="$tmp/no-program-files"
+    MSYS2_ROOT="$tmp/no-msys2"
+    LLVM_HOME=""
+    SIMPLE_WINDOWS_ABI="$1"
+    LLVM_SYS_231_PREFIX="$2"
+    SIMPLE_HOST_LLVM_ROOT="$3"
+    SIMPLE_MINGW_ROOT="$tmp/no-mingw"
+    PATH=/usr/bin:/bin
+    . "$detector"
+    printf 'found=%s\nprefix=%s\n' "$LLVM_FOUND" "$LLVM_PREFIX"
+)
+
+run_detector gnu "$tmp/msvc prefix" "" > "$tmp/missing.out" 2> "$tmp/missing.err"
+grep -q '^found=0$' "$tmp/missing.out"
+grep -Fq "required MinGW import library is missing: $tmp/msvc prefix/lib/libLLVM-23.dll.a" "$tmp/missing.err"
+
+run_detector gnu "$tmp/msvc prefix" "$tmp/gnu" > "$tmp/fallback.out" 2> "$tmp/fallback.err"
+grep -Fq "prefix=$tmp/gnu" "$tmp/fallback.out"
+test ! -s "$tmp/fallback.err"
+
+run_detector msvc "$tmp/msvc prefix" "" > "$tmp/msvc.out" 2> "$tmp/msvc.err"
+grep -q '^found=1$' "$tmp/msvc.out"
+test ! -s "$tmp/msvc.err"
+
+printf '#!/bin/sh\nprintf "22.1.1\\n"\n' > "$tmp/msvc prefix/bin/llvm-config"
+run_detector gnu "$tmp/msvc prefix" "" > "$tmp/version.out" 2> "$tmp/version.err"
+grep -q '^found=0$' "$tmp/version.out"
+test ! -s "$tmp/version.err"
+printf '%s\n' 'PASS: Windows LLVM missing import diagnostic, valid fallback, MSVC and version controls'
