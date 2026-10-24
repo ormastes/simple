@@ -1,0 +1,34 @@
+use std.spec
+use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_truncate_v1,
+    id_scope_global_v1, id_scope_file_v1}
+
+val KEY_A: text = "abcd0000000000000000000000000001"
+val KEY_B: text = "abcd0000000000000000000000000002"
+val KEY_C: text = "1234ffff000000000000000000000000"
+
+describe "in-memory id scopes":
+    it "truncates the leading bits of the 128-bit key":
+        expect(id_scope_truncate_v1(KEY_A, 16)).to_equal(43981)
+        expect(id_scope_truncate_v1(KEY_C, 32)).to_equal(305463295)
+
+    it "gives the same short id for the same key":
+        val scope = id_scope_file_v1()
+        val first = scope.id_of_key(KEY_A)
+        expect(first).to_equal("s:43981")
+        expect(scope.id_of_key(KEY_A)).to_equal(first)
+
+    it "falls back to the full key when a different key owns the short id":
+        val scope = id_scope_file_v1()
+        expect(scope.id_of_key(KEY_A)).to_equal("s:43981")
+        expect(scope.id_of_key(KEY_B)).to_equal("f:" + KEY_B)
+        expect(scope.collisions).to_equal(1)
+
+    it "keeps keys with different 32-bit prefixes on short ids in the global scope":
+        val scope = id_scope_global_v1()
+        expect(scope.id_of_key(KEY_A).starts_with("s:")).to_equal(true)
+        expect(scope.id_of_key(KEY_C).starts_with("s:")).to_equal(true)
+
+    it "hashes arbitrary values through xxh3-128":
+        val scope = id_scope_global_v1()
+        val id = scope.id_of("compiler.driver.cache")
+        expect(scope.id_of("compiler.driver.cache")).to_equal(id)
