@@ -1,0 +1,132 @@
+# Object-hash link receipt: skip the relink when nothing the link reads changed.
+#
+# After every successful native link a receipt `<output>.link-receipt` is
+# published (temp + rename) holding
+#   - the link key: sha256 over, IN LINK ORDER, each input object's content
+#     sha256, the output path, every NativeLinkOptions field, and the content
+#     sha256 of each regular file directly under the runtime path; and
+#   - the content sha256 of the produced output.
+# On the next link with the same key and an output whose bytes still match the
+# receipt, nothing the link reads has changed, so the existing output is the
+# result -- no new object, no relink.
+#
+# Modes (SIMPLE_LINK_RECEIPT):
+#   unset / "shadow"  link anyway; report whether the receipt WOULD have
+#                     skipped and whether the fresh output is byte-identical.
+#                     This is the default because the semantic cache manager
+#                     design keeps object/artifact reuse shadow-only until
+#                     differential evidence qualifies it
+#                     (doc/04_architecture/compiler_semantic_cache_manager.md).
+#   "1"               authoritative: skip the link on a receipt hit.
+#   "0"               receipts off entirely.
+# The AOP formal design (§16.6) relinks on every static change; this receipt
+# skips only when every link input hash is unchanged, which is the case it
+# leaves implicit. Not covered by the key (named): the linker binary itself
+# and system libraries outside the runtime path / explicit library list.
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, is_file, dir_list, env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+
+val LINK_RECEIPT_HEADER_V1: text = "simple-link-receipt: 1"
+
+pub fn native_link_options_text_v1(opts: NativeLinkOptions) -> text:
+    var parts: [text] = [
+        "target=" + opts.target_triple, "debug={opts.debug}", "strip={opts.strip_output}",
+        "pie={opts.pie}", "bare={opts.bare_metal}", "opt={opts.opt_level}",
+        "backend=" + opts.stage4_backend, "compiler=" + opts.stage4_compiler_hash,
+        "runtime=" + opts.runtime_path, "bundle=" + opts.runtime_bundle]
+    for library in opts.libraries:
+        parts.push("lib=" + library)
+    for path in opts.library_paths:
+        parts.push("libpath=" + path)
+    for flag in opts.linker_flags:
+        parts.push("flag=" + flag)
+    parts.join("\n")
+
+# Pure key: object digests in link order + output + options + runtime digests.
+pub fn native_link_key_v1(object_digests: [text], output: text, options_text: text,
+        runtime_digests: [text]) -> text:
+    var parts: [text] = ["simple.link.key.v1", "output=" + output, options_text]
+    for digest in object_digests:
+        parts.push("obj=" + digest)
+    for digest in runtime_digests:
+        parts.push("rt=" + digest)
+    sha256_text(parts.join("\n"))
+
+pub fn native_link_receipt_render_v1(key: text, output_digest: text) -> text:
+    LINK_RECEIPT_HEADER_V1 + "\nkey: " + key + "\noutput-sha256: " + output_digest + "\n"
+
+# The recorded output digest when `content` is a receipt for `key`, else "".
+pub fn native_link_receipt_output_digest_v1(content: text, key: text) -> text:
+    val prefix = LINK_RECEIPT_HEADER_V1 + "\nkey: " + key + "\noutput-sha256: "
+    if not content.starts_with(prefix) or not content.ends_with("\n"):
+        return ""
+    val digest = content.substring(prefix.len(), content.len() - 1)
+    if digest.len() != 64 or digest.contains("\n"):
+        return ""
+    digest
+
+fn _file_digest_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    sha256_u8_hex(file_read_bytes(path))
+
+fn _runtime_digests_v1(runtime_path: text) -> [text]:
+    var out: [text] = []
+    if runtime_path == "":
+        return out
+    for name in dir_list(runtime_path):
+        val path = runtime_path + "/" + name
+        if is_file(path):
+            out.push(name + "=" + _file_digest_v1(path))
+    out
+
+fn _publish_receipt_v1(path: text, content: text) -> bool:
+    val temp = "{path}.{getpid()}.tmp"
+    if not file_write(temp, content):
+        val _w = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return false
+    true
+
+# Drop-in for link_llvm_native at the driver's final-link sites.
+pub fn native_link_with_receipt_v1(objects: [text], output: text,
+        opts: NativeLinkOptions) -> Result<text, text>:
+    val mode = env_get_opt("SIMPLE_LINK_RECEIPT") ?? ""
+    if mode == "0":
+        return link_llvm_native(objects, output, opts)
+    var object_digests: [text] = []
+    for object in objects:
+        val digest = _file_digest_v1(object)
+        if digest == "":
+            # Unknown input: no receipt claim either way.
+            return link_llvm_native(objects, output, opts)
+        object_digests.push(digest)
+    val key = native_link_key_v1(object_digests, output, native_link_options_text_v1(opts),
+        _runtime_digests_v1(opts.runtime_path))
+    val receipt_path = output + ".link-receipt"
+    val recorded = if file_exists(receipt_path):
+        native_link_receipt_output_digest_v1(file_read(receipt_path), key)
+    else:
+        ""
+    val hit = recorded != "" and _file_digest_v1(output) == recorded
+    if hit and mode == "1":
+        eprint("[link-receipt] hit: {objects.len()} object(s) unchanged; relink skipped ({output})")
+        return Ok(output)
+    val linked = link_llvm_native(objects, output, opts)
+    if linked.is_ok():
+        val produced = _file_digest_v1(output)
+        if hit:
+            eprint("[link-receipt] shadow: would skip relink; fresh output identical={produced == recorded} ({output})")
+        if produced != "":
+            val _published = _publish_receipt_v1(receipt_path,
+                native_link_receipt_render_v1(key, produced))
+    linked
+
+export native_link_options_text_v1, native_link_key_v1
+export native_link_receipt_render_v1, native_link_receipt_output_digest_v1
+export native_link_with_receipt_v1
