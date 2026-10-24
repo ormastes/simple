@@ -34,6 +34,7 @@ use compiler.mono.model.generic_subst_model.{MType, mt_key_type, mt_is_unknown,
     MI_STATUS_CLOSED, MI_STATUS_OPEN, MI_STATUS_DEPTH}
 use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_admissible_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, HASH_ALGO_SHA256_V1}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
 use std.common.string_core.{text_to_bytes}
@@ -180,16 +181,24 @@ pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemp
 # Forward read record (P2 schema, SQR1): the concrete view `tldr.concrete`
 # consumed the template `tldr.symbolic` summary. `.rr` maps this kind to the
 # `generic-specialization` family; it is never an input of the view's key.
+# The SQR1 wire carries a bare sha256 digest field; a tagged identity is
+# admitted there only when it is a sha256 DigestV1 ("" otherwise, which the
+# manifest validator rejects - fail closed).
+fn _sqr1_digest_v1(tagged: text) -> text:
+    match digest_v1_parse(tagged):
+        case Some(d): if d.algo_id == HASH_ALGO_SHA256_V1: d.hex else: ""
+        case nil: ""
+
 pub fn concrete_tldr_read_manifest_v1(view: ConcreteTldrAstViewV1,
         profile_digest: text) -> SemanticQueryReadManifestV1:
     val profile = sha256_text(profile_digest)
     val symbol = view.template.symbol_id
     val consumer = SemanticQueryKeyV1(kind: "tldr.concrete", stable_entity_id: symbol,
-        semantic_profile_digest: profile, parameter_digest: view.args_id)
+        semantic_profile_digest: profile, parameter_digest: _sqr1_digest_v1(view.args_id))
     val producer = SemanticQueryKeyV1(kind: "tldr.symbolic", stable_entity_id: symbol,
         semantic_profile_digest: profile, parameter_digest: sha256_text("tldr.symbolic/no-arguments/v1"))
     val read = SemanticQueryReadV1(producer: producer, consumer: consumer,
-        facet: "template-summary", ordinal: 0, consumed_fingerprint: view.template_id,
+        facet: "template-summary", ordinal: 0, consumed_fingerprint: _sqr1_digest_v1(view.template_id),
         witness_digest: generic_template_summary_digest_v1(view.template),
         partition_id: symbol, completeness: SemanticCoverageV1.Complete)
     SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [read])

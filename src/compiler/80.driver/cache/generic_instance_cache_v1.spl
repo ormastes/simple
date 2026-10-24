@@ -9,9 +9,9 @@
 # the key the legacy ConcreteType path builds (`name:<symbol>` definition,
 # `canonical_type_id_of_concrete` argument ids).
 #
-# Hash agility: every stored digest is `<algo>:<hex>`; at most three
-# algorithms are admitted and an unknown or malformed tag is a MISS, never a
-# reinterpretation. Only sha256 is admitted until the algorithm registry lands.
+# Hash agility: instance keys are DigestV1 text from the shared registry
+# (hash_algorithm_registry_v1, at most three algorithms per identity); an
+# unknown or malformed tag is a MISS, never a reinterpretation.
 #
 # No locks: entries are set-once. A second publication of the SAME key with
 # DIFFERENT bytes is nondeterminism: the entry is quarantined (every later
@@ -29,37 +29,20 @@ use compiler.monomorphize.mono_key.{MonoSemanticKey, MonoArtifactKey,
     mono_artifact_key_canonical_text, mono_semantic_key_is_generic}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse,
+    digest_v1_identity_ok}
 
-pub val GENERIC_DIGEST_ALGOS_V1 = ["sha256"]   # admitted; at most three
-
-# `<algo>:<hex>` for an admitted algorithm, "" otherwise.
-pub fn generic_digest_tag_v1(algo: text, hex: text) -> text:
-    if not GENERIC_DIGEST_ALGOS_V1.contains(algo) or hex == "":
-        return ""
-    algo + ":" + hex
-
-# True iff `tagged` names an admitted algorithm with a lowercase-hex body of
-# that algorithm's width.
+# An instance key is admitted only as a parseable DigestV1 of a KNOWN,
+# collision-resistant algorithm (hash_algorithm_registry_v1). Unknown or
+# malformed tags, and fast fingerprints (xxh3/crc32), are a MISS.
 pub fn generic_digest_admitted_v1(tagged: text) -> bool:
-    val colon = tagged.index_of(":")
-    if colon <= 0:
-        return false
-    val algo = tagged.substring(0, colon)
-    if not GENERIC_DIGEST_ALGOS_V1.contains(algo):
-        return false
-    val hex = tagged.substring(colon + 1)
-    if algo == "sha256" and hex.len() != 64:
-        return false
-    var i = 0
-    while i < hex.len():
-        val c = hex.char_code_at(i)
-        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
-            return false
-        i = i + 1
-    true
+    match digest_v1_parse(tagged):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
 
+# The ConcreteTldrKey is already an algorithm-tagged DigestV1.
 pub fn generic_instance_key_v1(view: ConcreteTldrAstViewV1) -> text:
-    generic_digest_tag_v1("sha256", view.semantic_key)
+    view.semantic_key
 
 fn _join_ids_v1(ts: [MType]) -> text:
     var parts: [text] = []
@@ -206,6 +189,6 @@ class GenericInstanceCacheV1:
 pub fn generic_instance_cache_new() -> GenericInstanceCacheV1:
     GenericInstanceCacheV1.create()
 
-export GENERIC_DIGEST_ALGOS_V1, generic_digest_tag_v1, generic_digest_admitted_v1
+export generic_digest_admitted_v1
 export generic_instance_key_v1, generic_canonical_type_id_v1, generic_instance_semantic_key_v1
 export GenericInstanceCacheV1, generic_instance_cache_new
