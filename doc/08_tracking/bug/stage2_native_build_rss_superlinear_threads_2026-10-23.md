@@ -1,7 +1,7 @@
 # Seed native-build of stage 2 (windows-gnu, LLVM): runaway RSS after the CLANG64 libLLVM-23 switch
 
 - **Date:** 2026-10-23
-- **Status:** open. The cause is a suspect, not proven. Nothing was rebuilt, because the host is shared.
+- **Status:** fixed by PR #4288 (`a440291a0b8`); see Root cause below.
 - **Process:** the Rust seed, `stage2-runtime-authority/simple.exe native-build`. It is not a Simple-compiled compiler.
 - **Evidence:** `C:/dev/wt-rel3-new/build/rss/jobs40.curve`
 
@@ -71,3 +71,43 @@ The thread count is not the variable. The 16-thread baseline is from the **old**
 - `SIMPLE_MEMORY_LIMIT_MB` (`watchdog.rs:38-42`, `memory_guard.rs:32`) is a hard RSS kill, not admission.
 - `SIMPLE_MODULE_RSS_WARN_MB` only warns. `SIMPLE_PARSED_SOURCE_CACHE_MAX` caps the per-worker parse memo (default 256).
 - No RSS-aware admission exists. If one is wanted, the place is `NativeCompileAdmission::run`: block admission while RSS is above a `SIMPLE_NATIVE_RSS_BUDGET_MB`.
+
+## Root cause (resolved 2026-10-24)
+
+The runaway was **mimalloc's thread-exit hook not being registered under
+clang-mingw**, not LLVM retention. The seed allocates through mimalloc
+(`driver/src/main.rs`), and `compile_file_safe` spawns a fresh `std::thread`
+per file. Under the windows-gnu (llvm-mingw / clang) build, `libmimalloc-sys`
+compiled without the FLS-based thread-done callback, so each exiting worker
+thread's mimalloc heap was abandoned instead of reclaimed. Growth therefore
+tracked file throughput (+80 MB/file), independent of `--threads`, matching
+the 24- and 40-job curves above. The CLANG64 `libLLVM-23.dll` switch only
+coincided with moving the lane onto the mingw seed build.
+
+**Fix:** PR #4288 (`a440291a0b8`, `work/mimalloc-fls-mingw`) —
+`src/compiler_rust/vendor/libmimalloc-sys/build.rs` now registers the FLS
+thread-exit hook on mingw. Measured after: RSS flat at about **2.2 GB at 550
+files** (was +80 MB/file and 82 GB at kill).
+
+Status: **fixed**. The "Leading hypothesis" and "Smallest fix" sections above
+are superseded; the per-file thread spawn is no longer a leak source.
+
+## Separate concern: per-file parser promote (stage-2 binary, not fixed)
+
+Evidence (`src/compiler/10.frontend/core/parser.spl` at `a440291a0b8`):
+
+- `parser_promote_transient_owners` (lines 161-171) promotes `par_errors`,
+  `par_warnings` and `par_struct_names` out of the file's transient scope
+  every file.
+- `parser_init_with_path` (lines 342-344) then reassigns all three to `[]`,
+  so the previous file's promoted copies lose their last module-global
+  reference.
+- Whether that is a leak depends on whether the persistent heap reclaims an
+  unreferenced promoted array; that is a runtime-heap property, not visible in
+  `parser.spl`. Promotion is required (diagnostics are read after scope end),
+  so the copies cannot simply be dropped.
+- Unmeasured: the #4288 measurement is the **seed** process, which never runs
+  `parser.spl`, so it says nothing about this path. To decide, run a stage-2
+  binary compile over many files with per-file RSS sampling
+  (`SIMPLE_NATIVE_FILE_TIMING=1`) and check for a monotonic per-file step.
+  Not fixed here because the cause is not proven.
