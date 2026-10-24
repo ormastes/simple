@@ -46,3 +46,36 @@ fn query_uses_calling_thread_and_preserves_other_threads_scope() {
     assert!(rt_transient_array_scope_end());
     assert_eq!(rt_transient_array_scope_state_v1(), 0);
 }
+
+#[test]
+fn promote_cost_is_proportional_to_reachable_not_scope_size() {
+    // Many tracked objects, then many small promotions while paused: each
+    // promotion must not rescan the whole scope (it was O(objects) twice per
+    // call -- ~50% of a stage2 parse profile, 2026-10-24).
+    assert!(rt_transient_array_scope_begin());
+    let mut kept = Vec::new();
+    for i in 0..200_000u64 {
+        let array = rt_array_new(1);
+        assert!(!array.is_nil());
+        if i % 400 == 0 {
+            kept.push(array);
+        }
+    }
+    assert!(rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    for array in &kept {
+        assert!(rt_transient_heap_promote(*array));
+    }
+    let elapsed = started.elapsed();
+    // A promoted object is no longer scope owned: promoting it again is the
+    // persistent no-op path.
+    assert!(rt_transient_heap_promote(kept[0]));
+    assert!(rt_transient_array_scope_end());
+    // Promoted arrays survived scope end and are still valid.
+    for array in &kept {
+        assert!(rt_array_push(*array, RuntimeValue::from_int(7)));
+        rt_array_free(*array);
+    }
+    eprintln!("promote_cost: {} promotions over 200000 tracked in {:?}", kept.len(), elapsed);
+    assert!(elapsed < std::time::Duration::from_secs(2), "promotion rescans the scope: {:?}", elapsed);
+}

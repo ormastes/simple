@@ -427,6 +427,24 @@ progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
+# Post-mono MIR-to-object batching requests for the Stage 3 and Stage 4
+# native-builds (doc/05_design/compiler/perf/per_module_stream_to_object_v1.md):
+# Whole-program HIR/type-check and mono still precede this work. The compiler
+# currently refuses staging for SIMPLE_BOOTSTRAP=1 without STAGE4, including
+# llvm-lib, so Stage 3's request does not enable batching. Eligible Stage 4
+# lowers/verifies/borrow-checks/emits MIR batches and evicts their references;
+# this is not evidence of reclaimed memory or ready-unit source-to-object work.
+# Go-to-end retains valid objects and fails a stage with required failures.
+#   SIMPLE_BOOTSTRAP_STREAM_OBJECTS=0   whole-program MIR (no staged batches)
+#   SIMPLE_BOOTSTRAP_STREAM_BATCH=<n>   modules per batch (default 32)
+#   SIMPLE_BOOTSTRAP_GO_TO_END=0        stop at the first failing phase
+# These are shell knobs only: the compiler sees the SIMPLE_NATIVE_* values,
+# both of which cache/native_build_environment_identity.spl excludes from the
+# object identity, so toggling them never changes a cache scope.
+bootstrap_stream_batch="${SIMPLE_BOOTSTRAP_STREAM_BATCH:-32}"
+[ "${SIMPLE_BOOTSTRAP_STREAM_OBJECTS:-1}" != 0 ] || bootstrap_stream_batch=0
+bootstrap_go_to_end=1
+[ "${SIMPLE_BOOTSTRAP_GO_TO_END:-1}" != 0 ] || bootstrap_go_to_end=0
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
 # Typed reason used to auto-produce the Stage-3 planner receipt at the end of a
@@ -2698,6 +2716,13 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP_STAGE4=1 \
     SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
+    SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
+    SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
+    SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-stage4}" \
+    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
+    SIMPLE_HIR_CACHE=1 \
+    SIMPLE_HIR_CACHE_DIR="${native_cache_dir}/hir" \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
@@ -4244,6 +4269,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=0" \
+      "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=${bootstrap_stream_batch}" \
+      "SIMPLE_NATIVE_GO_TO_END=${bootstrap_go_to_end}" \
+      "SIMPLE_CACHE_SCOPE=stage3" \
       "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
       "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
       "SIMPLE_FRONTEND_CACHE=1" \
@@ -4280,7 +4308,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source "${cuda_source_root}" \
-      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
@@ -5319,6 +5347,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   [ ! -e "${stage3_memory_snapshot}" ] && [ ! -L "${stage3_memory_snapshot}" ] || exit 1
   [ ! -e "${stage3_phase_profile}" ] && [ ! -L "${stage3_phase_profile}" ] || exit 1
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
+  # Stage 3 (exact capsule) rejects more than five --source roots; the driver has
+  # five root slots (k1 composition, cuda, compiler, app, lib). src/plugins is
+  # reached through entry closure. Keep in sync with stage3_build_args_sha256.
   bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
     "$(absolute_path "${log_dir}/stage3-native-build.log")" \
@@ -5336,6 +5367,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_K1_COMPOSITION_SHA256_BEFORE="${k1_composition_sha256_before}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+    SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
+    SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
+    SIMPLE_CACHE_SCOPE=stage3 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=1 \
@@ -5374,7 +5408,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
     ${k1_composition_source_args} --source "${cuda_source_root}" \
-    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+    --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \

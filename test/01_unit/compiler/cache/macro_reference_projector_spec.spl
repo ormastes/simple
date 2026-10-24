@@ -1,0 +1,161 @@
+# Purpose: P5 forward macro facts (plan 2026-10-24 §6, M-01/M-02, vertical slice 3).
+# Module .tld MacroDefinitionTable + outgoing MacroUse records, __init__.tld
+# name-candidate roots, MacroExpandKey expansion cache with single-flight, and
+# macro-generated public surface. Reverse `.rr` projection is owned by P2.
+# @req M-01 M-02
+
+use std.spec.*
+use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{
+    MacroUseStatusV1, macro_definition_table_encode_v1, macro_use_status_tag_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{
+    MacroSourceDefV1, MacroSourceInvocationV1, MacroModuleSourceV1,
+    MacroModuleProjectionV1, project_macro_module_v1,
+    package_macro_name_index_v1, macro_projection_diff_v1, macro_forward_users_of_v1,
+    macro_def_key_of_v1}
+use compiler.driver.cache.module_public_summary_facts_v1.{module_public_macro_facts_v1}
+use compiler.semantics.macro_contracts.{MacroContractItem, macro_contract_canonical_text,
+    macro_contract_introduced_names}
+
+fn mdef(name: text, intros: [text]) -> MacroDef:
+    var decls: [MacroIntroDecl] = []
+    for n in intros:
+        decls.push(MacroIntroDecl(kind: "fn", name_pattern: n, type_pattern: nil))
+    MacroDef(name: name, params: ["x"], contract_intros: decls, contract_injects: [])
+
+fn sdef(name: text, body: text, nested: [text], intros: [text]) -> MacroSourceDefV1:
+    MacroSourceDefV1(def: mdef(name, intros), namespace: "macro", body_text: body,
+        nested_macro_names: nested, declared_effects: [], guard_ids: [], is_public: true)
+
+fn inv(region: text, name: text) -> MacroSourceInvocationV1:
+    MacroSourceInvocationV1(region_id: region, stable_invocation_id: "inv:" + region,
+        requested_name: name, invocation_text: name + "(1)", args_text: "1",
+        hygiene_scope_id: "h:" + region, active_guard_id: "", active: true)
+
+fn module_a(double_body: text) -> MacroModuleSourceV1:
+    MacroModuleSourceV1(package: "pkg", module: "a", source_id: "a.spl",
+        defs: [sdef("double", double_body, [], ["gen_double"]),
+               sdef("quad", "double(double(x))", ["double"], [])],
+        invocations: [])
+
+fn module_b(invs: [MacroSourceInvocationV1]) -> MacroModuleSourceV1:
+    MacroModuleSourceV1(package: "pkg", module: "b", source_id: "b.spl", defs: [], invocations: invs)
+
+fn project_b(a: MacroModuleProjectionV1, invs: [MacroSourceInvocationV1]) -> MacroModuleProjectionV1:
+    project_macro_module_v1(module_b(invs), [a])
+
+describe "M-01: change macro with direct and nested users":
+    it "pre-edit forward users list equals the post-edit re-expansion set":
+        val a0 = project_macro_module_v1(module_a("x + x"), [])
+        val b0 = project_b(a0, [inv("r1", "double"), inv("r2", "quad"), inv("r3", "other")])
+        val users = macro_forward_users_of_v1([a0, b0], "pkg", "a", "double")
+        expect(users).to_equal(["b.spl#r1", "b.spl#r2"])
+        val a1 = project_macro_module_v1(module_a("x * 2"), [])
+        val b1 = project_b(a1, [inv("r1", "double"), inv("r2", "quad"), inv("r3", "other")])
+        val da = macro_projection_diff_v1(a0, a1)
+        expect(da.changed_def_ids.len()).to_equal(2)
+        val db = macro_projection_diff_v1(b0, b1)
+        expect(db.reexpand_use_ids).to_equal(["b.spl#r1", "b.spl#r2"])
+        expect(db.rebound_use_ids.len()).to_equal(0)
+
+    it "keeps the def key when only a private non-semantic input is equal":
+        val a0 = project_macro_module_v1(module_a("x + x"), [])
+        val a1 = project_macro_module_v1(module_a("x + x"), [])
+        expect(macro_definition_table_encode_v1(a0.def_table)).to_equal(macro_definition_table_encode_v1(a1.def_table))
+        expect(macro_projection_diff_v1(a0, a1).changed_def_ids.len()).to_equal(0)
+
+describe "M-02: add/remove invocation, rename, new macro satisfying missing name":
+    it "adding or removing an invocation never changes MacroDefKey":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val k = macro_def_key_of_v1(a, "double")
+        val b1 = project_b(a, [inv("r1", "double")])
+        val b2 = project_b(a, [inv("r1", "double"), inv("r2", "double")])
+        val a_again = project_macro_module_v1(module_a("x + x"), [b1, b2])
+        expect(macro_def_key_of_v1(a_again, "double")).to_equal(k)
+        val diff = macro_projection_diff_v1(b1, b2)
+        expect(diff.added_use_ids).to_equal(["b.spl#r2"])
+        expect(diff.removed_use_ids.len()).to_equal(0)
+        val back = macro_projection_diff_v1(b2, b1)
+        expect(back.removed_use_ids).to_equal(["b.spl#r2"])
+
+    it "records a negative witness and invalidates it when the name appears":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val b0 = project_b(a, [inv("r1", "triple")])
+        expect(macro_use_status_tag_v1(b0.use_table.uses[0].status)).to_equal("unresolved")
+        expect(b0.use_table.uses[0].has_absence_witness).to_equal(true)
+        val a2_src = MacroModuleSourceV1(package: "pkg", module: "a", source_id: "a.spl",
+            defs: [sdef("double", "x + x", [], ["gen_double"]),
+                   sdef("quad", "double(double(x))", ["double"], []),
+                   sdef("triple", "x + x + x", [], [])],
+            invocations: [])
+        val a2 = project_macro_module_v1(a2_src, [])
+        expect(package_macro_name_index_v1("pkg", [a]).candidate_root == package_macro_name_index_v1("pkg", [a2]).candidate_root).to_equal(false)
+        val b1 = project_b(a2, [inv("r1", "triple")])
+        expect(macro_use_status_tag_v1(b1.use_table.uses[0].status)).to_equal("resolved")
+        val diff = macro_projection_diff_v1(b0, b1)
+        expect(diff.rebound_use_ids).to_equal(["b.spl#r1"])
+
+    it "rename turns old users into negative-resolution users":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val b0 = project_b(a, [inv("r1", "double")])
+        val renamed = MacroModuleSourceV1(package: "pkg", module: "a", source_id: "a.spl",
+            defs: [sdef("twice", "x + x", [], ["gen_double"]),
+                   sdef("quad", "twice(twice(x))", ["twice"], [])],
+            invocations: [])
+        val a1 = project_macro_module_v1(renamed, [])
+        val da = macro_projection_diff_v1(a, a1)
+        expect(da.removed_def_ids.len()).to_equal(1)
+        expect(da.added_def_ids.len()).to_equal(1)
+        val b1 = project_b(a1, [inv("r1", "double")])
+        expect(b1.use_table.uses[0].has_absence_witness).to_equal(true)
+        expect(macro_projection_diff_v1(b0, b1).rebound_use_ids).to_equal(["b.spl#r1"])
+
+    it "inactive guarded invocation is retained but not resolved":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        var g = inv("r9", "double")
+        g.active = false
+        g.active_guard_id = "when:linux"
+        val b = project_b(a, [g])
+        expect(b.use_table.uses.len()).to_equal(1)
+        expect(macro_use_status_tag_v1(b.use_table.uses[0].status)).to_equal("inactive")
+
+describe "macro-generated public surface feeds module TLDR":
+    it "body-only edit keeps the surface digest; intro change alters it":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val b0 = project_b(a, [inv("r1", "double")])
+        expect(b0.generated_public_names).to_equal(["gen_double"])
+        val a_body = project_macro_module_v1(module_a("x * 2"), [])
+        val b_body = project_b(a_body, [inv("r1", "double")])
+        expect(b_body.generated_public_surface_digest).to_equal(b0.generated_public_surface_digest)
+        val a_intro_src = MacroModuleSourceV1(package: "pkg", module: "a", source_id: "a.spl",
+            defs: [sdef("double", "x + x", [], ["gen_double", "gen_double_extra"]),
+                   sdef("quad", "double(double(x))", ["double"], [])],
+            invocations: [])
+        val b_intro = project_b(project_macro_module_v1(a_intro_src, []), [inv("r1", "double")])
+        expect(b_intro.generated_public_surface_digest == b0.generated_public_surface_digest).to_equal(false)
+
+
+describe "macro facts reach the module public summary":
+    it "emits MacroSignature facts for public defs and generated members":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val b = project_b(a, [inv("r1", "double")])
+        val facts = module_public_macro_facts_v1(a.def_table, b.generated_public_names, "pkg.a")
+        expect(facts.len()).to_equal(3)
+        expect(facts[1].stable_symbol_id).to_equal("macro:pkg.a.double")
+        expect(facts[2].stable_symbol_id).to_equal("macro-gen:pkg.a.gen_double")
+        val a_body = project_macro_module_v1(module_a("x * 2"), [])
+        val facts_body = module_public_macro_facts_v1(a_body.def_table, b.generated_public_names, "pkg.a")
+        expect(facts_body[1].canonical_bytes).to_equal(facts[1].canonical_bytes)
+
+describe "semantic-side contract digest input":
+    it "canonical contract text and introduced names":
+        val items = [
+            MacroContractItem(kind: "intro", has_name: true, name: "b_fn", has_type_name: false,
+                type_name: "", has_label: false, label: "", has_anchor: false, anchor: "",
+                has_anchor_value: false, anchor_value: ""),
+            MacroContractItem(kind: "intro", has_name: true, name: "a_fn", has_type_name: true,
+                type_name: "i64", has_label: false, label: "", has_anchor: false, anchor: "",
+                has_anchor_value: false, anchor_value: "")]
+        expect(macro_contract_introduced_names(items)).to_equal(["a_fn", "b_fn"])
+        val t1 = macro_contract_canonical_text(items)
+        expect(t1 == macro_contract_canonical_text([items[1], items[0]])).to_equal(false)

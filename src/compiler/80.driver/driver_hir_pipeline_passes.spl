@@ -16,6 +16,9 @@ use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_phase}
 use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
@@ -232,6 +235,86 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
 # distinguishable from "it ran and found nothing".
 # ---------------------------------------------------------------------------
 
+# Bug native_build_hir_phase_scopes_2026_10_24: the any-escape, enum-contract
+# and representation passes walk every module with no transient scope, so
+# each walk's scratch (~1.3 MB/module measured for the enum-contract window at
+# 472 modules) stays immortal in the no-GC runtime. The collectors are
+# read-only ("Only rendered diagnostic arrays escape",
+# hir_semantic_consumer_v1.spl) and write no global or ctx state, so each one
+# runs in its own scope and only its receipt is promoted. Every persistent
+# write -- publish_module_typecheck_receipt_v1 (ctx.add_warning/add_error),
+# the `out` push, the representation write-back into `hir_modules` -- runs
+# AFTER scope end. SIMPLE_HIR_SEMANTIC_PASS_SCOPE=0 restores the unscoped walk.
+fn hir_semantic_pass_scope_enabled_v1() -> bool:
+    (env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE") ?? "") != "0"
+
+fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
+    if not hir_semantic_pass_scope_enabled_v1(): return false
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        eprint("[hir-pass-scope] WARNING transient scope refused; running {pass_name} UNSCOPED, arena retained: module={name}")
+        return false
+    true
+
+# Promotion stays in the frame that owns the receipt (a struct passed by value
+# could reach a helper as a copy), and the three arrays are promoted too so the
+# children survive even if the struct shell is a by-value no-op promotion.
+# Re-promoting an already-immortal child is a documented no-op success.
+fn _hir_pass_scope_failed_v1(pass_name: text, name: text, paused: bool, owned: bool, ended: bool):
+    eprint("[hir-pass-scope] WARNING receipt promotion failed (paused={paused} owned={owned} ended={ended}); re-running {pass_name} UNSCOPED: module={name}")
+
+fn _any_escape_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("any_escape", name):
+        return collect_module_any_escape_receipt_v1(name, module, strictness)
+    val receipt = collect_module_any_escape_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("any_escape", name, paused, owned, ended)
+    collect_module_any_escape_receipt_v1(name, module, strictness)
+
+fn _enum_contract_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("enum_contract", name):
+        return collect_module_enum_contract_receipt_v1(name, module, strictness)
+    val receipt = collect_module_enum_contract_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("enum_contract", name, paused, owned, ended)
+    collect_module_enum_contract_receipt_v1(name, module, strictness)
+
+fn _representation_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("representation_manifest", name):
+        return collect_module_representation_receipt_v1(name, module, strictness)
+    val receipt = collect_module_representation_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("representation_manifest", name, paused, owned, ended)
+    collect_module_representation_receipt_v1(name, module, strictness)
+
+# The bind result is written back into the persistent `hir_modules` by the
+# caller, so it is promoted here and the module is never mutated in scope.
+fn _representation_bind_scoped_v1(contexts: Dict<text, RepresentationSourceContextV1>,
+        name: text, module: HirModule) -> [RepresentationDeclarationV1]:
+    if not _hir_pass_scope_open_v1("representation_bind", name):
+        return representation_bind_module_facts_v1(contexts, name, module)
+    val declarations = representation_bind_module_facts_v1(contexts, name, module)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(declarations)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return declarations
+    eprint("[hir-pass-scope] WARNING declaration promotion failed (paused={paused} owned={owned} ended={ended}); re-running representation_bind UNSCOPED: module={name}")
+    representation_bind_module_facts_v1(contexts, name, module)
+
 pub fn run_any_escape_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
@@ -243,7 +326,7 @@ pub fn run_any_escape_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_any_escape_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _any_escape_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -272,7 +355,7 @@ pub fn run_enum_contract_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_enum_contract_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _enum_contract_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -341,9 +424,9 @@ pub fn run_representation_manifest_pass(ctx: CompileContext,
     var errors_raised = 0
     for name in hir_modules.keys():
         var module: HirModule = hir_modules[name]
-        module.representation_declarations = representation_bind_module_facts_v1(contexts, name, module)
+        module.representation_declarations = _representation_bind_scoped_v1(contexts, name, module)
         hir_modules[name] = module
-        val receipt = collect_module_representation_receipt_v1(name, module, strictness)
+        val receipt = _representation_receipt_scoped_v1(name, module, strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)

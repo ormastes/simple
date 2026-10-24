@@ -882,6 +882,18 @@ fn cl_translate_instruction(
                 val continuation = cranelift_create_block(ctx)
                 cranelift_switch_to_block(ctx, continuation)
 
+        case Ref(dest, _, place):
+            # A borrow (`&x` / `&mut x`) lowers to the identity on the borrowed
+            # place's value, exactly as the LLVM backend's llvm_ref_impl does
+            # (and with the same Copy store discipline). Missing here, the
+            # catch-all panicked and aborted MIR shard workers in codegen.
+            # See doc/08_tracking/bug/cranelift_ref_unlowered_shard_abort_2026-10-24.md
+            val src_val = load_local(ctx, place.local.id, value_map, slot_map, func)
+            value_map[dest.id] = src_val
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+                val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
+                cranelift_store(ctx, src_val, addr, 0)
+
         case Nop:
             ()
 

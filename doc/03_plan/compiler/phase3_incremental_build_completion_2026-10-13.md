@@ -2,6 +2,21 @@
 
 Status: ACTIVE. This is the replacement execution plan as of 2026-10-13. It supersedes the execution status of [the earlier agent plan](../agent_tasks/incremental_build_metadata_20261008.md) and [the earlier acceptance plan](../sys_test/incremental_build_metadata_20261008.md). Those documents are closed as execution plans and retained as historical requirements and test-design references. Closing a plan does not mean its features are implemented.
 
+**Design authority (2026-10-24):**
+[`src_based_tldr_build_v1.md`](../../05_design/compiler/incremental_build/src_based_tldr_build_v1.md)
+— per-file src→obj jobs with no stage barrier; `SourceReader`
+{`read_tldr`, `read_src`, `update_tldr`, `update_src`} with async file and
+cache readers; one parse → full AST + TLDR; temp+rename publication;
+single-flight futures; shared binary AST cache; TLDR as forward declaration with
+set-once async pointers; in-memory xxh3 id scopes; cache limits (memory max,
+storage max, max main branches, per-branch versions per source); no locks; NUMA
+locality. Resolved conflicts: single `$SIMPLE_CACHE` root (per-lane is
+bootstrap-only); daemon `CacheWriterV1` for shared state with atomic
+workspace-local stores; object reuse shadow-only until admitted; over-limit
+rejects; `.tldr` written by the compiler to an explicit `--out` root, never
+importable. The synchronous parse lease is dropped. Landed toward it: #4352
+#4354 #4355 #4360 #4362 #4364 #4366 #4368 #4371.
+
 ## Priorities and scope
 
 1. Produce a usable Phase 3 compiler: repair object-generation failures, retain compatible successes, link the compiler, and compile/run Hello World with it. Land reviewed compile fixes on `release_phase3` through PRs as they become usable.
@@ -40,6 +55,18 @@ The entries below are incomplete until their end-to-end acceptance evidence exis
 | Runner recovery and qualification | Preserve grouped workers normally; isolate unknown tasks after crash. Keep independent build/test tasks running and preserve nonzero aggregate failures. | One failure/crash does not suppress independent work; retry only affected failed stages; header may survive object failure without declaring object/link ready. |
 | <=100ms entry compilation | Include startup, source admission, header validation, parse/lower, object emission and publication. Dependency preparation must precede measurement. | Bounded same-source p50/p95, CPU, RSS, bytes, opens, cache counts and lock waits; exactly one new entry object, zero hidden imported-body codegen. Cold and final-link costs reported separately. |
 | Formal cache model | Model generations, header/object stages, publishers/readers, leases, cancellation and crashes against real owner interfaces. | Retained finite-model safety/liveness result plus real concurrency/failure tests; modeling does not prove complete semantic read sets. |
+
+Additive rows (2026-10-24; detail and path:line status in the design doc):
+
+| Feature | Remaining integration | Completion evidence |
+| --- | --- | --- |
+| Per-file src→obj jobs | Replace the parse/HIR/MIR shard phases (#4348, #4368) and `bootstrap_builder/phase_admission.spl` barriers with one async job per source file joined only on TLDR futures. | First object lands before the last source is parsed; Stage3 wall time and object-arrival timeline recorded. |
+| `CacheReader` + single-flight | Daemon/runner-backed `SourceReader` that returns the shared binary AST or fails; compiler parses and hands the AST back through `update_*`; one future per key, later callers await it. | N concurrent same-key compiles parse once; failure of the first is delivered to all waiters. |
+| TLDR forward declaration | HIR consumes the `.tldr` companion instead of the source; cross-module references are set-once async pointers filled via single-flight; one shared immutable table of loaded TLDRs. | File-open trace shows no dependency source opened; pointer fill count equals distinct referenced modules. |
+| Id scopes and set-once AST | xxh3_128 keys truncated to 32/16-bit per-file/local ids with bloom filter and 128-bit fallback, never persisted; set-once fields; usage-profiled array/hash attributes. | Collision fixture resolves through fallback; serialized artifacts contain no truncated id. |
+| Incremental rules and no-relink | Recompile only changed sources, their TLDRs and the aspect-affected pointcut set; when all object hashes are equal emit nothing and place the cached binary. | Unchanged-tree rebuild performs zero links; pointcut edit recompiles exactly the matched set. |
+| Cache limits | Memory max, storage max, max main branches, per-branch max versions per source file; over-limit rejects. | Each limit has a fixture that trips it and a recompute-only recovery. |
+| Generic / AOP / macro semantic cache | Additive package [`cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`](cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md) (P1–P7), rechecked against `release/1.0.0`. | Its §11 matrix; P6 carries the four cache limits. |
 
 Carry forward every scenario and requirement in the historical acceptance plan, including snapshot separation, full diagnostic coverage, publication races, scope completeness, packed/hybrid parity and post-build qualification. No scenario is discarded by supersession.
 

@@ -1,0 +1,73 @@
+# Macro expansion cache keyed by MacroExpandKey (plan 2026-10-24 §3.2, P5).
+#
+# Coalesces identical in-flight expansions through the existing daemon
+# single-flight table (cache/daemon/cache_single_flight_v1.spl): the first
+# request for a key is the LEADER and expands; concurrent requests for the
+# same key become WAITERS and observe the leader's published bytes. No locks:
+# the table is owned by one event loop and published values are immutable.
+#
+# A key whose producer publishes two different expansions is QUARANTINED
+# (plan §9.6): it never hits again and callers fall back to a reference
+# expansion. Newest-wins is never used.
+use std.common.text_bytes.{text_to_bytes}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
+
+class MacroExpansionCacheV1:
+    flights: CacheSingleFlightV1
+    keys: [text]
+    values: [text]
+    quarantined: [text]
+    computations: i64
+
+    static fn create() -> MacroExpansionCacheV1:
+        MacroExpansionCacheV1(flights: CacheSingleFlightV1.create(), keys: [], values: [],
+            quarantined: [], computations: 0)
+
+    fn _index(expand_key: text) -> i64:
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == expand_key: return i
+            i = i + 1
+        -1
+
+    fn _is_quarantined(expand_key: text) -> bool:
+        for k in self.quarantined:
+            if k == expand_key: return true
+        false
+
+    # "hit" | "leader" | "waiter" | "quarantined"
+    me begin(expand_key: text, request_id: text) -> text:
+        if self._is_quarantined(expand_key): return "quarantined"
+        if self._index(expand_key) >= 0: return "hit"
+        val (role, _flight) = self.flights.join(cache_single_flight_key_v1("macro-expand", expand_key), request_id)
+        if role == SINGLE_FLIGHT_LEADER_V1:
+            self.computations = self.computations + 1
+            return "leader"
+        "waiter"
+
+    # true when published (or an identical republish); false when the key is
+    # now quarantined for a differing expansion.
+    me publish(expand_key: text, request_id: text, expansion: text) -> bool:
+        if self._is_quarantined(expand_key): return false
+        val i = self._index(expand_key)
+        if i >= 0:
+            if self.values[i] == expansion: return true
+            self.quarantined.push(expand_key)
+            return false
+        self.keys.push(expand_key)
+        self.values.push(expansion)
+        val _done = self.flights.complete(cache_single_flight_key_v1("macro-expand", expand_key),
+            request_id, Some(text_to_bytes(expansion)))
+        true
+
+    fn value_of(expand_key: text) -> text:
+        if self._is_quarantined(expand_key): return ""
+        val i = self._index(expand_key)
+        if i < 0: return ""
+        self.values[i]
+
+    fn inflight_count() -> i64:
+        self.flights.inflight_count()
+
+export MacroExpansionCacheV1

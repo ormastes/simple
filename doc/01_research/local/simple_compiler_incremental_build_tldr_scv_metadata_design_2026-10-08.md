@@ -2,6 +2,8 @@
 
 **Date:** 2026-10-08  
 **Status:** Final architecture/design recommendation; **not implemented or performance-qualified**  
+
+> **Partly superseded (2026-10-24)** by [`doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`](../../05_design/compiler/incremental_build/src_based_tldr_build_v1.md): §7.1 phases-and-barriers → per-file src→obj jobs with no stage barrier; §8.1 shared cache → `SourceReader` with async file and cache readers, single-flight futures and no locks; `.tldr` is a compiler-written non-importable companion (`compiler_semantic_cache_manager.md` items 10-12). Edit capture (§4), freshness identities (§5) and SCM checkpoints (§6) remain the reference.
 **Projects:** [Simple](https://github.com/ormastes/simple), [Spipe](https://github.com/ormastes/Spipe)  
 **Scope:** Simple compiler, Simple IDE, Spipe, SCV/Git/jj, BuildRunner, TestRunner, bootstrap, `.tld`/`__init__.tld`, SMF artifacts  
 **Source basis:** Inspected default-branch code and project designs (repository search results observed at revision `2e43233b11fbbd837535d9313a168f729fad7f46`); compared with Git, Tree-sitter, Jujutsu, Salsa, and Bazel documentation. This is **not** an implementation or benchmark report.

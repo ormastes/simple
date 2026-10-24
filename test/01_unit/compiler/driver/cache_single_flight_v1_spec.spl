@@ -1,0 +1,72 @@
+use std.spec
+use std.async.poll.{Poll}
+use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use std.service.daemon_base.{daemon_config_new}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1, SINGLE_FLIGHT_WAITER_V1}
+
+fn ready_len(table: CacheSingleFlightV1, flight: i64) -> i64:
+    match table.future(flight).poll():
+        case Poll.Ready(blob):
+            match blob:
+                case Some(bytes): bytes.len()
+                case nil: -1
+        case Poll.Pending: -2
+
+describe "cache single-flight table":
+    it "makes the first request leader and joins later ones to its flight":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("tldr", "d1")
+        val (role_a, flight_a) = table.join(key, "req-a")
+        val (role_b, flight_b) = table.join(key, "req-b")
+        expect(role_a).to_equal(SINGLE_FLIGHT_LEADER_V1)
+        expect(role_b).to_equal(SINGLE_FLIGHT_WAITER_V1)
+        expect(flight_b).to_equal(flight_a)
+        expect(ready_len(table, flight_a)).to_equal(-2)
+
+    it "lets only the leader complete, and every participant observes the blob once":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("tldr", "d2")
+        val (_ra, flight) = table.join(key, "req-a")
+        val (_rb, _same) = table.join(key, "req-b")
+        expect(table.complete(key, "req-b", Some([9u8]))).to_equal(false)
+        expect(table.complete(key, "req-a", Some([9u8]))).to_equal(true)
+        expect(table.inflight_count()).to_equal(0)
+        expect(ready_len(table, flight)).to_equal(1)
+        expect(ready_len(table, flight)).to_equal(1)
+        expect(ready_len(table, flight)).to_equal(-2)
+
+    it "starts a fresh flight after completion":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("ast", "d3")
+        val (_r1, f1) = table.join(key, "req-a")
+        expect(table.complete(key, "req-a", nil)).to_equal(true)
+        expect(ready_len(table, f1)).to_equal(-1)
+        val (role, f2) = table.join(key, "req-c")
+        expect(role).to_equal(SINGLE_FLIGHT_LEADER_V1)
+        expect(f2 != f1).to_equal(true)
+
+describe "cache daemon host artifact flights":
+    it "refuses artifact production before daemon admission":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        val (role, _f) = host.join_artifact("tldr", "d9", "req-a", 1)
+        expect(role).to_equal(-1)
+
+    it "coalesces producers and balances the request counter once admitted":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        host.package_admission_open = true
+        val (role_a, flight) = host.join_artifact("tldr", "d9", "req-a", 1)
+        val (role_b, same) = host.join_artifact("tldr", "d9", "req-b", 2)
+        expect(role_a).to_equal(SINGLE_FLIGHT_LEADER_V1)
+        expect(role_b).to_equal(SINGLE_FLIGHT_WAITER_V1)
+        expect(same).to_equal(flight)
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.complete_artifact("tldr", "d9", "req-a", Some([4u8, 2u8]), 3)).to_equal(true)
+        expect(host.lifecycle.request_count).to_equal(0)
+        val got = match host.poll_artifact(flight).poll():
+            case Poll.Ready(blob):
+                match blob:
+                    case Some(bytes): bytes.len()
+                    case nil: -1
+            case Poll.Pending: -2
+        expect(got).to_equal(2)

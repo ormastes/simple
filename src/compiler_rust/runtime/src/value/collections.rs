@@ -34,6 +34,71 @@ thread_local! {
 struct TransientHeapScope {
     paused: bool,
     objects: Vec<RuntimeValue>,
+    /// Lazily built header-address -> `objects` position index, so promotion
+    /// answers ownership and removal in O(reachable) instead of rescanning
+    /// every object the scope ever tracked. Tracking only appends while the
+    /// scope is running and promotion only runs while it is paused, so the
+    /// index is synced (extended over `objects[indexed..]`) at promote time.
+    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
+    /// two full rescans were ~50% of parse-phase samples.
+    by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
+    indexed: usize,
+    /// Two tracked objects share a header address; fall back to the exact
+    /// original linear scans for this scope.
+    index_ambiguous: bool,
+}
+
+impl TransientHeapScope {
+    fn sync_index(&mut self) {
+        while self.indexed < self.objects.len() {
+            let object = self.objects[self.indexed];
+            if object.is_heap() {
+                let ptr = object.as_heap_ptr() as usize;
+                if self.by_ptr.insert(ptr, self.indexed).is_some() {
+                    self.index_ambiguous = true;
+                }
+            }
+            self.indexed += 1;
+        }
+    }
+
+    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+        self.sync_index();
+        if self.index_ambiguous {
+            return self
+                .objects
+                .iter()
+                .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr);
+        }
+        self.by_ptr.contains_key(&(root_ptr as usize))
+    }
+
+    /// Drop every tracked object whose exact value bits are in `reachable`.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        self.sync_index();
+        if self.index_ambiguous {
+            self.objects.retain(|object| !reachable.contains(&object.0));
+            self.by_ptr.clear();
+            self.indexed = 0;
+            self.index_ambiguous = false;
+            return;
+        }
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if !value.is_heap() {
+                continue;
+            }
+            let ptr = value.as_heap_ptr() as usize;
+            if let Some(&position) = self.by_ptr.get(&ptr) {
+                if self.objects[position].0 == *bits {
+                    // Tombstone: NIL is not heap, so scope end skips it and
+                    // the free order of the survivors is unchanged.
+                    self.objects[position] = RuntimeValue::NIL;
+                    self.by_ptr.remove(&ptr);
+                }
+            }
+        }
+    }
 }
 
 /// Nodes whose promotion fully committed earlier in the open share window:
@@ -2687,6 +2752,9 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         *slot = Some(TransientHeapScope {
             paused: false,
             objects: Vec::new(),
+            by_ptr: Default::default(),
+            indexed: 0,
+            index_ambiguous: false,
         });
         true
     })
@@ -2877,12 +2945,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // Scope-owned registered roots are walked, never treated as persistent:
         // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|scope| {
-                scope
-                    .objects
-                    .iter()
-                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
-            })
+            slot.borrow_mut()
+                .as_mut()
+                .is_some_and(|scope| scope.owns_heap_ptr(root_ptr))
         });
         if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
             // An unowned root can still hold scope-owned children: allocations
@@ -2969,7 +3034,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        scope.release_reachable(&reachable_heap);
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
