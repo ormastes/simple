@@ -80,3 +80,21 @@ describe "per-source byte caps":
         expect(plan.unload).to_equal([1])
         expect(plan.disk_bytes_after).to_equal(120)
         expect(plan.memory_bytes_after).to_equal(60)
+
+describe "reference-aware eviction (T-EV1)":
+    it "never evicts an object that a kept TLDR references":
+        val object = e("main", "a.spl", "obj-v1", 100, 0, 1)
+        val tldr = CacheEntryUseV1(branch: "main", source: "a.spl.tldr", version_key: "tldr-v1",
+            disk_bytes: 10, memory_bytes: 0, last_used_ms: 9, references: ["obj-v1"])
+        val plan = cache_eviction_plan_v1([object, tldr], limits(1000, 50, 4, 3))
+        expect(plan.evict.contains(0)).to_equal(false)
+        expect(plan.evict.contains(1)).to_equal(false)
+        expect(plan.disk_bytes_after).to_equal(110)
+
+    it "evicts the referent once its referrer is evicted too":
+        val object = e("main", "a.spl", "obj-v1", 100, 0, 1)
+        val tldr = CacheEntryUseV1(branch: "main", source: "a.spl.tldr", version_key: "tldr-v1",
+            disk_bytes: 10, memory_bytes: 0, last_used_ms: 0, references: ["obj-v1"])
+        val plan = cache_eviction_plan_v1([object, tldr], limits(1000, 5, 4, 3))
+        expect(plan.evict.contains(0)).to_equal(true)
+        expect(plan.evict.contains(1)).to_equal(true)
