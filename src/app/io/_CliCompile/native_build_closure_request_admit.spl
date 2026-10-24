@@ -1,0 +1,45 @@
+# Child-side admission of the parent's frozen entry-closure request
+# (native_build_parse_closure_owner.spl publishes it). Shared by parse shards,
+# HIR/MIR shard workers and the real native-build worker so every consumer
+# applies the same identity, producer and inherited-SCV-authority checks.
+use app.io.env_ops.{env_get}
+use app.io.file_ops.{path_absolute}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    NativeEntryClosureRequestV1, native_entry_closure_request_read_v1}
+
+# True when the parent left a request for this process. An absent path is the
+# only "no request" signal; a present path must then admit or the caller fails.
+pub fn native_build_closure_request_present_v1() -> bool:
+    (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") != ""
+
+pub fn native_build_closure_request_admit_v1(entry_point: text,
+        source_dirs: [text]) -> Result<NativeEntryClosureRequestV1, text>:
+    val request_path = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+    if request_path == "":
+        return Err("no closure request published")
+    val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+    val entry_absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry_point))
+    if not entry_absolute.starts_with(source_root + "/"):
+        return Err("closure entry outside source owner")
+    val identity = entry_absolute.substring(source_root.len() + 1)
+    var roots = native_build_snapshot_source_roots_v1(identity, source_dirs)
+    if not roots.contains(identity): roots = roots.push(identity)
+    val request = native_entry_closure_request_read_v1(request_path,
+        env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "", source_root, identity, roots,
+        file_hash_sha256(cli_kernel_executable_path()))
+    if request.is_err():
+        return Err("closure request rejected: " + request.unwrap_err())
+    val admitted = request.unwrap()
+    if admitted.snapshot.snapshot_root != (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") or
+            admitted.snapshot.revision_id != (env_get("SIMPLE_SCV_REVISION_ID") ?? "") or
+            admitted.snapshot.commit_id != (env_get("SIMPLE_SCV_COMMIT_ID") ?? "") or
+            admitted.snapshot.tree_id != (env_get("SIMPLE_SCV_TREE_ID") ?? "") or
+            admitted.snapshot.inventory_digest != (env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") or
+            admitted.source_digest != (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") or
+            admitted.generation != ((env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? "").to_i64() ?? -1):
+        return Err("closure request differs from inherited source authority")
+    Ok(admitted)

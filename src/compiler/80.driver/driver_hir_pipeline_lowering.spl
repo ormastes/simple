@@ -10,6 +10,8 @@ use compiler.mono.mono_archive_registration_v1.{
     MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
     mono_archive_collect_registration_in_owned_scope_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{
     DriverHirManagedRuntimeSelectionV1, driver_hir_archive_input_from_managed_runtime_selection_v1}
 use compiler.driver.cache.driver_hir_archive_schedule_v1.{driver_hir_archive_schedule_verify_streaming_owner_v1}
@@ -219,6 +221,17 @@ pub fn driver_hir_shard_cache_stored_v1(status: i64) -> bool:
 # max 444 MB) and 189 s with zero tracked-heap change, while bootstrap runs
 # set SIMPLE_COMPILER_PHASE_PROFILE=1 by default. The [abi-interface] lines
 # are opt-in via SIMPLE_HIR_ABI_INTERFACE_TRACE=1 (on top of phase tracing).
+# Opens a scratch scope for one auxiliary per-module step of the retained HIR
+# loop (bug native_build_hir_phase_scopes_2026_10_24). The caller promotes its
+# result in its own frame and does every persistent write after scope end.
+# SIMPLE_HIR_LOOP_AUX_SCOPE=0 keeps those steps unscoped.
+fn driver_hir_loop_aux_scope_begin_v1(step: text, name: text) -> bool:
+    if (env_get("SIMPLE_HIR_LOOP_AUX_SCOPE") ?? "") == "0": return false
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        eprint("[hir-loop-scope] WARNING transient scope refused; running {step} UNSCOPED, arena retained: module={name}")
+        return false
+    true
+
 fn driver_hir_abi_interface_trace_enabled() -> bool:
     driver_phase_trace_enabled() and (env_get("SIMPLE_HIR_ABI_INTERFACE_TRACE")) == "1"
 
@@ -2208,10 +2221,29 @@ impl CompilerDriver:
                         retained_module_surfaces.surfaces[validation_surface_index].logical_name)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:key-push:done index={source_idx}")
-                    validation_module_values = validation_module_values.push(
-                        value_struct_layout_declarations_v1(
-                            name, hir_module.path, hir_module.structs,
-                            hir_module.symbols))
+                    # Bug native_build_hir_phase_scopes_2026_10_24: the layout
+                    # projection walks the module's struct and symbol dicts
+                    # (struct-copy reads) with no scope, so that scratch stayed
+                    # immortal. Compute in a scope, promote ONLY the projection
+                    # in this same frame, and push into the persistent array
+                    # after the scope has ended. Opt out:
+                    # SIMPLE_HIR_LOOP_AUX_SCOPE=0.
+                    val layout_scoped: bool = driver_hir_loop_aux_scope_begin_v1("layout-projection", name)
+                    var layout_projection: ValueStructLayoutModuleV1 = value_struct_layout_declarations_v1(
+                        name, hir_module.path, hir_module.structs,
+                        hir_module.symbols)
+                    if layout_scoped:
+                        val layout_paused = transient_scope_pause()
+                        val layout_owned = layout_paused and transient_promote(layout_projection) and
+                            transient_promote(layout_projection.structs) and
+                            transient_promote(layout_projection.struct_symbols)
+                        val layout_ended = transient_scope_end()
+                        if not layout_paused or not layout_owned or not layout_ended:
+                            eprint("[hir-loop-scope] WARNING layout projection promotion failed (paused={layout_paused} owned={layout_owned} ended={layout_ended}); recomputing UNSCOPED: module={name}")
+                            layout_projection = value_struct_layout_declarations_v1(
+                                name, hir_module.path, hir_module.structs,
+                                hir_module.symbols)
+                    validation_module_values = validation_module_values.push(layout_projection)
                     # Shards publish cache entries and exit before aggregate
                     # validation. Keep identity/layout receipts above, but
                     # avoid retaining this unused validation transport.
@@ -2247,9 +2279,17 @@ impl CompilerDriver:
                             # lives there (hir_module_has_rt_hal). The blobs
                             # validation entry must NEVER read a field off a decoded
                             # HirModule.
-                            val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
-                            self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
+                            # has_rt_hal is a scalar: the functions key array it
+                            # allocates dies with the scope, nothing is promoted,
+                            # and the ctx pushes run after scope end. The claim
+                            # count reads the registry's own array handle (no
+                            # scratch), so it stays outside the scope.
                             val validation_claim_count: i64 = rt_criticality_claim_keys().len()
+                            val facts_scoped: bool = driver_hir_loop_aux_scope_begin_v1("rt-facts", name)
+                            val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
+                            if facts_scoped and not transient_scope_end():
+                                eprint("[hir-loop-scope] WARNING rt-facts scope end failed; arena retained: module={name}")
+                            self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
                             self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:value-push:done index={source_idx}")

@@ -51,6 +51,15 @@ void rt_fork_child_exit(int64_t exit_code) {
     exit((int)exit_code);
 }
 
+int64_t rt_fork_shared_heap_v1(void) {
+    return -3; /* EXPERIMENTAL MIR fork workers: no fork on Windows */
+}
+
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    (void)child_pid;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -647,6 +656,74 @@ void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr
 
 void rt_fork_child_exit(int64_t exit_code) {
     _exit((int)exit_code);
+}
+
+/* EXPERIMENTAL (SIMPLE_MIR_FORK_WORKERS): fork WITHOUT stdio redirection, so
+ * several children can run at once and share the parent's post-mono heap
+ * copy-on-write. rt_fork_child_setup() cannot be used for that: it keeps ONE
+ * static pipe-read slot, so a second concurrent child's pipe is never drained
+ * and blocks once it fills. Fails closed instead of forking a multithreaded
+ * process (another thread may hold a mimalloc or stdio lock the child would
+ * then deadlock on). The child dies with the parent (PR_SET_PDEATHSIG), stays
+ * in the parent's process group, and must leave via rt_fork_child_exit().
+ *   >0 parent (child pid)   0 child
+ *   -1 fork failed   -2 more than one thread alive   -3 unsupported host
+ * Design: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md */
+#if defined(__linux__)
+#include <dirent.h>
+#include <sys/prctl.h>
+
+static int fork_shared_heap_thread_count(void) {
+    DIR* tasks = opendir("/proc/self/task");
+    if (!tasks) return -1;
+    int count = 0;
+    struct dirent* entry;
+    while ((entry = readdir(tasks)) != NULL) {
+        if (entry->d_name[0] != '.') count++;
+    }
+    closedir(tasks);
+    return count;
+}
+
+int64_t rt_fork_shared_heap_v1(void) {
+    if (fork_shared_heap_thread_count() != 1) return -2;
+    fflush(NULL);
+    pid_t expected_parent = getpid();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != expected_parent) {
+            _exit(127);
+        }
+        return 0;
+    }
+    return (int64_t)pid;
+}
+#else
+int64_t rt_fork_shared_heap_v1(void) {
+    /* No portable single-thread proof or parent-death signal here. */
+    return -3;
+}
+#endif
+
+/* Blocking reap of a rt_fork_shared_heap_v1 child. rt_process_wait cannot be
+ * used: the Rust runtime lane's rt_process_wait only knows pids in its
+ * SPAWNED_CHILDREN registry and answers -1 at once for any other pid without
+ * calling waitpid, so a forked child was "reaped" while still running and then
+ * SIGKILLed by PR_SET_PDEATHSIG when the root exited (run-18, 2026-10-24).
+ *   >=0 exit status   -(128+signo) killed by a signal   -1 waitpid failed
+ * Bug: doc/08_tracking/bug/mir_fork_wait_returns_before_children_2026-10-24.md */
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    if (child_pid <= 0) return -1; /* waitpid(-1) would reap any child */
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid((pid_t)child_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) return -1;
+    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
+    return -1;
 }
 
 #endif /* _WIN32 / POSIX */

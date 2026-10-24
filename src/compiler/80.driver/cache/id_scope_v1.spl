@@ -1,0 +1,86 @@
+# In-memory id scopes: global / per-file / local.
+#
+# Every id derives from the value's xxh3-128 key. Inside a scope the key is
+# truncated to a short id (32 bits per-file, 16 bits local; the global scope
+# keeps the full 128-bit key, per doc src_based_tldr_build_v1.md) so hot
+# tables index small integers. A bloom filter over the short ids answers
+# "possibly seen"; only on a positive is the owning 128-bit key compared, and
+# when a DIFFERENT key already owns that short id the value falls back to its
+# full 128-bit key, so a truncation collision can never alias two values.
+#
+# Short ids are process-local: there is no serializer, they are never
+# persisted, never written to a cache entry and never sent to another host.
+# Anything that crosses a process or host boundary uses the full key.
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+
+pub val ID_SCOPE_GLOBAL_BITS_V1: i64 = 128
+pub val ID_SCOPE_FILE_BITS_V1: i64 = 32
+pub val ID_SCOPE_LOCAL_BITS_V1: i64 = 16
+val ID_SCOPE_BLOOM_BITS_V1: i64 = 65536
+
+fn _hex_value_v1(code: i64) -> i64:
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 97 and code <= 102: return code - 87
+    if code >= 65 and code <= 70: return code - 55
+    0
+
+# Leading `bits` bits of a hex key (bits is a multiple of 4).
+pub fn id_scope_truncate_v1(full_key: text, bits: i64) -> i64:
+    var value: i64 = 0
+    var i = 0
+    while i < bits / 4 and i < full_key.len():
+        value = value * 16 + _hex_value_v1(full_key.char_code_at(i))
+        i = i + 1
+    value
+
+class IdScopeV1:
+    width_bits: i64
+    bloom: [bool]
+    owners: Dict<text, text>
+    collisions: i64
+
+    static fn create(width_bits: i64) -> IdScopeV1:
+        var bloom: [bool] = []
+        var i = 0
+        while i < ID_SCOPE_BLOOM_BITS_V1:
+            bloom.push(false)
+            i = i + 1
+        IdScopeV1(width_bits: width_bits, bloom: bloom, owners: {}, collisions: 0)
+
+    fn _slots(short_id: i64) -> (i64, i64):
+        val a = short_id % ID_SCOPE_BLOOM_BITS_V1
+        val b = (short_id * 40503 + 7) % ID_SCOPE_BLOOM_BITS_V1
+        (if a < 0: a + ID_SCOPE_BLOOM_BITS_V1 else: a, if b < 0: b + ID_SCOPE_BLOOM_BITS_V1 else: b)
+
+    # "s:<short>" for a scope-unique short id, "f:<128-bit key>" on fallback.
+    me id_of_key(full_key: text) -> text:
+        if self.width_bits >= 128:
+            return "f:" + full_key
+        val short_id = id_scope_truncate_v1(full_key, self.width_bits)
+        val (a, b) = self._slots(short_id)
+        val slot = "{short_id}"
+        if self.bloom[a] and self.bloom[b] and self.owners.contains_key(slot):
+            if self.owners[slot] == full_key:
+                return "s:" + slot
+            self.collisions = self.collisions + 1
+            return "f:" + full_key
+        self.bloom[a] = true
+        self.bloom[b] = true
+        self.owners[slot] = full_key
+        "s:" + slot
+
+    me id_of(value: text) -> text:
+        self.id_of_key(xxh3_128_text(value))
+
+pub fn id_scope_global_v1() -> IdScopeV1:
+    IdScopeV1.create(ID_SCOPE_GLOBAL_BITS_V1)
+
+pub fn id_scope_file_v1() -> IdScopeV1:
+    IdScopeV1.create(ID_SCOPE_FILE_BITS_V1)
+
+pub fn id_scope_local_v1() -> IdScopeV1:
+    IdScopeV1.create(ID_SCOPE_LOCAL_BITS_V1)
+
+export ID_SCOPE_GLOBAL_BITS_V1, ID_SCOPE_FILE_BITS_V1, ID_SCOPE_LOCAL_BITS_V1
+export id_scope_truncate_v1, IdScopeV1
+export id_scope_global_v1, id_scope_file_v1, id_scope_local_v1

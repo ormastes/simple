@@ -72,3 +72,60 @@ fn cache_limits_hard_limit_bytes(limits: CacheLimits) -> i64:
 
 fn cache_limits_min_free_bytes(limits: CacheLimits) -> i64:
     (limits.max_bytes.to_f64() * limits.min_free_ratio).to_i64()
+
+# ---------------------------------------------------------------------------
+# Retention limits (memory / storage / branches / versions per source).
+#
+# Precedence, highest first: SIMPLE_CACHE_* env override, then the host config
+# (SIMPLE_HOST_CACHE_*, exported by host_config_load in scripts/setup/host-env.shs from
+# ~/.config/simple/host.sdn, then the legacy per-host file, then config defaults),
+# then the default. Storage max shares SIMPLE_CACHE_MAX_BYTES with CacheLimits.
+# The per-branch limit is a COUNT of kept versions per source file (AST, TLDR,
+# object of each src), not a byte size per branch. Eviction order and write
+# refusal live in cache/gc/cache_eviction_plan_v1.spl.
+
+val DEFAULT_MEMORY_MAX_BYTES: i64 = 1073741824     # 1 GiB in-RAM cache
+val DEFAULT_MAX_BRANCHES: i64 = 4
+val DEFAULT_VERSIONS_PER_SOURCE: i64 = 3
+
+struct CacheRetentionLimitsV1:
+    memory_max_bytes: i64
+    storage_max_bytes: i64
+    max_branches: i64
+    kept_branches: [text]
+    versions_per_source: i64
+
+fn _cache_limit_positive_v1(env_name: text, host_name: text, fallback: i64) -> i64:
+    for name in [env_name, host_name]:
+        val raw = (env_get_opt(name) ?? "").trim()
+        if raw != "":
+            val parsed = raw.to_i64() ?? 0
+            if parsed > 0:
+                return parsed
+    fallback
+
+fn _cache_limit_list_v1(env_name: text, host_name: text, fallback: [text]) -> [text]:
+    for name in [env_name, host_name]:
+        val raw = (env_get_opt(name) ?? "").trim()
+        if raw != "":
+            var out: [text] = []
+            for part in raw.split(","):
+                val item = part.trim()
+                if item != "":
+                    out.push(item)
+            return out
+    fallback
+
+fn cache_retention_limits_load_v1() -> CacheRetentionLimitsV1:
+    CacheRetentionLimitsV1(
+        memory_max_bytes: _cache_limit_positive_v1("SIMPLE_CACHE_MEMORY_MAX_BYTES",
+            "SIMPLE_HOST_CACHE_MEMORY_MAX_BYTES", DEFAULT_MEMORY_MAX_BYTES),
+        storage_max_bytes: _cache_limit_positive_v1("SIMPLE_CACHE_MAX_BYTES",
+            "SIMPLE_HOST_CACHE_STORAGE_MAX_BYTES", DEFAULT_MAX_BYTES),
+        max_branches: _cache_limit_positive_v1("SIMPLE_CACHE_MAX_BRANCHES",
+            "SIMPLE_HOST_CACHE_MAX_BRANCHES", DEFAULT_MAX_BRANCHES),
+        kept_branches: _cache_limit_list_v1("SIMPLE_CACHE_KEPT_BRANCHES",
+            "SIMPLE_HOST_CACHE_KEPT_BRANCHES", ["main"]),
+        versions_per_source: _cache_limit_positive_v1("SIMPLE_CACHE_VERSIONS_PER_SOURCE",
+            "SIMPLE_HOST_CACHE_VERSIONS_PER_SOURCE", DEFAULT_VERSIONS_PER_SOURCE),
+    )
