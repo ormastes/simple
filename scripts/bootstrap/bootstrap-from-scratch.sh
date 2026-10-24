@@ -4280,7 +4280,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source "${cuda_source_root}" \
-      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+      --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
@@ -5319,6 +5319,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   [ ! -e "${stage3_memory_snapshot}" ] && [ ! -L "${stage3_memory_snapshot}" ] || exit 1
   [ ! -e "${stage3_phase_profile}" ] && [ ! -L "${stage3_phase_profile}" ] || exit 1
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
+  # Stage 3 (exact capsule) rejects more than five --source roots; the driver has
+  # five root slots (k1 composition, cuda, compiler, app, lib). src/plugins is
+  # reached through entry closure. Keep in sync with stage3_build_args_sha256.
   bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
     "$(absolute_path "${log_dir}/stage3-native-build.log")" \
@@ -5374,7 +5377,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
     ${k1_composition_source_args} --source "${cuda_source_root}" \
-    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
+    --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
