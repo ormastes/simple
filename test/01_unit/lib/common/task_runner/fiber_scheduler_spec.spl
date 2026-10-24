@@ -1,0 +1,145 @@
+"""
+## Purpose and audience
+Purpose: Verify the fiber scheduler core: per-worker queues, socket-local work
+stealing, memory admission and its no-deadlock progress rule.
+Audience: build-runner and compiler-driver engineers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-carrier deterministic core only; the threaded carrier is covered later.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3-4
+"""
+use std.common.task_runner.fiber_scheduler.{FiberStepV1, FiberSchedV1, fiber_step_done, fiber_step_yield, fiber_step_park, fiber_sched_new, fiber_sched_submit, fiber_sched_prioritize, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_sched_run_round, FIBER_STATE_PENDING, FIBER_STATE_READY, FIBER_STATE_DONE}
+
+fn _always_done(id: i64) -> FiberStepV1:
+    fiber_step_done()
+
+fn _drain(s0: FiberSchedV1, step_fn: fn(i64) -> FiberStepV1, max_rounds: i64) -> FiberSchedV1:
+    var s = s0
+    var r = 0
+    while r < max_rounds and not fiber_sched_all_done(s):
+        s = fiber_sched_run_round(s, step_fn)
+        r = r + 1
+    s
+
+describe "fiber scheduler core":
+    it "rejects an empty worker set and a non-positive budget":
+        expect(fiber_sched_new([], 10).error).to_equal("no workers")
+        expect(fiber_sched_new([0], 0).error).to_equal("budget must be positive")
+
+    it "admits only while the memory budget holds":
+        var s = fiber_sched_new([0, 0], 100)
+        s = fiber_sched_submit(s, 40)
+        s = fiber_sched_submit(s, 40)
+        s = fiber_sched_submit(s, 40)
+        s = fiber_sched_admit(s)
+        expect(s.reserved).to_equal(80)
+        expect(s.pending.len()).to_equal(1)
+        expect(s.fiber_state[2]).to_equal(FIBER_STATE_PENDING)
+        expect(s.overcommits).to_equal(0)
+
+    it "releases memory on completion and admits the next fiber":
+        var s = fiber_sched_new([0], 50)
+        s = fiber_sched_submit(s, 50)
+        s = fiber_sched_submit(s, 50)
+        s = fiber_sched_admit(s)
+        val pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_done())
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_DONE)
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_READY)
+        expect(s.reserved).to_equal(50)
+
+    it "admits one oversized fiber when nothing else can run (progress rule)":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 500)
+        s = fiber_sched_admit(s)
+        expect(s.fiber_state[0]).to_equal(FIBER_STATE_READY)
+        expect(s.overcommits).to_equal(1)
+        s = _drain(s, _always_done, 5)
+        expect(fiber_sched_all_done(s)).to_be(true)
+        expect(s.reserved).to_equal(0)
+
+    it "never deadlocks when every admitted fiber parks on a pending producer":
+        # Fiber 0 (consumer) fills the budget and parks on token 7; fiber 1
+        # (producer, wakes 7) is still pending. The progress rule must admit it.
+        var s = fiber_sched_new([0], 100)
+        s = fiber_sched_submit(s, 100)
+        s = fiber_sched_submit(s, 100)
+        s = fiber_sched_admit(s)
+        expect(s.pending.len()).to_equal(1)
+        var pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_park(7))
+        expect(fiber_sched_parked_count(s)).to_equal(1)
+        expect(s.fiber_state[1]).to_equal(FIBER_STATE_READY)
+        pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(1)
+        s = fiber_sched_complete(pick.sched, 0, 1, fiber_step_done())
+        s = fiber_sched_wake(s, 7)
+        expect(fiber_sched_parked_count(s)).to_equal(0)
+        pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_done())
+        expect(fiber_sched_all_done(s)).to_be(true)
+        expect(s.reserved).to_equal(0)
+
+    it "prioritize moves a pending producer to the admission head":
+        var s = fiber_sched_new([0], 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_submit(s, 10)
+        s = fiber_sched_prioritize(s, 2)
+        expect(s.pending[0]).to_equal(2)
+        expect(s.pending[1]).to_equal(0)
+        expect(s.pending[2]).to_equal(1)
+
+    it "steals within the socket before crossing sockets":
+        # workers 0,1 on socket 0; workers 2,3 on socket 1
+        var s = fiber_sched_new([0, 0, 1, 1], 1000)
+        s.queues[0] = [10, 11, 12]
+        s.queues[2] = [20, 21]
+        var i = 0
+        while i < 30:
+            s = fiber_sched_submit(s, 1)
+            i = i + 1
+        s.pending = []
+        var pick = fiber_sched_pick(s, 1)
+        expect(pick.fiber).to_equal(10)
+        expect(pick.sched.steals_local).to_equal(1)
+        expect(pick.sched.steals_remote).to_equal(0)
+        s = pick.sched
+        s.queues[0] = []
+        s.queues[1] = []
+        pick = fiber_sched_pick(s, 1)
+        expect(pick.fiber).to_equal(20)
+        expect(pick.sched.steals_remote).to_equal(1)
+
+    it "does not cross sockets while the own socket still has work":
+        var s = fiber_sched_new([0, 0, 1], 1000)
+        s.queues[1] = [5]
+        s.queues[2] = [6, 7]
+        val pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(5)
+        expect(pick.sched.steals_remote).to_equal(0)
+
+    it "a yielding fiber is requeued and eventually completes":
+        var s = fiber_sched_new([0], 100)
+        s = fiber_sched_submit(s, 1)
+        s = fiber_sched_admit(s)
+        var pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_yield())
+        expect(fiber_sched_runnable_count(s)).to_equal(1)
+        pick = fiber_sched_pick(s, 0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_done())
+        expect(fiber_sched_all_done(s)).to_be(true)
+
+    it "drains many fibers across workers within budget":
+        var s = fiber_sched_new([0, 0, 1, 1], 64)
+        var i = 0
+        while i < 40:
+            s = fiber_sched_submit(s, 8)
+            i = i + 1
+        s = _drain(s, _always_done, 100)
+        expect(fiber_sched_all_done(s)).to_be(true)
+        expect(s.overcommits).to_equal(0)
+        expect(s.reserved).to_equal(0)
