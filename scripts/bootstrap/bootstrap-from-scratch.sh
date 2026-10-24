@@ -2635,13 +2635,18 @@ bootstrap_stage_sanity() (
 )
 
 bootstrap_native_build_main() {
+  # The Stage 4 capsule (run_exact_stage4_focused_capsule) rejects more than five
+  # --source roots and ignores them all (the driver seeds only --entry and
+  # resolves imports), so keep this list at five or fewer; src/os and
+  # examples/10_tooling are reached through entry closure.
+  # See doc/08_tracking/bug/stage4_seven_source_roots_rejected_2026-10-24.md
   compiler=$1
   output=$2
   set -- native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source src/os --source "${plugin_policy_source_root}" --source examples/10_tooling \
+    --source "${cuda_source_root}" --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
