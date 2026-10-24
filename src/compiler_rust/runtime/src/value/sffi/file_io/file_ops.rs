@@ -2196,6 +2196,55 @@ pub extern "C" fn rt_file_write_bytes_array(path: RuntimeValue, data: RuntimeVal
     unsafe { rt_file_write_bytes(path_ptr, path_len as u64, bytes.as_ptr(), bytes.len() as u64) }
 }
 
+/// Bytes available to the caller on the volume holding `path` (Simple text).
+/// Rust twin of runtime_native.c `rt_host_disk_headroom_bytes_v1`; 0 when
+/// unknown (callers treat 0 as "cannot measure", never as "disk full").
+#[no_mangle]
+pub extern "C" fn rt_host_disk_headroom_bytes_v1(path: RuntimeValue) -> i64 {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len <= 0 || path_len >= 4096 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    if text.contains('\0') {
+        return 0;
+    }
+    host_disk_headroom(text)
+}
+
+#[cfg(windows)]
+fn host_disk_headroom(path: &str) -> i64 {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut available: u64 = 0;
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } == 0 {
+        return 0;
+    }
+    i64::try_from(available).unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn host_disk_headroom(path: &str) -> i64 {
+    let Ok(c_path) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return 0;
+    }
+    let available = (stat.f_bavail as u128) * (stat.f_frsize as u128);
+    i64::try_from(available).unwrap_or(i64::MAX)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn host_disk_headroom(_path: &str) -> i64 {
+    0
+}
+
 /// Wrap a host native shared library in a role-2 SMF envelope.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_wrap_smf_dynlib(
