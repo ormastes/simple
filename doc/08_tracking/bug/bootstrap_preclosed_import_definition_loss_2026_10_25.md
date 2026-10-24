@@ -110,3 +110,47 @@ mode correction. No key, schema, or cache-admission bypass is added.
 - No full Phase 3 retry, Rust seed rebuild, codec retry, or relaxed memory guard
   has been used to validate this repair. The new cause has its own finite
   six-cycle maximum; the old MIR diagnostic lane remains stopped.
+
+## Final rejection verification: six-cycle stop
+
+The first minimum-zero bootstrap diagnostic attempt retained the same original
+receiver source and normal private cache. It reached 1,245 per-file timing
+completions before the unchanged 5,859,375 KiB RSS guard stopped it with exit 88:
+peak RSS 5,921,700 KiB, peak commit 6,517,228 KiB, quiescent cleanup. No diagnostic
+executable was produced and no receiver assertion ran. Cache performance remains
+open; the changed entry closure had zero normal cache hits, not forced reuse.
+
+The receiver then copied the real slim driver constructor and actual environment
+policy resolver, avoiding the full backend facade. It still invokes the genuine
+`load_sources_impl`, SCV acquisition and receipt publication, and preserves all
+four cases and 24 assertions. The final source is SHA256
+`ce387baa00c4081d180aed04d103efd9c4de2ba5a0c0b57c10d986854ee19a49`.
+Its bootstrap-only compile built 1,058 fresh modules with zero failures in
+177.1 seconds, native exit 0 and quiescent cleanup. Peak RSS was 5,228,680 KiB.
+The actual link command selected generated core-C `simple_runtime.lib`; the
+nominal Rust058 runtime directory is not evidence of its actual link provider.
+This is diagnostic compilation evidence, not qualification of a Rust058 parent.
+
+The first run wrapper failed before target startup because the fresh output
+parent was missing (guard root PID 0, no samples). Its failed evidence was
+preserved. The authorized corrected run used the same immutable executable,
+SHA256 `3cdccde832e0ea57228d8ee0e3864a793d17dec20a1b7fa360bea9712124b0ae`.
+It created the real temporary project, then exited 1/raw `0x1` at setup with
+`actual diagnostic producer digest unavailable`, before any receiver assertion.
+Cleanup was quiescent; peak RSS was 56,260 KiB and peak commit 104,608 KiB.
+
+The failure boundary is the fixture's real `cli_current_exe_path()` followed by
+`file_hash_sha256()` and its 64-hex requirement. Its stdout does not identify
+whether executable-path lookup or the digest provider failed. This does not
+demonstrate failure of the production 14-line source-admission change. The
+four-case/24-assert negative requirement has NOT passed. No case is marked PASS.
+Final bound evidence: `C:/dev/simple-preclosed-owner-negative-lean-storage-20261025/evidence-attempt3/final-terminal-result.sdn`
+(SHA256 `7e0b1c4ed528cffef4b5355fbdeb9441c3fc73f9b34950813fa3a1350726d886`).
+
+Conservative feature cycles are: old two-module reproduction (1), repaired
+producer compilation (2), minimum-one stop (3), original receiver RSS failure (4),
+lean receiver compilation/run-wrapper failure (5), corrected final run (6).
+The six-cycle budget is exhausted. The preclosed feature is frozen: no further
+fixture, build or run retry. Negative verification and mandatory full CLI gates
+remain incomplete; the PR remains a draft. Independent read-only runtime-cause
+analysis does not reset this feature budget.
