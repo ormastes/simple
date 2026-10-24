@@ -501,11 +501,25 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")
 
-fn _emit_nil_scalar_reject(u: CodecUniverse, type_text: text, target: text, indent: text) -> text:
-    """A non-optional scalar slot must never hold the wire nil sentinel: refuse the blob."""
+fn _emit_nil_scalar_reject(u: CodecUniverse, type_text: text, target: text, indent: text, raw_name: text) -> text:
+    """A non-optional scalar slot must never hold the wire nil sentinel: refuse the blob.
+
+    The guard reads the RAW wire token, never `target == nil`: staged-native
+    codegen compares a raw i64 against nil's immediate (so every integer 3
+    reads as nil) and a raw bool against true (so every true reads as nil) --
+    the exact hazards HirCodecWriter.put_i64/put_bool document. The value
+    comparison therefore refused nearly every module under the self-hosted
+    compiler (mass `[hir-cache] SELFCHECK FAILED reason=decode` in the phase-3
+    build). Wire nil for i64/bool is exactly the bare N token; text gets no
+    guard at all: nil text is a legitimate in-memory state that put_text and
+    put_nil_text_wire round-trip as the escaped-N wire token, and rejecting it
+    refused every module carrying, e.g., an AsmTargetSpec with os/abi/backend
+    unset. `raw_name` is the `rawK` binder _emit_dec emitted immediately
+    before (one counter step back).
+    """
     val cat = u.classify(type_text).cat
-    if cat == "prim_i64" or cat == "prim_bool" or cat == "prim_text":
-        return indent + "if " + target + " == nil:\n" + indent + "    r.reject_malformed(\"nil_in_non_optional_scalar\")\n"
+    if cat == "prim_i64" or cat == "prim_bool":
+        return indent + "if " + raw_name + " == \"N\":\n" + indent + "    r.reject_malformed(\"nil_in_non_optional_scalar\")\n"
     ""
 
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
@@ -733,7 +747,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     nil_indices.push(field_index)
                 else:
                     parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
-                    parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "        "))
+                    parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "        ", "raw{c.n - 1}"))
                 names.push("f_" + f.binder)
                 field_index = field_index + 1
             if fields.len() == 0:
@@ -761,7 +775,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
         parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
-        parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    "))
+        parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}"))
         names.push(f.binder + ": f_" + f.binder)
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")

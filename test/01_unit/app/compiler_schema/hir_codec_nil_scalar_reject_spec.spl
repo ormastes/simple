@@ -1,7 +1,12 @@
 # A nil sentinel in a non-optional scalar slot must refuse the blob.
+# The guard reads the RAW wire token: `value == nil` on a decoded i64/bool is
+# miscompiled under staged-native codegen (every 3 / every true reads as nil),
+# which made the selfcheck refuse nearly every module in the phase-3 self-host
+# build. Nil TEXT slots are legitimate and round-trip as `\N` by design, so
+# they must NOT be refused (put_text/put_nil_text_wire).
 use std.spec.*
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
-use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind, hc_dec_asm_target_spec}
 
 describe "HIR codec non-optional scalar decode":
     it "rejects N in the IntLit value slot":
@@ -12,4 +17,21 @@ describe "HIR codec non-optional scalar decode":
     it "accepts a real integer in the IntLit value slot":
         var r = FlatPoolReader.new("0\n7\n0\n")
         val _k = hc_dec_hir_expr_kind(r)
+        expect(r.ok).to_equal(true)
+
+    it "accepts 3 in the IntLit value slot (staged-native i64 == nil hazard)":
+        var r = FlatPoolReader.new("0\n3\n0\n")
+        val _k = hc_dec_hir_expr_kind(r)
+        expect(r.ok).to_equal(true)
+
+    it "accepts a true bool slot (staged-native bool == nil hazard)":
+        # AsmTargetSpec frame: 0 archs, has_os=true, os=nil, has_abi=false,
+        # abi=nil, has_backend=false, backend=nil, 0 version constraints.
+        var r = FlatPoolReader.new("0\n1\n\\N\n0\n\\N\n0\n\\N\n0\n")
+        val _s = hc_dec_asm_target_spec(r)
+        expect(r.ok).to_equal(true)
+
+    it "accepts a nil text slot (AsmTargetSpec os/abi/backend unset)":
+        var r = FlatPoolReader.new("0\n0\n\\N\n0\n\\N\n0\n\\N\n0\n")
+        val _s = hc_dec_asm_target_spec(r)
         expect(r.ok).to_equal(true)
