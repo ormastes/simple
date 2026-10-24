@@ -7,6 +7,7 @@ use compiler.mir.mir_data.*
 use compiler.backend.common.type_mapper.*
 use compiler.hir.hir_types.MemorySpace
 use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.hir.hir_types.{SymbolId}
 
 # ============================================================================
 # CUDA Type Mapper
@@ -32,14 +33,19 @@ class CudaTypeMapper:
     """
 
     compute_capability: (i64, i64)  # e.g., (8, 6) for SM 8.6
+    type_defs: Dict<SymbolId, MirTypeDef>  # MirModule.types; resolves Struct(SymbolId) layout
 
     static fn create() -> CudaTypeMapper:
         """Create mapper for default compute capability (SM 7.0)."""
-        CudaTypeMapper(compute_capability: (7, 0))
+        CudaTypeMapper(compute_capability: (7, 0), type_defs: {})
 
     static fn create_sm(major: i64, minor: i64) -> CudaTypeMapper:
         """Create mapper for specific compute capability."""
-        CudaTypeMapper(compute_capability: (major, minor))
+        CudaTypeMapper(compute_capability: (major, minor), type_defs: {})
+
+    fn with_type_defs(defs: Dict<SymbolId, MirTypeDef>) -> CudaTypeMapper:
+        """Copy of this mapper that resolves Struct(SymbolId) against the MIR module type table."""
+        CudaTypeMapper(compute_capability: self.compute_capability, type_defs: defs)
 
 fn cuda_type_mapper_create_sm(major: i64, minor: i64) -> CudaTypeMapper:
     CudaTypeMapper.create_sm(major, minor)
@@ -276,7 +282,22 @@ impl CudaTypeMapper:
             case I8 | U8 | Bool: 1
             case Unit: 0
             case Ptr(_, _): 8  # 64-bit pointers
-            case Struct(_): 8  # SymbolId-only kind; aggregates are pointer-passed (64-bit)
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var struct_total = 0
+                            var struct_index = 0
+                            while struct_index < fields.len():
+                                struct_total = struct_total + self.size_of(fields[struct_index].type_)
+                                struct_index = struct_index + 1
+                            struct_total
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
             case Array(elem, size):
                 self.size_of(elem) * size
             case Tuple(elements):
@@ -298,7 +319,21 @@ impl CudaTypeMapper:
             case I32 | U32 | F32: 4
             case I16 | U16: 2
             case I8 | U8 | Bool: 1
-            case Struct(_): 8  # SymbolId-only kind; pointer-passed aggregate
+            case Struct(sym):
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var max_align = 1
+                            for field in fields:
+                                val alignment = self.align_of(field.type_)
+                                if alignment > max_align:
+                                    max_align = alignment
+                            max_align
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    8
             case Array(elem, _):
                 self.align_of(elem)
             case Tuple(elements):
