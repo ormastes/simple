@@ -64,3 +64,11 @@ Not verified: no compile was run (memory budget reserved for run-11). Sites with
 | 50.mir/hwir/mir_to_hwir.spl | chained `strict_mir_*().unwrap().field` | typed `MirLocal?`/`LocalId?`/`HwirStrictLowerResult?` locals (workaround) |
 | 50.mir/_MirLoweringExpr/expr_dispatch.spl:5134 | `.len()` on `_sffi_tuple_get<[HirIfArm]>` result | `[HirIfArm]?` local + `?? []` (workaround) |
 Unverified: no compile run.
+
+## Run-13 batch (driver_source_pipeline_loading)
+| site | cause | action |
+|---|---|---|
+| 80.driver/driver_source_pipeline_loading.spl:625 | `decoded.is_err()` on untyped local of call result; `Result[..]`->`<>` field fix did not help | `match decoded` -> bool (workaround) |
+| driver_source_pipeline_loading.spl:651 | `staged.result.is_err()` on field of untyped local | `match staged.result` -> bool (workaround) |
+| driver_source_pipeline_loading.spl:826 | `input_path.substring` (`driver_inputs[i]`, `[text]`, not Optional) inside `val loaded = if ..` expression | typed `text` local (workaround) |
+Unverified: no compile run.
