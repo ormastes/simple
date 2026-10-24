@@ -1123,6 +1123,75 @@ crash address follows allocation state, not a fixed bad access). HIR
 progress is monotonic regardless (1877+/2934 after 4 crashes) because the
 hir-cache stores each completed module before the next crash.
 
+## Restoration 2026-10-24 (lane D): rebase-dropped evidence restored
+
+The release-branch rebase onto release-phase3 dropped three lane-D addenda
+from this document. They are decision records for the active bisection; the
+full original text survives in the history of work/bisect-probe2-20261024.
+Restored in compact form:
+
+1. Lane 58 split-field probe: all 160 blob.split("\n") fields of the p2_add
+   frontend-cache blob are VALID (10 len=0 empties, 146 len=1, 2 len=26,
+   2 len=7; ZERO len=-1) and the capture refusal still fires. blob.split, the
+   reader, and empty-field handling are innocent; the -1 handles are created
+   between flat_pools_restore_all's write and the capture dump's read, ~100
+   source lines apart, no pool reset, no scope end. Also: fixture-probing
+   pollutes build/scv's snapshot index (snapshot-index-drift); clear and
+   rebuild to recover.
+2. Debugger prevention: five cdb approaches all produced ZERO refusals
+   (allocation-order-sensitive defect; debug-thread injection perturbs the
+   heap enough to prevent it), while 160 extra prints still reproduced.
+   Close-path = debugger-free print-bisection, ~2-3 lane cycles. cdb facts:
+   refusal literal VA 0x14163caec; attach to the SECOND simple.exe (worker ==
+   parent binary; ~2 s lifetime).
+3. Lane 59 bisect probe 1: sanitized dump immediately after parse_module_body
+   shows parses 1-2 CLEAN (4582 bytes), parses 3-4 POISONED (4588/4352) in the
+   same worker process; refusal and AV follow. Kill is INSIDE
+   parse_module_body, heap-context-dependent, building across repeated parses.
+
+## Annotation 2026-10-24 (lane D, lane 60 bisect probe 2): poisoned BEFORE decl-0's parse
+
+Probe-2 candidate (in-parser dumps at decl-loop i==1 and i==3, env
+SIMPLE_BISECT2=1; committed on work/bisect-probe2-20261024) on the 30 s
+warm-cache repro (verbatim, four parses of p2_add):
+
+    parse 1: [bisect2] after-decl i=1 bytes=820 poisoned=false
+             [bisect2] after-decl i=3 bytes=1348 poisoned=false
+             [bisect]  post-parse bytes=4582 poisoned=false
+    parse 2: (identical, all false)
+    parse 3: [bisect2] after-decl i=1 bytes=823 poisoned=true
+             [bisect2] after-decl i=3 bytes=1346 poisoned=true
+             [bisect]  post-parse bytes=4349 poisoned=true
+    parse 4: (identical to parse 3, post-parse 4351)
+    refusals: 8, RC=139
+
+Interpretation: the decl loop increments i, probes at the TOP of iteration
+i==1, and only then parses decl 0 (tag_bool). parse_module_body's own
+prologue between entry and the loop is inert (var declarations only). So on
+parse 3 the pool arrays are ALREADY poisoned before the first declaration is
+parsed: the corruptor acts in the inter-parse window (post-parse-2 dump was
+CLEAN), in the hit-path restore, or in the caller tail between restore and
+the loop. The bisect moves out of the parser body to the restore/inter-parse
+boundary. Deterministic shape: parses 1-2 always clean, 3-4 always poisoned.
+
+## Coordination 2026-10-24 (lane D): branch move + worktree lanes
+
+Lane D's work moved to work/bootstrap-tip-v2, based on the rebased
+origin/release/1.0 (per owner directive). Probe 3 (lane 61, branch
+work/bisect-probe3-20261024) instruments four env-gated (SIMPLE_BISECT3) dump
+sites with a per-process sequence counter: A = miss-path entry before
+reset_all_pools (inherited pools), B = immediately after parse_module_body,
+C = after the transient-scope pause (promote boundary), D = hit-path
+immediately after flat_pools_restore_all. Result matrix: A poisoned ->
+inter-parse teardown; D poisoned -> restore write; A/D clean, B poisoned ->
+parse fill; all clean until refusal -> caller-tail/frame corruption.
+
+Lane-environment note: the shared checkout D:/dev/simple now carries a live
+parallel agent's uncommitted restructure, and the stage3 authority guard
+(scripts/check/lib/bootstrap-stage3/authority.shs:5220) requires a fully
+clean tree incl. submodules (gitlink-dirty abort). All lane-D lanes therefore
+run in isolated clean worktrees off the pushed work branches; the shared
+checkout is left untouched for the parallel agent.
 ## Lane B convergence update 2026-10-24 (afternoon): crash-after-store rhythm
 
 Eleven SIGBUS restarts in, the lane's behavior stabilized into a productive
@@ -1135,3 +1204,56 @@ the accumulating-corruption model: the fault follows total allocation volume,
 not a specific module. Net: the wrapper-restart + hir-cache design converts
 the admitted candidate's heap-corruption crashes from blocking to
 slowdown-only. Cure remains the owner lane's runtime reclaim work.
+
+
+## Annotation 2026-10-24 (lane D, lane 61 probe 3 + crash catch): frontend exonerated as WRITER; deterministic HIR-worker AV caught
+
+Probe-3 candidate (four env-gated dump sites: A=miss-path entry, B=post-parse,
+C=post-scope-pause, D=hit-postrestore; branch work/bisect-probe3-20261024) on
+the 30 s repro, TWO consecutive runs, identical shape:
+
+    [bisect3] seq=1 site=A-entry   bytes=460  poisoned=false   (driver parse)
+    [bisect3] seq=2 site=B-postparse bytes=4589 poisoned=false
+    [bisect3] seq=3 site=C-postpause bytes=4589 poisoned=false
+    [bisect3] seq=1 site=D-postrestore bytes=4589 poisoned=false (hit restore)
+    [hir-shard] owner=0/1@0 status=CRASH exit=-1073741819 claimed=1 sealed=1
+    RC=1, refusals=0
+
+Facts established:
+1. The frontend writes the pools CLEAN at every measured boundary (entry,
+   post-parse, post-pause, post-restore) in the configuration that crashes.
+   The frontend/restore path is exonerated as the corrupting writer; the
+   refusal observed in other configurations is the sanitize fallback reading
+   corruption whose origin is elsewhere (HIR/MIR phase or inter-phase).
+2. PERTURBATION LAW (heap-allocation-order sensitivity, quantified across
+   three candidates): the 2-dump candidate refuses at parse 3/4 in the
+   frontend; the 4-dump candidate keeps the frontend fully clean and crashes
+   deterministically (2/2) in the HIR worker; the unprobed build refuses in
+   the frontend AND crashes the MIR shard (rc=139). Every measurement moves
+   the surface; the corruptor has never been directly observed.
+3. SCRIPTED cdb CATCH of the deterministic crash (SIMPLE_BISECT3=1; the
+   debugger does NOT prevent this manifestation): full register + disasm in
+   /tmp/p2cdb/cdb.log of the lane-D session, summary:
+     rip=simple_exe+0x16c37f  mov rax,[r14]  with r14=0 (AV read of NULL)
+     r14 = return of call simple_exe+0x125796d(ecx=edi, rdx=0); loop scans
+     r15=0xa3 (163) entries (inc rbx / cmp r15,rbx), per entry:
+     unmask [entry] (~7), read [header+38h], call simple_exe+0x12abfb7(rcx=that,
+     edx=3), test/jne-exit. X(0) returned 0 on the FIRST iteration and the
+     result is dereferenced unchecked. Post-seal, delegated HIR worker.
+   This is a nil-lookup-result dereference in a bounded table scan in the HIR
+   worker - hardening candidate for the gate blocker.
+4. The BASELINE manifestation (no BISECT3) is debugger-prevented: 240 s under
+   cdb -o produced no AV (consistent with the lane-58 debugger finding).
+5. WER never fires for these worker crashes: no Event 1000/1001 despite valid
+   HKCU LocalDumps keys for simple.exe.rejected (WerSvc stopped is not the
+   cause; kernel GPU watchdog events at 9:03 were unrelated). Crash capture
+   requires scripted cdb with a MULTI-g command file - cdb -o consumes one
+   command per child attach-break (git spawns at candidate startup), so a
+   single -c "g" exits on stdin EOF (the doc's 'session exits early').
+6. The stage2 gate's actual blocker (lane 61 verdict): candidate_frontend_smoke
+   p2_add-build raw rc=139 = the worker AV; the capture refusal is the
+   graceful fallback, not the blocker.
+
+Next: (a) lane 62 gate-check on lane B's stage2-fixes + mir-mem-fixes-r10
+base; (b) source-level identification of the 0x16c37f scan loop for a nil
+guard; (c) if the r10 base still crashes, cdb-catch on it and diff the site.
