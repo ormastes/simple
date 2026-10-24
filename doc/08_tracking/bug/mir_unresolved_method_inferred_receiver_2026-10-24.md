@@ -25,3 +25,19 @@ callee/field/module var instead of giving up). Prior case: mir_text_bytes_unreso
 
 Not verified: no compile was run (memory budget reserved for run-11). Sites with unknown exact line
 (driver_aot_native_output other unwraps, mir_to_hwir) may still fail; check the next run's log.
+
+## Later sites (picked up while polling run-11)
+| site | method | workaround |
+|---|---|---|
+| 70.backend/backend_plugin/loader.spl:45 | unwrap on `validated.err()` chain | typed `BackendPluginError?` local |
+| 70.backend/backend/llvm_type_mapper.spl:284/:318 | `.map(self.f(_)).sum()/.max()` closure chain | explicit loops |
+| 70.backend/../vulkan_type_mapper.spl:316 (plugins/backend_vulkan) | same `.sum()` | explicit loop |
+| 30.types/type_infer/context.spl:136 | unwrap on `{i64: bool}` index | typed `bool?` local |
+| 30.types/type_infer/generic_calls.spl:22 | unwrap on match-expression local | `SymbolId?` annotation |
+| 50.mir/mir_bitfield.spl:23 | contains on `symbol.name` | typed `text` local |
+| 70.backend/linker/mold.spl:447 | parse_i64 on `.trim()` result | typed `text` local |
+| plugins/backend_lean/lean_type_declarations.spl:599,504 | `create` (declared `fn`, called statically: add `static`), `pop` on inferred `[start]` | `static fn`, typed `[i64]` locals |
+| plugins/backend_vhdl/vhdl/vhdl_call_lowering.spl:790,819 | unwrap on `if .. else nil` local | `MirFunction?` annotation |
+
+## NOT fixable by a source workaround
+- 70.backend/linker/smf_getter.spl:337/340/371/372: `file_read` (std.nogc_sync_mut.io.file_ops:168) returns `text`, yet the code calls `.is_err()/.is_ok()/.unwrap()` on it. Genuine type error, not inference; fixing changes behavior (error path) and needs an owner decision (use a Result-returning read).
