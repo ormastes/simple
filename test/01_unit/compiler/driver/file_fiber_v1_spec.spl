@@ -11,7 +11,7 @@ small temp source files in the working directory and deletes them.
 Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §2
 """
 use std.spec
-use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, file_fiber_run_v1}
+use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, file_fiber_run_v1, file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
 use compiler.frontend.parser_types.{ParserModule}
 use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, file_exists, file_read, getpid}
@@ -48,7 +48,7 @@ fn _src(name: text, body: text) -> text:
     p
 
 fn _entry(key: text, path: text) -> FileFiberEntryV1:
-    FileFiberEntryV1(module_key: key, path: path, est_bytes: 10)
+    FileFiberEntryV1(module_key: key, path: path, est_bytes: 10, content: "")
 
 describe "FileFiber v1":
     it "runs a file whose import is produced by another fiber of the run":
@@ -112,3 +112,35 @@ describe "FileFiber v1":
         expect(run.done_order.len()).to_equal(12)
         expect(run.sched.reserved).to_equal(0)
         for p in paths: file_delete(p)
+
+    it "skips the read for pre-read content and lets the host own the one parse":
+        val entries = [FileFiberEntryV1(module_key: "p", path: "virtual/p.spl", est_bytes: 5, content: "use q\n"),
+            FileFiberEntryV1(module_key: "q", path: "virtual/q.spl", est_bytes: 5, content: "fn q(): 0\n")]
+        var run = file_fiber_begin_v1(entries, [0], 100)
+        var parses = 0
+        while not file_fiber_finished_v1(run):
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                parses = parses + 1
+                run.parse_done(i, "host-tldr:" + run.entries[i].module_key, "")
+        file_fiber_end_v1(run)
+        expect(parses).to_equal(2)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.done_order.len()).to_equal(2)
+        expect(run.table.is_loaded("q")).to_be(true)
+
+    it "a host parse error fails the file and its importer":
+        val entries = [FileFiberEntryV1(module_key: "u", path: "virtual/u.spl", est_bytes: 5, content: "use v\n"),
+            FileFiberEntryV1(module_key: "v", path: "virtual/v.spl", est_bytes: 5, content: "broken(\n")]
+        var run = file_fiber_begin_v1(entries, [0], 100)
+        while not file_fiber_finished_v1(run):
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                if run.entries[i].module_key == "v":
+                    run.parse_done(i, "", "syntax error in v")
+                else:
+                    run.parse_done(i, "tldr-u", "")
+        file_fiber_end_v1(run)
+        expect(run.error[1]).to_equal("syntax error in v")
+        expect(run.error[0].starts_with("import v failed")).to_be(true)
