@@ -8,8 +8,8 @@
   One `<name>_live_change_visible` per component, one `<id>_gap_invisible`
   per known gap; the gate checks |components| + |gaps| = inputs_total.
   Assumption stated, not proved: the Simple text encoders frame each
-  component unambiguously (known gap scope_key_unframed says where they
-  do not) and digests are collision resistant.
+  component unambiguously (scope/producer identity length-framed by
+  cache_key_frame; CompileOptionsHash by _coh_component) and digests are collision resistant.
 -/
 namespace CacheProtocol.Live
 
@@ -149,15 +149,14 @@ inductive Gap where
   | hash_algorithm_tag
   | reexport_chain_closure
   | resolution_new_probe
-  | scope_key_unframed
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .ctfe_env_reads, .guard_id, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe, .scope_key_unframed]
+def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .ctfe_env_reads, .guard_id, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
 
-def inputsTotal : Nat := 49
+def inputsTotal : Nat := 48
 
 /-- §4.2 accounting: every enumerated input is a key component or a counted gap. -/
 theorem inputs_accounted : allFields.length + allGaps.length = inputsTotal := by decide
@@ -416,11 +415,6 @@ theorem reexport_chain_closure_gap_invisible :
 /-- Known gap: the live key does not see `resolution_new_probe`. -/
 theorem resolution_new_probe_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .resolution_new_probe ≠ j.gap .resolution_new_probe :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `scope_key_unframed`. -/
-theorem scope_key_unframed_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .scope_key_unframed ≠ j.gap .scope_key_unframed :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 end CacheProtocol.Live
