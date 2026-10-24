@@ -75,8 +75,8 @@ use compiler.driver.driver_phase_gates.{
 }
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
-use std.io_runtime.{file_exists, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
 use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
 use compiler.common.structural_contracts.frontend_offload_switch.{
     FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
@@ -197,11 +197,12 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # reaches; whoever claims first parses it, everyone else skips. Work stays
 # balanced to within one module.
 #
-# Claim = a marker file under the queue dir, created inside a single flock'd
-# critical section (rt_file_lock is flock(2) and exists in both the seed and
-# the C runtime; rt_dir_create returns true on EEXIST and rename(2) overwrites,
-# so neither is an atomic claim on its own). The section is a stat and a tiny
-# write, microseconds against a multi-second parse.
+# Claim = a marker file under the queue dir, created with an exclusive create
+# (O_CREAT|O_EXCL / CREATE_NEW): exactly one process can create a given path,
+# so the create IS the claim and no shared lock is needed. (rt_dir_create
+# returns true on EEXIST and rename(2) overwrites, so neither is an atomic
+# claim on its own.) The former flock'd critical section serialized every
+# shard on one lock file for every module.
 #
 # Output is unchanged by construction: a claimed module is parsed by exactly
 # one shard into the same content-keyed cache entry the static split would
@@ -210,8 +211,9 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # a pure function of the path -- WHICH shard parses a module now depends on
 # timing -- but the union still is, and only the union reaches the cache.
 #
-# Lock failure degrades to the static split for that module rather than to
-# "owns nothing" (same fail-closed reasoning as the malformed-spec case).
+# A failed create of a marker that does not exist (queue dir unwritable)
+# degrades to the static split for that module rather than to "owns nothing"
+# (same fail-closed reasoning as the malformed-spec case).
 
 var _driver_parse_shard_queue_memo: text = "@@unset@@"
 var _driver_parse_shard_claimed: i64 = 0
@@ -232,13 +234,9 @@ fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
     val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
     if file_exists(marker):
         return false
-    val fd = file_lock("{queue_dir}/.lock", 30)
-    if fd < 0:
+    val claimed = file_create_exclusive(marker, _driver_parse_shard_spec())
+    if not claimed and not file_exists(marker):
         return _driver_parse_shard_owns_static(path)
-    var claimed = false
-    if not file_exists(marker):
-        claimed = file_write(marker, _driver_parse_shard_spec())
-    val _unlocked = file_unlock(fd)
     if claimed:
         _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
     claimed
