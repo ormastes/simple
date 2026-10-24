@@ -114,6 +114,19 @@ fn _sffi_env_set(key: text, value: text) -> bool:
     unsafe(capabilities: [ffi]):
         env_set(key, value)
 
+@unsafe(reason: "read-only diagnostic inspection of runtime text data", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: text) -> i64
+@unsafe(reason: "read-only diagnostic inspection of runtime text length", capabilities: [ffi])
+extern fn rt_string_len(value: text) -> i64
+
+fn _driver_hir_identity_text_data(value: text) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_data(value)
+
+fn _driver_hir_identity_text_len(value: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_string_len(value)
+
 @always_inline
 fn _sffi_transient_array_scope_begin() -> bool:
     unsafe(capabilities: [ffi]):
@@ -264,8 +277,47 @@ fn _driver_publish_frontend_cache_scope(ctx: CompileContext) -> bool:
             return false
     if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
         return true
+    val hir_identity_trace = (_sffi_env_get("SIMPLE_HIR_IDENTITY_DIAGNOSTIC") ?? "") == "1"
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
-    if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+    val scope_key: text = "SIMPLE_FRONTEND_CACHE_SCOPE"
+    var key_len: i64 = -1
+    var value_len: i64 = -1
+    var key_data_null = false
+    var value_data_null = false
+    var key_len_ok = false
+    var value_len_ok = false
+    var key_scan_checked = false
+    var value_scan_checked = false
+    var key_nul = false
+    var key_equals = false
+    var value_nul = false
+    if hir_identity_trace:
+        key_len = _driver_hir_identity_text_len(scope_key)
+        value_len = _driver_hir_identity_text_len(scope)
+        val key_data = _driver_hir_identity_text_data(scope_key)
+        val value_data = _driver_hir_identity_text_data(scope)
+        key_data_null = key_data == 0
+        value_data_null = value_data == 0
+        key_len_ok = key_len > 0 and key_len <= 4095
+        value_len_ok = value_len >= 0 and value_len <= 65535
+        key_scan_checked = key_len_ok and not key_data_null
+        value_scan_checked = value_len_ok and (value_len == 0 or not value_data_null)
+        var key_scan_at: i64 = 0
+        if key_scan_checked:
+            while key_scan_at < key_len:
+                val key_byte = scope_key.byte_at(key_scan_at)
+                if key_byte == 0: key_nul = true
+                if key_byte == 61: key_equals = true
+                key_scan_at = key_scan_at + 1
+        var value_scan_at: i64 = 0
+        if value_scan_checked:
+            while value_scan_at < value_len:
+                if scope.byte_at(value_scan_at) == 0: value_nul = true
+                value_scan_at = value_scan_at + 1
+    val scope_published = _sffi_env_set(scope_key, scope)
+    if not scope_published:
+        if hir_identity_trace:
+            eprint("[hir-id] scope-set-failed key_len={key_len} key_data_null={key_data_null} key_len_ok={key_len_ok} key_scan_checked={key_scan_checked} key_nul={key_nul} key_equals={key_equals} value_len={value_len} value_data_null={value_data_null} value_len_ok={value_len_ok} value_scan_checked={value_scan_checked} value_nul={value_nul}")
         return false
     if not driver_stage_phase2_frontend_frozen_raw_v1(ctx.runtime_std_cfg_source_identity_by_path):
         dtrace("[M3] frontend compatibility frozen-identity-stage-failed")
