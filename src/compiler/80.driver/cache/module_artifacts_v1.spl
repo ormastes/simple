@@ -1,0 +1,116 @@
+# Per-module artifact producer: ONE parse of a source file yields both
+#   (1) the full binary AST cache entry -- the frontend's flat-pool blob, which
+#       parse_full_frontend stores into the private parse cache and, when
+#       SIMPLE_SHARED_PARSE_CAS_ROOT is configured, the cross-process shared
+#       parse CAS (frontend.spl frontend_parse_or_restore ->
+#       frontend_shared_parse_store_v1, temp + no-replace publish); and
+#   (2) the module's TLDR companion (`<root>/<logical path>.tldr`): a versioned
+#       header binding it to the exact source bytes, followed by the module's
+#       canonical, self-sealing SIF interface text (sif/sif.spl).
+#
+# This is the single producer contract shared by `simple tldr`
+# (src/app/cli/tldr_entry.spl) and the test runner's refresh step, which
+# invokes that same CLI. Per incremental_build_tldr_scv_implementation
+# (Option "keep canonical .tld; adapt private .tldr companions through an
+# explicit versioned producer/reader"), the companion is versioned and does
+# not replace the canonical package `.tld` / PackageTldrHeaderV1.
+#
+# Freshness is the source CONTENT digest, never mtime. Publication is
+# temp-file-in-the-same-directory + rename-over (MoveFileExW
+# REPLACE_EXISTING on Windows, rename(2) elsewhere): readers always see a
+# complete old or complete new file, and racing producers of the same source
+# write identical bytes, so the last rename winning is harmless.
+#
+# Known gap (named, not filled): SIF parts come from the v1 textual header
+# extractor (action_key.source_interface_parts). They carry declaration
+# headers only -- no generic/inline bodies, layouts, trait impl tables,
+# constant values or macro expansions -- so they identify interface changes
+# but cannot yet replace lowering a dependency.
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.driver.sif.sif.{sif_of_source, sif_validate}
+
+pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 1"
+val MODULE_TLDR_LANG_V1: text = "1"
+
+var _module_artifact_tmp_seq_v1: i64 = 0
+
+# "src/lib/common/text.spl" -> "src.lib.common.text"
+pub fn module_artifact_module_id_v1(logical_path: text) -> text:
+    var rel = logical_path.replace("\\", "/")
+    while rel.starts_with("./"):
+        rel = rel.substring(2)
+    if rel.ends_with(".spl"):
+        rel = rel.substring(0, rel.len() - 4)
+    rel.replace("/", ".")
+
+pub fn module_tldr_companion_path_v1(root: text, logical_path: text) -> text:
+    var rel = logical_path.replace("\\", "/")
+    while rel.starts_with("./"):
+        rel = rel.substring(2)
+    if rel.ends_with(".spl"):
+        rel = rel.substring(0, rel.len() - 4)
+    root + "/" + rel + ".tldr"
+
+pub fn module_tldr_companion_render_v1(module_id: text, source: text) -> text:
+    MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
+        "source-sha256: " + sha256_text(source) + "\n" +
+        sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
+
+# Returns the SIF body when `content` is a valid companion for `source`, else "".
+pub fn module_tldr_companion_body_v1(content: text, source: text) -> text:
+    val header = MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
+        "source-sha256: " + sha256_text(source) + "\n"
+    if not content.starts_with(header):
+        return ""
+    val body = content.substring(header.len())
+    if sif_validate(body) != "":
+        return ""
+    body
+
+pub fn module_tldr_companion_fresh_v1(path: text, source: text) -> bool:
+    if not file_exists(path):
+        return false
+    module_tldr_companion_body_v1(file_read(path), source) != ""
+
+# Temp file in the destination directory, then rename over the destination.
+pub fn module_artifact_publish_atomic_v1(path: text, content: text) -> bool:
+    val slash = path.rfind("/")
+    if slash > 0 and not dir_create_all(path.substring(0, slash)):
+        return false
+    _module_artifact_tmp_seq_v1 = _module_artifact_tmp_seq_v1 + 1
+    val temp = "{path}.{getpid()}.{_module_artifact_tmp_seq_v1}.tmp"
+    if not file_write(temp, content):
+        val _w = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return false
+    true
+
+# The shared entry. Returns "" on success (fresh or regenerated), else an
+# error text. A fresh companion skips the parse entirely.
+pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
+    if not file_exists(source_path):
+        return "source not found: {source_path}"
+    val source = file_read(source_path)
+    val tldr_path = module_tldr_companion_path_v1(tldr_root, source_path)
+    if module_tldr_companion_fresh_v1(tldr_path, source):
+        return ""
+    val module_id = module_artifact_module_id_v1(source_path)
+    # The one parse: fills the full-AST caches as a side effect of the
+    # ordinary frontend cache boundary.
+    val _parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
+    if not module_artifact_publish_atomic_v1(tldr_path,
+            module_tldr_companion_render_v1(module_id, source)):
+        return "tldr publish failed: {tldr_path}"
+    ""
+
+export MODULE_TLDR_COMPANION_HEADER_V1
+export module_artifact_module_id_v1, module_tldr_companion_path_v1
+export module_tldr_companion_render_v1, module_tldr_companion_body_v1
+export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
+export module_artifacts_emit_v1
