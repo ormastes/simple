@@ -34,7 +34,8 @@ use compiler.mono.model.generic_subst_model.{MType, mt_key_type, mt_is_unknown,
     MI_STATUS_CLOSED, MI_STATUS_OPEN, MI_STATUS_DEPTH}
 use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_admissible_v1}
-use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, HASH_ALGO_SHA256_V1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_identity_ok,
+    HASH_ALGO_SHA256_V1}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
 use std.common.string_core.{text_to_bytes}
@@ -123,6 +124,12 @@ pub fn acquire_symbolic_tldr(section: GenericTemplateSectionV1, symbol_id: text)
         return GenericSymbolicAcquireV1(found: false, entry: _empty_entry_v1())
     GenericSymbolicAcquireV1(found: true, entry: section.entries[at])
 
+# A tagged, collision-resistant DigestV1 (registry); anything else is a miss.
+fn _identity_digest_ok_v1(tagged: text) -> bool:
+    match digest_v1_parse(tagged):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
+
 fn _unresolved_v1(entry: GenericTemplateEntryV1, snapshot_pin: text, error: text) -> GenericConcreteAcquireV1:
     GenericConcreteAcquireV1(view: ConcreteTldrAstViewV1(view_id: "", semantic_key: "",
         template_id: "", args_id: "", arg_keys: [], snapshot_pin: snapshot_pin, template: entry,
@@ -141,7 +148,7 @@ pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemp
     val entry = sym.entry
     # An incomplete (unevaluable-guard) root, or a template whose guard root is
     # not a tagged ActiveGuardRoot digest, can never key a cache entry: miss.
-    if not active_guard_root_admissible_v1(guard_root) or not entry.active_guard_root.starts_with("sha256/"):
+    if not active_guard_root_admissible_v1(guard_root) or not _identity_digest_ok_v1(entry.active_guard_root):
         return _unresolved_v1(entry, snapshot_pin, "guard-root-inadmissible")
     if args.len() != entry.params.len():
         return _unresolved_v1(entry, snapshot_pin, "arity-mismatch")
