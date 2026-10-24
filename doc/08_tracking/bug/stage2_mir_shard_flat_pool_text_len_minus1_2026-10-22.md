@@ -1147,3 +1147,56 @@ the accumulating-corruption model: the fault follows total allocation volume,
 not a specific module. Net: the wrapper-restart + hir-cache design converts
 the admitted candidate's heap-corruption crashes from blocking to
 slowdown-only. Cure remains the owner lane's runtime reclaim work.
+
+
+## Annotation 2026-10-24 (lane D, lane 61 probe 3 + crash catch): frontend exonerated as WRITER; deterministic HIR-worker AV caught
+
+Probe-3 candidate (four env-gated dump sites: A=miss-path entry, B=post-parse,
+C=post-scope-pause, D=hit-postrestore; branch work/bisect-probe3-20261024) on
+the 30 s repro, TWO consecutive runs, identical shape:
+
+    [bisect3] seq=1 site=A-entry   bytes=460  poisoned=false   (driver parse)
+    [bisect3] seq=2 site=B-postparse bytes=4589 poisoned=false
+    [bisect3] seq=3 site=C-postpause bytes=4589 poisoned=false
+    [bisect3] seq=1 site=D-postrestore bytes=4589 poisoned=false (hit restore)
+    [hir-shard] owner=0/1@0 status=CRASH exit=-1073741819 claimed=1 sealed=1
+    RC=1, refusals=0
+
+Facts established:
+1. The frontend writes the pools CLEAN at every measured boundary (entry,
+   post-parse, post-pause, post-restore) in the configuration that crashes.
+   The frontend/restore path is exonerated as the corrupting writer; the
+   refusal observed in other configurations is the sanitize fallback reading
+   corruption whose origin is elsewhere (HIR/MIR phase or inter-phase).
+2. PERTURBATION LAW (heap-allocation-order sensitivity, quantified across
+   three candidates): the 2-dump candidate refuses at parse 3/4 in the
+   frontend; the 4-dump candidate keeps the frontend fully clean and crashes
+   deterministically (2/2) in the HIR worker; the unprobed build refuses in
+   the frontend AND crashes the MIR shard (rc=139). Every measurement moves
+   the surface; the corruptor has never been directly observed.
+3. SCRIPTED cdb CATCH of the deterministic crash (SIMPLE_BISECT3=1; the
+   debugger does NOT prevent this manifestation): full register + disasm in
+   /tmp/p2cdb/cdb.log of the lane-D session, summary:
+     rip=simple_exe+0x16c37f  mov rax,[r14]  with r14=0 (AV read of NULL)
+     r14 = return of call simple_exe+0x125796d(ecx=edi, rdx=0); loop scans
+     r15=0xa3 (163) entries (inc rbx / cmp r15,rbx), per entry:
+     unmask [entry] (~7), read [header+38h], call simple_exe+0x12abfb7(rcx=that,
+     edx=3), test/jne-exit. X(0) returned 0 on the FIRST iteration and the
+     result is dereferenced unchecked. Post-seal, delegated HIR worker.
+   This is a nil-lookup-result dereference in a bounded table scan in the HIR
+   worker - hardening candidate for the gate blocker.
+4. The BASELINE manifestation (no BISECT3) is debugger-prevented: 240 s under
+   cdb -o produced no AV (consistent with the lane-58 debugger finding).
+5. WER never fires for these worker crashes: no Event 1000/1001 despite valid
+   HKCU LocalDumps keys for simple.exe.rejected (WerSvc stopped is not the
+   cause; kernel GPU watchdog events at 9:03 were unrelated). Crash capture
+   requires scripted cdb with a MULTI-g command file - cdb -o consumes one
+   command per child attach-break (git spawns at candidate startup), so a
+   single -c "g" exits on stdin EOF (the doc's 'session exits early').
+6. The stage2 gate's actual blocker (lane 61 verdict): candidate_frontend_smoke
+   p2_add-build raw rc=139 = the worker AV; the capture refusal is the
+   graceful fallback, not the blocker.
+
+Next: (a) lane 62 gate-check on lane B's stage2-fixes + mir-mem-fixes-r10
+base; (b) source-level identification of the 0x16c37f scan loop for a nil
+guard; (c) if the r10 base still crashes, cdb-catch on it and diff the site.
