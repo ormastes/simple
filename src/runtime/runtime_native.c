@@ -3305,6 +3305,12 @@ int64_t stdin_read_char(void) {
 }
 
 #if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
+
+#if defined(_WIN32)
 /*
  * Windows CRT stdio defaults to TEXT mode, which rewrites every '
 ' written to
@@ -3329,11 +3335,6 @@ int64_t stdin_read_char(void) {
  * build is affected identically. Only the constructor-registration mechanism
  * below differs per compiler.
  */
-#if defined(_WIN32)
-#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
-#else
-#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
-#endif
 static void rt_win_set_binary_stdio(void) {
     /* Same defect for FILES: every open()/fopen() in this runtime without an
      * explicit _O_BINARY / "b" (rt_file_write_text_at, rt_file_open, the
