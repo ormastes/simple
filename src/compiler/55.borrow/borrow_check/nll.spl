@@ -11,6 +11,7 @@
 # - Region inference: Compute minimal regions for borrows
 # - Error reporting: Generate helpful borrow errors
 
+use std.io_runtime.{env_get_nullable}
 use compiler.borrow.borrow_check.lifetime.*
 use compiler.borrow.borrow_check.nll_short_calls.*
 use compiler.borrow.borrow_check.borrow_graph.*
@@ -349,6 +350,29 @@ fn nll_live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
             case _: ()
         if keep: kept = kept.push(alias)
     kept
+
+# workaround(borrow-work-budget): the loan solver budget is a fixed 1,000,000
+# because liveness/CFG sets use O(n^2) array `contains`; big modules exhaust it.
+# SIMPLE_BORROW_WORK_BUDGET overrides it (unset/malformed -> 1000000).
+# Real fix: Dict-based sets. See doc/08_tracking/bug/borrow_loan_work_budget_exhausted_2026-10-24.md
+fn nll_loan_work_budget() -> i64:
+    val raw = env_get_nullable("SIMPLE_BORROW_WORK_BUDGET") ?? ""
+    if raw == "" or raw.len() > 12:
+        return 1000000
+    val digits = "0123456789"
+    var value = 0
+    var index = 0
+    while index < raw.len():
+        val ch = raw.substring(index, index + 1)
+        var digit = -1
+        var probe = 0
+        while probe < 10:
+            if digits.substring(probe, probe + 1) == ch: digit = probe
+            probe = probe + 1
+        if digit < 0: return 1000000
+        value = value * 10 + digit
+        index = index + 1
+    if value <= 0: 1000000 else: value
 
 class NLLChecker:
     """Non-Lexical Lifetimes borrow checker.
@@ -703,6 +727,7 @@ class NLLChecker:
         var after: Dict<i64, [i64]> = {}
         var changed = true
         var work = 0
+        val work_budget = nll_loan_work_budget()
         val reachable = self.cfg.reverse_postorder()
         var point_ids: Dict<i64, bool> = {}
         for block_id in reachable:
@@ -745,7 +770,7 @@ class NLLChecker:
                     before[point] = previous
                     live = previous
                     work = work + 1 + live.len()
-                    if work > 1000000:
+                    if work > work_budget:
                         self.loan_failure(point, "loan liveness work budget exhausted")
                         return
         var incoming: Dict<i64, [LoanAlias]> = {}
@@ -761,7 +786,7 @@ class NLLChecker:
                 state = self.transfer_loans(point, state, false)
                 state = nll_live_aliases(state, after[point])
                 work = work + 1 + state.len()
-                if work > 1000000:
+                if work > work_budget:
                     self.loan_failure(point, "loan CFG work budget exhausted")
                     return
             for successor in self.cfg.blocks[block_id].successors:
