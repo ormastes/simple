@@ -1,0 +1,68 @@
+use std.spec
+use std.async.poll.{Poll}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrHandleV1, tldr_table_fill_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+use compiler.frontend.parser_types.{ParserModule}
+
+fn resolved(table: TldrTableV1, h: TldrHandleV1) -> text:
+    match table.deref(h).poll():
+        case Poll.Ready(value):
+            match value:
+                case Some(t): t
+                case nil: "<nil>"
+        case Poll.Pending: "<pending>"
+
+describe "shared set-once TLDR table":
+    it "creates handles without loading the module":
+        val table = TldrTableV1.create()
+        val h = table.handle("key-a", "Point")
+        expect(h.module_id.starts_with("s:")).to_equal(true)
+        expect(table.loaded_count()).to_equal(0)
+        expect(table.take_fill_requests().len()).to_equal(0)
+
+    it "queues exactly one fill per unloaded module and resolves after publish":
+        val table = TldrTableV1.create()
+        val h1 = table.handle("key-a", "Point")
+        val h2 = table.handle("key-a", "Line")
+        expect(resolved(table, h1)).to_equal("<pending>")
+        expect(resolved(table, h2)).to_equal("<pending>")
+        expect(table.take_fill_requests()).to_equal(["key-a"])
+        expect(table.take_fill_requests().len()).to_equal(0)
+        expect(table.publish("key-a", "summary A")).to_equal(true)
+        expect(resolved(table, h1)).to_equal("summary A")
+        expect(resolved(table, h2)).to_equal("summary A")
+
+    it "is set-once: identical republish is accepted, different text refused":
+        val table = TldrTableV1.create()
+        expect(table.publish("key-b", "summary B")).to_equal(true)
+        expect(table.publish("key-b", "summary B")).to_equal(true)
+        expect(table.publish("key-b", "other")).to_equal(false)
+        expect(resolved(table, table.handle("key-b", "x"))).to_equal("summary B")
+
+    it "never cascades: publishing one module loads nothing else":
+        val table = TldrTableV1.create()
+        expect(table.publish("key-c", "mentions key-d and key-e")).to_equal(true)
+        expect(table.loaded_count()).to_equal(1)
+        expect(table.take_fill_requests().len()).to_equal(0)
+
+struct StubReader:
+    text_: text
+
+impl SourceReader for StubReader:
+    fn read_src(path: text) -> ParserModule?:
+        nil
+    fn read_tldr(path: text) -> text:
+        self.text_
+    fn update_src(path: text) -> bool:
+        false
+    fn update_tldr(path: text) -> text:
+        ""
+
+describe "TLDR table fill through a SourceReader":
+    it "publishes the reader's TLDR for the requested module":
+        val table = TldrTableV1.create()
+        val h = table.handle("key-f", "f")
+        expect(resolved(table, h)).to_equal("<pending>")
+        for key in table.take_fill_requests():
+            expect(tldr_table_fill_v1(table, StubReader(text_: "summary F"), key, "f.spl")).to_equal("")
+        expect(resolved(table, h)).to_equal("summary F")
