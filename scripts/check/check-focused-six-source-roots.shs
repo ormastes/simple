@@ -135,16 +135,24 @@ fn main():
     print "six-root-result={six_roots_unique_value()}"
 SPL
 # Compile the actual patched focused closure into a dedicated dispatcher.
-# Building this harness can use the producer's generic coordinator; every proof
-# invocation below directly enters run_focused_native_build and fixed_v2.
+# Only the explicitly declared Rust bootstrap producer uses its native Rust
+# coordinator. Every proof invocation below enters run_focused_native_build
+# and fixed_v2 directly, without these command-local bootstrap overrides.
 set -- native-build --source "$k1_root" --source "$cuda_root" \
     --source src/compiler --source src/app --source src/lib --source src/plugins \
     --entry-closure --threads "$jobs" --backend llvm --mode one-binary --runtime-bundle core-c-bootstrap \
     --entry test/fixtures/bootstrap_six_roots/focused_harness.spl \
     --runtime-path "$runtime" --output "$fixture/focused-harness"
 printf '%s\n' "$producer" "$@" > "$fixture/harness-build.argv"
-"$producer" "$@" \
-    > "$fixture/harness-build.log" 2>&1 || { cat "$fixture/harness-build.log"; exit 1; }
+if [ "$producer_kind" = rust-seed-bootstrap-diagnostic ]; then
+    printf '%s\n' SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TRACE=1 > "$fixture/harness-build.env"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TRACE=1 "$producer" "$@"
+else
+    : > "$fixture/harness-build.env"
+    "$producer" "$@"
+fi > "$fixture/harness-build.log" 2>&1 || { cat "$fixture/harness-build.log"; exit 1; }
 # The unique helper has no copy in the entry directory or first five roots.
 "$fixture/focused-harness" native-build --runtime-path "$runtime" --source "$fixture/root1" --source "$fixture/root2" \
     --source "$fixture/root3" --source "$fixture/root4" --source "$fixture/root5" \
