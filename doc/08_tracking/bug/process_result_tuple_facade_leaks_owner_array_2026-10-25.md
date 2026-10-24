@@ -30,3 +30,15 @@ Free the owner array in `rt_process_result_to_tuple` once slots 0/1 are
 transferred (they stay referenced by the block), mirroring the owned-observed
 facade; give tuple-result blocks an owner in the destructure lowering (or
 scope-free them) so the block itself is reclaimed.
+
+## Related gap: C-only dependency in the Cranelift lane
+
+The Cranelift (default production) lane now calls
+`rt_process_run_owned_observed_bounded_text`, which exists only in C
+(`runtime_native.c`). It has no Rust twin because the Rust runtime has no
+`rt_process_run_owned_observed_bounded_value` owner to wrap (only the
+interpreter implements it, `interpreter_extern/system.rs`). A binary linked
+against the Rust runtime instead of the C bundle cannot resolve it. Closing
+this needs the owned-observed owner ported to the Rust runtime first, then a
+`process_result_block`-style twin. Its multi-line C signature also hides it
+from the rt dual-implementation census (line-based regex).
