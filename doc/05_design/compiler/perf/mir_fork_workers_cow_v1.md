@@ -37,15 +37,41 @@ fork has to happen inside a worker that has reached mono.
    order, per-PASS sidecars, terminals, seal and `.done`. It leaves via
    `_exit` (`rt_fork_child_exit`) after flushing, so no atexit handler or
    allocator teardown walks the shared heap.
-4. **Root**: reaps every child (`process_wait_raw` = `waitpid`), seals each
-   child owner's unterminated claims (`CRASH` on signal death, else `FAILED`;
-   legal because the child is reaped), marks its own owner done and exits 0
-   only if every child exited 0 with nothing to seal. The coordinator then
-   sees one finished owner and continues exactly as today: inventory close,
-   `native_mir_shard_outcome_v1`, link child (`SIMPLE_MIR_SHARD_LINK`).
-   If no child could be forked the root claims nothing and exits 1, which the
-   coordinator already treats as `fallback` (complete worker owns the build).
-5. **Identity**: `SIMPLE_MIR_FORK_WORKERS` is excluded from the module object
+4. **Root**: forks in rounds. Each round reaps every live child
+   (`process_wait_raw` = `waitpid`) before deciding anything, so the
+   unclaimed count it reads is exact, not a race with live siblings. Each
+   reaped child's unterminated claims are sealed under that child's owner
+   (`CRASH` on signal death, else `FAILED`; legal because it is reaped).
+5. **Re-fork of a dead share** (`native_mir_fork_reforkable_v1`): a share is
+   re-forked from the root's untouched post-mono heap when its child stopped
+   *unfinished* (no `.done`: signal/OOM death, env-install failure, or a
+   refused fork), at least one inventory row is still unclaimed (the
+   `hir_shard_recovery_can_replace` rule: no relaunch when everything is
+   claimed and sealed), the ledger is not BLOCKED, `SIMPLE_COMPILE_FAIL_FAST`
+   is not `1`, and the share has used fewer than
+   `NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1` (2) retries. At most 3 rounds.
+   The replacement keeps the share spec `i/N` (so its own claim cap ceil(n/N)
+   covers the dead child's residue) and gets a fresh owner
+   `0/1@0+fork<i>/<N>~r<k>`, so the dead attempt's seal cannot touch the
+   replacement's claims. A finished child already walked the whole schedule
+   and sealed its own failures; it is never re-forked. Rows the dead child
+   claimed keep their `CRASH`/`FAILED` terminal: the ledger refuses a second
+   claim on any row with a `.claim`, so they are reported, never re-lowered.
+6. **Root exit**: when every share finished, or nothing is left unclaimed,
+   the root marks its owner done. It exits 1 if any finished child exited
+   non-zero or any row was sealed `CRASH`/`FAILED` in any round; a stopped
+   child that left nothing unterminated is judged by its replacement. Module
+   verdicts stay the ledger's: the coordinator counts every non-PASS terminal.
+   When a share was abandoned (retries exhausted, fail-fast, BLOCKED) with
+   rows still unclaimed, the root exits 1
+   **without** `.done`. The coordinator now reads progress with
+   `hir_shard_recovery_owner_tree_progress_v1` (the owner's own claims plus
+   every `+fork` child's), so that root is an unfinished owner with
+   progress and the existing replacement path applies (a new root
+   generation `0/1@<g+1>` re-runs the front end and forks again). If no child
+   could be forked in round 0 the root claims nothing and exits 1 done,
+   which the coordinator treats as `fallback`.
+7. **Identity**: `SIMPLE_MIR_FORK_WORKERS` is excluded from the module object
    environment identity (it only chooses which process emits a module) and
    refused in admitted-epoch compiles, beside the other shard selectors.
 
@@ -98,21 +124,25 @@ every child. A cgroup charges a shared page once.
 - The knob is inert unless MIR sharding is engaged (ad-hoc default, or
   `SIMPLE_MIR_SHARDING=1`), the build is not `--clean`, and the HIR warm
   generation was admitted.
-- Any single child death fails the build; nothing retries it. The
-  coordinator's replacement rule is
-  `hir_shard_recovery_can_replace(fail_fast, code, progress)`
-  (`driver_hir_recovery.spl`, needs `progress > 0`) evaluated on the ROOT
-  owner (`native_build_main.spl` ~1052-1062), and
-  `hir_shard_recovery_progress` matches `owner + "\n"` exactly, so the
-  `+fork` children's claims count as zero progress for the root. A child
-  killed after claiming (OOM is the likely case with 10-20 children) has its
-  claims sealed CRASH by the root, its unclaimed share is capped away from
-  the siblings (`native_mir_shard_claim_cap_v1` = ceil(n/N) per child), the
-  coordinator closes the rest BLOCKED, and no replacement generation is
-  spawned. Same for a child that dies before claiming, and for a partial
-  fork (some `fork()` calls fail): the root exits 1 and the build fails
-  closed. Fix options: sum `+fork`-prefixed owners' progress into the root's
-  in the coordinator, or re-fork replacements inside the root.
+- A dead child's share is now retried (design steps 5-6), but the build
+  still fails: claims precede lowering, so a
+  child that dies after claiming leaves at least one `CRASH` row, and
+  `native_mir_shard_outcome_v1` returns `fail` on any failed module. Re-fork
+  lowers the dead child's unclaimed residue so keep-going reports one CRASH
+  row instead of a BLOCKED mass; it does not rescue the build. A child that
+  dies before its first claim leaves no CRASH row and a re-fork can recover
+  it completely.
+- A child OOM-killed under memory pressure may die again on re-fork; the
+  2-retry cap bounds that. Replacements run after the whole round is reaped
+  (exact unclaimed count), so a dead share's residue costs one extra
+  share-length of wall time per retry.
+- Inventory rows that every finished child skipped (go-to-end exclusions)
+  also read as unclaimed. With a dead share present they cause up to two
+  cheap re-forks and then a coordinator replacement generation (a full
+  front-end rerun) before the inventory close terminalizes them.
+- If the coordinator kills the root (deadline), children die by
+  `PR_SET_PDEATHSIG` asynchronously and nothing seals their claims; the
+  inventory close fails closed (`-1`), as before.
 - Every child still repeats the `lower_to_mir` setup before the per-module
   loop (CPU only). A later fork point inside `lower_to_mir`, after the
   shared setup, would also share that work.

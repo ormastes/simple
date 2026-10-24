@@ -85,6 +85,26 @@ pub fn hir_shard_recovery_progress(queue: text, owner: text) -> i64:
                 claimed = claimed + 1
     claimed
 
+# Separator between a MIR fork root's owner and its forked children's owners
+# ("<root>+fork<i>/<n>[~r<k>]", driver_build/native_mir_fork_v1.spl).
+# Coordinator owners ("<i>/<n>@<generation>") never contain it.
+pub const HIR_SHARD_FORK_OWNER_MARK_V1: text = "+fork"
+
+# Coordinator view of one reaped worker: its own claims plus every claim of
+# the children it forked. A fork root claims nothing itself, so exact-owner
+# progress would read 0 and refuse the replacement it is handing off to.
+pub fn hir_shard_recovery_owner_tree_progress_v1(queue: text, owner: text) -> i64:
+    var claimed: i64 = 0
+    val listing = dir_list_optional(queue)
+    if listing == nil: return -1
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            val claim = file_read("{queue}/{name}")
+            if not hir_shard_claim_valid(claim): return -1
+            if claim.starts_with(owner + "\n") or claim.starts_with(owner + HIR_SHARD_FORK_OWNER_MARK_V1):
+                claimed = claimed + 1
+    claimed
+
 pub fn hir_shard_recovery_failure_count(queue: text) -> i64:
     var failures: i64 = 0
     val listing = dir_list_optional(queue)
