@@ -1,0 +1,65 @@
+# Authored diagnostic contracts; execution is pending root build review.
+use std.spec.{describe, it, expect, step}
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
+    compile_source_inventory_git_event_v1, compile_source_inventory_git_event_cost_v1,
+    compile_source_inventory_apply_event_v1,
+    compile_source_inventory_encode_v1}
+use app.compiler_entrypoint.inventory_trace.{inventory_trace_cost_create_v1,
+    inventory_trace_cost_emit_v1}
+
+describe "SCV diagnostic cost preserves inventory authority":
+    it "keeps encoded inventory identical with facet timing enabled":
+        step("Reduce the same real source bytes with and without counters")
+        val content = "# comment\nfn main():\n    print \"hello\"\n"
+        val cost = ScvCompileCostV1()
+        val plain = compile_source_inventory_git_event_v1("create", "src/main.spl", content)
+        val timed = compile_source_inventory_git_event_cost_v1("create", "src/main.spl", content, cost)
+        val plain_change = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []), plain)
+        val timed_change = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []), timed)
+        expect(plain_change.valid).to_equal(true)
+        expect(timed_change.valid).to_equal(true)
+        expect(compile_source_inventory_encode_v1(timed_change.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(plain_change.inventory!))
+        expect(cost.hash_calls).to_equal(3)
+
+    it "does not hash deleted content or alter a deletion event":
+        step("Preserve delete identity and empty facets independently of metrics")
+        val cost = ScvCompileCostV1()
+        val change = compile_source_inventory_git_event_cost_v1("delete", "src/gone.spl", "", cost)
+        expect(change.operation).to_equal("delete")
+        expect(change.source_identity).to_equal("src/gone.spl")
+        expect(change.content_digest).to_equal("")
+        expect(change.byte_count).to_equal(0)
+        expect(cost.hash_calls).to_equal(0)
+
+    it "uses no clock result and creates no carrier for disabled or invalid tracing":
+        step("Leave ordinary invocations on the nil diagnostic path")
+        expect(scv_cost_now_v1(nil)).to_equal(0)
+        expect(inventory_trace_cost_create_v1("")).to_be_nil()
+        expect(inventory_trace_cost_create_v1("not-a-valid-token")).to_be_nil()
+
+    it "does not consume an aggregate while the refresh lock is held":
+        step("Require an unlock before diagnostic output is eligible")
+        val cost = ScvCompileCostV1()
+        cost.lock_released = false
+        inventory_trace_cost_emit_v1("0123456789abcdef", cost)
+        expect(cost.emitted).to_equal(false)
+        cost.lock_released = true
+        inventory_trace_cost_emit_v1("invalid", cost)
+        expect(cost.emitted).to_equal(false)
+
+    it "sums scalar operation counters without storing per-file paths":
+        step("Retain only bounded aggregate state across file scratch scopes")
+        val cost = ScvCompileCostV1()
+        cost.record_exists(11)
+        cost.record_read(20, 7)
+        cost.record_read(30, 0)
+        cost.record_copy(40)
+        cost.record_verify(50)
+        expect(cost.exists_calls).to_equal(1)
+        expect(cost.read_calls).to_equal(2)
+        expect(cost.read_ns).to_equal(50)
+        expect(cost.read_bytes).to_equal(7)
+        expect(cost.copy_ns).to_equal(40)
+        expect(cost.verify_ns).to_equal(50)

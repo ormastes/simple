@@ -1,0 +1,120 @@
+# Bootstrap-only native diagnostic. Real owner imports; no mock scope or clock.
+use app.io.env_ops.{env_get}
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1,
+    compiler_inventory_file_event_cost_v1}
+use app.compiler_entrypoint.inventory_trace.{inventory_trace_cost_emit_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_inventory_v1}
+use std.scv.compile_cost_v1.{ScvCompileCostV1}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1,
+    CompileSourceInventoryV1, compile_source_inventory_apply_event_v1,
+    compile_source_inventory_encode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+
+fn event_same(left: CompileSourceEventV1, right: CompileSourceEventV1) -> bool:
+    left.source == right.source and left.operation == right.operation and
+        left.source_identity == right.source_identity and
+        left.content_digest == right.content_digest and
+        left.semantic_digest == right.semantic_digest and
+        left.export_digest == right.export_digest and
+        left.initializer_digest == right.initializer_digest and
+        left.provider_digest == right.provider_digest and
+        left.byte_count == right.byte_count
+
+fn scratch_row(root: text) -> i64:
+    val cost = ScvCompileCostV1()
+    val first = compiler_inventory_file_event_cost_v1(
+        "create", "src/a.spl", root + "/src/a.spl", cost)
+    if first == nil:
+        print "FAIL first checked read/scope"
+        return 1
+    val second = compiler_inventory_file_event_cost_v1(
+        "create", "src/b.spl", root + "/src/b.spl", cost)
+    if second == nil:
+        print "FAIL second checked read/scope"
+        return 1
+    val plain_first = compiler_inventory_file_event_v1("create", "src/a.spl", root + "/src/a.spl")
+    val plain_second = compiler_inventory_file_event_v1("create", "src/b.spl", root + "/src/b.spl")
+    if plain_first == nil or plain_second == nil:
+        print "FAIL untimed checked read/scope"
+        return 1
+    if not event_same(first!, plain_first!) or not event_same(second!, plain_second!):
+        print "FAIL retained event fields differ"
+        return 1
+    if cost.read_calls != 2 or cost.event_calls != 2 or cost.hash_calls <= 0:
+        print "FAIL carrier calls after real scope teardown"
+        return 1
+    if cost.read_bytes != first!.byte_count + second!.byte_count:
+        print "FAIL carrier UTF-8 byte total"
+        return 1
+    if cost.read_ns < 0 or cost.event_ns < 0 or cost.hash_ns < 0:
+        print "FAIL negative elapsed"
+        return 1
+    val timed_one = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []), first!)
+    val plain_one = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []), plain_first!)
+    if not timed_one.valid or not plain_one.valid:
+        print "FAIL first real reduction"
+        return 1
+    val timed_two = compile_source_inventory_apply_event_v1(timed_one.inventory!, second!)
+    val plain_two = compile_source_inventory_apply_event_v1(plain_one.inventory!, plain_second!)
+    if not timed_two.valid or not plain_two.valid:
+        print "FAIL second real reduction"
+        return 1
+    if compile_source_inventory_encode_v1(timed_two.inventory!) != compile_source_inventory_encode_v1(plain_two.inventory!):
+        print "FAIL retained inventory bytes differ"
+        return 1
+    print "PASS scratch retained_events=2 read_calls={cost.read_calls} event_calls={cost.event_calls} hash_calls={cost.hash_calls} bytes={cost.read_bytes}"
+    0
+
+fn cardinality_row() -> i64:
+    val cost = ScvCompileCostV1()
+    cost.lock_released = false
+    stderr_write("marker lock-held\n")
+    inventory_trace_cost_emit_v1("0123456789abcdef", cost)
+    if cost.emitted:
+        print "FAIL held lock consumed emission"
+        return 1
+    stderr_write("marker unlocked\n")
+    cost.lock_released = true
+    inventory_trace_cost_emit_v1("0123456789abcdef", cost)
+    inventory_trace_cost_emit_v1("0123456789abcdef", cost)
+    inventory_trace_cost_emit_v1("invalid", ScvCompileCostV1())
+    inventory_trace_cost_emit_v1("0123456789abcdef", nil)
+    if not cost.emitted or cost.read_calls != 0:
+        print "FAIL aggregate carrier state"
+        return 1
+    print "PASS cardinality"
+    0
+
+fn authority_row(root: text) -> i64:
+    val authority = compiler_source_authority_acquire_v1(root, root + "/build/scv", ["src"], true)
+    if not authority.valid:
+        print "FAIL source authority reason={authority.reason}"
+        return 1
+    val inventory = compiler_source_authority_inventory_v1(root, authority)
+    if inventory.is_err():
+        print "FAIL admitted inventory reason={inventory.unwrap_err()}"
+        return 1
+    val manifest = file_read_regular_no_follow_bounded(
+        authority.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", 1048576)
+    if manifest.is_err():
+        print "FAIL admitted manifest read"
+        return 1
+    val encoded = compile_source_inventory_encode_v1(inventory.unwrap())
+    print "diag inventory_sha={sha256_text(encoded)}"
+    print "diag source_manifest_sha={sha256_text(manifest.unwrap())}"
+    print "diag source_count={authority.snapshot.inventory_count}"
+    print "diag generation={authority.inventory_generation}"
+    print "PASS source-authority reason={authority.reason}"
+    0
+
+fn main() -> i64:
+    val mode = env_get("SCV_DIAG_MODE") ?? ""
+    val root = env_get("SCV_DIAG_ROOT") ?? ""
+    if mode == "scratch": return scratch_row(root)
+    if mode == "cardinality": return cardinality_row()
+    if mode == "authority": return authority_row(root)
+    print "FAIL missing diagnostic mode"
+    1

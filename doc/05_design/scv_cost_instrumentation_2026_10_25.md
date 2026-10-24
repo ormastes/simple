@@ -1,0 +1,129 @@
+# SCV cost instrumentation (review pending)
+
+This patch measures existing source admission work. It changes no source
+selection, facet, receipt, cache identity, publication, alias or rejection rule.
+The two-second goal remains **unmet**. Four tiny native diagnostic rows passed
+under the bootstrap Rust seed and core-C runtime. The reviewed instrumentation
+has since been compiled into the next full producer, and its default Hello
+compiled and ran successfully. Full Phase 3 and negative-oracle qualification
+remain pending. The patch remains unmerged.
+
+The actual 145-fixture cold admission published 42,796 inventory rows
+(16,409,927 bytes) after 273.24 seconds, started snapshot staging 2.20 seconds
+later, and materialized 14,869 selected sources in 172.43 seconds. Total time
+from refresh-lock creation to snapshot receipt was 447.96 seconds. Evidence:
+`C:/dev/simple-llvm-flags-corec-fixture-storage-20261025/evidence/scv-cold-cost-observation.sdn`.
+Actual Fable 5.1 review is retained at
+`C:/dev/simple-scv-fable-review-20261024/cold-live-review.txt`. It rejected a
+merged existence/read operation as the first patch and conditionally approved
+instrumentation. Its absent/error, race, physical-alias and tamper concerns
+remain requirements, not waived checks.
+
+## Scope
+
+Only a valid existing `SIMPLE_INVENTORY_TRACE_ATTEMPT` token creates an
+invocation-owned `ScvCompileCostV1`. Disabled invocations never query its clock.
+The clock is `std.nogc_sync_mut.sffi.time.time_monotonic_ns`, whose
+`rt_time_monotonic_ns` is an actual runtime export; `rt_time_ms` and
+`rt_time_now` from the unresolved-stub list are not used.
+Negative start/end samples and backwards intervals contribute zero duration;
+the operation count and observed successful bytes are still recorded. An
+unavailable clock interval is ignored, never interpreted as process uptime.
+
+Direct Git file-event reduction counts existence calls, checked reads and bytes
+returned by successful reads (not unobservable partial bytes from failed reads),
+successful/deletion events, and the actual facet SHA256 calls. Event wall time
+includes canonicalization and hashing; hash wall is a nested subset. Alias
+expansion, filesystem journal decoding and library-internal hash calls are not
+misrepresented as measured direct file events. The inventory total includes
+the whole existing refresh, including lock wait and those other operations.
+
+Snapshot materialization counts attempted full and reuse operations. Copy time
+includes chunk publication and destination write/copy (including their existing
+internal checks); explicit source, chunk, destination and drift verification
+have a separate bucket. These buckets overlap and must not be added as if they
+were disjoint. Snapshot total includes its unchanged owner checks and receipt
+publication. Final source-authority validation remains unchanged and outside
+the snapshot-acquisition bucket.
+
+The carrier is allocated before scratch scopes. Inside a scope, diagnostics
+only call the nonallocating clock and update scalar fields; no path, content,
+formatting or log record is retained by the carrier. Core facet hashing accepts
+an optional carrier so actual deduplicated hash calls can be counted, rather
+than estimating from digest equality.
+
+Existing historical inventory trace records retain their behavior. Exactly one
+additional `phase=cost` aggregate is emitted through that trace owner after
+refresh unlock and snapshot acquisition/validation, including failed acquisition
+results. Failed unlock suppresses it. Nothing is logged per file or written to
+SCV inventory paths by instrumentation. The record carries no authority.
+
+Existing entrypoints and helpers retain their exact argument signatures through
+old-arity wrappers forwarding a nil carrier. Instrumented callers explicitly use
+new `*_cost_v1` symbols. `CompilerInventoryTraceV1` retains its original fields;
+the separate cost carrier is passed explicitly, so diagnostics do not require
+blanket cached-native-caller invalidation or change the existing trace layout.
+
+## Required review and validation
+
+The later full producer is SHA256
+`c63563672c95353d5475814ec0bc7241ca51b59c2e16646902c6f3a7a977873a`,
+with 1,501 fresh units, zero reused and zero failed. Its default Hello evidence
+is `C:/dev/simple-gnu-ready-hello-20261025/evidence/hello-result.sdn`;
+the generated Hello SHA256 is
+`6c1d66fd1dd21a3b56bebbbe0c1c781aa8b39508543edf4aa707f43f434e7cbe`.
+Native DWORD 0, exact combined output and quiescent cleanup passed. That producer
+still has 101 generated stubs and no formal admission. Ongoing Phase 3 is not
+qualification, and no general runtime or two-second claim follows.
+
+The real native fixture `test/fixtures/bootstrap/scv_cost_native/main.spl`
+passed four rows on 2026-10-25. Frozen inputs, canonical argv, captured logs,
+native receipts and summary are under
+`C:/dev/simple-scv-native-parity-diagnostic2-storage-20261025/`.
+The accepted narrow summary is `evidence/summary.sdn`, SHA256
+`d7b4edfedfaabfe681ddbcf9fd3b16235c78077ce1a4e8acd453c41aa20915b7`.
+
+The immutable bootstrap seed was SHA256
+`5a6a8bec8c8c205b2c4507768acf553b3ef6027018706357350394af09f81622`.
+It produced diagnostic program SHA256
+`7e807f86cc9501e8230a4dd710263ae30aef2166283bde7c02c96c3bd3acf9f9`
+(2,999,296 bytes), using one fresh unit and 150 cached units in 5.3 seconds.
+The build used 24 workers, a 5,859,375 KiB cap and peaked at 1,479,568 KiB.
+All four native rows exited DWORD 0, quiescent, with no cleanup or job remnants.
+
+Real scratch helpers retained two events and the carrier through later scope
+teardowns; timed/untimed event fields and encoded inventory bytes matched.
+Counters recorded two reads, two events, six hashes and 78 UTF-8 bytes.
+Externally captured bytes contained exactly one aggregate after the unlock
+marker despite repeated emit, invalid-token and nil-carrier calls. The twin
+source-authority rows matched inventory digest, source manifest digest, count
+and generation. Enabled tracing emitted one aggregate and one of each historical
+phase 1–4; disabled tracing emitted no aggregate. Real enabled monotonic
+inventory/snapshot intervals were 223,068,000 / 53,668,300 ns. These tiny values
+are not realistic-fixture performance or tracing-overhead evidence.
+
+The executable remains unadmitted: its core-C link generated 13 unresolved broad
+time-facade stubs, retained in `build/work.log`. `rt_time_monotonic_ns` is not
+among them. This PASS does not qualify those providers, native-all composition,
+the Rust runtime lane, or normal self-hosted tooling. The first attempt failed
+after 151 successful unit compilations because the private sparse checkout
+omitted `src/runtime/platform/platform.h`; its receipts and objects remain at
+`C:/dev/simple-scv-native-parity-storage-20261025/`. A separately approved
+platform-only readiness repair passed 29 actual clang dependency preflights
+covering 64 files before the successful cache-preserving diagnostic.
+
+The authored `scv_compile_cost_spec.spl` checks event/inventory byte parity,
+deduplicated hash-call count, deletion behavior, disabled/invalid token gates,
+lock-held suppression and scalar accumulation. It remains unexecuted.
+
+Before full integration, measure tracing overhead in both wall and peak RSS on
+a representative fixture with identical inventory bytes/digest and source
+outcome. Match counts to the filtered
+Git event stream, including deletions and failed reads; do not equate them with
+all runtime I/O. Retain the existing unreadable/missing/race, physical-alias,
+tamper, commit-advance and malformed-publication negative oracles. No before/after
+speedup is claimed until comparable measurements exist.
+
+The bounded native carrier-survival/cardinality plan is
+`scv_cost_native_parity_fixture_2026_10_25.md`; its actual four-row execution is
+recorded above. The separate authored unit spec remains unexecuted.
