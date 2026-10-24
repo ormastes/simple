@@ -100,6 +100,11 @@ void rt_fork_child_exit(int64_t exit_code);
  */
 int64_t rt_fork_shared_heap_v1(void);
 
+/* Blocking reap of a rt_fork_shared_heap_v1 child: exit status, -(128+signo)
+ * on a signal death, -1 when waitpid fails. Never rt_process_wait (the Rust
+ * lane only knows its own spawn registry). */
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid);
+
 #ifdef __cplusplus
 }
 #endif
