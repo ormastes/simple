@@ -230,19 +230,25 @@ fn _mir_error_is_fatal(message: text) -> bool:
 # persistent HIR strings; other misses stay correct, merely uncached. The flat
 # bootstrap rows carry the registry spelling, which differs from `module.name`
 # under SIMPLE_BOOTSTRAP=1 and is looked up per module over all modules.
-# Symbol ids are dense below next_symbol_id; iterating them avoids
-# materialising a keys() array on the immortal heap.
+# Symbol ids are NOT dense below next_symbol_id: register_preserved_symbol
+# raises the counter past every preserved id, and mono specializations live at
+# MONO_SYMBOL_BASE = 2^50 (40.mono/monomorphize_integration.spl), structural
+# unions at 900M. A dense 0..next_symbol_id walk therefore never finished for
+# any module with a specialization (bug
+# mir_warm_names_dense_symbol_walk_hang_2026_10_24). Walk the real key set;
+# the one keys() array per module is the bounded price of state 0.
 fn driver_warm_mir_logical_names_v1(modules: Dict<text, HirModule>):
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
         module_logical_name_cache_warm(module_key)
         module_logical_name_cache_warm(module.name)
-        var raw_id: i64 = 0
-        while raw_id < module.symbols.next_symbol_id:
-            val owner = module.symbols.symbol_defining_module_scalar_raw(raw_id)
+        val raw_ids: [i64] = module.symbols.symbols.keys()
+        var raw_index: i64 = 0
+        while raw_index < raw_ids.len():
+            val owner = module.symbols.symbol_defining_module_scalar_raw(raw_ids[raw_index])
             if owner != "":
                 module_logical_name_cache_warm(owner)
-            raw_id = raw_id + 1
+            raw_index = raw_index + 1
     var flat_index: i64 = 0
     while flat_index < bootstrap_hir_module_count():
         module_logical_name_cache_warm(bootstrap_hir_module_name_at(flat_index))
