@@ -157,12 +157,23 @@ describe "shard memory clamp":
         # 24 GiB cgroup, 3 GB HIR workers: 0.6 * 24 GiB / 3 GB = 5, not 8.
         expect(shard_threads_tree_cap_for(8, 3000000, 108000000, shard_tree_budget_kb_for(0, 25165824), true)).to_equal(5)
 
-    it "scales HIR estimates with the parent while preserving deliberate overrides":
+    # Default (2026-10-24): the parent peak is NOT a budget floor -- flooring
+    # the estimate at the supervisor's own front-end peak collapsed admission
+    # to one worker that re-ran the whole front-end replay and was SIGBUS-killed
+    # (phase-3 lane, 41 deaths). SIMPLE_HIR_SHARD_PARENT_FLOOR=1 restores the
+    # 61bb554b161 behavior explicitly.
+    it "ignores the parent peak as a budget floor unless explicitly restored":
         val key = "SIMPLE_SPEC_HIR_PARENT_BUDGET"
+        val gate = "SIMPLE_HIR_SHARD_PARENT_FLOOR"
         val old = env_get(key) ?? ""
+        val old_gate = env_get(gate) ?? ""
         val old_host = env_get("SIMPLE_HOST_WORKER_MEM_MIB") ?? ""
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", "")
         env_set(key, "")
+        env_set(gate, "")
+        expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(3000000)
+        expect(shard_worker_budget_kb(key, 3000000, 100000)).to_equal(3000000)
+        env_set(gate, "1")
         expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(6522576)
         expect(shard_worker_budget_kb(key, 3000000, 100000)).to_equal(3000000)
         for invalid in ["invalid", "0", "-1", "9223372036854775808"]:
@@ -173,6 +184,7 @@ describe "shard memory clamp":
         env_set(key, "1000000")
         expect(shard_worker_budget_kb(key, 3000000, 6522576)).to_equal(1000000)
         env_set(key, old)
+        env_set(gate, old_gate)
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", old_host)
 
     it "bounds the failed HIR fixture with a workload-sensitive estimate":
