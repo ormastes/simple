@@ -16219,11 +16219,6 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * and the AOT diagnostic lane stages per worker process; the slot makes the
  * pair safe under any caller). set_parent/make is a single logical
  * operation: make always consumes the slot, success or failure. */
-static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
-static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
-static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
-static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
-
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
@@ -16303,45 +16298,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * generic extern crossing every seed and both pure-Simple backends already
  * emit, so the split API needs no table row at all. See
  * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
-static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
-    int64_t len = rt_string_len(value);
-    if (len <= 0) return 0;
-    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
-}
-
-int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
-    if (!rt_secure_temp_dir_slot_from_value(parent_value,
-                             rt_secure_temp_dir_parent_slot,
-                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
-    rt_secure_temp_dir_parent_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
-    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
-                             rt_secure_temp_dir_prefix_slot,
-                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
-    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
-        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
-        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
-    rt_secure_temp_dir_prefix_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_make(void) {
-    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
-        rt_secure_temp_dir_parent_ready = 0;
-        rt_secure_temp_dir_prefix_ready = 0;
-        return rt_string_new(NULL, 0);
-    }
-    char parent[RT_TEXT_PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
-    rt_secure_temp_dir_parent_ready = 0;
-    rt_secure_temp_dir_prefix_ready = 0;
-    return rt_secure_temp_dir_core(parent,
-        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
-        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
-}
+#include "runtime_secure_temp_split_private.h"
 
 #if defined(_WIN32)
 /* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
