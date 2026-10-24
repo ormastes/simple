@@ -1524,6 +1524,35 @@ pub fn dep_iface_gate_valid(recorded: text, dep_paths: [text]) -> bool:
         return recorded == fresh_fold
     false
 
+pub fn dependency_closure_v1(recorded: {text: [text]}, dependencies: [text]) -> [text]?:
+    """Transitive dependency closure over recorded `source -> dependencies`
+    edges, so an interface change reached only through a re-export chain
+    (A imports B, B re-exports C) changes A's deps_iface fold
+    (live_object_key.sdn gap reexport_chain_closure, closed). nil (fail
+    closed) when a reachable dependency has no recorded edges: its own
+    dependencies are unknown. Sorted, de-duplicated."""
+    var seen: [text] = []
+    var queue: [text] = dependencies
+    var i = 0
+    while i < queue.len():
+        val dep = queue[i]
+        i = i + 1
+        if seen.contains(dep):
+            continue
+        seen.push(dep)
+        if not recorded.contains_key(dep):
+            return nil
+        for next in recorded[dep]:
+            if not seen.contains(next):
+                queue.push(next)
+    Some(incremental_sorted_text(seen))
+
+pub fn build_cache_dependency_closure(cache: BuildCache, dependencies: [text]) -> [text]?:
+    var recorded: {text: [text]} = {}
+    for source in cache.entries.keys():
+        recorded[source] = cache.entries[source].dependencies
+    dependency_closure_v1(recorded, dependencies)
+
 pub fn build_cache_open(cache_path: text) -> BuildCache:
     BuildCache.load(cache_path)
 
@@ -1536,7 +1565,8 @@ pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
     were when the artifact was produced. If any dependency is unreadable the
     fold is nil and "" is stored — build_cache_entry_is_valid then fails
     closed on this entry."""
-    val deps_iface = dep_iface_gate_record(dependencies)
+    val closure = build_cache_dependency_closure(cache, dependencies)
+    val deps_iface = if val deps = closure: dep_iface_gate_record(deps) else: ""
     reverse_reference_owner_register_source_alias_v1(source, source)
     for output in outputs:
         reverse_reference_owner_register_source_alias_v1(output, source)
@@ -1593,7 +1623,9 @@ pub fn build_cache_entry_is_valid(cache: BuildCache, source: text) -> bool:
         for out in entry.outputs:
             if not incremental_file_exists(out):
                 return false
-        return dep_iface_gate_valid(entry.deps_iface, entry.dependencies)
+        if val deps = build_cache_dependency_closure(cache, entry.dependencies):
+            return dep_iface_gate_valid(entry.deps_iface, deps)
+        return false
     false
 
 pub fn build_cache_persist(cache: BuildCache) -> bool:
@@ -1650,7 +1682,7 @@ export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, b
 export build_cache_record_entry_at, build_cache_entry_is_valid_at
 export incremental_detect_changes_at
 export IncrementalCompileResult, IncrChangeSet, IncrChange, ChangeKind
-export dep_iface_gate_record, dep_iface_gate_valid
+export dep_iface_gate_record, dep_iface_gate_valid, dependency_closure_v1, build_cache_dependency_closure
 export incremental_reverse_reference_fallback_reason_v1
 export incremental_publish_direct_import_export_v1
 export incremental_publish_module_scc_artifact_v1
