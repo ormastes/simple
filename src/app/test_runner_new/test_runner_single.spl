@@ -1178,6 +1178,25 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     val pct = (hit * 100) / total
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
+# Runner-side TLDR refresh (opt-in SIMPLE_TLDR_ROOT=<dir>): the sources the
+# spec imports are refreshed through the SAME `simple tldr` producer contract
+# native-build uses (compiler.driver.cache.module_artifacts_v1). Advisory:
+# a refresh failure is reported and never changes the test verdict.
+fn _refresh_tldr_companions(binary: text, spec_path: text):
+    val root = env_get("SIMPLE_TLDR_ROOT") ?? ""
+    if root == "":
+        return
+    val spec_src = file_read_nullable(spec_path) ?? ""
+    val targets = _cov_targets(spec_src)
+    if targets.len() == 0:
+        return
+    var args: [text] = ["tldr", "--out", root]
+    for target in targets:
+        args.push(target)
+    val (_out, err, code) = process_run_bounded(binary, args, 120000, TEST_OUTPUT_CAPTURE_BYTES)
+    if code != 0:
+        print "warning: test-runner: tldr refresh failed (exit {code}) {err.trim()}"
+
 fn main() -> i64:
     val args = clean_args()
     var run = parse_child_run(args)
@@ -1325,6 +1344,7 @@ fn main() -> i64:
             return 1
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-apk-runner: pid={getpid()}"
+    _refresh_tldr_companions(binary, run.path)
     val start = time_now_unix_micros()
     # The child runs from the spec's project root so `src/...` reads resolve
     # the way its imports do, whatever directory the runner was started in.
