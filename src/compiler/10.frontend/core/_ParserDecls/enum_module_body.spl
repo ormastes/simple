@@ -47,6 +47,8 @@ use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
 use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.frontend.flat_ast_bridge.{flat_pools_dump_all}
+use std.io_runtime.{env_get_opt}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -940,6 +942,17 @@ fn parse_module_body():
     var pm_prev_col: i64 = 0 - 1
     while true:
         i = i + 1
+        # Bisection probe 2 (doc: stage2_mir_shard_flat_pool_text_len_minus1,
+        # lane 59 result): sanitized dump after decl 0 (i==1) and decl 2 (i==3).
+        # poisoned at i==1 -> the lexer/first-decl corrupts; clean at i==1 but
+        # poisoned by the post-parse probe -> decls 1-4 or the loop tail.
+        if i == 1 or i == 3:
+            if (env_get_opt("SIMPLE_BISECT2") ?? "") == "1":
+                flat_pool_capture_sanitize_arm_v1()
+                val _mid_blob = flat_pools_dump_all()
+                val _mid_poisoned = flat_pool_capture_poisoned_v1()
+                flat_pool_capture_sanitize_disarm_v1()
+                eprint("[bisect2] after-decl i={i} bytes={_mid_blob.len()} poisoned={_mid_poisoned}\n")
         parser_skip_newlines_and_semicolons()
         # Module scope is indentation level 0, so a Dedent (182) arriving here is
         # always structural residue from a nested block that the statement parser
