@@ -98,9 +98,21 @@ every child. A cgroup charges a shared page once.
 - The knob is inert unless MIR sharding is engaged (ad-hoc default, or
   `SIMPLE_MIR_SHARDING=1`), the build is not `--clean`, and the HIR warm
   generation was admitted.
-- A child that dies before claiming its share leaves rows unclaimed. The
-  coordinator closes them BLOCKED and the build fails; there is no in-root
-  replacement generation.
+- Any single child death fails the build; nothing retries it. The
+  coordinator's replacement rule is
+  `hir_shard_recovery_can_replace(fail_fast, code, progress)`
+  (`driver_hir_recovery.spl`, needs `progress > 0`) evaluated on the ROOT
+  owner (`native_build_main.spl` ~1052-1062), and
+  `hir_shard_recovery_progress` matches `owner + "\n"` exactly, so the
+  `+fork` children's claims count as zero progress for the root. A child
+  killed after claiming (OOM is the likely case with 10-20 children) has its
+  claims sealed CRASH by the root, its unclaimed share is capped away from
+  the siblings (`native_mir_shard_claim_cap_v1` = ceil(n/N) per child), the
+  coordinator closes the rest BLOCKED, and no replacement generation is
+  spawned. Same for a child that dies before claiming, and for a partial
+  fork (some `fork()` calls fail): the root exits 1 and the build fails
+  closed. Fix options: sum `+fork`-prefixed owners' progress into the root's
+  in the coordinator, or re-fork replacements inside the root.
 - Every child still repeats the `lower_to_mir` setup before the per-module
   loop (CPU only). A later fork point inside `lower_to_mir`, after the
   shared setup, would also share that work.
