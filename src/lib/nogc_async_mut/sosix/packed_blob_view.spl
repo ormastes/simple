@@ -1,0 +1,193 @@
+"""Zero-copy read-only view over a PACKED binary blob mapped from disk.
+
+Container layout (little-endian, every offset relative to blob byte 0, no
+stored addresses anywhere -- only offsets, indices and lengths):
+
+    header (32 bytes)
+      0  u64  magic  PACKED_BLOB_MAGIC ("SPLPKB01")
+      8  u32  version (PACKED_BLOB_VERSION)
+      12 u32  section_count
+      16 u64  total_size (must equal the mapped file size)
+      24 u64  reserved (0)
+    section table (section_count x 24 bytes, starting at 32)
+      0  u32  section id (caller-defined; unique within a blob)
+      4  u32  element size in bytes (0 = unstructured)
+      8  u64  section offset
+      16 u64  section length in bytes
+    sections (packed node arrays, string pools, ...)
+
+String pool section layout (see `packed_blob_string`):
+      0  u32  count
+      4  u32  reserved (0)
+      8  count x (u32 offset-from-pool-start, u32 byte length)
+      ...     UTF-8 bytes
+
+The file is mapped once (`sosix_file_map`: mmap / MapViewOfFile) and read in
+place: node fields are loaded by (section, index, field offset); only a string
+that is actually requested is copied into a `text`. Every section and every
+read is bounds-checked against the mapped size, so a torn or hostile entry is
+a refusal, never an out-of-bounds load. The view never trusts a stored
+pointer: references between nodes are indices into sections.
+"""
+
+use std.nogc_sync_mut.io_runtime.{file_size}
+use std.nogc_async_mut.sosix.file_map.{sosix_file_map, sosix_file_unmap}
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64}
+
+extern fn rt_string_new(bytes: i64, len: i64) -> text
+
+pub val PACKED_BLOB_MAGIC: i64 = 0x3130424B504C5053
+pub val PACKED_BLOB_VERSION: i64 = 1
+pub val PACKED_BLOB_HEADER_BYTES: i64 = 32
+pub val PACKED_BLOB_SECTION_ENTRY_BYTES: i64 = 24
+
+pub struct PackedBlobView:
+    addr: i64
+    size: i64
+    section_count: i64
+    error: text
+
+pub struct PackedBlobSection:
+    id: i64
+    elem_size: i64
+    offset: i64
+    length: i64
+
+fn _packed_blob_refused(reason: text) -> PackedBlobView:
+    PackedBlobView(addr: 0, size: 0, section_count: 0, error: reason)
+
+pub fn packed_blob_view_ok(view: PackedBlobView) -> bool:
+    view.addr != 0 and view.error == ""
+
+# Raw little-endian loads. `off + width <= size` is the caller's contract;
+# a load that would cross the end of the mapping reads the last 8 mapped
+# bytes and shifts, so no load ever touches an unmapped page.
+fn _packed_blob_load(view: PackedBlobView, off: i64, width: i64) -> i64:
+    if off < 0 or width <= 0 or width > 8 or off + width > view.size:
+        return -1
+    val word = if off + 8 <= view.size:
+        rt_ptr_read_i64(view.addr, off)
+    else:
+        if view.size < 8:
+            return -1
+        val tail = rt_ptr_read_i64(view.addr, view.size - 8)
+        tail >> ((off - (view.size - 8)) * 8)
+    if width == 8:
+        return word
+    word & ((1 << (width * 8)) - 1)
+
+pub fn packed_blob_u8(view: PackedBlobView, off: i64) -> i64:
+    _packed_blob_load(view, off, 1)
+
+pub fn packed_blob_u32(view: PackedBlobView, off: i64) -> i64:
+    _packed_blob_load(view, off, 4)
+
+pub fn packed_blob_u64(view: PackedBlobView, off: i64) -> i64:
+    _packed_blob_load(view, off, 8)
+
+# Map `path` and validate header + section table. A refused view carries the
+# reason and has addr 0; it must not be read.
+pub fn packed_blob_map(path: text) -> PackedBlobView:
+    val size = file_size(path)
+    if size < PACKED_BLOB_HEADER_BYTES:
+        return _packed_blob_refused("packed blob too small: {path}")
+    val addr = sosix_file_map(path, size, 0, true)
+    if addr == 0:
+        return _packed_blob_refused("packed blob map failed: {path}")
+    val probe = PackedBlobView(addr: addr, size: size, section_count: 0, error: "")
+    val reason = _packed_blob_validate(probe)
+    if reason != "":
+        val _unmapped = sosix_file_unmap(addr, size)
+        return _packed_blob_refused(reason)
+    PackedBlobView(addr: addr, size: size,
+        section_count: packed_blob_u32(probe, 12), error: "")
+
+fn _packed_blob_validate(view: PackedBlobView) -> text:
+    if packed_blob_u64(view, 0) != PACKED_BLOB_MAGIC:
+        return "packed blob bad magic"
+    if packed_blob_u32(view, 8) != PACKED_BLOB_VERSION:
+        return "packed blob unsupported version"
+    if packed_blob_u64(view, 16) != view.size:
+        return "packed blob size mismatch (torn entry)"
+    val count = packed_blob_u32(view, 12)
+    val table_end = PACKED_BLOB_HEADER_BYTES + count * PACKED_BLOB_SECTION_ENTRY_BYTES
+    if count < 0 or table_end > view.size:
+        return "packed blob section table out of bounds"
+    var i = 0
+    while i < count:
+        val entry = PACKED_BLOB_HEADER_BYTES + i * PACKED_BLOB_SECTION_ENTRY_BYTES
+        val elem_size = packed_blob_u32(view, entry + 4)
+        val offset = packed_blob_u64(view, entry + 8)
+        val length = packed_blob_u64(view, entry + 16)
+        if offset < table_end or length < 0 or offset > view.size or length > view.size - offset:
+            return "packed blob section {i} out of bounds"
+        if elem_size > 0 and length % elem_size != 0:
+            return "packed blob section {i} length not a multiple of its element size"
+        i = i + 1
+    ""
+
+pub fn packed_blob_unmap(view: PackedBlobView) -> bool:
+    if view.addr == 0:
+        return false
+    sosix_file_unmap(view.addr, view.size)
+
+# Section by id; length -1 when absent.
+pub fn packed_blob_section(view: PackedBlobView, id: i64) -> PackedBlobSection:
+    var i = 0
+    while i < view.section_count:
+        val entry = PACKED_BLOB_HEADER_BYTES + i * PACKED_BLOB_SECTION_ENTRY_BYTES
+        if packed_blob_u32(view, entry) == id:
+            return PackedBlobSection(id: id,
+                elem_size: packed_blob_u32(view, entry + 4),
+                offset: packed_blob_u64(view, entry + 8),
+                length: packed_blob_u64(view, entry + 16))
+        i = i + 1
+    PackedBlobSection(id: id, elem_size: 0, offset: 0, length: -1)
+
+pub fn packed_blob_section_len(section: PackedBlobSection) -> i64:
+    if section.length < 0 or section.elem_size <= 0:
+        return -1
+    section.length / section.elem_size
+
+# Field load from element `index` of a fixed-stride node array; -1 when the
+# element or field is out of the section.
+pub fn packed_blob_elem_u32(view: PackedBlobView, section: PackedBlobSection,
+        index: i64, field_off: i64) -> i64:
+    if index < 0 or field_off < 0 or field_off + 4 > section.elem_size:
+        return -1
+    val rel = index * section.elem_size + field_off
+    if rel + 4 > section.length:
+        return -1
+    packed_blob_u32(view, section.offset + rel)
+
+pub fn packed_blob_elem_u64(view: PackedBlobView, section: PackedBlobSection,
+        index: i64, field_off: i64) -> i64:
+    if index < 0 or field_off < 0 or field_off + 8 > section.elem_size:
+        return -1
+    val rel = index * section.elem_size + field_off
+    if rel + 8 > section.length:
+        return -1
+    packed_blob_u64(view, section.offset + rel)
+
+pub fn packed_blob_string_count(view: PackedBlobView, pool: PackedBlobSection) -> i64:
+    if pool.length < 8:
+        return -1
+    val count = packed_blob_u32(view, pool.offset)
+    if 8 + count * 8 > pool.length:
+        return -1
+    count
+
+# Copy ONE interned string out of the pool; nil when the index or its bytes
+# fall outside the pool section.
+pub fn packed_blob_string(view: PackedBlobView, pool: PackedBlobSection, index: i64) -> text?:
+    val count = packed_blob_string_count(view, pool)
+    if count < 0 or index < 0 or index >= count:
+        return nil
+    val row = pool.offset + 8 + index * 8
+    val rel = packed_blob_u32(view, row)
+    val len = packed_blob_u32(view, row + 4)
+    if rel < 8 + count * 8 or rel > pool.length or len > pool.length - rel:
+        return nil
+    if len == 0:
+        return Some("")
+    Some(rt_string_new(view.addr + pool.offset + rel, len))
