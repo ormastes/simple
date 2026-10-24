@@ -562,6 +562,32 @@ pub fn rt_thread_is_done(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
+/// Zero-arg current-thread id backing for `spl_thread_current_id`.
+///
+/// Simple sources declare `spl_thread_current_id() -> i64` (0 args) and the C
+/// runtime implements it as `spl_thread_current_id(void)`; the interpreter
+/// registration previously aliased it to the 1-arg `rt_thread_id(handle)`,
+/// which failed every 0-arg call. Each interpreter OS thread gets a stable
+/// positive id assigned lazily from the handle counter.
+thread_local! {
+    static CURRENT_THREAD_I64: std::cell::Cell<i64> = std::cell::Cell::new(0);
+}
+
+pub fn spl_thread_current_id(_args: &[Value]) -> Result<Value, CompileError> {
+    let id = CURRENT_THREAD_I64.with(|slot| {
+        let existing = slot.get();
+        if existing > 0 {
+            return existing;
+        }
+        let mut next = NEXT_HANDLE_ID.lock().unwrap();
+        let assigned = *next;
+        *next += 1;
+        slot.set(assigned);
+        assigned
+    });
+    Ok(Value::Int(id))
+}
+
 /// Get thread ID
 pub fn rt_thread_id(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {

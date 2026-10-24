@@ -2365,7 +2365,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
-    insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
+    insert_simple!("spl_thread_current_id", concurrency::spl_thread_current_id);
     insert_simple!(
         "rt_cpu_affinity_avx2_acquire",
         concurrency::rt_cpu_affinity_avx2_unavailable_i64
