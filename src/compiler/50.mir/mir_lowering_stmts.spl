@@ -1614,7 +1614,22 @@ impl MirLowering:
                                     # Match the ordinary Let arm: keep aggregate
                                     # metadata inside its owner instead of passing
                                     # a returned HirType across the staged ABI.
-                                    self.copy_local_hir_type_metadata(init_local.id, local.id)
+                                    # A real annotation outranks an initializer
+                                    # type that carries no information (Infer /
+                                    # Error) or an erased i64/any handle under a
+                                    # container annotation
+                                    # (mir_unresolved_method_inferred_receiver_2026-10-24).
+                                    val declared_override = if let_type_present: self.let_declared_type_override_v1(init_local.id, let_type_value) else: 0
+                                    if declared_override > 0:
+                                        self.remember_local_hir_type(local.id, let_type_value, 0, 0)
+                                        if declared_override == 2:
+                                            self.runtime_array_locals[local.id] = true
+                                            self.mark_runtime_value_local(local.id)
+                                        elif declared_override == 3:
+                                            self.runtime_dict_locals[local.id] = true
+                                            self.mark_runtime_value_local(local.id)
+                                    else:
+                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
                                 else:
                                     # Same defect as the two sites above, and
                                     # latent rather than dormant: this is the
@@ -3341,6 +3356,75 @@ impl MirLowering:
             self.struct_value_syms[dest.id] = shared_struct
         if all_typed and self.find_local_hir_type(dest.id) == nil:
             self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
+        elif self.find_local_hir_type(dest.id) == nil:
+            self.remember_merged_result_ctor_arm_type(dest, arm_locals)
+
+    me let_declared_type_override_v1(init_local_id: i64, declared: HirType) -> i64:
+        """Whether an annotated `val x: T = init` must record T instead of
+        copying the initializer local's HIR type. 0 = copy the initializer
+        (unchanged behaviour); 1 = record T; 2 / 3 = record T and mark the
+        binding a runtime array / dict handle.
+
+        Untyped bindings carry the HIR `Infer` marker as their Let type, so
+        `val r = s.substring(..)` leaves `r` typed Infer, and the copy rule
+        then let that placeholder beat `val t: text = r` -- `t.bytes()` died as
+        `unresolved method call: bytes`. Likewise `val args: [MirOperand] =
+        raw_args` with `raw_args: i64` (SFFI handle) copied Int over the array
+        annotation and `args.len()` was unresolved. Only those two shapes are
+        overridden; any informative initializer type still wins."""
+        if declared == nil:
+            return 0
+        var declared_container = 0
+        match declared.kind:
+            case HirTypeKind.Infer(_, _): return 0
+            case HirTypeKind.Error: return 0
+            case HirTypeKind.Array(_, _): declared_container = 2
+            case HirTypeKind.Dict(_, _): declared_container = 3
+            case _: ()
+        match self.find_local_hir_type(init_local_id):
+            case Some(init_type):
+                if init_type == nil:
+                    return 0
+                match init_type.kind:
+                    case HirTypeKind.Infer(_, _): return 1
+                    case HirTypeKind.Error: return 1
+                    case HirTypeKind.Any:
+                        if declared_container > 0: return declared_container
+                    case HirTypeKind.Int(bits, _):
+                        if bits == 64 and declared_container > 0: return declared_container
+                    case _: ()
+            case nil: ()
+        0
+
+    me remember_merged_result_ctor_arm_type(dest: LocalId, arm_locals: [LocalId]):
+        """`val r = if val h = x: lower(h) else: Err("missing")` — one arm is a
+        call with a declared `Result<T, E>`, the other an untyped `Ok(..)` /
+        `Err(..)` constructor that retains no HIR type, so the all-typed join
+        above refuses and `r.is_err()` / `r.unwrap()` died as `unresolved
+        method call` (mir_unresolved_method_inferred_receiver_2026-10-24).
+        Adopt the typed arms' type only when: every untyped arm is an untyped
+        Result constructor, at least one arm is typed, all typed arms agree
+        (`hir_types_equal`), and that agreed type is a Result. An arm of
+        unknown type, or a non-Result typed arm, leaves the slot unknown."""
+        var first_typed = -1
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local: LocalId = arm_locals[arm_i]
+            if val arm_type = self.find_local_hir_type(arm_local.id):
+                if first_typed < 0:
+                    match arm_type.kind:
+                        case HirTypeKind.Result(_, _): first_typed = arm_i
+                        case _: return
+                else:
+                    if val first_type = self.find_local_hir_type(arm_locals[first_typed].id):
+                        if not hir_types_equal(first_type, arm_type):
+                            return
+            elif not self.untyped_result_ctor_locals.contains(arm_local.id):
+                return
+            arm_i = arm_i + 1
+        if first_typed < 0:
+            return
+        self.copy_local_hir_type_metadata(arm_locals[first_typed].id, dest.id)
 
     me remember_merged_optional_arm_type(dest: LocalId, arm_locals: [LocalId]):
         """`val r = match o: case Some(e): Some(f(e)); case nil: nil` and
