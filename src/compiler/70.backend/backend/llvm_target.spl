@@ -20,6 +20,28 @@ use compiler.backend.portable_numeric_capabilities.{portable_numeric_default_pla
 # std.io_runtime.host_os() instead, proven correct in this exact harness.
 use std.io_runtime.{host_arch, host_os, env_get_opt}
 
+fn llvm_hosted_windows_env() -> text:
+    """LLVM env for a hosted Windows triple: "gnu" or "msvc".
+
+    Same precedence as runtime_compiler.windows_link_flavor_select: an
+    ABI-qualified SIMPLE_NATIVE_BUILD_TARGET, then SIMPLE_LINKER_FLAVOR, then
+    SIMPLE_WINDOWS_ABI, else msvc. A hardcoded msvc env made the gnu lane
+    (ld.lld + llvm-mingw) emit objects referencing the MSVC CRT marker
+    `_fltused`, which mingw does not define."""
+    val target = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
+    if target.ends_with("-windows-msvc"):
+        return "msvc"
+    if target.ends_with("-windows-gnu") or target.ends_with("-w64-mingw32"):
+        return "gnu"
+    val flavor = (env_get_opt("SIMPLE_LINKER_FLAVOR") ?? "").trim().lower()
+    if flavor == "msvc":
+        return "msvc"
+    if flavor == "gnu" or flavor == "mingw":
+        return "gnu"
+    if (env_get_opt("SIMPLE_WINDOWS_ABI") ?? "").trim().lower() == "gnu":
+        return "gnu"
+    "msvc"
+
 fn llvm_riscv64_hard_float_requested() -> bool:
     """True when the explicit target selects the RV64GC/LP64D profile."""
     val requested = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
@@ -105,7 +127,7 @@ impl LlvmTargetTriple:
         - Linux: x86_64-unknown-linux-gnu
         - FreeBSD: x86_64-unknown-freebsd
         - macOS: x86_64-apple-darwin or aarch64-apple-darwin
-        - Windows: x86_64-pc-windows-msvc
+        - Windows: x86_64-pc-windows-msvc (gnu when the Windows ABI selects it)
         """
         # An explicit OS target is independent of the compiler host.  Resolve it
         # before hosted-mode detection so in-guest compilation never shells out
@@ -177,7 +199,7 @@ impl LlvmTargetTriple:
             val env_result = match detected_host_os:
                 case "freebsd": nil
                 case "macos": nil
-                case "windows": Some("msvc")
+                case "windows": Some(llvm_hosted_windows_env())
                 case _: Some("gnu")
 
             match target:
