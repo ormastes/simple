@@ -1,0 +1,211 @@
+# Per-instance generic cache keyed by ConcreteTldrKey (plan P3 follow-up).
+#
+# One specialized instance (e.g. `Pair<i64, f64>`) is shared by every
+# importer: its target-neutral instance MIR is stored once under the
+# algorithm-tagged ConcreteTldrKey, and each target's object is stored under
+# that key plus the existing `MonoArtifactKey` (target, layout, cpu, backend,
+# assurance/universe/weave). No new key scheme: the instance identity is the
+# existing `MonoSemanticKey`, derived from a concrete view so that it equals
+# the key the legacy ConcreteType path builds (`name:<symbol>` definition,
+# `canonical_type_id_of_concrete` argument ids).
+#
+# Hash agility: every stored digest is `<algo>:<hex>`; at most three
+# algorithms are admitted and an unknown or malformed tag is a MISS, never a
+# reinterpretation. Only sha256 is admitted until the algorithm registry lands.
+#
+# No locks: entries are set-once. A second publication of the SAME key with
+# DIFFERENT bytes is nondeterminism: the entry is quarantined (every later
+# lookup misses) instead of newest-wins. Production of a key is deduplicated
+# by daemon/cache_single_flight_v1.
+#
+# Named gaps: in-memory only (persistence is the P6 publication slice); no
+# producer yet stores real instance MIR/objects (HIR/MIR wiring is next).
+
+use compiler.common.cache_contract.generic_tldr_view_v1.{ConcreteTldrAstViewV1,
+    GENERIC_CLOSURE_CONCRETE}
+use compiler.mono.model.generic_subst_model.{MType, mt_from_key}
+use compiler.monomorphize.mono_key.{MonoSemanticKey, MonoArtifactKey,
+    mono_semantic_key_types_only, mono_semantic_key_canonical_text,
+    mono_artifact_key_canonical_text, mono_semantic_key_is_generic}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
+
+pub val GENERIC_DIGEST_ALGOS_V1 = ["sha256"]   # admitted; at most three
+
+# `<algo>:<hex>` for an admitted algorithm, "" otherwise.
+pub fn generic_digest_tag_v1(algo: text, hex: text) -> text:
+    if not GENERIC_DIGEST_ALGOS_V1.contains(algo) or hex == "":
+        return ""
+    algo + ":" + hex
+
+# True iff `tagged` names an admitted algorithm with a lowercase-hex body of
+# that algorithm's width.
+pub fn generic_digest_admitted_v1(tagged: text) -> bool:
+    val colon = tagged.index_of(":")
+    if colon <= 0:
+        return false
+    val algo = tagged.substring(0, colon)
+    if not GENERIC_DIGEST_ALGOS_V1.contains(algo):
+        return false
+    val hex = tagged.substring(colon + 1)
+    if algo == "sha256" and hex.len() != 64:
+        return false
+    var i = 0
+    while i < hex.len():
+        val c = hex.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
+            return false
+        i = i + 1
+    true
+
+pub fn generic_instance_key_v1(view: ConcreteTldrAstViewV1) -> text:
+    generic_digest_tag_v1("sha256", view.semantic_key)
+
+fn _join_ids_v1(ts: [MType]) -> text:
+    var parts: [text] = []
+    for t in ts:
+        val tt: MType = t
+        parts = parts.push(generic_canonical_type_id_v1(tt))
+    parts.join(",")
+
+# MType -> the mono_key canonical type id (ConcreteType conventions).
+pub fn generic_canonical_type_id_v1(t: MType) -> text:
+    match t:
+        case MType.Var(name): "param:" + name
+        case MType.Con(name):
+            if name == "text": "str"
+            elif name == "unit": "unit"
+            else: name
+        case MType.App(ctor, args):
+            if ctor == "Array" and args.len() == 1: "[" + generic_canonical_type_id_v1(args[0]) + "]"
+            elif ctor == "Optional" and args.len() == 1: "opt<" + generic_canonical_type_id_v1(args[0]) + ">"
+            elif ctor == "Dict" and args.len() == 2:
+                "dict<" + generic_canonical_type_id_v1(args[0]) + "," + generic_canonical_type_id_v1(args[1]) + ">"
+            elif ctor == "Tuple": "(" + _join_ids_v1(args) + ")"
+            elif ctor.starts_with("Named:"):
+                val name = ctor.substring(6)
+                if args.len() == 0: "named:" + name else: "named:" + name + "<" + _join_ids_v1(args) + ">"
+            else: ctor + "<" + _join_ids_v1(args) + ">"
+
+# The existing MonoSemanticKey of a Concrete view; [] when the view is not
+# Concrete or an argument key does not decode (fail closed).
+pub fn generic_instance_semantic_key_v1(view: ConcreteTldrAstViewV1) -> [MonoSemanticKey]:
+    if view.closure_status != GENERIC_CLOSURE_CONCRETE:
+        return []
+    var ids: [text] = []
+    for k in view.arg_keys:
+        val parsed = mt_from_key(k)
+        if not parsed.ok:
+            return []
+        ids = ids.push(generic_canonical_type_id_v1(parsed.t))
+    val key = mono_semantic_key_types_only("name:" + view.template.symbol_id, ids)
+    if mono_semantic_key_is_generic(key):
+        return []
+    [key]
+
+struct GenericInstanceEntryV1:
+    semantic_text: text
+    mir: [u8]
+    has_mir: bool
+    objects: Dict<text, [u8]>
+    quarantined: bool
+
+class GenericInstanceCacheV1:
+    entries: Dict<text, GenericInstanceEntryV1>
+    flights: CacheSingleFlightV1
+    hits: i64
+    misses: i64
+    quarantines: i64
+
+    static fn create() -> GenericInstanceCacheV1:
+        GenericInstanceCacheV1(entries: {}, flights: CacheSingleFlightV1.create(),
+            hits: 0, misses: 0, quarantines: 0)
+
+    # Leader/waiter role for producing `instance_key`'s MIR or object.
+    me begin_produce(instance_key: text, request_id: text) -> bool:
+        val (role, _flight) = self.flights.join(cache_single_flight_key_v1("generic.instance", instance_key), request_id)
+        role == SINGLE_FLIGHT_LEADER_V1
+
+    me _entry_for(instance_key: text, semantic: MonoSemanticKey) -> [GenericInstanceEntryV1]:
+        if not generic_digest_admitted_v1(instance_key):
+            return []
+        val text_key = mono_semantic_key_canonical_text(semantic)
+        if self.entries.has(instance_key):
+            val e = self.entries[instance_key]
+            if e.semantic_text != text_key:
+                return []
+            return [e]
+        [GenericInstanceEntryV1(semantic_text: text_key, mir: [], has_mir: false, objects: {}, quarantined: false)]
+
+    me _quarantine(instance_key: text, e: GenericInstanceEntryV1):
+        var q = e
+        q.quarantined = true
+        self.entries[instance_key] = q
+        self.quarantines = self.quarantines + 1
+
+    # Set-once publication of target-neutral instance MIR. False when the key
+    # is not admitted, names another instance, or the bytes differ from an
+    # earlier publication (quarantined).
+    me put_mir(instance_key: text, semantic: MonoSemanticKey, request_id: text, mir: [u8]) -> bool:
+        val found = self._entry_for(instance_key, semantic)
+        if found.len() == 0:
+            return false
+        var e = found[0]
+        if e.quarantined:
+            return false
+        if e.has_mir:
+            if e.mir != mir:
+                self._quarantine(instance_key, e)
+                return false
+            return true
+        e.mir = mir
+        e.has_mir = true
+        self.entries[instance_key] = e
+        self.flights.complete(cache_single_flight_key_v1("generic.instance", instance_key), request_id, mir)
+        true
+
+    me get_mir(instance_key: text, semantic: MonoSemanticKey) -> [[u8]]:
+        val found = self._entry_for(instance_key, semantic)
+        if found.len() == 0 or found[0].quarantined or not found[0].has_mir or not self.entries.has(instance_key):
+            self.misses = self.misses + 1
+            return []
+        self.hits = self.hits + 1
+        [found[0].mir]
+
+    # Per-target object, keyed by the instance key + MonoArtifactKey; the
+    # artifact key must carry the same semantic key as the instance.
+    me put_object(instance_key: text, artifact: MonoArtifactKey, obj: [u8]) -> bool:
+        val found = self._entry_for(instance_key, artifact.semantic)
+        if found.len() == 0:
+            return false
+        var e = found[0]
+        if e.quarantined:
+            return false
+        val akey = mono_artifact_key_canonical_text(artifact)
+        if e.objects.has(akey):
+            if e.objects[akey] != obj:
+                self._quarantine(instance_key, e)
+                return false
+            return true
+        e.objects[akey] = obj
+        self.entries[instance_key] = e
+        true
+
+    me get_object(instance_key: text, artifact: MonoArtifactKey) -> [[u8]]:
+        val found = self._entry_for(instance_key, artifact.semantic)
+        val akey = mono_artifact_key_canonical_text(artifact)
+        if found.len() == 0 or found[0].quarantined or not found[0].objects.has(akey):
+            self.misses = self.misses + 1
+            return []
+        self.hits = self.hits + 1
+        [found[0].objects[akey]]
+
+    fn size() -> i64:
+        self.entries.len()
+
+pub fn generic_instance_cache_new() -> GenericInstanceCacheV1:
+    GenericInstanceCacheV1.create()
+
+export GENERIC_DIGEST_ALGOS_V1, generic_digest_tag_v1, generic_digest_admitted_v1
+export generic_instance_key_v1, generic_canonical_type_id_v1, generic_instance_semantic_key_v1
+export GenericInstanceCacheV1, generic_instance_cache_new
