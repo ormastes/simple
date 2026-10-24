@@ -50,9 +50,27 @@ unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
     out
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 unsafe fn with_fd<T>(_fd: i64, default: T, _f: impl FnOnce(&mut File) -> T) -> T {
     default
+}
+
+/// Windows twin of the unix `with_fd`: borrow the `File` from the raw HANDLE
+/// the Simple side carries, then leak it back with `into_raw_handle` so the
+/// Simple-side owner keeps closing it. Without this, every interpreter-mode
+/// fd operation (read, seek, meta_size, read_all, read_line, close) silently
+/// returned the default on Windows (2026-10-24: seed file_read returned empty
+/// text and close reported false on a valid descriptor).
+#[cfg(windows)]
+unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
+    if fd <= 0 {
+        return default;
+    }
+    use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+    let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+    let out = f(&mut file);
+    let _ = file.into_raw_handle();
+    out
 }
 
 fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
@@ -174,7 +192,15 @@ pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Int(-1)),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        match opts.open(&path) {
+            Ok(file) => Ok(Value::Int(file.into_raw_handle() as i64)),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Value::Int(-1))
     }
