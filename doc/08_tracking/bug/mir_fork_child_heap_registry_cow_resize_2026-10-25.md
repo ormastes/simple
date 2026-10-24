@@ -41,7 +41,7 @@ table), the same step costs about 4.8 GB per child. That matches the
 
 Right after `fork()`, the child calls
 `heap_registry_freeze_for_fork_child()` (C:
-`rt_core_immortal_registry_freeze_for_fork_child_v1()`). This makes the
+`spl_immortal_registry_freeze_for_fork_child_v1()`). This makes the
 inherited table a read-only frozen layer:
 
 - new objects go into an empty child-local table;

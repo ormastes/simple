@@ -686,7 +686,7 @@ static int fork_shared_heap_thread_count(void) {
 }
 
 /* runtime_native.c; weak so a runtime_fork.c-only link still resolves. */
-extern void rt_core_immortal_registry_freeze_for_fork_child_v1(void) __attribute__((weak));
+extern void spl_immortal_registry_freeze_for_fork_child_v1(void) __attribute__((weak));
 
 int64_t rt_fork_shared_heap_v1(void) {
     if (fork_shared_heap_thread_count() != 1) return -2;
@@ -700,8 +700,8 @@ int64_t rt_fork_shared_heap_v1(void) {
         }
         /* Keep the inherited heap registry read-only so the child neither
          * privatizes nor regrows the parent's table. */
-        if (rt_core_immortal_registry_freeze_for_fork_child_v1) {
-            rt_core_immortal_registry_freeze_for_fork_child_v1();
+        if (spl_immortal_registry_freeze_for_fork_child_v1) {
+            spl_immortal_registry_freeze_for_fork_child_v1();
         }
         return 0;
     }

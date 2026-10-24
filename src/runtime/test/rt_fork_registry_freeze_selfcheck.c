@@ -1,5 +1,5 @@
 /* Self-check for the fork-child heap-registry freeze
- * (rt_core_immortal_registry_freeze_for_fork_child_v1, called by
+ * (spl_immortal_registry_freeze_for_fork_child_v1, called by
  * rt_fork_shared_heap_v1 in the child). Membership must be unchanged across
  * the freeze: inherited objects stay live, erase exactly once, and may be
  * re-registered; child objects register and erase in the overlay. Checked
@@ -20,7 +20,7 @@ extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 extern int64_t rt_string_free(int64_t value);
 extern int64_t rt_string_len(int64_t value);
 extern int64_t rt_heap_registry_count(void);
-extern void rt_core_immortal_registry_freeze_for_fork_child_v1(void);
+extern void spl_immortal_registry_freeze_for_fork_child_v1(void);
 
 static int failures = 0;
 static void check(int cond, const char* what) {
@@ -66,7 +66,7 @@ int main(void) {
     fflush(NULL);
     pid_t pid = fork();
     if (pid == 0) {
-        rt_core_immortal_registry_freeze_for_fork_child_v1();
+        spl_immortal_registry_freeze_for_fork_child_v1();
         _exit(run_child_checks() == 0 ? 0 : 1);
     }
     int status = 0;
@@ -75,9 +75,9 @@ int main(void) {
     check(rt_heap_registry_count() >= N, "parent registry untouched by the child");
 
     printf("in-process freeze:\n");
-    rt_core_immortal_registry_freeze_for_fork_child_v1();
+    spl_immortal_registry_freeze_for_fork_child_v1();
     run_child_checks();
-    rt_core_immortal_registry_freeze_for_fork_child_v1(); /* nested: no-op layer */
+    spl_immortal_registry_freeze_for_fork_child_v1(); /* nested: no-op layer */
     check(rt_string_len(inherited[8]) > 0, "nested freeze keeps membership");
 
     printf("%s\n", failures == 0 ? "PASS" : "FAIL");
