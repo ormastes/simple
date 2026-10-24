@@ -268,6 +268,15 @@ Verification: `sh scripts/check/check-dual-run-shadow.shs` (C/Simple twin gate)
 for each new extern; a selftest fixture per surface on Linux and Windows CI
 (`required-gates.yml` extended job).
 
+### 4.3 Linux follow-up list (landed on Windows, not yet verified on Linux)
+
+| Item | Landed in | Gap |
+|---|---|---|
+| C topology/pinning twin (`rt_cpu_topology_*`, `rt_thread_pin_current`, `rt_thread_current_cpu` in `runtime_core_host_services.c`) | #4423 | the `__linux__` branch (sysfs enumeration, `pthread_setaffinity_np`, `sched_getcpu`, `_GNU_SOURCE` guard) was **never compiled** — only `clang -fsyntax-only` on Windows; needs a Linux compile + `host_io_topology_spec.spl` run |
+| Rust topology twin (`runtime/src/cpu_topology.rs`) Linux branch | #4423 | unrun on Linux; verify `/sys/devices/system/cpu` package/NUMA ids and `sched_setaffinity` on a 2-socket box |
+| Fiber IO reactor over io_uring (`fiber/io_reactor.spl`) | #4417, #4430 | specs ran only against IOCP / the reference driver; run `io_reactor_spec.spl` with the io_uring provider |
+| Mapped writer POSIX branch of `rt_mmap_create` (C `ftruncate` + `mmap`) | #4416 | POSIX C branch not compiled locally |
+
 ## 5. Recommended order
 
 1. Fix the two live P0s: wake-up future in `cache_single_flight_v1` (+ remove
