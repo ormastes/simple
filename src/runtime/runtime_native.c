@@ -15947,6 +15947,16 @@ int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArra
         cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
     char* path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
@@ -18314,6 +18324,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     rt_tuple_set(tuple, 2, rt_value_int((int64_t)regs.c));
     rt_tuple_set(tuple, 3, rt_value_int((int64_t)regs.d));
     return tuple;
+}
+
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
 }
 
 int64_t rt_xgetbv(int32_t index) {
