@@ -59,6 +59,7 @@ use compiler.common.cache_contract.hash_algorithm_compute_v1.{hash_algorithm_nam
 use std.nogc_async_mut.sosix.packed_blob_view.{PackedBlobView, packed_blob_map, packed_blob_unmap,
     packed_blob_view_ok, packed_blob_u8, packed_blob_u16, packed_blob_u32, packed_blob_u64}
 use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
 extern fn rt_string_new(bytes: i64, len: i64) -> text
 extern fn rt_is_interpreter_runtime() -> bool
@@ -85,6 +86,18 @@ pub val SPAB_SECTION_STRING_OFFSETS: i64 = 1281
 pub val SPAB_SECTION_STRING_BYTES: i64 = 1282
 pub val SPAB_SECTION_SCHEMA: i64 = 1283
 pub val SPAB_SECTION_CLEARED: i64 = 1284
+# 0x0104: lazy cross-module reference table (§2.7), saved UNFILLED. Row (52 B):
+#   module_key[16] xxh3-128 of the imported module path, u32 decl_id
+#   (0xFFFFFFFF = unresolved), target_content_key[16] (zero = unresolved),
+#   u32 name str_index, u32 module_path str_index, u32 owning decl index,
+#   u32 reserved (0). Rows are in decl order, then import-name order.
+pub val SPAB_SECTION_XREF: i64 = 260
+# 0x0900: set-once field map (§2.6). Entries: u32 section id, u32 element
+# count, then a bitset (bit i = element i may be filled once at runtime, in a
+# RAM side array -- never in the mapped bytes), zero padded to 8.
+pub val SPAB_SECTION_SET_ONCE: i64 = 2304
+val SPAB_XREF_ROW_BYTES: i64 = 52
+val SPAB_UNRESOLVED_U32: i64 = 4294967295
 
 # Section entry encoding: bits 0-7 element kind, bits 8-14 pool shape, bit 15
 # REQUIRED (an unknown section with this bit set is a miss; without it, ignored).
@@ -98,6 +111,7 @@ val KIND_U8: i64 = 3
 val KIND_STR: i64 = 4
 val KIND_PAIR: i64 = 5
 val KIND_BYTES: i64 = 6
+val KIND_XREF: i64 = 7
 
 # Family bases/limits (decimal of 0x0001/0x00FF, 0x0200/0x02FF, 0x0300/0x03FF,
 # 0x0400/0x047F, 0x0480/0x049F, 0x04A0/0x04BF, 0x04C0/0x04FF).
@@ -132,6 +146,7 @@ fn _elem_kind(shape: i64) -> i64:
     -1
 
 fn _kind_width(kind: i64) -> i64:
+    if kind == KIND_XREF: return SPAB_XREF_ROW_BYTES
     if kind == KIND_I64: return 8
     if kind == KIND_U8: return 1
     if kind == KIND_STR: return 4
@@ -160,6 +175,14 @@ fn _get_le(bytes: [u8], at: i64, width: i64) -> i64:
             b = b - 256
         v = v * 256 + b
         i = i - 1
+    v
+
+fn _pow2(k: i64) -> i64:
+    var v = 1
+    var i = 0
+    while i < k:
+        v = v * 2
+        i = i + 1
     v
 
 fn _append(out: [u8], tail: [u8]) -> [u8]:
@@ -473,6 +496,17 @@ fn _identity_ok(digests: [SpabDigestV1]) -> bool:
 pub fn flat_packed_encode_v1(lines_blob: text, trace: [i64], digests: [SpabDigestV1],
         module_key_hex: text) -> [u8]:
     """`.spab` blob for a canonical flat-pool line blob, or [] when refused."""
+    flat_packed_encode_refs_v1(lines_blob, trace, [], digests, module_key_hex)
+
+# One cross-module import reference (a `use` declaration's imported name).
+pub struct SpabImportRefV1:
+    decl_index: i64
+    module_path: text
+    name: text
+
+pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImportRefV1],
+        digests: [SpabDigestV1], module_key_hex: text) -> [u8]:
+    """As flat_packed_encode_v1, plus the 0x0104 reference table and 0x0900 map."""
     val module_key = _hex_bytes(module_key_hex)
     if module_key.len() != 16 or not _identity_ok(digests):
         return []
@@ -515,6 +549,9 @@ pub fn flat_packed_encode_v1(lines_blob: text, trace: [i64], digests: [SpabDiges
     for p in pools:
         for t in p.texts:
             all_texts.push(t)
+    for r in refs:
+        all_texts.push(r.module_path)
+        all_texts.push(r.name)
     val strings = _sorted_unique(all_texts)
     var emit = _Emit(string_index: {}, i64_children: [], i64_child_count: 0,
         str_children: [], str_child_count: 0, pair_children: [], pair_child_count: 0)
@@ -541,6 +578,50 @@ pub fn flat_packed_encode_v1(lines_blob: text, trace: [i64], digests: [SpabDiges
     sections.push(_Section(id: SPAB_SECTION_I64_CHILDREN, encoding: KIND_I64, data: emit.i64_children))
     sections.push(_Section(id: SPAB_SECTION_STR_CHILDREN, encoding: KIND_STR, data: emit.str_children))
     sections.push(_Section(id: SPAB_SECTION_PAIR_CHILDREN, encoding: KIND_PAIR, data: emit.pair_children))
+    # Lazy cross-module references, UNFILLED: resolution happens in RAM.
+    var xref: [u8] = []
+    for r in refs:
+        xref = _append(xref, _hex_bytes(xxh3_128_text(r.module_path)))
+        xref = _put_le(xref, SPAB_UNRESOLVED_U32, 4)
+        var z = 0
+        while z < 16:
+            xref.push(0u8)
+            z = z + 1
+        xref = _put_le(xref, emit.string_index[r.name], 4)
+        xref = _put_le(xref, emit.string_index[r.module_path], 4)
+        xref = _put_le(xref, r.decl_index, 4)
+        xref = _put_le(xref, 0, 4)
+    sections.push(_Section(id: SPAB_SECTION_XREF, encoding: KIND_XREF, data: xref))
+    # Set-once map: every reference row's resolved target may be filled once.
+    var set_once: [u8] = []
+    if refs.len() > 0:
+        set_once = _put_le(set_once, SPAB_SECTION_XREF, 4)
+        set_once = _put_le(set_once, refs.len(), 4)
+        var bit = 0
+        while bit < refs.len():
+            var byte = 0
+            var k = 0
+            while k < 8 and bit + k < refs.len():
+                byte = byte + _pow2(k)
+                k = k + 1
+            set_once.push(byte as u8)
+            bit = bit + 8
+        set_once = _pad_to(set_once, 8)
+    sections.push(_Section(id: SPAB_SECTION_SET_ONCE, encoding: KIND_BYTES, data: set_once))
+    # Sections are written sorted by id (§2.2).
+    var sorted: [_Section] = []
+    for sec in sections:
+        var next: [_Section] = []
+        var placed = false
+        for have in sorted:
+            if not placed and sec.id < have.id:
+                next.push(sec)
+                placed = true
+            next.push(have)
+        if not placed:
+            next.push(sec)
+        sorted = next
+    sections = sorted
     # Body digest (subject 3) covers [end of the 0x0000 section, blob end): a
     # digest table cannot hash itself. Written as zeros, patched after layout.
     var identity: [SpabDigestV1] = []
@@ -684,6 +765,35 @@ pub struct SpabViewV1:
                 return d.hex
         ""
 
+    me import_ref_count() -> i64:
+        val xref = self.section(SPAB_SECTION_XREF)
+        if xref.length < 0: 0 else: xref.length / SPAB_XREF_ROW_BYTES
+
+    # Row `i` of the unfilled reference table (resolution is a RAM side array).
+    me import_ref(i: i64) -> SpabImportRefV1:
+        val row = self.section(SPAB_SECTION_XREF).offset + i * SPAB_XREF_ROW_BYTES
+        SpabImportRefV1(decl_index: _le(self.src, row + 44, 4),
+            module_path: self.string_at(_le(self.src, row + 40, 4)),
+            name: self.string_at(_le(self.src, row + 36, 4)))
+
+    # True when element `index` of section `section_id` may be filled once at runtime.
+    me set_once_allowed(section_id: i64, index: i64) -> bool:
+        val map = self.section(SPAB_SECTION_SET_ONCE)
+        var at = map.offset
+        val end = map.offset + (if map.length < 0: 0 else: map.length)
+        while at < end:
+            val count = _le(self.src, at + 4, 4)
+            var bytes = (count + 7) / 8
+            while (8 + bytes) % 8 != 0:
+                bytes = bytes + 1
+            if _le(self.src, at, 4) == section_id:
+                if index < 0 or index >= count:
+                    return false
+                val byte = _le(self.src, at + 8 + index / 8, 1)
+                return (byte / _pow2(index % 8)) % 2 == 1
+            at = at + 8 + bytes
+        false
+
 fn _miss(src: SpabSourceV1, reason: text) -> SpabViewV1:
     SpabViewV1(valid: false, reason: reason, src: src, flags: 0, module_key_hex: "",
         sections: [], digests: [], string_count: 0)
@@ -713,7 +823,8 @@ fn _read_digests(src: SpabSourceV1, s: SpabSectionV1) -> [SpabDigestV1]?:
 fn _known_section(id: i64) -> bool:
     id == SPAB_SECTION_DIGESTS or _is_pool_section(id) or
         (id >= SPAB_SECTION_STRING_OFFSETS and id <= SPAB_SECTION_CLEARED) or
-        (id >= SPAB_SECTION_I64_CHILDREN and id <= SPAB_SECTION_PAIR_CHILDREN)
+        (id >= SPAB_SECTION_I64_CHILDREN and id <= SPAB_SECTION_PAIR_CHILDREN) or
+        id == SPAB_SECTION_XREF or id == SPAB_SECTION_SET_ONCE
 
 fn _index_bounds_reason(view: SpabViewV1) -> text:
     val b = view.src
@@ -742,6 +853,38 @@ fn _index_bounds_reason(view: SpabViewV1) -> text:
         if _le(b, pairc.offset + j * 8, 4) + _le(b, pairc.offset + j * 8 + 4, 4) > strc.length / 4:
             return "pair children out of bounds"
         j = j + 1
+    # Reference table: string indices in range, and saved UNFILLED.
+    val xref = view.section(SPAB_SECTION_XREF)
+    var r = 0
+    while xref.length > 0 and r < xref.length / SPAB_XREF_ROW_BYTES:
+        val row = xref.offset + r * SPAB_XREF_ROW_BYTES
+        if _le(b, row + 16, 4) != SPAB_UNRESOLVED_U32:
+            return "reference row {r} saved filled"
+        var z = 0
+        while z < 16:
+            if _le(b, row + 20 + z, 1) != 0:
+                return "reference row {r} saved filled"
+            z = z + 1
+        if _le(b, row + 36, 4) >= n or _le(b, row + 40, 4) >= n:
+            return "reference row {r} string index out of range"
+        r = r + 1
+    # Set-once map: each entry names a present section and covers its rows.
+    val map = view.section(SPAB_SECTION_SET_ONCE)
+    var at = map.offset
+    val end = map.offset + (if map.length < 0: 0 else: map.length)
+    while at < end:
+        if at + 8 > end:
+            return "set-once map truncated"
+        val target = view.section(_le(b, at, 4))
+        val count = _le(b, at + 4, 4)
+        if target.length < 0 or count != target.length / _kind_width(target.encoding % 256):
+            return "set-once map names an absent section or a wrong count"
+        var bytes = (count + 7) / 8
+        while (8 + bytes) % 8 != 0:
+            bytes = bytes + 1
+        if at + 8 + bytes > end:
+            return "set-once map truncated"
+        at = at + 8 + bytes
     ""
 
 pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
@@ -1140,6 +1283,7 @@ export SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER, SPAB_SUBJECT_BODY
 export SPAB_SECTION_DIGESTS, SPAB_SECTION_STRING_OFFSETS, SPAB_SECTION_STRING_BYTES
 export SPAB_SECTION_SCHEMA, SPAB_SECTION_I64_CHILDREN, SPAB_SECTION_STR_CHILDREN
 export SPAB_SECTION_PAIR_CHILDREN, SPAB_SECTION_CLEARED, SPAB_ENCODING_REQUIRED
+export SPAB_SECTION_XREF, SPAB_SECTION_SET_ONCE, SpabImportRefV1, flat_packed_encode_refs_v1
 export SpabDigestV1, SpabSectionV1, SpabViewV1
 export flat_packed_encode_v1, flat_packed_view_v1, flat_packed_admit_v1, flat_packed_decode_lines_v1
 export SpabSourceV1, SpabTokensV1, flat_packed_view_src_v1, flat_packed_open_v1, flat_packed_close_v1

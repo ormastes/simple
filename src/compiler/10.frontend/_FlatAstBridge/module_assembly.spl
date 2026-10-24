@@ -57,8 +57,8 @@ use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1, flat_pool_validate_texts_arm_v1, flat_pool_validate_texts_disarm_v1, flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1}
-use compiler.frontend.core.flat_pool_packed_v1.{SpabViewV1, flat_packed_tokens_v1}
-use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabViewV1, SpabImportRefV1, flat_packed_tokens_v1}
+use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore, flat_type_pools_clear_chunks_v1}
 use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
 use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
 use compiler.core.parser_decls.{flat_pending_pools_dump, flat_pending_pools_restore}
@@ -1343,6 +1343,8 @@ pub fn flat_pools_clear_chunks_v1() -> [text]:
         chunks.push(c)
     for c in flat_stmt_pools_clear_chunks_v1():
         chunks.push(c)
+    for c in flat_type_pools_clear_chunks_v1():
+        chunks.push(c)
     chunks
 
 # Returns false when the blob is truncated, malformed, or written by a
@@ -1427,6 +1429,30 @@ pub fn flat_pool_capture_take_trace() -> [i64]:
     val trace = _fab_captured_trace
     _fab_captured_trace = []
     trace
+
+# Cross-module import references of the captured parse (packed 0x0104 table).
+var _fab_captured_refs: [SpabImportRefV1] = []
+
+pub fn flat_pool_capture_take_refs() -> [SpabImportRefV1]:
+    val refs = _fab_captured_refs
+    _fab_captured_refs = []
+    refs
+
+# One row per imported name of every top-level `use` declaration (DECL_USE = 6),
+# in module order; a `use` with no names (glob) yields one row with name "".
+pub fn flat_pool_import_refs_v1() -> [SpabImportRefV1]:
+    var refs: [SpabImportRefV1] = []
+    var k = 0
+    while k < module_decl_count_get():
+        val idx = module_decl_at(k)
+        if decl_get_tag(idx) == 6:
+            val names = decl_get_imports(idx)
+            if names.len() == 0:
+                refs.push(SpabImportRefV1(decl_index: idx, module_path: decl_get_name(idx), name: ""))
+            for name in names:
+                refs.push(SpabImportRefV1(decl_index: idx, module_path: decl_get_name(idx), name: name))
+        k = k + 1
+    refs
 # Paths already captured this process. Re-capturing an identical path is
 # always redundant (the blob is content-identical) and each repeat dump
 # re-exposes the transient-scope reclaim window that poisons the capture
@@ -1705,6 +1731,7 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         flat_pool_type_trace_arm_v1()
         _fab_captured_blob = flat_pools_dump_all()
         _fab_captured_trace = flat_pool_type_trace_take_v1()
+        _fab_captured_refs = flat_pool_import_refs_v1()
         if (_sffi_env_get("SIMPLE_CAPTURE_TRACE") ?? "") == "1":
             eprint("[capture-trace] blob-built len={_fab_captured_blob.len()} poisoned={flat_pool_capture_poisoned_v1()}\n")
         flat_pool_capture_sanitize_disarm_v1()
