@@ -59,6 +59,9 @@ inductive Field where
   | prelower_build_module_set
   | persisted_digest_algorithm
   | advice_call_only_weave
+  | link_linker_identity
+  | link_system_library_content
+  | link_import_library_content
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -106,6 +109,9 @@ def Field.name : Field → String
   | .prelower_build_module_set => "prelower_build_module_set"
   | .persisted_digest_algorithm => "persisted_digest_algorithm"
   | .advice_call_only_weave => "advice_call_only_weave"
+  | .link_linker_identity => "link_linker_identity"
+  | .link_system_library_content => "link_system_library_content"
+  | .link_import_library_content => "link_import_library_content"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -153,20 +159,20 @@ def Field.kind : Field → String
   | .prelower_build_module_set => "ordered"
   | .persisted_digest_algorithm => "scalar"
   | .advice_call_only_weave => "scalar"
+  | .link_linker_identity => "scalar"
+  | .link_system_library_content => "ordered"
+  | .link_import_library_content => "ordered"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure, .prelower_interface_lines, .prelower_copyable_full_source, .prelower_build_module_set, .persisted_digest_algorithm, .advice_call_only_weave]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure, .prelower_interface_lines, .prelower_copyable_full_source, .prelower_build_module_set, .persisted_digest_algorithm, .advice_call_only_weave, .link_linker_identity, .link_system_library_content, .link_import_library_content]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
 
 /-- Inputs that can change an object but are not in the live key. -/
 inductive Gap where
-  | linker_binary_version
-  | system_library_content
-  | import_lib_export_sets
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.linker_binary_version, .system_library_content, .import_lib_export_sets]
+def allGaps : List Gap := []
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -407,24 +413,24 @@ theorem advice_call_only_weave_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .advice_call_only_weave ≠ k2 .advice_call_only_weave) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .advice_call_only_weave)
 
+-- pos 45 (scalar) bound to src/compiler/80.driver/driver_build/native_link_receipt_v1.spl#_toolchain_digests_v1
+theorem link_linker_identity_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .link_linker_identity ≠ k2 .link_linker_identity) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .link_linker_identity)
+
+-- pos 46 (ordered) bound to src/compiler/80.driver/driver_build/native_link_receipt_v1.spl#native_link_library_rows_v1
+theorem link_system_library_content_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .link_system_library_content ≠ k2 .link_system_library_content) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .link_system_library_content)
+
+-- pos 47 (ordered) bound to src/compiler/80.driver/driver_build/native_link_receipt_v1.spl#native_link_library_candidates_v1
+theorem link_import_library_content_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .link_import_library_content ≠ k2 .link_import_library_content) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .link_import_library_content)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
   gap  : Gap → Val
-
-/-- Known gap: the live key does not see `linker_binary_version`. -/
-theorem linker_binary_version_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .linker_binary_version ≠ j.gap .linker_binary_version :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `system_library_content`. -/
-theorem system_library_content_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .system_library_content ≠ j.gap .system_library_content :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `import_lib_export_sets`. -/
-theorem import_lib_export_sets_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .import_lib_export_sets ≠ j.gap .import_lib_export_sets :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 end CacheProtocol.Live
