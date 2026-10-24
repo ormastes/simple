@@ -5,6 +5,8 @@
 # are confined to the caller-provided SCV cache root.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 @allow(star_import) # reason: public compatibility facade over the pure inventory core
 export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list}
@@ -619,7 +621,38 @@ fn compile_source_inventory_revalidate_pointer_v1(
 fn compile_source_inventory_read_at_pointer_v1(
     cache_root: text, pointer_content: text
 ) -> CompileSourceInventoryReadV1:
-    """Read one immutable inventory generation selected by a captured CURRENT record."""
+    """Read one authenticated generation, retaining only the complete result graph."""
+    # Active and paused scopes belong to the caller. Refused begin preserves
+    # the original reader, including when a foreign owner holds the C scope.
+    if transient_array_scope_state_v1() != 0:
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    if not transient_scope_begin():
+        return compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    val result = compile_source_inventory_read_at_pointer_unscoped_v1(cache_root, pointer_content)
+    # Entry validation ends only scopes it opened. No per-file scratch owner
+    # or mutable caller trace/cost object is inside this reader boundary.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 1:
+        if scope_state == 2:
+            val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-state-invalid", "", nil)
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-pause-failed", "", nil)
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    # Never access result after a failed promote/end. Construct failure values
+    # after retirement; an end failure is not retried or reported as restored.
+    if not retained:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-promote-failed", "", nil)
+    if not ended:
+        return CompileSourceInventoryReadV1(false, "inventory-read-scratch-end-failed", "", nil)
+    result
+
+fn compile_source_inventory_read_at_pointer_unscoped_v1(
+    cache_root: text, pointer_content: text
+) -> CompileSourceInventoryReadV1:
+    """Original immutable-generation admission, with scratch owned by its caller."""
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return CompileSourceInventoryReadV1(false, "inventory-cache-root-invalid", "", nil)
     val root = compile_source_inventory_storage_v1(cache_root)
