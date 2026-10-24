@@ -39,7 +39,11 @@ use compiler.driver.sif.sif.{sif_of_source, sif_validate}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
     module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
 use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_sections_of_module_v1}
-use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of_module_v1}
+use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of_module_v1,
+    module_public_macro_facts_v1}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
+    MacroUseTableV1, macro_definition_table_encode_v1, macro_use_table_encode_v1,
+    macro_reference_schema_v1}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_artifact.public_summary_projector.{FrozenPublicFactV1,
@@ -132,10 +136,39 @@ fn _module_summary_input_v1(module_id: text, source_path: text, source: text,
 # A projection refusal yields no summary section (named in the result).
 pub fn module_tldr_companion_view_sections_v1(module: ParserModule, source_path: text,
         source: text, module_id: text) -> ([text], text):
+    module_tldr_companion_view_sections_with_macros_v1(module, source_path, source, module_id,
+        MacroDefinitionTableV1(schema: macro_reference_schema_v1(), module_id: module_id, entries: []),
+        MacroUseTableV1(schema: macro_reference_schema_v1(), module_id: module_id, uses: []), [])
+
+
+# Macro TLDR sections (plan 2026-10-24 §6.1/§6.3): the module's
+# MacroDefinitionTableV1 and its OUTGOING MacroUseTableV1, each sealed by the
+# contract codec. Users of a macro are never listed in the defining module's
+# sections; the reverse view is the `.rr` projection.
+pub fn module_tldr_macro_sections_v1(def_table: MacroDefinitionTableV1,
+        use_table: MacroUseTableV1) -> [text]:
+    var sections: [text] = []
+    if def_table.entries.len() > 0:
+        sections.push("macro-def|" + macro_definition_table_encode_v1(def_table))
+    if use_table.uses.len() > 0:
+        sections.push("macro-use|" + macro_use_table_encode_v1(use_table))
+    sections
+
+# View sections plus macro facts: macro MacroSignature facts join the
+# PublicSummaryV1 input (so macro-generated public members change the summary
+# and a body-only macro edit does not), and the macro sections follow.
+# Named gap: ParserModule carries no macro facts yet, so the caller supplies
+# the projection (compiler.frontend.cache_artifact.macro_reference_projector).
+pub fn module_tldr_companion_view_sections_with_macros_v1(module: ParserModule,
+        source_path: text, source: text, module_id: text,
+        def_table: MacroDefinitionTableV1, use_table: MacroUseTableV1,
+        generated_public_names: [text]) -> ([text], text):
     var sections: [text] = []
     var refusal = ""
+    val facts = module_public_facts_of_module_v1(module, source, module_id) +
+        module_public_macro_facts_v1(def_table, generated_public_names, module_id)
     val projected = project_public_summary_v1(_module_summary_input_v1(module_id,
-        source_path, source, module_public_facts_of_module_v1(module, source, module_id)))
+        source_path, source, facts))
     match projected:
         case Ok(summary):
             sections.push("summary|" + render_public_summary_tldr_v1(summary))
@@ -144,6 +177,8 @@ pub fn module_tldr_companion_view_sections_v1(module: ParserModule, source_path:
     for entry in module_tldr_sections_of_module_v1(module, source):
         if entry.starts_with("generic|") or entry.starts_with("inline|"):
             sections.push(entry)
+    for entry in module_tldr_macro_sections_v1(def_table, use_table):
+        sections.push(entry)
     (sections, refusal)
 
 # Temp file in the destination directory, then rename over the destination.
@@ -186,4 +221,5 @@ export module_tldr_companion_render_v1, module_tldr_companion_body_v1
 export module_tldr_companion_sections_v1, module_tldr_companion_render_sections_v1
 export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_tldr_companion_view_sections_v1
+export module_tldr_macro_sections_v1, module_tldr_companion_view_sections_with_macros_v1
 export module_artifacts_emit_v1

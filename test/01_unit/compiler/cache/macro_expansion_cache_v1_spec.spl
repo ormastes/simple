@@ -1,0 +1,29 @@
+# Purpose: P5 macro expansion cache keyed by MacroExpandKey, coalesced through
+# the daemon single-flight table (plan 2026-10-24 §3.2, §9.6).
+# @req M-04 X-02
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.macro_expansion_cache_v1.{MacroExpansionCacheV1}
+
+describe "macro expansion cache":
+    it "coalesces concurrent identical requests and reuses the result":
+        val key = sha256_text("expand-key")
+        var cache = MacroExpansionCacheV1.create()
+        expect(cache.begin(key, "w1")).to_equal("leader")
+        expect(cache.begin(key, "w2")).to_equal("waiter")
+        expect(cache.inflight_count()).to_equal(1)
+        expect(cache.publish(key, "w1", "1 + 1")).to_equal(true)
+        expect(cache.inflight_count()).to_equal(0)
+        expect(cache.begin(key, "w3")).to_equal("hit")
+        expect(cache.value_of(key)).to_equal("1 + 1")
+        expect(cache.computations).to_equal(1)
+
+    it "quarantines a key whose producer is nondeterministic":
+        var cache = MacroExpansionCacheV1.create()
+        expect(cache.begin("k", "w1")).to_equal("leader")
+        expect(cache.publish("k", "w1", "v1")).to_equal(true)
+        expect(cache.publish("k", "w1", "v1")).to_equal(true)
+        expect(cache.publish("k", "w1", "v2")).to_equal(false)
+        expect(cache.begin("k", "w2")).to_equal("quarantined")
+        expect(cache.value_of("k")).to_equal("")

@@ -10,9 +10,12 @@ use compiler.common.cache_contract.macro_reference_manifest_v1.{
     MacroUseStatusV1, macro_definition_table_encode_v1, macro_use_status_tag_v1}
 use compiler.frontend.cache_artifact.macro_reference_projector.{
     MacroSourceDefV1, MacroSourceInvocationV1, MacroModuleSourceV1,
-    MacroModuleProjectionV1, MacroExpansionCacheV1, project_macro_module_v1,
+    MacroModuleProjectionV1, project_macro_module_v1,
     package_macro_name_index_v1, macro_projection_diff_v1, macro_forward_users_of_v1,
-    macro_def_key_of_v1, macro_expansion_cache_new_v1}
+    macro_def_key_of_v1}
+use compiler.driver.cache.module_public_summary_facts_v1.{module_public_macro_facts_v1}
+use compiler.semantics.macro_contracts.{MacroContractItem, macro_contract_canonical_text,
+    macro_contract_introduced_names}
 
 fn mdef(name: text, intros: [text]) -> MacroDef:
     var decls: [MacroIntroDecl] = []
@@ -131,22 +134,28 @@ describe "macro-generated public surface feeds module TLDR":
         val b_intro = project_b(project_macro_module_v1(a_intro_src, []), [inv("r1", "double")])
         expect(b_intro.generated_public_surface_digest == b0.generated_public_surface_digest).to_equal(false)
 
-describe "expansion cache keyed by MacroExpandKey with single-flight":
-    it "coalesces concurrent identical requests and reuses the result":
+
+describe "macro facts reach the module public summary":
+    it "emits MacroSignature facts for public defs and generated members":
         val a = project_macro_module_v1(module_a("x + x"), [])
         val b = project_b(a, [inv("r1", "double")])
-        val key = b.use_table.uses[0].expand_key
-        var cache = macro_expansion_cache_new_v1()
-        expect(cache.begin(key)).to_equal("leader")
-        expect(cache.begin(key)).to_equal("waiter")
-        expect(cache.publish(key, "1 + 1")).to_equal(1)
-        expect(cache.begin(key)).to_equal("hit")
-        expect(cache.value_of(key)).to_equal("1 + 1")
-        expect(cache.computations).to_equal(1)
+        val facts = module_public_macro_facts_v1(a.def_table, b.generated_public_names, "pkg.a")
+        expect(facts.len()).to_equal(3)
+        expect(facts[1].stable_symbol_id).to_equal("macro:pkg.a.double")
+        expect(facts[2].stable_symbol_id).to_equal("macro-gen:pkg.a.gen_double")
+        val a_body = project_macro_module_v1(module_a("x * 2"), [])
+        val facts_body = module_public_macro_facts_v1(a_body.def_table, b.generated_public_names, "pkg.a")
+        expect(facts_body[1].canonical_bytes).to_equal(facts[1].canonical_bytes)
 
-    it "quarantines a key whose producer is nondeterministic":
-        var cache = macro_expansion_cache_new_v1()
-        expect(cache.begin("k")).to_equal("leader")
-        cache.publish("k", "v1")
-        expect(cache.publish("k", "v2")).to_equal(-1)
-        expect(cache.begin("k")).to_equal("quarantined")
+describe "semantic-side contract digest input":
+    it "canonical contract text and introduced names":
+        val items = [
+            MacroContractItem(kind: "intro", has_name: true, name: "b_fn", has_type_name: false,
+                type_name: "", has_label: false, label: "", has_anchor: false, anchor: "",
+                has_anchor_value: false, anchor_value: ""),
+            MacroContractItem(kind: "intro", has_name: true, name: "a_fn", has_type_name: true,
+                type_name: "i64", has_label: false, label: "", has_anchor: false, anchor: "",
+                has_anchor_value: false, anchor_value: "")]
+        expect(macro_contract_introduced_names(items)).to_equal(["a_fn", "b_fn"])
+        val t1 = macro_contract_canonical_text(items)
+        expect(t1 == macro_contract_canonical_text([items[1], items[0]])).to_equal(false)

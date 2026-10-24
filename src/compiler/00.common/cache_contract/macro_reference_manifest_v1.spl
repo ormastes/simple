@@ -1,0 +1,499 @@
+# Macro definition / use TLDR sections (plan 2026-10-24 §6, slice P1+P5).
+#
+# Module `.tld`: MacroDefinitionTableV1 (keyed by scoped MacroDefId) plus the
+# module's outgoing MacroUseTableV1 (one forward record per invocation,
+# including negative/absence witnesses). Package `__init__.tld`:
+# PackageMacroNameIndexV1 (name -> candidate def ids, membership/candidate
+# roots). The reverse `.rr` projection is NOT stored here: it is rebuilt by the
+# reference coordinator from these forward facts.
+#
+# Identity rule: a definition's MacroDefKey never folds in who references the
+# macro, so adding/removing users cannot change it (plan §6.3).
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1, SemanticReadKindV1,
+    semantic_read_facet_v1}
+
+pub struct MacroDefIdV1:
+    package: text
+    module: text
+    namespace: text
+    binder: text
+
+pub struct MacroDefinitionEntryV1:
+    def_id: MacroDefIdV1
+    macro_name: text
+    generation: i64
+    contract_digest: text
+    body_digest: text
+    hygiene_schema: text
+    declared_effects: [text]
+    dependent_macros: [text]
+    guard_ids: [text]
+    is_public: bool
+    generated_member_names: [text]
+    generated_member_root: text
+    exported_surface_digest: text
+
+pub struct MacroDefinitionTableV1:
+    schema: i64
+    module_id: text
+    entries: [MacroDefinitionEntryV1]
+
+pub enum MacroUseStatusV1:
+    Resolved
+    Unresolved
+    Inactive
+
+pub struct MacroUseV1:
+    invoking_source_id: text
+    region_id: text
+    stable_invocation_id: text
+    requested_scoped_name: text
+    has_resolved_def: bool
+    resolved_def_id: text
+    resolved_def_key: text
+    invocation_ast_digest: text
+    argument_digest: text
+    hygiene_scope_id: text
+    active_guard_id: text
+    generated_symbols_digest: text
+    resolution_candidate_root: text
+    has_absence_witness: bool
+    absence_witness: text
+    expand_key: text
+    status: MacroUseStatusV1
+    coverage: text
+
+pub struct MacroUseTableV1:
+    schema: i64
+    module_id: text
+    uses: [MacroUseV1]
+
+pub struct MacroNameMembershipV1:
+    scoped_name: text
+    def_ids: [text]
+
+pub struct PackageMacroNameIndexV1:
+    package: text
+    entries: [MacroNameMembershipV1]
+    membership_root: text
+    candidate_root: text
+
+pub struct MacroDefinitionTableDecodeV1:
+    ok: bool
+    value: MacroDefinitionTableV1
+    error: text
+
+pub struct MacroUseTableDecodeV1:
+    ok: bool
+    value: MacroUseTableV1
+    error: text
+
+pub fn macro_reference_schema_v1() -> i64: 1
+pub fn macro_reference_max_items_v1() -> i64: 65536
+pub fn macro_reference_max_text_v1() -> i64: 1048576
+
+# ---------------------------------------------------------------------------
+# Canonical framing and keys
+# ---------------------------------------------------------------------------
+
+fn _frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn _frame_list_v1(values: [text]) -> text:
+    var out = "{values.len()}["
+    for v in values:
+        out = out + _frame_v1(v)
+    out + "]"
+
+pub fn macro_hash_v1(domain: text, parts: [text]) -> text:
+    sha256_text(_frame_v1(domain) + _frame_list_v1(parts))
+
+pub fn macro_def_id_canonical_v1(id: MacroDefIdV1) -> text:
+    "macro-def-id/v1|" + _frame_v1(id.package) + _frame_v1(id.module) +
+        _frame_v1(id.namespace) + _frame_v1(id.binder)
+
+pub fn macro_definition_digest_v1(entry: MacroDefinitionEntryV1) -> text:
+    val visibility = if entry.is_public: "public" else: "private"
+    macro_hash_v1("macro-definition/v1", [entry.macro_name, entry.body_digest,
+        _frame_list_v1(entry.declared_effects), _frame_list_v1(entry.dependent_macros),
+        _frame_list_v1(entry.guard_ids), visibility, entry.generated_member_root,
+        entry.exported_surface_digest])
+
+# MacroDefKey = H("macro-def/v1", ScopedMacroSymbolId, DefinitionDigest,
+#                 ContractDigest, NestedReadRoot, HygieneSchema)
+pub fn macro_def_key_v1(entry: MacroDefinitionEntryV1, nested_read_root: text) -> text:
+    macro_hash_v1("macro-def/v1", [macro_def_id_canonical_v1(entry.def_id),
+        macro_definition_digest_v1(entry), entry.contract_digest, nested_read_root,
+        entry.hygiene_schema])
+
+# MacroExpandKey = H("macro-expand/v1", ResolvedMacroDefKey, InvocationASTDigest,
+#                    BoundArgsDigest, CaptureScopeId, CTFEReadRoot,
+#                    ActiveGuardRoot, ExpansionSchema)
+pub fn macro_expand_key_v1(resolved_def_key: text, invocation_ast_digest: text,
+        bound_args_digest: text, capture_scope_id: text, ctfe_read_root: text,
+        active_guard_root: text) -> text:
+    macro_hash_v1("macro-expand/v1", [resolved_def_key, invocation_ast_digest,
+        bound_args_digest, capture_scope_id, ctfe_read_root, active_guard_root,
+        "expansion-schema/v1"])
+
+pub fn macro_absence_witness_v1(requested_name: text, candidate_root: text) -> text:
+    macro_hash_v1("macro-absence/v1", [requested_name, candidate_root])
+
+pub fn macro_use_status_tag_v1(status: MacroUseStatusV1) -> text:
+    match status:
+        case Resolved: "resolved"
+        case Unresolved: "unresolved"
+        case Inactive: "inactive"
+
+fn _status_from_tag_v1(tag: text) -> i64:
+    if tag == "resolved": return 0
+    if tag == "unresolved": return 1
+    if tag == "inactive": return 2
+    -1
+
+fn _status_from_index_v1(idx: i64) -> MacroUseStatusV1:
+    if idx == 0: return MacroUseStatusV1.Resolved
+    if idx == 1: return MacroUseStatusV1.Unresolved
+    MacroUseStatusV1.Inactive
+
+pub fn macro_use_identity_v1(value: MacroUseV1) -> text:
+    value.invoking_source_id + "#" + value.region_id
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+fn _digest_ok_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value.chars():
+        val ok = (ch >= "" and ch <= "9") or (ch >= "a" and ch <= "f")
+        if not ok: return false
+    true
+
+fn _sorted_unique_v1(values: [text]) -> bool:
+    var i = 1
+    while i < values.len():
+        if not (values[i - 1] < values[i]): return false
+        i = i + 1
+    true
+
+pub fn macro_definition_entry_valid_v1(entry: MacroDefinitionEntryV1) -> bool:
+    if entry.def_id.binder == "" or entry.def_id.module == "": return false
+    if entry.macro_name == "": return false
+    if not _digest_ok_v1(entry.contract_digest): return false
+    if not _digest_ok_v1(entry.body_digest): return false
+    if not _digest_ok_v1(entry.generated_member_root): return false
+    if not _digest_ok_v1(entry.exported_surface_digest): return false
+    _sorted_unique_v1(entry.declared_effects) and _sorted_unique_v1(entry.dependent_macros) and
+        _sorted_unique_v1(entry.guard_ids) and _sorted_unique_v1(entry.generated_member_names)
+
+pub fn macro_definition_table_valid_v1(table: MacroDefinitionTableV1) -> bool:
+    if table.schema != macro_reference_schema_v1(): return false
+    if table.entries.len() > macro_reference_max_items_v1(): return false
+    var ids: [text] = []
+    for e in table.entries:
+        if not macro_definition_entry_valid_v1(e): return false
+        ids.push(macro_def_id_canonical_v1(e.def_id))
+    _sorted_unique_v1(ids)
+
+pub fn macro_use_valid_v1(value: MacroUseV1) -> bool:
+    if value.invoking_source_id == "" or value.region_id == "": return false
+    if value.requested_scoped_name == "": return false
+    val tag = macro_use_status_tag_v1(value.status)
+    if tag == "resolved":
+        if not value.has_resolved_def or value.resolved_def_id == "": return false
+        if value.has_absence_witness: return false
+        if not _digest_ok_v1(value.expand_key): return false
+        if not _digest_ok_v1(value.resolved_def_key): return false
+    if tag == "unresolved":
+        if value.has_resolved_def: return false
+        if not value.has_absence_witness: return false
+        if not _digest_ok_v1(value.absence_witness): return false
+    if tag == "inactive":
+        if value.has_resolved_def: return false
+    value.coverage == "complete" or value.coverage == "conservative"
+
+pub fn macro_use_table_valid_v1(table: MacroUseTableV1) -> bool:
+    if table.schema != macro_reference_schema_v1(): return false
+    if table.uses.len() > macro_reference_max_items_v1(): return false
+    var ids: [text] = []
+    for u in table.uses:
+        if not macro_use_valid_v1(u): return false
+        ids.push(macro_use_identity_v1(u))
+    _sorted_unique_v1(ids)
+
+# ---------------------------------------------------------------------------
+# __init__.tld macro-name candidate / membership roots
+# ---------------------------------------------------------------------------
+
+pub fn package_macro_name_index_build_v1(package: text,
+        entries: [MacroNameMembershipV1]) -> PackageMacroNameIndexV1:
+    var membership: [text] = []
+    var names: [text] = []
+    for e in entries:
+        names.push(e.scoped_name)
+        membership.push(_frame_v1(e.scoped_name) + _frame_list_v1(e.def_ids))
+    PackageMacroNameIndexV1(package: package, entries: entries,
+        membership_root: macro_hash_v1("macro-name-membership/v1", [package] + membership),
+        candidate_root: macro_hash_v1("macro-name-candidates/v1", [package] + names))
+
+# ---------------------------------------------------------------------------
+# Codec: "MRT1" header, length-framed payload, trailing sha256 seal.
+# ---------------------------------------------------------------------------
+
+class _CursorV1:
+    data: text
+    pos: i64
+    ok: bool
+
+fn _cursor_read_v1(cur: _CursorV1) -> text:
+    if not cur.ok: return ""
+    var colon = -1
+    var i = cur.pos
+    while i < cur.data.len() and i < cur.pos + 12:
+        if cur.data.substring(i, i + 1) == ":":
+            colon = i
+            break
+        val ch = cur.data.substring(i, i + 1)
+        if ch < "" or ch > "9":
+            cur.ok = false
+            return ""
+        i = i + 1
+    if colon <= cur.pos:
+        cur.ok = false
+        return ""
+    val n = cur.data.substring(cur.pos, colon).to_i64()
+    if n < 0 or n > macro_reference_max_text_v1() or colon + 1 + n > cur.data.len():
+        cur.ok = false
+        return ""
+    cur.pos = colon + 1 + n
+    cur.data.substring(colon + 1, colon + 1 + n)
+
+fn _cursor_count_v1(cur: _CursorV1) -> i64:
+    val t = _cursor_read_v1(cur)
+    if not cur.ok: return 0
+    for ch in t.chars():
+        if ch < "" or ch > "9":
+            cur.ok = false
+            return 0
+    if t == "":
+        cur.ok = false
+        return 0
+    val n = t.to_i64()
+    if n > macro_reference_max_items_v1():
+        cur.ok = false
+        return 0
+    n
+
+fn _cursor_list_v1(cur: _CursorV1) -> [text]:
+    val n = _cursor_count_v1(cur)
+    var out: [text] = []
+    var i = 0
+    while i < n and cur.ok:
+        out.push(_cursor_read_v1(cur))
+        i = i + 1
+    out
+
+fn _put_list_v1(values: [text]) -> text:
+    var out = _frame_v1("{values.len()}")
+    for v in values:
+        out = out + _frame_v1(v)
+    out
+
+fn _bool_tag_v1(b: bool) -> text:
+    if b: "1" else: ""
+
+fn _seal_v1(magic: text, payload: text) -> text:
+    magic + "\n" + payload + "\n#" + sha256_text(magic + payload)
+
+fn _unseal_v1(magic: text, data: text) -> text:
+    # Returns the payload, or "\0" sentinel on failure.
+    if data.len() < magic.len() + 67: return "\0"
+    if data.substring(0, magic.len() + 1) != magic + "\n": return "\0"
+    val seal_at = data.len() - 66
+    if data.substring(seal_at, seal_at + 2) != "\n#": return "\0"
+    val payload = data.substring(magic.len() + 1, seal_at)
+    if sha256_text(magic + payload) != data.substring(seal_at + 2, data.len()): return "\0"
+    payload
+
+fn _entry_put_v1(e: MacroDefinitionEntryV1) -> text:
+    _frame_v1(e.def_id.package) + _frame_v1(e.def_id.module) + _frame_v1(e.def_id.namespace) +
+        _frame_v1(e.def_id.binder) + _frame_v1(e.macro_name) + _frame_v1("{e.generation}") +
+        _frame_v1(e.contract_digest) + _frame_v1(e.body_digest) + _frame_v1(e.hygiene_schema) +
+        _put_list_v1(e.declared_effects) + _put_list_v1(e.dependent_macros) +
+        _put_list_v1(e.guard_ids) + _frame_v1(_bool_tag_v1(e.is_public)) +
+        _put_list_v1(e.generated_member_names) + _frame_v1(e.generated_member_root) +
+        _frame_v1(e.exported_surface_digest)
+
+fn _entry_read_v1(cur: _CursorV1) -> MacroDefinitionEntryV1:
+    val id = MacroDefIdV1(package: _cursor_read_v1(cur), module: _cursor_read_v1(cur),
+        namespace: _cursor_read_v1(cur), binder: _cursor_read_v1(cur))
+    val name = _cursor_read_v1(cur)
+    val gen = _cursor_read_v1(cur).to_i64()
+    val contract = _cursor_read_v1(cur)
+    val body = _cursor_read_v1(cur)
+    val hygiene = _cursor_read_v1(cur)
+    val effects = _cursor_list_v1(cur)
+    val deps = _cursor_list_v1(cur)
+    val guards = _cursor_list_v1(cur)
+    val pub_tag = _cursor_read_v1(cur)
+    val members = _cursor_list_v1(cur)
+    val member_root = _cursor_read_v1(cur)
+    val surface = _cursor_read_v1(cur)
+    if pub_tag != "" and pub_tag != "1": cur.ok = false
+    MacroDefinitionEntryV1(def_id: id, macro_name: name, generation: gen,
+        contract_digest: contract, body_digest: body, hygiene_schema: hygiene,
+        declared_effects: effects, dependent_macros: deps, guard_ids: guards,
+        is_public: pub_tag == "1", generated_member_names: members,
+        generated_member_root: member_root, exported_surface_digest: surface)
+
+fn _empty_def_table_v1() -> MacroDefinitionTableV1:
+    MacroDefinitionTableV1(schema: 0, module_id: "", entries: [])
+
+fn _empty_use_table_v1() -> MacroUseTableV1:
+    MacroUseTableV1(schema: 0, module_id: "", uses: [])
+
+pub fn macro_definition_table_encode_v1(table: MacroDefinitionTableV1) -> text:
+    var payload = _frame_v1("{table.schema}") + _frame_v1(table.module_id) +
+        _frame_v1("{table.entries.len()}")
+    for e in table.entries:
+        payload = payload + _entry_put_v1(e)
+    _seal_v1("MRT1-DEF", payload)
+
+pub fn macro_definition_table_decode_v1(data: text) -> MacroDefinitionTableDecodeV1:
+    val payload = _unseal_v1("MRT1-DEF", data)
+    if payload == "\0":
+        return MacroDefinitionTableDecodeV1(ok: false, value: _empty_def_table_v1(), error: "seal")
+    var cur = _CursorV1(data: payload, pos: 0, ok: true)
+    val schema = _cursor_read_v1(cur).to_i64()
+    val module_id = _cursor_read_v1(cur)
+    val n = _cursor_count_v1(cur)
+    var entries: [MacroDefinitionEntryV1] = []
+    var i = 0
+    while i < n and cur.ok:
+        entries.push(_entry_read_v1(cur))
+        i = i + 1
+    val table = MacroDefinitionTableV1(schema: schema, module_id: module_id, entries: entries)
+    if not cur.ok or cur.pos != payload.len() or not macro_definition_table_valid_v1(table):
+        return MacroDefinitionTableDecodeV1(ok: false, value: _empty_def_table_v1(), error: "payload")
+    MacroDefinitionTableDecodeV1(ok: true, value: table, error: "")
+
+fn _use_put_v1(u: MacroUseV1) -> text:
+    _frame_v1(u.invoking_source_id) + _frame_v1(u.region_id) + _frame_v1(u.stable_invocation_id) +
+        _frame_v1(u.requested_scoped_name) + _frame_v1(_bool_tag_v1(u.has_resolved_def)) +
+        _frame_v1(u.resolved_def_id) + _frame_v1(u.resolved_def_key) + _frame_v1(u.invocation_ast_digest) +
+        _frame_v1(u.argument_digest) + _frame_v1(u.hygiene_scope_id) +
+        _frame_v1(u.active_guard_id) + _frame_v1(u.generated_symbols_digest) +
+        _frame_v1(u.resolution_candidate_root) + _frame_v1(_bool_tag_v1(u.has_absence_witness)) +
+        _frame_v1(u.absence_witness) + _frame_v1(u.expand_key) +
+        _frame_v1(macro_use_status_tag_v1(u.status)) + _frame_v1(u.coverage)
+
+fn _use_read_v1(cur: _CursorV1) -> MacroUseV1:
+    val src = _cursor_read_v1(cur)
+    val region = _cursor_read_v1(cur)
+    val stable = _cursor_read_v1(cur)
+    val name = _cursor_read_v1(cur)
+    val has_def = _cursor_read_v1(cur)
+    val def_id = _cursor_read_v1(cur)
+    val def_key = _cursor_read_v1(cur)
+    val inv = _cursor_read_v1(cur)
+    val args = _cursor_read_v1(cur)
+    val hyg = _cursor_read_v1(cur)
+    val guard = _cursor_read_v1(cur)
+    val gen = _cursor_read_v1(cur)
+    val cand = _cursor_read_v1(cur)
+    val has_abs = _cursor_read_v1(cur)
+    val abs = _cursor_read_v1(cur)
+    val key = _cursor_read_v1(cur)
+    val status_idx = _status_from_tag_v1(_cursor_read_v1(cur))
+    val coverage = _cursor_read_v1(cur)
+    if status_idx < 0: cur.ok = false
+    MacroUseV1(invoking_source_id: src, region_id: region, stable_invocation_id: stable,
+        requested_scoped_name: name, has_resolved_def: has_def == "1", resolved_def_id: def_id, resolved_def_key: def_key,
+        invocation_ast_digest: inv, argument_digest: args, hygiene_scope_id: hyg,
+        active_guard_id: guard, generated_symbols_digest: gen, resolution_candidate_root: cand,
+        has_absence_witness: has_abs == "1", absence_witness: abs, expand_key: key,
+        status: _status_from_index_v1(status_idx), coverage: coverage)
+
+pub fn macro_use_table_encode_v1(table: MacroUseTableV1) -> text:
+    var payload = _frame_v1("{table.schema}") + _frame_v1(table.module_id) +
+        _frame_v1("{table.uses.len()}")
+    for u in table.uses:
+        payload = payload + _use_put_v1(u)
+    _seal_v1("MRT1-USE", payload)
+
+pub fn macro_use_table_decode_v1(data: text) -> MacroUseTableDecodeV1:
+    val payload = _unseal_v1("MRT1-USE", data)
+    if payload == "\0":
+        return MacroUseTableDecodeV1(ok: false, value: _empty_use_table_v1(), error: "seal")
+    var cur = _CursorV1(data: payload, pos: 0, ok: true)
+    val schema = _cursor_read_v1(cur).to_i64()
+    val module_id = _cursor_read_v1(cur)
+    val n = _cursor_count_v1(cur)
+    var uses: [MacroUseV1] = []
+    var i = 0
+    while i < n and cur.ok:
+        uses.push(_use_read_v1(cur))
+        i = i + 1
+    val table = MacroUseTableV1(schema: schema, module_id: module_id, uses: uses)
+    if not cur.ok or cur.pos != payload.len() or not macro_use_table_valid_v1(table):
+        return MacroUseTableDecodeV1(ok: false, value: _empty_use_table_v1(), error: "payload")
+    MacroUseTableDecodeV1(ok: true, value: table, error: "")
+
+# ---------------------------------------------------------------------------
+# Forward semantic reads for the `.rr` projection (reverse_reference_projection_v2).
+# Consumer: `macro.expand` keyed by the use identity. Reads:
+#   resolved   -> positive `macro.def` read of the resolved MacroDefKey
+#                 (family macro-definition-consumer) + membership read of the
+#                 name's candidate root (macro-name-resolution);
+#   unresolved -> absence read bound to the absence witness
+#                 (macro-name-absence) + membership read of the candidate root;
+#   inactive   -> membership read only (a guard flip re-resolves it).
+# ---------------------------------------------------------------------------
+
+fn _query_key_v1(kind: text, entity: text, profile: text, parameter: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: kind, stable_entity_id: entity, semantic_profile_digest: profile,
+        parameter_digest: parameter)
+
+fn _read_v1(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1, facet: text,
+        ordinal: i64, fingerprint: text, partition: text,
+        coverage: SemanticCoverageV1) -> SemanticQueryReadV1:
+    SemanticQueryReadV1(producer: producer, consumer: consumer, facet: facet, ordinal: ordinal,
+        consumed_fingerprint: fingerprint,
+        witness_digest: macro_hash_v1("macro-read-witness/v1", [producer.kind,
+            producer.stable_entity_id, facet, fingerprint]),
+        partition_id: partition, completeness: coverage)
+
+pub fn macro_use_consumer_key_v1(value: MacroUseV1, semantic_profile_digest: text) -> SemanticQueryKeyV1:
+    val tag = macro_use_status_tag_v1(value.status)
+    val parameter = if tag == "resolved": value.expand_key
+        elif tag == "unresolved": value.absence_witness
+        else: macro_hash_v1("macro-inactive/v1", [macro_use_identity_v1(value), value.active_guard_id])
+    _query_key_v1("macro.expand", macro_use_identity_v1(value), semantic_profile_digest, parameter)
+
+pub fn macro_use_forward_read_manifest_v1(value: MacroUseV1,
+        semantic_profile_digest: text) -> SemanticQueryReadManifestV1:
+    val consumer = macro_use_consumer_key_v1(value, semantic_profile_digest)
+    val coverage = if value.coverage == "complete": SemanticCoverageV1.Complete else: SemanticCoverageV1.Conservative
+    val partition = value.invoking_source_id
+    val name_query = _query_key_v1("macro.resolve", "macro-name:" + value.requested_scoped_name,
+        semantic_profile_digest, value.resolution_candidate_root)
+    var reads: [SemanticQueryReadV1] = []
+    val tag = macro_use_status_tag_v1(value.status)
+    if tag == "resolved":
+        val def_query = _query_key_v1("macro.def", value.resolved_def_id, semantic_profile_digest,
+            value.resolved_def_key)
+        reads.push(_read_v1(def_query, consumer,
+            semantic_read_facet_v1(SemanticReadKindV1.Positive, "macro-definition"), 0,
+            value.resolved_def_key, partition, coverage))
+    elif tag == "unresolved":
+        reads.push(_read_v1(name_query, consumer,
+            semantic_read_facet_v1(SemanticReadKindV1.Absence, "macro-name"), 0,
+            value.absence_witness, partition, coverage))
+    reads.push(_read_v1(name_query, consumer,
+        semantic_read_facet_v1(SemanticReadKindV1.Membership, "macro-name"), reads.len(),
+        value.resolution_candidate_root, partition, coverage))
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
