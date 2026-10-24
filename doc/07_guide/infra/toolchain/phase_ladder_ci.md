@@ -5,7 +5,7 @@ Two workflows implement the first slice of
 
 | Workflow | What it does | Triggers |
 |---|---|---|
-| `phase-ladder.yml` | Climbs every bootstrap lane to phase 4, one phase per rung, then publishes what each lane reached as the next numbered RC | push to `release/**` and `release_phase3` (bootstrap-relevant paths), nightly 04:17 KST, manual |
+| `phase-ladder.yml` | Climbs every bootstrap lane to phase 4, one phase per rung (darwin-x86_64, the slow Intel macOS runner, climbs in its own chain so it never holds the other lanes back), then publishes what each lane reached as the next numbered RC | push to `release/**` and `release_phase3` (bootstrap-relevant paths), nightly 04:17 KST, manual |
 | `component-build.yml` | Builds only the kernels, plugins, providers and SIMD variants a change touches, using an already-proven compiler | push and PR on `main`, `release/**`, `release_phase3`; manual |
 
 ## Phase ladder
