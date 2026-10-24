@@ -258,7 +258,7 @@ class MonomorphizationPass:
     archive_requests: [MonoSpecializationRequestV1] = mono_default_archive_requests_v1()
     # Filled only from completed FIFO emission records during archive assembly.
     archive_emitted_templates: Dict<text, text> = {}
-    # Root discovery (opt-in, SIMPLE_MONO_ROOT_DISCOVERY=1 or set directly):
+    # Root discovery (default on; SIMPLE_MONO_ROOT_DISCOVERY=0 disables it):
     # a read-only pre-walk proves a root body holds no mono-relevant node and
     # passes it through instead of rebuilding it. See
     # `mono_root_is_relevant_v1` for the soundness argument.
@@ -4745,8 +4745,17 @@ fn mono_diag_enabled() -> bool:
         mono_diag_refresh_v1()
     _mono_diag_enabled_state == 1
 
+# Default ON (bug=native_build_per_worker_baseline_rss_2026_10_24): the full
+# root walk rebuilds every non-template function body, and in this no-GC
+# runtime the replaced bodies are never freed. Measured on the p2shard-9
+# Stage 2 producer: mono+MIR-setup plateau 3151 -> 2807 MB at 204 modules
+# (roots_rewritten 4179 -> 2), same go-to-end verdicts; the mono step grows
+# superlinearly (+0.5 GB at 204, +3.45 GB at 472, ~+17 GB at 1471) and is
+# re-run by every MIR shard worker. Output identity is pinned by
+# test/01_unit/compiler/mono/mono_root_discovery_determinism_spec.spl.
+# SIMPLE_MONO_ROOT_DISCOVERY=0 restores the full walk.
 fn mono_root_discovery_env_v1() -> bool:
-    env_get("SIMPLE_MONO_ROOT_DISCOVERY") == "1"
+    env_get("SIMPLE_MONO_ROOT_DISCOVERY") != "0"
 
 fn mono_key_last_member_v1(key: text) -> text:
     """`"<identity>::<member>"` -> `"<member>"` (identities may hold `::`)."""
