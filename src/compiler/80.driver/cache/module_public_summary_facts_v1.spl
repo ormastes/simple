@@ -1,0 +1,96 @@
+# AST -> FrozenPublicFactV1 producer for the frontend public summary.
+#
+# The TLDR companion is a non-authoritative VIEW of PublicSummaryV1
+# (10.frontend/cache_artifact/public_summary_projector.spl): this module turns
+# the producer's parsed module into the projector's public facts, and the
+# projector -- not this module -- validates, orders and renders them.
+#
+# Facts per top-level declaration -- Simple imports are not restricted to
+# `pub` items (non-`pub` top-level functions are imported directly across the
+# tree), so every top-level declaration is part of the importable surface
+# (the parsed module decides existence,
+# and kind; canonical bytes are the source block at that
+# declaration, via module_tldr_block_at_v1):
+#   struct/class/enum/bitfield/trait/type/const  ForwardDeclaration +
+#       Declaration, bytes = the declaration block (grammar-valid Simple)
+#   non-generic function  ForwardDeclaration + Declaration, bytes = its header
+#       as `pub extern fn ...` (signature only, no body)
+#   generic / inline function  BodyReference (the body itself travels in the
+#       companion's body sections; summaries never carry executable bodies)
+#   impl  TraitImplCoherence, bytes = the impl header line
+# Named gaps: dependency_symbol_ids are empty (no cross-symbol edges yet);
+# a multi-line function header is recorded as a BodyReference only.
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1,
+    FrozenPublicFactV1}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_block_at_v1}
+use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_decl_line_v1}
+
+fn _fact_v1(kind: FrontendPublicFactKindV1, symbol: text, bytes: text) -> FrozenPublicFactV1:
+    FrozenPublicFactV1(fact_kind: kind, stable_symbol_id: symbol, canonical_bytes: bytes,
+        is_public: true, contains_executable_body: false, contains_private_source: false,
+        dependency_symbol_ids: [])
+
+# `pub fn add(a: i64) -> i64:` -> `pub extern fn add(a: i64) -> i64`; "" when
+# the header does not fit on its line.
+pub fn module_public_extern_signature_v1(header: text) -> text:
+    var line = header.trim()
+    if not line.ends_with(":"):
+        return ""
+    line = line.substring(0, line.len() - 1)
+    if line.starts_with("pub fn "):
+        return "pub extern fn " + line.substring(7)
+    if line.starts_with("fn "):
+        return "pub extern fn " + line.substring(3)
+    ""
+
+fn _push_declaration_v1(facts: [FrozenPublicFactV1], symbol: text, bytes: text) -> [FrozenPublicFactV1]:
+    var out = facts
+    if bytes == "":
+        return out
+    out.push(_fact_v1(FrontendPublicFactKindV1.ForwardDeclaration, symbol, bytes))
+    out.push(_fact_v1(FrontendPublicFactKindV1.Declaration, symbol, bytes))
+    out
+
+pub fn module_public_facts_of_module_v1(module: ParserModule, source: text,
+        module_id: text) -> [FrozenPublicFactV1]:
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var facts: [FrozenPublicFactV1] = []
+    for name in module.structs.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.structs[name].span.line, lines, ["struct"], name) - 1, "layout"))
+    for name in module.classes.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.classes[name].span.line, lines, ["class"], name) - 1, "layout"))
+    for name in module.enums.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.enums[name].span.line, lines, ["enum"], name) - 1, "layout"))
+    for name in module.traits.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.traits[name].span.line, lines, ["trait"], name) - 1, "trait"))
+    for name in module.type_aliases.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.type_aliases[name].span.line, lines, ["type"], name) - 1, "type"))
+    for name in module.constants.keys():
+        facts = _push_declaration_v1(facts, "sym:" + module_id + "." + name,
+            module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(module.constants[name].span.line, lines, ["val", "const", "var"], name) - 1, "const"))
+    for name in module.functions.keys():
+        val f = module.functions[name]
+        if f.is_method or f.span.line <= 0 or f.span.line > lines.len():
+            continue
+        val symbol = "sym:" + module_id + "." + name
+        val signature = if f.type_params.len() > 0 or f.is_const: "" else:
+            module_public_extern_signature_v1(lines[f.span.line - 1])
+        if signature == "":
+            facts.push(_fact_v1(FrontendPublicFactKindV1.BodyReference, symbol, "body " + name))
+        else:
+            facts = _push_declaration_v1(facts, symbol, signature)
+    var impl_index = 0
+    for impl_ in module.impls:
+        if impl_.span.line > 0 and impl_.span.line <= lines.len():
+            facts.push(_fact_v1(FrontendPublicFactKindV1.TraitImplCoherence,
+                "impl:" + module_id + "#{impl_index}", lines[impl_.span.line - 1].trim()))
+        impl_index = impl_index + 1
+    facts
+
+export module_public_extern_signature_v1, module_public_facts_of_module_v1
