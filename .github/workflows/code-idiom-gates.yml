@@ -510,6 +510,40 @@ jobs:
           run_gate scripts/check/check-range-shs-hygiene-push.shs --tree --rev "$head"
           [ "$rc_total" -eq 0 ] || exit 1
 
+      # Cache formal-verification gates (plan:
+      # doc/05_design/compiler/incremental_build/cache_invalidation_formal_verification_2026-10-24.md
+      # §4.4). Same commands as the bootstrap-tier rows cache-protocol-formal,
+      # cache-identity-formal, build-cache-lean, aop-weaver-lean in
+      # config/check/must_check_gates.sdn. lake is not on push hosts, so these
+      # cannot be push rows; here elan is installed when absent. If lake is
+      # still missing every gate answers ERROR (exit 2) and this step is RED —
+      # absence of the prover is never a PASS.
+      - name: Cache formal-verification Lean gates
+        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' }}
+        timeout-minutes: 45
+        run: |
+          set +e
+          if ! command -v lake >/dev/null 2>&1 && [ ! -x "$HOME/.elan/bin/lake" ]; then
+              curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh |
+                  sh -s -- -y --default-toolchain none || echo "elan install failed; gates will ERROR"
+          fi
+          export PATH="$HOME/.elan/bin:$PATH"
+          rc_total=0
+          for gate in \
+              "scripts/check/check-cache-protocol-formal.shs" \
+              "scripts/check/check-cache-identity-formal-proofs.shs" \
+              "scripts/check/check-lean-proofs.shs --project src/verification/build_cache verification/build_cache" \
+              "scripts/check/check-lean-proofs.shs --project src/verification/aop_weaver verification/aop_weaver" \
+              "scripts/check/check-cache-formal-source-binding.shs"; do
+              echo "::group::$gate"
+              sh $gate
+              rc=$?
+              echo "::endgroup::"
+              echo "cache-formal: $gate exit=$rc"
+              [ "$rc" -eq 0 ] || rc_total=1
+          done
+          [ "$rc_total" -eq 0 ] || exit 1
+
       # Most gates below hard-depend on ripgrep; install once for the job.
       # Skipped in `sanity`: apt-get alone costs more than the whole 60s budget.
       # An empty/missing output is never 'sanity', so this installs by default.
