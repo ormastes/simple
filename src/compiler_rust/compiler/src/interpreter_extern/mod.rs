@@ -2432,6 +2432,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_cpu_topology_count", concurrency::rt_cpu_topology_count);
+    insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
+    insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
+    insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
+    insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
+    insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
     insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);
