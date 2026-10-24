@@ -51,28 +51,75 @@ use crate::exec_core::run_main;
 /// `@tag:qemu` in the first ~4 KB) get a longer budget because they typically
 /// run several `_run_qemu(arch)` invocations, each up to 15 s. Override the
 /// QEMU-specific budget with `SIMPLE_QEMU_TEST_TIMEOUT_SECS` (default 240).
+///
+/// `# @timeout_secs <N>` header directive (raise-only): mirrors the pure-Simple
+/// single-runner parser `spec_timeout_secs_directive` in
+/// src/app/test_runner_new/test_runner_single.spl (kept in lockstep with its
+/// sibling `_spec_timeout_secs_directive_text` in test_runner_client.spl): scan
+/// for the first `# @timeout_secs ` occurrence, take the run of decimal digits
+/// after it (0 when absent or digitless), and raise — never lower — the
+/// computed budget when the declared value exceeds it. Long specs (e.g. KDF
+/// iteration measurements) use this to raise the seed's bound the same way the
+/// pure-Simple runner already allows.
 fn per_test_timeout_secs(path: &Path) -> u64 {
     if let Ok(raw) = std::env::var("SIMPLE_TEST_TIMEOUT") {
         if let Ok(parsed) = raw.parse::<u64>() {
             return parsed;
         }
     }
-    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+    let mut base = if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
         if file_name == "simpleos_guest_toolchain_live_spec.spl" || file_name == "ssh_live_login_in_qemu_spec.spl" {
-            return 300;
+            300
+        } else {
+            0
         }
+    } else {
+        0
+    };
+    if base == 0 {
+        base = if is_qemu_spec(path) {
+            std::env::var("SIMPLE_QEMU_TEST_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(240)
+        } else if path.components().any(|c| c.as_os_str() == "system") {
+            120
+        } else {
+            60
+        };
     }
-    if is_qemu_spec(path) {
-        let qemu_default = std::env::var("SIMPLE_QEMU_TEST_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(240);
-        return qemu_default;
+    let declared = spec_timeout_secs_directive(path);
+    if declared > base {
+        base = declared;
     }
-    if path.components().any(|c| c.as_os_str() == "system") {
-        return 120;
+    base
+}
+
+/// Parse `# @timeout_secs <N>` from a spec (0 when absent/invalid), mirroring
+/// `spec_timeout_secs_directive` in src/app/test_runner_new/test_runner_single.spl
+/// exactly: first occurrence of the 16-byte key `# @timeout_secs `, then a run
+/// of ASCII decimal digits; a non-digit (or digitless) tail yields 0.
+fn spec_timeout_secs_directive(path: &Path) -> u64 {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let key = "# @timeout_secs ";
+    let Some(idx) = content.find(key) else {
+        return 0;
+    };
+    let mut pos = idx + key.len();
+    let bytes = content.as_bytes();
+    let mut value: u64 = 0;
+    let mut digits: u32 = 0;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        value = value.saturating_mul(10).saturating_add((bytes[pos] - b'0') as u64);
+        digits += 1;
+        pos += 1;
     }
-    60
+    if digits == 0 {
+        return 0;
+    }
+    value
 }
 
 /// Returns true if the spec is a QEMU-driven test (path under `test/system/qemu/`,
@@ -2219,6 +2266,59 @@ fn create_test_runner(options: &super::types::TestOptions) -> Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `# @timeout_secs <N>` directive parser must mirror the pure-Simple
+    /// single-runner parser (`spec_timeout_secs_directive` in
+    /// src/app/test_runner_new/test_runner_single.spl): first occurrence of the
+    /// 16-byte key, run of ASCII decimal digits, 0 when absent or digitless.
+    #[test]
+    fn spec_timeout_secs_directive_parses_like_the_pure_simple_runner() {
+        let dir = std::env::temp_dir().join(format!(
+            "seed_timeout_directive_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let with_directive = dir.join("with_directive_spec.spl");
+        std::fs::write(
+            &with_directive,
+            concat!(
+                "# @timeout_secs 1500 (interpreted-mode suites are slow)\n",
+                "use std.spec\n",
+                "describe \"x\":\n",
+                "    it \"y\":\n",
+                "        expect(1).to_equal(1)\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(spec_timeout_secs_directive(&with_directive), 1500);
+
+        // First occurrence wins, trailing digits after a separator are ignored,
+        // and a digitless directive reads as absent — all exactly like the
+        // pure-Simple parser.
+        let multi = dir.join("multi_spec.spl");
+        std::fs::write(
+            &multi,
+            "# @timeout_secs 90 extra\n# @timeout_secs 2400\n",
+        )
+        .unwrap();
+        assert_eq!(spec_timeout_secs_directive(&multi), 90);
+
+        let digitless = dir.join("digitless_spec.spl");
+        std::fs::write(&digitless, "# @timeout_secs \n").unwrap();
+        assert_eq!(spec_timeout_secs_directive(&digitless), 0);
+
+        let absent = dir.join("absent_spec.spl");
+        std::fs::write(&absent, "describe \"x\":\n").unwrap();
+        assert_eq!(spec_timeout_secs_directive(&absent), 0);
+
+        let missing = dir.join("does_not_exist_spec.spl");
+        assert_eq!(spec_timeout_secs_directive(&missing), 0);
+    }
 
     /// Regression: a multi-line top-level `val XS: [text] = [ ... ]` used to
     /// have its closing `]` (column 0, not a declaration keyword) swept into
