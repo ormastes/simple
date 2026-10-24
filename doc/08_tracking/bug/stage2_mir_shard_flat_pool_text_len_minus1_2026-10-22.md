@@ -1076,3 +1076,15 @@ Owner next step: debugger watch on the refusing pool's array object between
 flat_pools_restore_all (module_assembly.spl:1456) and the capture dump
 (module_assembly.spl:1584-1609) in the delegated worker; the array's element 0
 transitions from a valid "" to rt_string_len=-1 within that window.
+
+## Addendum 2026-10-24 (lane D): rejected candidates carry no PDB - scripted symbol debugging blocked
+
+lldb 18 and cdb are available on this host, but the preserved stage2 rejected
+candidates (26 MB exe) ship WITHOUT a .pdb - symbol lookup returns nothing, so
+scripted breakpoint/watchpoint debugging by Simple-function name is blocked.
+Owner options: (a) run an interactive cdb session and do disassembly
+archaeology (locate the "capture refused" string, xref to the enc push site,
+watch the pool array element address), or (b) rebuild a candidate with
+debug-info emission enabled if the lane supports it, then lldb/cdb source-level
+watchpoints per the lane-58 annotation. This was the last environmental blocker
+on the diagnostic path; everything upstream is exonerated or fixed.
