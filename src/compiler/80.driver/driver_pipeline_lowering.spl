@@ -1007,6 +1007,19 @@ impl CompilerDriver:
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
+            # Match the direct lane's declaration prepass order before any
+            # bootstrap-flat module body is lowered: struct field identities
+            # first, then enum and composite inventories.
+            log_phase("aot:bootstrap_fixed:struct_prescan:start")
+            var bootstrap_prescan_idx = 0
+            while bootstrap_prescan_idx < self.ctx.sources.len():
+                val bootstrap_prescan_key: text = self.ctx.sources[bootstrap_prescan_idx].module_name
+                bootstrap_lowering.prescan_module_struct_names(
+                    self.ctx.hir_modules, bootstrap_prescan_key)
+                bootstrap_prescan_idx = bootstrap_prescan_idx + 1
+                if bootstrap_prescan_idx % 64 == 0:
+                    log_phase("aot:bootstrap_fixed:struct_prescan visited={bootstrap_prescan_idx} total={self.ctx.sources.len()}")
+            log_phase("aot:bootstrap_fixed:struct_prescan:done")
             # lower_module's bootstrap-flat branch returns before the
             # non-bootstrap tail, so on this fresh lowering instance NO enum
             # registration exists: not the entry's own module.enums, not the
@@ -1022,10 +1035,11 @@ impl CompilerDriver:
             var bootstrap_enum_idx = 0
             while bootstrap_enum_idx < self.ctx.sources.len():
                 val bootstrap_enum_hir = self.ctx.hir_modules[self.ctx.sources[bootstrap_enum_idx].module_name]
-                if bootstrap_enum_hir != nil:
-                    bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
+                if val present_bootstrap_enum_hir = bootstrap_enum_hir:
+                    bootstrap_enum_modules = bootstrap_enum_modules.push(present_bootstrap_enum_hir)
                 bootstrap_enum_idx = bootstrap_enum_idx + 1
             bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
+            bootstrap_lowering.register_module_composite_inventory_v1(bootstrap_enum_modules)
             # Emission coverage (site-19, emission divergence 2026-10-17): this
             # lane previously lowered ONLY the entry, so the per-module
             # collection emission iterated just the replayed modules (~40
