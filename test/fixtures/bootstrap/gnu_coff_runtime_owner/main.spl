@@ -1,0 +1,52 @@
+# Native execution remains required. Inputs are explicit retained artifacts;
+# this fixture neither builds nor fabricates a Rust archive or C provider.
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_c_gnu_archive_v1, llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_gnu_machine_v1}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_write, file_hash_sha256}
+
+fn main() -> i64:
+    print "gnu-owner diagnostic stage=target-contracts"
+    var cases = 0
+    for host in ["windows", "linux", "macos"]:
+        for mingw in [true, false]:
+            for target in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnullvm"]:
+                print "gnu-owner case={cases} host={host} mingw={mingw} target={target} flavor={llvm_runtime_owner_coff_flavor_v1(host, target, mingw)} machine={llvm_runtime_owner_gnu_machine_v1(target)} expected=windows-gnu"
+                assert(llvm_runtime_owner_coff_flavor_v1(host, target, mingw) == "windows-gnu")
+                assert(llvm_runtime_owner_gnu_machine_v1(target) != 0)
+                cases = cases + 1
+            for target in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]:
+                val expected = if target.ends_with("-msvc"): "windows-msvc" else: ""
+                print "gnu-owner case={cases} host={host} mingw={mingw} target={target} flavor={llvm_runtime_owner_coff_flavor_v1(host, target, mingw)} machine={llvm_runtime_owner_gnu_machine_v1(target)} expected={expected}"
+                assert(llvm_runtime_owner_coff_flavor_v1(host, target, mingw) == expected)
+                assert(llvm_runtime_owner_gnu_machine_v1(target) == 0)
+                cases = cases + 1
+    print "gnu-owner diagnostic stage=target-case-count actual={cases} expected=24"
+    assert(cases == 24)
+    val archive = env_get("SIMPLE_GNU_OWNER_TEST_ARCHIVE") ?? ""
+    val object_list = env_get("SIMPLE_GNU_OWNER_TEST_OBJECT_LIST") ?? ""
+    val cache = env_get("SIMPLE_GNU_OWNER_TEST_CACHE") ?? ""
+    val output_record = env_get("SIMPLE_GNU_OWNER_TEST_OUTPUT") ?? ""
+    val target = env_get("SIMPLE_GNU_OWNER_TEST_TARGET") ?? ""
+    print "gnu-owner diagnostic stage=environment archive={archive} object_list={object_list} cache={cache} output={output_record} target={target}"
+    assert(archive != "" and object_list != "" and cache != "" and output_record != "")
+    var objects: [text] = []
+    for line in file_read(object_list).split("\n"):
+        val object = line.trim()
+        if object != "": objects.push(object)
+    print "gnu-owner diagnostic stage=object-count actual={objects.len()}"
+    assert(objects.len() > 0)
+    val original = file_hash_sha256(archive)
+    print "gnu-owner diagnostic stage=source-digest actual={original} length={original.len()}"
+    assert(original.len() == 64)
+    val projected = llvm_runtime_owner_c_gnu_archive_v1(archive, objects, cache, target)
+    print "gnu-owner diagnostic stage=projection-result ok={projected.is_ok()}"
+    if projected.is_err():
+        print "gnu-owner projection-error={projected.unwrap_err()}"
+    assert(projected.is_ok())
+    val selected = projected.unwrap()
+    assert(selected.ends_with("/libsimple_native_all.a"))
+    assert(file_hash_sha256(archive) == original)
+    val derived = file_hash_sha256(selected)
+    assert(derived.len() == 64)
+    assert(file_write(output_record, "schema: gnu-coff-owner-fixture-v1\nsource_sha256: {original}\nprojection_sha256: {derived}\nprojection_path: {selected}\n"))
+    print "gnu-coff-runtime-owner cases={cases} actual_projection=written"
+    return 0
