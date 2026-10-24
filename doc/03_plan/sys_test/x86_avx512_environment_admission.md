@@ -17,6 +17,7 @@ operation and an explicit fixture supplies a runtime receipt.
 | REQ-AVX512-001/002/006 | `test/02_integration/compiler/native/x86_avx512_native_execution_environment_spec.spl` | `doc/06_spec/02_integration/compiler/native/x86_avx512_native_execution_environment_spec.md` | Host classifier, operation subset gate, receipt, fixture execution |
 | REQ-AVX512-001/004 | `test/01_unit/compiler/interp/mir_simd_avx512_semantics_spec.spl` | Existing generated manual | Fixed Vec16f/Vec8d/Vec16i interpreter oracle |
 | REQ-AVX512-002/003 | `test/02_integration/compiler/native/x86_avx512_mir_pipeline_spec.spl` | Existing generated manual | Selector and final EVEX pipeline |
+| REQ-AVX512-006/007 | `scripts/check/check-vector-provider-levels.shs` (run/qemu/compile lanes) + `src/runtime/test/vector_level_bench.c` | plan § "Levelled single-DSO vector provider" | Per-level admission (v2/v3/v4 full feature sets + XCR0 / macOS sysctl), capped same-host variants `_cap0..3`, per-object xmm/ymm/zmm ISA gate, `simple_vector_selected_level_v1`; Simple-side db/web probe receipts still open |
 
 ## Environment contract
 
@@ -29,6 +30,18 @@ FreeBSD, and macOS retain distinct tags.
 
 Unavailable rows remain visible as `UNSUPPORTED`; qualified hosts lacking the
 fixture remain `BLOCKED`. Both force `enabled=false` and `attempted=false`.
+
+For the levelled provider row the contract is per level, not per operation:
+L3 (`x86-64-v3`) requires AVX/AVX2/FMA/F16C/BMI1/BMI2/LZCNT/MOVBE plus XCR0
+XMM/YMM; L4 (`x86-64-v4`) additionally requires AVX-512 F/BW/CD/DQ/VL plus
+XCR0 opmask/ZMM state (`0xe6`; on macOS the `hw.optional.avx512{f,bw,dq,vl,cd}`
+sysctls replace the XCR0 test). The lane fails an L4 object with no `zmm`
+instruction, an L3 object with `zmm`, or an L1/L2 object with `ymm`/`zmm`.
+The runtime receipt carries the artifact digest and `selected_level` today;
+the below-max reason code is an open follow-up. Still to add: synthetic
+CPUID/XCR0 removal rows, one per removed v3/v4 feature bit and one per
+cleared XCR0 bit, each expected to step down to exactly the next admitted
+level.
 
 ## Qualified-host resume command
 

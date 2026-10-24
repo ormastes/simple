@@ -3,6 +3,7 @@
 # HTTP server dependency closure has no new raw-pointer foreign reference.
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.common.text_bytes.{text_byte_buffer}
 use std.io.types.{IoError, IoErrorKind}
 
 val TCP_READ_CHUNK_SPAN_MAX_V1: i64 = 8192
@@ -27,7 +28,20 @@ fn tcp_read_chunk_span_v1(stream: TcpStream, size: i64) -> Result<TcpReadChunkSp
         return Err(_tcp_read_span_error("tcp read span size is outside 1..8192"))
     match stream.read(size):
         Err(error): Err(error)
-        Ok(bytes): Ok(TcpReadChunkSpanV1(bytes: bytes))
+        Ok(bytes):
+            # The hosted TCP read returns a generic element array with no
+            # stable raw byte address; the span must retain packed byte
+            # storage so a native provider kernel can borrow the address.
+            # The element-by-element copy re-boxes each octet (`as u8`):
+            # pushing a generic-boxed element would silently convert the
+            # packed buffer back to unaddressable generic storage.
+            match text_byte_buffer(bytes.len()):
+                Err(_): Err(_tcp_read_span_error("tcp read span retention allocation failed"))
+                Ok(retained):
+                    var window = retained
+                    for byte in bytes:
+                        window.push(byte as u8)
+                    Ok(TcpReadChunkSpanV1(bytes: window))
 
 export TcpReadChunkSpanV1, TCP_READ_CHUNK_SPAN_MAX_V1
 export tcp_read_chunk_span_v1

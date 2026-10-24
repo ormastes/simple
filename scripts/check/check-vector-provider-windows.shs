@@ -1,0 +1,115 @@
+#!/bin/sh
+# Windows (PE) provider-only check: build the vector provider as a DLL with
+# clang (x86_64-w64-windows-gnu), verify the baseline-ISA / ZMM-kernel objdump
+# gates, and emit normal + forced-refusal variants. This mirrors
+# check-vector-bitmap-x86-avx512.shs / check-vector-http-avx512.shs; the POSIX
+# dlopen/mmap selfchecks are not portable, so DLL wire behavior is proven by
+# the Simple integration probes instead:
+#   test/02_integration/app/vector_provider/http_vector_parser_live_socket.spl
+#   test/02_integration/app/vector_provider/pure_database_bitmap_query.spl
+# This does not qualify Simple DB/HTTP callsites or claim AVX512 speedup.
+set -eu
+case $(uname -s) in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+    *) echo 'UNSUPPORTED: Windows (Git Bash / MSYS / Cygwin) required'; exit 77;;
+esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-$root/build/vector-provider-win}
+case "$out" in /*) ;; *) echo 'absolute output path required' >&2; exit 2;; esac
+mkdir -p "$out"
+cc=${CLANG:-clang}
+if ! command -v "$cc" >/dev/null 2>&1 && [ -x /c/llvm/install/bin/clang ]; then
+    cc=/c/llvm/install/bin/clang
+fi
+objdump=${OBJDUMP:-objdump}
+command -v "$objdump" >/dev/null 2>&1 || objdump=$(dirname "$cc")/llvm-objdump
+target=${TARGET:-x86_64-w64-windows-gnu}
+src=$root/src/runtime/providers/vector
+abi=$root/src/runtime/simple_vector_kernel_abi_v1.h
+
+exec 3>&1
+exec >>"$out/build.log" 2>&1
+
+"$cc" --version >"$out/toolchain.txt"
+"$objdump" --version >>"$out/toolchain.txt" 2>&1 || true
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_avx512.c" "$src/http_avx512.c" \
+    "$src/bitmap_kernel_private.h" "$abi" >"$out/source.sha256"
+
+provider_sha=$(printf '%s' 'simple-vector-http-bitmap-v1:x86_64-avx512bw' | sha256sum | cut -c1-16)
+implementation_sha=$(cat "$src/bitmap_provider.c" "$src/bitmap_kernel_private.h" \
+    "$src/bitmap_avx512.c" "$src/http_avx512.c" "$abi" | sha256sum | cut -c1-16)
+forced_implementation_sha=$(printf '%s' "$implementation_sha:force-no-avx512" | sha256sum | cut -c1-16)
+
+mkdir -p "$out/id" "$out/forced-id"
+printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+    "$provider_sha" "$implementation_sha" >"$out/id/provider_identity.h"
+printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+    "$provider_sha" "$forced_implementation_sha" >"$out/forced-id/provider_identity.h"
+
+# Build-dir artifact (NOT a source edit): PE export surface is exactly the
+# three-entry wire ABI from simple_vector_kernel_abi_v1.h.
+cat >"$out/vector_provider.def" <<'EOF'
+EXPORTS
+simple_provider_query_v1
+simple_vector_apply_v1
+simple_vector_executed_iterations_v1
+EOF
+
+common='-std=c11 -O2 -Wall -Wextra -Werror -march=x86-64 -fno-vectorize -fno-slp-vectorize'
+# No global -mavx512 flag: only the target-attributed functions in the kernel
+# TUs may contain AVX512 instructions.
+base="$common -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP_AVX512"
+
+compile() { "$cc" -target "$target" "$@"; }
+set -x
+compile $base -I"$out/id" -c "$src/bitmap_provider.c" -o "$out/provider.o"
+compile $base -I"$out/forced-id" -DSIMPLE_VECTOR_FORCE_NO_AVX512 \
+    -DSIMPLE_VECTOR_FORCE_NO_AVX512BW -c "$src/bitmap_provider.c" -o "$out/provider-forced.o"
+compile $base -c "$src/bitmap_avx512.c" -o "$out/kernel.o"
+compile $base -c "$src/http_avx512.c" -o "$out/http-kernel.o"
+compile -shared -fuse-ld=lld "$out/provider.o" "$out/kernel.o" "$out/http-kernel.o" \
+    "$out/vector_provider.def" -o "$out/simple_vector_provider.dll"
+compile -shared -fuse-ld=lld "$out/provider-forced.o" "$out/kernel.o" "$out/http-kernel.o" \
+    "$out/vector_provider.def" -o "$out/simple_vector_provider-forced.dll"
+set +x
+
+"$objdump" -d "$out/provider.o" >"$out/provider.disasm"
+"$objdump" -d "$out/kernel.o" >"$out/kernel.disasm"
+"$objdump" -d "$out/http-kernel.o" >"$out/http-kernel.disasm"
+if grep -Eiq 'zmm[0-9]+|\bkmov[a-z0-9]*\b' "$out/provider.disasm"; then
+    echo 'FAIL baseline provider object contains AVX512 register instructions' >&2
+    exit 1
+fi
+if ! grep -Eiq 'zmm[0-9]+' "$out/kernel.disasm"; then
+    echo 'FAIL target kernel object contains no ZMM instructions' >&2
+    exit 1
+fi
+if ! grep -Eiq 'vpcmpeq[bw]|vpcmp.*b' "$out/http-kernel.disasm"; then
+    echo 'FAIL HTTP kernel object contains no byte vector comparisons' >&2
+    exit 1
+fi
+
+sha256sum "$out/simple_vector_provider.dll" "$out/simple_vector_provider-forced.dll" \
+    >"$out/artifacts.sha256"
+digest=$(cut -d ' ' -f 1 "$out/artifacts.sha256" | sed -n 1p)
+forced_digest=$(cut -d ' ' -f 1 "$out/artifacts.sha256" | sed -n 2p)
+
+# Host feature probe: 1 = CPU advertises AVX512F (then the normal DLL serves
+# vector ops); 0 = provider must refuse with FEATURE_UNAVAILABLE (status 5).
+supported=0
+if [ -r /proc/cpuinfo ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+    supported=1
+fi
+printf 'host_avx512f_flag=%s\n' "$supported" >"$out/host-feature.env"
+
+cat >&3 <<EOF
+provider_dll=$out/simple_vector_provider.dll
+provider_dll_sha256=$digest
+forced_dll=$out/simple_vector_provider-forced.dll
+forced_dll_sha256=$forced_digest
+provider_id_decimal=$(printf '%u' "0x$provider_sha")
+implementation_id_decimal=$(printf '%u' "0x$implementation_sha")
+forced_implementation_id_decimal=$(printf '%u' "0x$forced_implementation_sha")
+host_avx512f_flag=$supported
+EOF
+printf '%s\n' 'PASS 3 checked: baseline ISA guard, AVX512 kernel emission, DLL export surface' >&3
