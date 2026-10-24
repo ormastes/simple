@@ -1,8 +1,14 @@
-# Per-module stream-to-object for the Phase 3 / Phase 4 bootstrap builds (v1)
+# Post-mono MIR-to-object batching requests for Phase 3 / Phase 4 (v1)
 
 Request (2026-10-24): "build src to obj in phase3. not hir, mir, obj. fix
 default phase3 and 4 build setting." Plus: the default must USE THE CACHE and
 GO TO END (every producible object, every failure named, no fake success).
+
+This change is partial post-mono batching, not the requested ready-unit
+source -> HIR -> MIR -> object pipeline. Whole-program HIR/type-check and
+monomorphization still precede native staging. The managed Stage 3 batch
+request is currently refused by the compiler's bootstrap-flat eligibility
+guard; Stage 4 may batch only after those global barriers and its other gates.
 
 Phase 3 = `native-build --entry-closure --entry src/app/cli/bootstrap_main.spl`
 (1471 modules); Phase 4 = the same for `src/app/cli/main.spl`
@@ -47,12 +53,18 @@ Two existing mechanisms stream MIR -> borrow -> codegen -> release after mono:
   sets `SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE3=1` with `--entry`, so
   `bootstrap_main.spl` routes to `run_exact_stage3_focused_capsule`
   (`bootstrap_focused_native_build.spl`), which calls
-  `aot_native_project_with_backend_fixed` **in process**: no coordinator, no
-  HIR/MIR sharding, no fork. It demands `--mode dynload` as an admission
+  `aot_native_project_with_backend_fixed` **in process**. The current CLI can
+  first run `bootstrap_capsule_shard_prepass(args, false)` for the admitted
+  Stage 3 entry/mode: HIR warm-up is allowed, MIR sharding is not. This prepass
+  does not enable staged codegen in the final focused capsule. It demands
+  `--mode dynload` as an admission
   string but the fixed API compiles with `output_format = native`
   (one-binary semantics; the dynload SMF side artifact is never produced).
   Stage 4 (`SIMPLE_BOOTSTRAP_STAGE4=1`) is the same shape via
-  `run_exact_stage4_focused_capsule`. Backend default `llvm-lib` (resident).
+  `run_exact_stage4_focused_capsule`, with an HIR/MIR shard prepass permitted
+  before its final focused compile/link. These are still sequential phase
+  prepasses, not one ready-unit source-to-object job. Backend default
+  `llvm-lib` (resident).
   The Stage 3 process runs under `env -i` with the explicit env vector only
   (`command-snapshot.shs:512`), so an exported `SIMPLE_CACHE_SCOPE` never
   reached it (scope was `default`).
@@ -64,19 +76,21 @@ Two existing mechanisms stream MIR -> borrow -> codegen -> release after mono:
   with fork children: it already streams post-mono at child-share
   granularity (74 modules per child at N=20).
 
-Eligibility (`native_staged_codegen_eligible_reason_v1`) for the managed
-lanes with `llvm-lib`: Stage 3 passes every check (the bootstrap-flat
-refusal is `not resident_backend and ...`), Stage 4 passes. The only reason
-staging was off is `NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1 = 0` with the
-script never setting the env. The bootstrap-flat refusal (non-resident
-backend + `SIMPLE_BOOTSTRAP=1` without STAGE4) stays: that lane lowers
-only the entry module and emits ONE object through
-`bootstrap_compile_context_to_native_local` (`ctx.bootstrap_entry_mir`,
-which `evict_mir_module` would clear) — it is a degraded single-object lane,
-not a per-module one, and admitting staging there is unsafe without routing
-it to `compile_to_native` and running the pass chain it skips.
+Actual eligibility (`native_staged_codegen_eligible_reason_v1`) refuses
+`SIMPLE_BOOTSTRAP=1` whenever `SIMPLE_BOOTSTRAP_STAGE4` is not `1`, including
+`llvm-lib`. There is no resident-backend exception in that condition. Thus
+managed Stage 3 requests a batch but receives
+`bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)` and keeps staging
+inactive. The earlier claim that Stage 3 passed this guard was incorrect.
 
-## 3. The default (this change)
+The fixed-entry shortcut can lower only `app.cli.bootstrap_main` and emit one
+object through `bootstrap_compile_context_to_native_local`; late code can read
+`ctx.bootstrap_entry_mir`, which eviction would clear. Stage 4 avoids this
+particular guard but must still pass every other eligibility check. Removing
+the Stage 3 guard requires a proven complete per-module route and pass chain,
+not a flag exception. See the [tracked eligibility gap](../../../08_tracking/bug/stage3_stream_objects_batch_requested_but_ineligible_2026_10_24.md).
+
+## 3. Default requests and their current eligibility
 
 Script (`bootstrap-from-scratch.sh`), Stage 3 (both invocation copies: the
 args-hash vector and the transcribed run, which must stay byte-identical) and
@@ -84,7 +98,7 @@ Stage 4 (`bootstrap_native_build_main`):
 
 | Env | Stage 3 | Stage 4 | Opt-out |
 |---|---|---|---|
-| `SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32` | added | added | `SIMPLE_BOOTSTRAP_STREAM_OBJECTS=0` (-> 0), `SIMPLE_BOOTSTRAP_STREAM_BATCH=<n>` |
+| `SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=32` | requested; currently refused by bootstrap-flat guard | requested; post-mono batching if eligible | `SIMPLE_BOOTSTRAP_STREAM_OBJECTS=0` (-> 0), `SIMPLE_BOOTSTRAP_STREAM_BATCH=<n>` |
 | `SIMPLE_NATIVE_GO_TO_END=1` | added (env: the focused capsule does not parse `--go-to-end`; the driver reads the env) | added | `SIMPLE_BOOTSTRAP_GO_TO_END=0` |
 | `SIMPLE_CACHE_SCOPE` | `stage3` added to the `env -i` vector (was `default`) | `${SIMPLE_CACHE_SCOPE:-stage4}` (already exported by `prepare_native_cache`) | — |
 | `SIMPLE_FRONTEND_CACHE/_DIR`, `SIMPLE_HIR_CACHE/_DIR` | already set | added (`${native_cache_dir}/{frontend,hir}`; the stage4 cache payload already claimed them) | — |
@@ -138,19 +152,22 @@ private memory per child is B modules, N children run on N cores, and the
 root's post-mono heap is shared copy-on-write once. In-process staging inside
 a child buys nothing for RSS and is left off there (`begin(0)`).
 
-The managed lanes cannot use this today: the focused capsules are
-single-process by admission. Bringing it to them means either routing Stage
-3/4 through `run_bootstrap_native_build_coordinator` (what the ad-hoc lane
-does; the provenance gate, args-hash transcript and planner admission are
-built around the focused capsule) or forking after mono inside the focused
-capsule with an in-process ledger. Both are route changes for the owner,
-not env defaults.
+Do not infer managed rolling-fork admission from these batching defaults.
+The final focused capsules are in-process; the current CLI's HIR/MIR
+prepasses are separate routes described above. Any rolling-fork integration
+must preserve the actual worker owner, provenance gate, args-hash transcript,
+planner admission and final ledger validation. Such integration is a route
+change with its own evidence, not an environment default.
 
 ## 5. Expected peak RSS
 
-- Managed Stage 3/4 with this default: **unchanged peak** (post-mono state
+- Managed Stage 3: the requested batch is refused, so no batch-emission or
+  memory benefit follows from the new default. No native execution is reported
+  here to qualify this source-level conclusion.
+- Eligible Stage 4 post-mono batching: no reclaimed-memory improvement is
+  established (post-mono state
   25-29 GB + every promoted MirModule, measured 83 GiB at module 1187/1302
-  before transient scoping; the batch does not free). What changes: objects
+  before transient scoping; the batch does not free). The intended change is that objects
   land in the cache per batch, a failed module costs itself (or its verify
   batch), and a rerun hits those objects.
 - Coordinator lane with N fork children: shared post-mono ~25-29 GB once +
@@ -197,6 +214,10 @@ not env defaults.
    UNEXECUTED; `scripts/bootstrap/tests/stage3-invocation-consistency-test.py`
    passes (shell stubs); `stage3-focused-provenance-test.py` fails identically
    at baseline (exit 90 precondition), so it is not a signal either way.
+9. Managed Stage 3 requests batching but the actual unconditional bootstrap-flat
+   guard refuses it for every backend. Its safe replacement and native evidence
+   remain open in the tracked eligibility gap above. Even a future safe
+   post-mono Stage 3 batch route would not remove the global HIR/mono barriers.
 
 ## 7. Review of release safety (item 3 of the request)
 
