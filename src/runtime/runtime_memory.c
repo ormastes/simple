@@ -223,19 +223,38 @@ int32_t rt_transient_raw_promote(uintptr_t ptr) {
     return rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes) ? 1 : 0;
 }
 
+/* Entries an emptied table may keep between scopes (16 bytes each, 64 KiB). */
+#define RT_TRANSIENT_RAW_RETAIN_CAP ((size_t)1 << 12)
+
 int32_t rt_transient_raw_scope_end(void) {
     if (!rt_transient_raw_active) return 0;
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    for (size_t i = 0; i < rt_transient_raw_cap; i++) {
-        RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
-        if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
-        if (entry->bytes & RT_TRANSIENT_RAW_OWNED_BIT) {
-            rt_free((uint8_t*)entry->ptr);
+    /* The table only grows, so one huge scope (a big module's HIR lowering)
+     * used to make EVERY later scope end -- including thousands of tiny
+     * per-entry scopes -- scan and memset that high-water capacity. Measured
+     * on a Windows stage2 native-build of the parser closure: 818 of 1167 HIR
+     * samples (70%) were this loop. Mirror runtime_native.c's
+     * rt_core_transient_raw_clear: an all-empty table is skipped outright,
+     * and a table much larger than this scope's use is released so the next
+     * scope regrows it in proportion to its own allocations. */
+    const size_t used = rt_transient_raw_len + rt_transient_raw_tombs;
+    if (used != 0) {
+        for (size_t i = 0; i < rt_transient_raw_cap; i++) {
+            RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
+            if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
+            if (entry->bytes & RT_TRANSIENT_RAW_OWNED_BIT) {
+                rt_free((uint8_t*)entry->ptr);
+            }
         }
-    }
-    if (rt_transient_raw_cap != 0) {
-        memset(rt_transient_raw_allocs, 0,
-            rt_transient_raw_cap * sizeof(RtTransientRawAlloc));
+        if (rt_transient_raw_cap > RT_TRANSIENT_RAW_RETAIN_CAP &&
+                used * 8 < rt_transient_raw_cap) {
+            free(rt_transient_raw_allocs);
+            rt_transient_raw_allocs = NULL;
+            rt_transient_raw_cap = 0;
+        } else {
+            memset(rt_transient_raw_allocs, 0,
+                rt_transient_raw_cap * sizeof(RtTransientRawAlloc));
+        }
     }
     rt_transient_raw_len = 0;
     rt_transient_raw_tombs = 0;
