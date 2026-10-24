@@ -29,7 +29,7 @@ describe "host_io cpu topology":
             expect(cpu.socket >= 0 and cpu.socket < t.socket_count).to_be(true)
         expect(host_worker_sockets(t).len()).to_equal(t.cpus.len())
 
-    it "pins a worker thread to the last CPU and it runs there":
+    it "pins a thread to the last CPU (group 1 on this host) and it runs there":
         val t = host_cpu_topology()
         val last = t.cpus[t.cpus.len() - 1]
         var h = thread_spawn_with_args(last.index, last.group * 65536 + last.number, \i, w: _pin_probe(i, w))
@@ -44,12 +44,16 @@ describe "host_io cpu topology":
         expect(host_pin_current_thread(t.cpus.len())).to_be(false)
         expect(host_pin_current_thread(-1)).to_be(false)
 
-    it "pinned worker threads occupy every processor group":
+    it "pinned worker threads occupy every processor group (or report inline execution honestly)":
         val t = host_cpu_topology()
         val occ = host_measure_group_occupancy(t)
-        print "occupancy: threads={occ.threads} pinned={occ.pinned} per_group={occ.per_group} sockets={t.socket_count} groups={t.group_count}"
+        print "occupancy: threads={occ.threads} separate_threads={occ.separate_threads} pinned={occ.pinned} per_group={occ.per_group} sockets={t.socket_count} groups={t.group_count}"
         expect(occ.threads).to_equal(t.cpus.len())
-        if host_current_cpu() >= 0:
+        if occ.separate_threads == 0:
+            # thread runtime ran closures inline (seed interpreter): nothing pinned
+            expect(occ.pinned).to_equal(0)
+        elif host_current_cpu() >= 0:
+            expect(occ.separate_threads).to_equal(occ.threads)
             expect(occ.pinned).to_equal(occ.threads)
             for g in 0..t.group_count:
                 expect(occ.per_group[g] > 0).to_be(true)

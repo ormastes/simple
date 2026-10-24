@@ -19,6 +19,7 @@ extern fn rt_cpu_topology_field(index: i64, field: i64) -> i64
 extern fn rt_thread_pin_current(index: i64) -> bool
 extern fn rt_thread_current_cpu() -> i64
 extern fn rt_par_atomic_add_i64(addr: i64, value: i64) -> i64
+extern fn spl_thread_current_id() -> i64
 
 struct HostCpuV1:
     index: i64
@@ -65,7 +66,15 @@ fn host_current_cpu() -> i64:
     """(group << 16) | number of the CPU running the caller, -1 if unknown."""
     rt_thread_current_cpu()
 
-fn _host_occupancy_worker(cpu_index: i64, counters: i64) -> i64:
+# counters layout: [0, groups) per-group hits, [groups] workers that ran on a
+# separate OS thread, [groups + 1] the caller's thread id.
+fn _host_occupancy_worker(cpu_index: i64, counters: i64, groups: i64) -> i64:
+    if spl_thread_current_id() == rt_ptr_read_i64(counters, (groups + 1) * 8):
+        # The thread runtime ran this closure inline on the caller (the seed
+        # interpreter does): pinning here would pin the CALLER and measure
+        # nothing about a pool, so report "not run" instead.
+        return 0
+    rt_par_atomic_add_i64(counters + groups * 8, 1)
     val pinned = rt_thread_pin_current(cpu_index)
     var spin = 0
     var acc = 0
@@ -80,19 +89,24 @@ fn _host_occupancy_worker(cpu_index: i64, counters: i64) -> i64:
 
 struct HostOccupancyV1:
     threads: i64
+    separate_threads: i64
     pinned: i64
     per_group: [i64]
 
 fn host_measure_group_occupancy(t: HostCpuTopologyV1) -> HostOccupancyV1:
     """Spawn one thread per logical CPU, pin it, and count which processor
     group each one actually ran in. A healthy multi-group host shows every
-    group occupied; an unpinned pool would show only one."""
+    group occupied; an unpinned pool would show only one. `separate_threads`
+    counts workers that really ran on their own OS thread; when the thread
+    runtime executes closures inline (seed interpreter) it is 0 and nothing
+    is pinned, so the result can never be mistaken for a pool measurement."""
     val groups = if t.group_count > 0: t.group_count else: 1
-    val counters = rt_alloc(groups * 8)
-    for g in 0..groups: rt_ptr_write_i64(counters, g * 8, 0)
+    val counters = rt_alloc((groups + 2) * 8)
+    for g in 0..(groups + 1): rt_ptr_write_i64(counters, g * 8, 0)
+    rt_ptr_write_i64(counters, (groups + 1) * 8, spl_thread_current_id())
     var handles = []
     for cpu in t.cpus:
-        handles = handles.push(thread_spawn_with_args(cpu.index, counters, \i, c: _host_occupancy_worker(i, c)))
+        handles = handles.push(thread_spawn_with_args(cpu.index, counters, \i, c: _host_occupancy_worker(i, c, groups)))
     var pinned = 0
     for h in handles:
         var handle = h
@@ -100,8 +114,9 @@ fn host_measure_group_occupancy(t: HostCpuTopologyV1) -> HostOccupancyV1:
         pinned = pinned + r
     var per_group: [i64] = []
     for g in 0..groups: per_group = per_group.push(rt_ptr_read_i64(counters, g * 8))
+    val separate = rt_ptr_read_i64(counters, groups * 8)
     rt_free(counters)
-    HostOccupancyV1(threads: t.cpus.len(), pinned: pinned, per_group: per_group)
+    HostOccupancyV1(threads: t.cpus.len(), separate_threads: separate, pinned: pinned, per_group: per_group)
 
 export HostCpuV1, HostCpuTopologyV1, HostOccupancyV1
 export host_cpu_topology, host_worker_sockets, host_pin_current_thread, host_current_cpu
