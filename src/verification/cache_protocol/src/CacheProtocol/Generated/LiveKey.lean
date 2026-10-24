@@ -148,19 +148,18 @@ inductive Gap where
   | linker_binary_version
   | system_library_content
   | import_lib_export_sets
-  | debug_info_path_prefix
   | advice_body_weave_root
   | hash_algorithm_tag
   | reexport_chain_closure
   | resolution_new_probe
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
+def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
 
-def inputsTotal : Nat := 48
+def inputsTotal : Nat := 47
 
 /-- §4.2 accounting: every enumerated input is a key component or a counted gap. -/
 theorem inputs_accounted : allFields.length + allGaps.length = inputsTotal := by decide
@@ -394,11 +393,6 @@ theorem system_library_content_gap_invisible :
 /-- Known gap: the live key does not see `import_lib_export_sets`. -/
 theorem import_lib_export_sets_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .import_lib_export_sets ≠ j.gap .import_lib_export_sets :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `debug_info_path_prefix`. -/
-theorem debug_info_path_prefix_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .debug_info_path_prefix ≠ j.gap .debug_info_path_prefix :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 /-- Known gap: the live key does not see `advice_body_weave_root`. -/
