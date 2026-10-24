@@ -16918,6 +16918,53 @@ int rt_setenv(const char* key, const char* value) {
 #endif
 }
 
+/* io_file.rs rt_io_file_close_value twin: same close, reported as 1/0. */
+int64_t rt_io_file_close_value(int64_t fd) {
+    return rt_io_file_close(fd) ? 1 : 0;
+}
+
+/* env_process.rs rt_env_temp twin: TMPDIR, then TMP, then TEMP, then the
+ * platform default (MSYS-style "/c/Temp" on Windows, "/tmp" elsewhere). */
+int64_t rt_env_temp(void) {
+    static const char* const keys[] = {"TMPDIR", "TMP", "TEMP"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const char* v = getenv(keys[i]);
+        if (v) return rt_string_new((const uint8_t*)v, (uint64_t)strlen(v));
+    }
+#if defined(_WIN32)
+    return rt_string_new((const uint8_t*)"/c/Temp", 7);
+#else
+    return rt_string_new((const uint8_t*)"/tmp", 4);
+#endif
+}
+
+/* cli_sffi.rs rt_exec_output twin: run the command through the platform
+ * shell, return captured stdout text; "" on bad input or spawn failure. */
+int64_t rt_exec_output(int64_t cmd_value) {
+    int64_t out = rt_shell_exec(cmd_value);
+    if (!rt_string_data(out)) return rt_string_new((const uint8_t*)"", 0);
+    return out;
+}
+
+/* directory.rs rt_set_current_dir twin: (utf-8 ptr, len) -> bool. */
+bool rt_set_current_dir(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return false;
+    if (memchr(path_ptr, '\0', (size_t)path_len)) return false;
+#if defined(_WIN32)
+    wchar_t wide[4096];
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)path_ptr,
+                                (int)path_len, wide, 4095);
+    if (n <= 0) return false;
+    wide[n] = L'\0';
+    return SetCurrentDirectoryW(wide) != 0;
+#else
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
+    return chdir(path) == 0;
+#endif
+}
+
 void rt_exit(int64_t code) {
     exit((int)code);
 }
