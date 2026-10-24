@@ -3954,6 +3954,64 @@ impl MirLowering:
                 ))
                 own_i = own_i + 1
             arms = owned_arms
+        # match_variant_pattern_shadowed_by_struct_name_2026-10-24: HIR
+        # reinterprets a bare `case Expr(e):` as a positional STRUCT pattern
+        # whenever a struct named `Expr` is visible and the enum's variants were
+        # not pre-registered (glob import). In an enum match that struct name is
+        # really a variant of the subject's enum: re-express it as the enum
+        # pattern (positional sub-patterns are already lowered in declared slot
+        # order). Only when the owner is proven: the subject's own enum, or --
+        # with the subject type unknown -- the sole enum declaring the name and
+        # a sibling Enum arm in this match.
+        var has_enum_sibling = false
+        var sib_i = 0
+        while sib_i < arms.len():
+            match arms[sib_i].pattern.kind:
+                case Enum(_, _, _): has_enum_sibling = true
+                case _: ()
+            sib_i = sib_i + 1
+        if has_enum_sibling or scrut_enum_lookup != "":
+            var variant_arms: [HirMatchArm] = []
+            var var_i = 0
+            while var_i < arms.len():
+                val va: HirMatchArm = arms[var_i]
+                var va_pat = va.pattern
+                match va.pattern.kind:
+                    case Struct(sv_type, sv_fields):
+                        var sv_name = ""
+                        match sv_type.kind:
+                            case Named(sv_sym, _):
+                                sv_name = self.symbols.symbol_name_scalar_raw(sv_sym.id)
+                            case _: ()
+                        var sv_owner = ""
+                        if sv_name != "":
+                            if scrut_enum_lookup != "" and self.enum_variant_discriminant(scrut_enum_lookup, sv_name) >= 0:
+                                sv_owner = scrut_enum_lookup
+                            elif scrut_enum_lookup == "":
+                                val sv_owners = self.variant_owner_keys(sv_name)
+                                if sv_owners.len() == 1:
+                                    sv_owner = sv_owners[0]
+                        if sv_owner != "":
+                            var sv_subs: [HirPattern] = []
+                            for sv_field in sv_fields:
+                                val sv_pair: (text, HirPattern) = sv_field
+                                sv_subs = sv_subs.push(sv_pair.1)
+                            val sv_payload: HirPatternPayload? = if sv_subs.len() > 0: Some(HirPatternPayload.Tuple(sv_subs)) else: nil
+                            va_pat = HirPattern(
+                                kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: va.pattern.span), sv_name, sv_payload),
+                                type_: nil,
+                                span: va.pattern.span
+                            )
+                    case _: ()
+                variant_arms = variant_arms.push(HirMatchArm(
+                    pattern: va_pat,
+                    has_guard: va.has_guard,
+                    guard: va.guard,
+                    body: va.body,
+                    span: va.span
+                ))
+                var_i = var_i + 1
+            arms = variant_arms
         var ai = 0
         while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
