@@ -39,6 +39,10 @@ use compiler.mir_opt.storage_projection_lowering.{
 use compiler.mir_opt.typed_storage_view_declaration.{MirTypedStorageViewDeclarationV1}
 use compiler.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
 use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use std.simd.{has_avx2}
 
 # ============================================================================
@@ -379,6 +383,45 @@ pub fn backend_helper_aot_opt_level(
     elif opt_level_i64 == 1: OptimizationLevel.Size
     elif opt_level_i64 == 2: OptimizationLevel.Speed
     else: OptimizationLevel.Aggressive
+
+# Bug native_codegen_unscoped_rss_growth_2026_10_24: one module's AOT compile
+# (storage-projection lowering, the backend MIR optimization copy, Cranelift
+# translation scratch, the object byte read) in its own transient scope,
+# opt-in via SIMPLE_CODEGEN_MODULE_SCOPE=1. Only the returned Result is
+# promoted. The scope wraps this pure call and nothing else: the backend
+# session authority mutates its persistent records (uses/results/kept) around
+# it, and a scope over those writes freed records still linked into the
+# authority (Stage 2 p2shard-5: lease promotion refused, then SIGSEGV).
+# Promotion cannot rescue that shape: the walk stops at persistent nodes.
+# Every argument is explicit; the bootstrap producer drops computed defaults.
+fn compile_module_with_backend_scoped_v1(
+    backend_name: text, module: MirModule, is_release: bool,
+    opt_level_i64: i64, target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1],
+    retained_options: BackendCompileOptions?,
+    retained_llvm_config: LlvmTargetConfig?,
+    retained_cranelift_triple: text?, retained_cranelift_cpu_v2: text?,
+    retained_cranelift_features_v2: [text]
+) -> Result<CompiledModule, CompileError>:
+    var scoped = (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1"
+    if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
+        eprint("[codegen-scope] WARNING transient scope refused; compiling UNSCOPED, arena retained: module={module.name}")
+        scoped = false
+    val compiled = compile_module_with_backend_target_cpu_storage_bindings(
+        backend_name, module, is_release, opt_level_i64, target_cpu,
+        storage_bindings, retained_options, retained_llvm_config,
+        retained_cranelift_triple, retained_cranelift_cpu_v2,
+        retained_cranelift_features_v2)
+    if not scoped:
+        return compiled
+    val paused = transient_scope_pause()
+    val kept = paused and transient_promote<Result<CompiledModule, CompileError>>(compiled)
+    val ended = transient_scope_end()
+    if paused and kept and ended:
+        return compiled
+    eprint("[codegen-scope] WARNING result promotion failed (paused={paused} kept={kept} ended={ended}): module={module.name}")
+    Err(compileerror_backend_error(BackendKind.Compiler,
+        "codegen-scope-promotion-failed (object not written)"))
 
 fn compile_module_with_backend_target_cpu_storage_bindings(
     backend_name: text,
