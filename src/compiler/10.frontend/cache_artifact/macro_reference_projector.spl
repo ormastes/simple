@@ -246,7 +246,7 @@ pub fn project_macro_module_v1(src: MacroModuleSourceV1,
     project_macro_module_guarded_v1(src, imported, macro_content_digest_v1("macro-profile/default"), [])
 
 # `evals` come from the guard evaluator (aop_source_guard_evals_v1 once landed).
-pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
+fn _project_active_v1(src: MacroModuleSourceV1,
         imported: [MacroModuleProjectionV1], profile_digest: text,
         evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
     var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [],
@@ -534,3 +534,58 @@ fn _guard_digests(guards: [GuardIdV1]) -> [text]:
     for g in guards:
         out.push(g.digest)
     _sorted_unique(out)
+
+# A definition is inactive when any of its guards evaluated to false under
+# the profile. Inactive definitions are RETAINED in the def table (so a guard
+# flip is a visible def-table change) but never resolve: they are projected
+# with is_public=false, get a key over a fixed "inactive" nested root, and are
+# excluded from local resolution, nested reads and the name index.
+fn _def_inactive(d: MacroSourceDefV1, evals: [GuardEvalV1]) -> bool:
+    for g in d.guard_ids:
+        for e in evals:
+            if e.guard.digest == g.digest and e.evaluable and not e.active:
+                return true
+    false
+
+pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], profile_digest: text,
+        evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
+    var active_defs: [MacroSourceDefV1] = []
+    var inactive_defs: [MacroSourceDefV1] = []
+    for d in src.defs:
+        if _def_inactive(d, evals): inactive_defs.push(d)
+        else: active_defs.push(d)
+    val active_src = MacroModuleSourceV1(package: src.package, module: src.module,
+        source_id: src.source_id, defs: active_defs, invocations: src.invocations)
+    val p = _project_active_v1(active_src, imported, profile_digest, evals)
+    if inactive_defs.len() == 0:
+        return p
+    var ids: [text] = []
+    var entries: [MacroDefinitionEntryV1] = []
+    var keys: [MacroDefKeyEntryV1] = []
+    for e in p.def_table.entries:
+        ids.push(macro_def_id_canonical_v1(e.def_id))
+        entries.push(e)
+    for k in p.def_keys:
+        keys.push(k)
+    for d in inactive_defs:
+        var e = _entry_without_keys(active_src, imported, d)
+        e.is_public = false
+        ids.push(macro_def_id_canonical_v1(e.def_id))
+        entries.push(e)
+        keys.push(MacroDefKeyEntryV1(def_id: macro_def_id_canonical_v1(e.def_id),
+            macro_name: d.def.name,
+            key: macro_def_key_v1(e, macro_hash_v1("macro-inactive-def/v1", []))))
+    var sorted_entries: [MacroDefinitionEntryV1] = []
+    var sorted_keys: [MacroDefKeyEntryV1] = []
+    for sid in _sorted_unique(ids):
+        sorted_entries.push(entries[_index_of(ids, sid)])
+        for k in keys:
+            if k.def_id == sid: sorted_keys.push(k)
+    MacroModuleProjectionV1(package: p.package, module: p.module, source_id: p.source_id,
+        def_table: MacroDefinitionTableV1(schema: p.def_table.schema, module_id: p.def_table.module_id,
+            entries: sorted_entries),
+        def_keys: sorted_keys, use_table: p.use_table,
+        generated_public_names: p.generated_public_names,
+        generated_public_surface_digest: p.generated_public_surface_digest,
+        diagnostics: p.diagnostics, uncacheable_def_ids: p.uncacheable_def_ids)
