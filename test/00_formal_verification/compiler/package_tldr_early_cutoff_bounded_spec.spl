@@ -1,0 +1,79 @@
+# T-RG1 twin of src/verification/build_cache/src/EarlyCutoffV1.lean: pins
+# package_tldr_early_cutoff_v1 to the model's `compared` set field by field.
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1, PackageTldrHeaderV1,
+    package_tldr_header_validate_v1, package_tldr_early_cutoff_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn base() -> PackageTldrHeaderV1:
+    val digest = sha256_text("cutoff-fixture")
+    PackageTldrHeaderV1(
+        schema_version: 1, producer_digest: digest,
+        package_identity: "pkg", module_identity: "pkg.main",
+        source_identity: "pkg/main.spl",
+        variant: ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "cranelift",
+            [], "debug", "abi-v1", [], []),
+        source_digest: digest, source_witness_digest: digest,
+        smf_digest: digest,
+        smf_sections: [PackageSmfSectionV1("exports", 0, 1, digest)],
+        export_digest: digest, abi_digest: digest,
+        initializer_digest: digest, provider_digest: digest,
+        generated_source_digest: digest, reverse_projection_digest: digest,
+        direct_imports: ["a.dep", "z.dep"],
+        reverse_dependents: ["a.user", "z.user"],
+        scc_identity: "scc.pkg",
+        scc_members: ["pkg.main", "pkg.peer"],
+        interface_archive_digest: digest, action_archive_digest: digest)
+
+fn d2() -> text:
+    sha256_text("cutoff-fixture-changed")
+
+fn mutate(field: text) -> PackageTldrHeaderV1:
+    var h = base()
+    if field == "producer_digest": h.producer_digest = d2()
+    if field == "package_identity": h.package_identity = "pkg2"
+    if field == "module_identity":
+        h.module_identity = "pkg.other"
+        h.scc_members = ["pkg.other", "pkg.peer"]
+    if field == "variant": h.variant = ConfigVariantKeyV1("x86_64-unknown-linux-gnu", "cranelift", [], "debug", "abi-v1", [], [])
+    if field == "smf_digest": h.smf_digest = d2()
+    if field == "export_digest": h.export_digest = d2()
+    if field == "abi_digest": h.abi_digest = d2()
+    if field == "initializer_digest": h.initializer_digest = d2()
+    if field == "provider_digest": h.provider_digest = d2()
+    if field == "generated_source_digest": h.generated_source_digest = d2()
+    if field == "reverse_projection_digest": h.reverse_projection_digest = d2()
+    if field == "interface_archive_digest": h.interface_archive_digest = d2()
+    if field == "source_identity": h.source_identity = "pkg/other.spl"
+    if field == "source_digest": h.source_digest = d2()
+    if field == "source_witness_digest": h.source_witness_digest = d2()
+    if field == "action_archive_digest": h.action_archive_digest = d2()
+    if field == "reverse_dependents": h.reverse_dependents = ["a.user"]
+    h
+
+describe "T-RG1 twin: package_tldr_early_cutoff_v1 compares exactly the model's fields":
+    it "accepts identical headers":
+        expect(package_tldr_header_validate_v1(base())).to_equal("ok")
+        expect(package_tldr_early_cutoff_v1(base(), base())).to_equal(true)
+
+    it "blocks cutoff when any of the 12 compared fields changes":
+        var checked = 0
+        for f in ["producer_digest", "package_identity", "module_identity", "variant",
+                "smf_digest", "export_digest", "abi_digest", "initializer_digest",
+                "provider_digest", "generated_source_digest", "reverse_projection_digest",
+                "interface_archive_digest"]:
+            expect(package_tldr_header_validate_v1(mutate(f))).to_equal("ok")
+            expect(package_tldr_early_cutoff_v1(base(), mutate(f))).to_equal(false)
+            checked = checked + 1
+        expect(checked).to_equal(12)
+
+    it "keeps cutoff when only a non-compared, still-valid field changes":
+        var checked = 0
+        for f in ["source_identity", "source_digest", "source_witness_digest",
+                "action_archive_digest", "reverse_dependents"]:
+            val m = mutate(f)
+            if package_tldr_header_validate_v1(m) == "ok":
+                expect(package_tldr_early_cutoff_v1(base(), m)).to_equal(true)
+                checked = checked + 1
+        expect(checked > 0).to_equal(true)
