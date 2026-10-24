@@ -86,6 +86,9 @@ pub fn generic_instance_semantic_key_v1(view: ConcreteTldrAstViewV1) -> [MonoSem
         return []
     [key]
 
+fn _instance_flight_key_v1(instance_key: text) -> text:
+    cache_single_flight_key_v1("generic.instance", instance_key)
+
 struct GenericInstanceEntryV1:
     semantic_text: text
     mir: [u8]
@@ -104,10 +107,24 @@ class GenericInstanceCacheV1:
         GenericInstanceCacheV1(entries: {}, flights: CacheSingleFlightV1.create(),
             hits: 0, misses: 0, quarantines: 0)
 
-    # Leader/waiter role for producing `instance_key`'s MIR or object.
-    me begin_produce(instance_key: text, request_id: text) -> bool:
-        val (role, _flight) = self.flights.join(cache_single_flight_key_v1("generic.instance", instance_key), request_id)
+    # Leader/waiter role for producing `instance_key`'s MIR. The leader joins
+    # with `now_ms` as its redrive start time and MUST end its flight: a
+    # successful put_mir completes it with the bytes; every failed put_mir
+    # and abandon_produce complete it with nil, so waiters re-produce instead
+    # of waiting forever. A leader that dies without either is re-driven by
+    # `redrive` once `timeout_ms` has passed.
+    me begin_produce(instance_key: text, request_id: text, now_ms: i64) -> bool:
+        val (role, _flight) = self.flights.join_at(_instance_flight_key_v1(instance_key), request_id, now_ms)
         role == SINGLE_FLIGHT_LEADER_V1
+
+    me abandon_produce(instance_key: text, request_id: text) -> bool:
+        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, nil)
+
+    me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
+        self.flights.redrive(now_ms, timeout_ms)
+
+    fn inflight_count() -> i64:
+        self.flights.inflight_count()
 
     me _entry_for(instance_key: text, semantic: MonoSemanticKey) -> [GenericInstanceEntryV1]:
         if not generic_digest_admitted_v1(instance_key):
@@ -128,8 +145,15 @@ class GenericInstanceCacheV1:
 
     # Set-once publication of target-neutral instance MIR. False when the key
     # is not admitted, names another instance, or the bytes differ from an
-    # earlier publication (quarantined).
+    # earlier publication (quarantined). Always ends `request_id`'s flight
+    # (bytes on success, nil on failure); a non-leader's completion is a no-op.
     me put_mir(instance_key: text, semantic: MonoSemanticKey, request_id: text, mir: [u8]) -> bool:
+        val ok = self._publish_mir(instance_key, semantic, mir)
+        val result: [u8]? = if ok: Some(mir) else: nil
+        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, result)
+        ok
+
+    me _publish_mir(instance_key: text, semantic: MonoSemanticKey, mir: [u8]) -> bool:
         val found = self._entry_for(instance_key, semantic)
         if found.len() == 0:
             return false
@@ -144,7 +168,6 @@ class GenericInstanceCacheV1:
         e.mir = mir
         e.has_mir = true
         self.entries[instance_key] = e
-        self.flights.complete(cache_single_flight_key_v1("generic.instance", instance_key), request_id, mir)
         true
 
     me get_mir(instance_key: text, semantic: MonoSemanticKey) -> [[u8]]:
