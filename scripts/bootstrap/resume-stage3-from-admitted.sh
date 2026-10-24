@@ -524,7 +524,8 @@ bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 # Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
 # bootstrap_windows_{abi,cc,include,lib,libpath}_env between the Darwin tool
-# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE. Without them every
+# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE, followed by
+# bootstrap_windows_os_env (OS=..., always carried on Windows). Without them every
 # Windows Stage 3 resume refused with `bootstrap-stage3-admission-mismatch:
 # build_args_sha256`. CC is carried exactly when the engine recorded it (always
 # on MSVC, only for an explicit MinGW driver on GNU).
@@ -577,6 +578,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   ${bootstrap_stage2_msvc_env:+"INCLUDE=$(stage2_env_value INCLUDE)"} \
   ${bootstrap_stage2_msvc_env:+"LIB=$(stage2_env_value LIB)"} \
   ${bootstrap_stage2_msvc_env:+"LIBPATH=$(stage2_env_value LIBPATH)"} \
+  ${bootstrap_stage2_windows_env:+"OS=$(stage2_env_value OS)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
