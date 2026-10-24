@@ -1,6 +1,12 @@
 /* Compile baseline-only: optional instructions live in separate kernel TU. */
 #include "bitmap_kernel_private.h"
 #include "provider_identity.h"
+#include <string.h>
+#include <stdatomic.h>
+#ifdef SIMPLE_VECTOR_LEVELLED
+/* Levelled DSO: vector_level_dispatch.c owns CPU/OS probing for every OS. */
+#include "vector_level_private.h"
+#else
 /* getauxval lives behind this header and is only used by the __aarch64__ /
  * __riscv branches below; PE/mingw targets have no sys/auxv.h. */
 #if defined(__has_include)
@@ -8,8 +14,6 @@
 #include <sys/auxv.h>
 #endif
 #endif
-#include <string.h>
-#include <stdatomic.h>
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #include <cpuid.h>
 #endif
@@ -17,6 +21,7 @@
 #include <asm/hwcap.h>
 #if defined(SIMPLE_VECTOR_REQUIRE_SVE) && defined(SIMPLE_VECTOR_REQUIRE_SVE2)
 #error "select exactly one scalable-vector provider requirement"
+#endif
 #endif
 #endif
 #define EXPORT __attribute__((visibility("default")))
@@ -38,7 +43,9 @@ extern void simple_vector_test_apply_event_v1(uint32_t opcode,
     uint32_t status, uint64_t executed_loops);
 #endif
 static int available(void) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(SIMPLE_VECTOR_LEVELLED)
+    return simple_vector_selected_level() > 0;
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #ifdef SIMPLE_VECTOR_FORCE_NO_AVX512
     return 0;
 #else
@@ -72,6 +79,8 @@ static int available(void) {
 static int http_available(void) {
 #if defined(SIMPLE_VECTOR_FORCE_NO_HTTP)
     return 0;
+#elif defined(SIMPLE_VECTOR_LEVELLED)
+    return available(); /* every level object carries an HTTP kernel */
 #elif defined(__x86_64__) && !defined(SIMPLE_VECTOR_FORCE_NO_AVX512BW)
     if(!available()) return 0;
     unsigned int a,b,c,d;
@@ -90,6 +99,12 @@ static int http_available(void) {
 EXPORT uint64_t simple_vector_executed_iterations_v1(void) {
     return atomic_load_explicit(&vector_iterations,memory_order_relaxed);
 }
+#ifdef SIMPLE_VECTOR_LEVELLED
+/* Diagnostic: admitted SIMD level (0 = refuses; see vector_level_private.h). */
+EXPORT int32_t simple_vector_selected_level_v1(void) {
+    return (int32_t)simple_vector_selected_level();
+}
+#endif
 EXPORT int32_t simple_provider_query_v1(uint64_t req,uint64_t res) {
     const uint8_t *q=(const uint8_t *)(uintptr_t)req;
     uint8_t *r=(uint8_t *)(uintptr_t)res;

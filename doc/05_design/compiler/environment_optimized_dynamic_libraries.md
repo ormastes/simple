@@ -1236,3 +1236,154 @@ environment variable. Existing `SIMPLE_NATIVE_BUILD_NO_MANGLE`,
 existing diagnostic/tool selection policies. They confer no accepted-feature
 authority. Full immutable normalized-options evidence still requires a later
 producer result and policy identity contract.
+
+## Levelled single-DSO provider detail (2026-10-24)
+
+Companion to the plan § "Levelled single-DSO vector provider". Applies to
+`src/runtime/providers/vector/` only; the V1 byte-wire ABI
+(`simple_vector_kernel_abi_v1.h`, 64-byte request / 24-byte response / 84-byte
+query response) is unchanged, so the ABI digest does not move.
+
+### Artifact layout
+
+```text
+simple_vector_provider_levelled.{dll,so}        production (max level = arch max)
+simple_vector_provider_levelled_cap{0,1,2,3}.*  same-host comparison only
+  bitmap_provider.o          wire ABI, -DSIMPLE_VECTOR_LEVELLED, baseline -march, no vectorize
+  vector_level_dispatch.o    probe + switch, baseline -march, no vectorize
+  l<N>-*.o                   one object per level; portable TU renamed with
+                             -Dsimple_bitmap_kernel=simple_bitmap_kernel_lN
+                             -Dsimple_http_kernel=simple_http_kernel_lN
+```
+
+Level sources: x86_64 L1–L3 are `vector_level_portable.c` built at
+`-march=x86-64`, `-v2`, `-v3`; L4 is the existing intrinsic pair
+`bitmap_avx512.c` / `http_avx512.c`. aarch64 L1 `*_neon.c`
+(`armv8-a+simd`), L2/L3 `*_sve.c` (`+sve` / `+sve2`). riscv64 L1 `*_rvv.c`
+(`rv64gcv`). All kernel symbols are hidden; exports are
+`simple_provider_query_v1`, `simple_vector_apply_v1`,
+`simple_vector_executed_iterations_v1` and, in levelled builds,
+`simple_vector_selected_level_v1() -> int32_t`. PE exports come from an
+explicit `provider.def` (visibility attributes mean nothing to PE and mingw's
+export-everything default would leak kernel symbols); PE links with lld and
+`-Wl,--no-insert-timestamp` so the digest is reproducible.
+
+### Dispatcher (`vector_level_dispatch.c`)
+
+`simple_vector_selected_level()` holds an `atomic_int` (-1 = unprobed). The
+first caller runs `probe_level()`, applies `SIMPLE_VECTOR_FORCE_NO_AVX512`
+(x86 ceiling 3) and `SIMPLE_VECTOR_MAX_LEVEL`, and stores the result; every
+later call is one acquire load. `simple_{bitmap,http}_kernel` are a `switch`
+on that level whose `case N:` arms exist only for `N <= min(arch max,
+SIMPLE_VECTOR_MAX_LEVEL)`, so a capped DSO references, links and carries no
+object above its cap; level 0 returns `UINT64_MAX`, which the wire layer
+reports as `FEATURE_UNAVAILABLE`. The dispatcher TU includes no libc headers
+(`getauxval`/`elf_aux_info`/`prctl`/`sysctlbyname` are declared `extern`), so
+every target compiles freestanding.
+
+x86_64 predicate (each level is the conjunction of everything the compiler
+may emit for that `-march`, not one headline bit):
+
+| Level | Leaf / register | Required bits |
+|---|---|---|
+| L1 | — | SSE2 is architectural on x86-64 |
+| L2 (`x86-64-v2`) | CPUID.1:ECX | SSE3[0], SSSE3[9], CMPXCHG16B[13], SSE4.1[19], SSE4.2[20], POPCNT[23] |
+|  | CPUID.0x80000001:ECX | LAHF-SAHF[0] (only if extended max leaf ≥ 0x80000001) |
+| L3 (`x86-64-v3`) | + CPUID.1:ECX | FMA[12], MOVBE[22], XSAVE[26], OSXSAVE[27], AVX[28], F16C[29] |
+|  | CPUID.7.0:EBX | BMI1[3], AVX2[5], BMI2[8] (only if max leaf ≥ 7) |
+|  | CPUID.0x80000001:ECX | LZCNT/ABM[5] |
+|  | XGETBV(0) XCR0 | `(xcr0 & 0x06) == 0x06` (XMM[1], YMM[2]) |
+| L4 (`x86-64-v4`) | + CPUID.7.0:EBX | AVX512F[16], AVX512DQ[17], AVX512CD[28], AVX512BW[30], AVX512VL[31] |
+|  | XCR0 (non-Apple) | `(xcr0 & 0xe6) == 0xe6` (adds opmask[5], ZMM_Hi256[6], Hi16_ZMM[7]) |
+|  | sysctl (Apple) | `hw.optional.avx512f/bw/dq/vl/cd` all non-zero — macOS enables ZMM state lazily, so XCR0 would deny a usable host |
+
+OSXSAVE is in the L3 conjunction and is tested **before** `xgetbv` executes
+(`xgetbv` raises `#UD` without it — relevant on SimpleOS and thin
+hypervisors). XCR0 is checked after CPUID because hypervisors mask either
+side independently. The legacy `available()` (AVX512F + `0xe6`, BW only on
+the HTTP path) is correct for L4 *state* but has no v2/v3 predicate and no
+DQ/CD/VL test; levelled builds route `available()` through
+`selected_level() > 0` instead.
+
+aarch64: Linux `getauxval(16)`/`getauxval(26)`, FreeBSD `elf_aux_info(25)`/
+`(26)`; L1 needs `HWCAP_ASIMD` (bit 1) else L0; L2 `HWCAP_SVE` (bit 22); L3
+also `HWCAP2_SVE2` (bit 1). macOS, Windows and SimpleOS return L1 without
+probing (NEON is architectural; SVE is a scaffold there).
+
+riscv64: L1 needs HWCAP `V` (`1 << ('V'-'A')`) and, on Linux,
+`prctl(PR_RISCV_V_GET_CONTROL = 70)` whose current-state field (`& 3`) is not
+`1` (OFF); a negative return (pre-6.5 kernel) is accepted. `riscv_hwprobe` is
+deliberately not used. FreeBSD uses `elf_aux_info(25)`. Everything else,
+including SimpleOS until the kernel exports hwcaps and enables `VS`, is L0.
+
+SimpleOS (`__simpleos__`): x86 runs the same CPUID/XGETBV sequence; the kernel
+contract is that XCR0 bits are set only for state it saves and restores.
+aarch64 is L1 (the kernel already enables FPEN for all userland). The
+`*-unknown-none-elf` compile lane builds these with `-ffreestanding`.
+
+### Kernel-TU constraints (why v4 code in a DSO is safe on a v1 CPU)
+
+- No `__attribute__((constructor))`, static init, `thread_local` or
+  file-scope objects with non-constant initializers in any level TU; the
+  test-observer constructor lives only in the baseline `bitmap_provider.c`.
+- No `always_inline`/`flatten`/`target_clones`/ifunc across TUs; glibc ifunc
+  resolvers run inside `dlopen` before admission and do not exist on
+  PE/Mach-O/SMF. The build uses no LTO; the ISA gate on the baseline objects
+  is the contract, not the inliner's feature-compat rule.
+- `vector_level_portable.c` is block-wise (16 words / 64 bytes) with no early
+  exit inside a block: `FIND_*` folds a block into a branchless any-match
+  flag and rescans only that block; a CRLF block needs 65 remaining bytes so
+  no load crosses the span. It returns block iterations, the same unit the
+  intrinsic kernels report.
+- Spans are 4-byte-aligned u32 or plain bytes; kernels use unaligned loads
+  and never assume 32/64-byte alignment.
+- SVE/RVV kernels are vector-length-agnostic (`svcntb()`/`vsetvl` per
+  iteration, never cached); no `-msve-vector-bits` / `-mrvv-vector-bits`.
+  qemu `vlen=128` and `vlen=256` both pass.
+
+### Cap semantics
+
+`SIMPLE_VECTOR_MAX_LEVEL=N` is compile-time only. The runtime ceiling is
+`min(N, probed)`; objects above N are not linked. The cap is folded into
+`SIMPLE_VECTOR_IMPLEMENTATION_ID` (`<impl>:max-level=N`) and into the file
+name (`_capN`), so a capped artifact is never admitted under the production
+path. The DSO reads no environment; administrator/`max` policy stays on the
+Simple side and, until the request wire gains a level field, can only choose
+a differently capped artifact.
+
+### Identity and receipts
+
+One SHA-256 pins the whole multi-level artifact and says nothing about which
+level ran; `simple_vector_selected_level_v1()` (0 = refuses) is the only
+level fact today. **Open follow-up:** Simple-side receipts must record
+artifact digest **and** `selected_level` **and** a below-max reason
+(`cpu-missing:<feature>`, `xcr0:<mask>`, `cap:<N>`, `os:<name>`); none of the
+reason codes is implemented. Level names in receipts are the compile presets
+(`x86-64-v3`, `sve2`, `rvv`), never "AVX2 kernel" inferred from a file name.
+L0 is reported as refusal, not as "scalar SIMD".
+
+### Build and evidence (`check-vector-provider-levels.shs`)
+
+Flags: dispatcher and wire TU `-std=c11 -O2 -Werror -fvisibility=hidden
+-DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_LEVELLED -fno-vectorize
+-fno-slp-vectorize` at the arch baseline (`x86-64`; `armv8-a
+-mgeneral-regs-only`; `rv64gc`); level TUs at their `-march` with
+vectorization on. ISA gate with `llvm-objdump -d`: `dispatch-cap4.o` and
+`provider-cap4.o` must match none of `[yz]mm|kmov` / `z<n>.`, `v<n>.16b|4s|8h`
+/ `vsetvli|vle|vse`; `l1`/`l2` need `xmm` and no `[yz]mm`; `l3` needs `ymm`
+and no `zmm`; `l4` needs `zmm`; aarch64 `l1` needs `.16b|.4s` and no `z`-regs,
+`l2`/`l3` need `z`-regs; riscv64 needs `vsetvli|vsetivli`. A level object
+with no vector instructions fails as "scalar under a SIMD label". Not yet
+gated: emptiness of `.init_array`/`DT_INIT`/PE TLS directory (holds by
+construction; add to the gate).
+
+Lanes: `run` builds the host-native DSO and every cap, then
+`vector_level_bench <dso> <expect|-1> [reps]` checks parity against an
+in-harness scalar reference and times bitmap AND (1 Mbit) and FIND_CRLF
+(1 MiB); `qemu` runs aarch64 (`neoverse-n1`→L1, `a64fx`→L2, `max`→L3) and
+riscv64 (`rva23u64` vlen 128/256→L1, `max,v=false`→L0) under qemu-user;
+`compile` builds FreeBSD x86/arm/riscv, macOS x86/arm64, Windows-ARM and the
+three `none-elf` SimpleOS scaffolds freestanding through the ISA gate.
+Numbers: plan § "Measured native kernel ns/op". AVX-512 license downclock is
+visible there (WSL bitmap AND L4 ≈ L3); it is recorded, not used to reorder
+selection.
