@@ -698,3 +698,404 @@ pool clearing before each parse/restore in the child, or a scope-lifetime
 contract for cumulative pools. The sanitize/refusal/promotion workarounds
 remain landed (they convert crashes into cache misses and removed three
 crash layers) but cannot repair the module graph the consumer walks.
+Fix-shape consequence: whatever owns the decode-hit module's texts must
+match the miss path's ownership before the module is handed to HIR/MIR —
+either own/promote them inside build_module_from_flat_pool_blob, or
+re-acquire them after the HIR re-parse reset. Encoder-side probes
+(91c2a192363 family) still needed to name the exact dead pool element
+before the binding fix lands.
+
+## Identification 2026-10-23 (lane A): panic pool fingerprinted
+
+enc_pool_head probe (8396828489 / 9b3968dd8a1) trace, repro4:
+
+```
+enc_pool_head n=5  item1='private'      \
+enc_pool_head n=56 item1=''              | same 11-pool tail in BOTH
+enc_pool_head n=56 item1='ok'            | dump passes (parent AND
+enc_pool_head n=10 item1=''             / child each panic once)
+flat pool encoder append failed site=text.value item=1 input_length=-1  (x2)
+enc_pool_head n=5 item1='1' / '' / 'tag_text' / 'private' ...
+```
+
+- The panic pool is a 2-element text pool whose item0 is valid and
+  item1 is the dangling handle (its enc_pool_head was skipped because the
+  head probe itself measured item1 len=-1).
+- Sibling pool contents ('private', 'tag_text', 'ok', 56-element pools)
+  are lexer/parser token pools of runtime-lib sources (tag_text appears in
+  src/lib/nogc_sync_mut/imap/build.spl et al.), placing the fingerprint in
+  the delegated frontend's parse-state region of the dump tail
+  (parser_state/extend/pending sections) — consistent with the
+  delegate-child locus.
+- Both passes encode identical pool tails, then both die on the same
+  element: the dangling handle survives from the decode-era module state
+  into the post-HIR-reparse capture.
+
+Fix shapes recorded for implementation: (A) sanitize-and-refuse-capture —
+validate text handles at capture time and abort the cache store (blob="",
+treated as a miss) instead of rt_panic, preserving the codec's
+"lossy restore must miss, never crash" contract; (B) name-and-fix-owner —
+tag pool vars at the ~40 dump call sites and repair the scope/lifetime
+owner of the identified pool. (A) unblocks stage2 immediately; (B) is the
+proper cure and needs the owner lane's runtime context.
+
+## Annotation 2026-10-23 (lane D, x86_64-pc-windows-msvc, lane 44 @ 32c50742629): panic -> graceful refusal -> AV; refusing pool unnamed
+
+Lane 44 = first full-jobs gate run over the landed ownership fixes
+(1b8136dd6ce decl-pool promote, b326b1b93f8 extend/pending-pool promote,
+70424d1ec9c scope-memo promote, ff1f69fd931 publish-deadlock fix). Gate red
+(exit 2) but the failure SHAPE CHANGED, which localizes the remaining defect:
+
+- The encoder panic is GONE. flat_pool_builder_push now refuses gracefully:
+  `[flat-pool] capture refused: invalid text handle site=text.value item=0
+  input_length=-1; cache store skipped` (flat_pool_codec.spl:495-499).
+- The invalid text handle at site=text.value item=0 STILL EXISTS, in the same
+  window: decode-hit (frontend-cache hits=1) -> hir-entry re-parse
+  (reset_all_pools n=2 per the pooldbg counter) -> the RE-PARSE's capture dump
+  hits a text pool whose elements are ALL rt_string_len == -1 (probe printed
+  item 0..4 len=-1 for the refusing pool; neighbouring pools in the same dump
+  are the same size n=5 with all-empty or all-valid elements).
+- Consequence chain: refused capture -> mir-shard worker exits ->
+  0xC0000005 access violation (rc 139) in the fallback path. The AV is a
+  SECONDARY defect exposed by the graceful skip (downstream code derefs what
+  the skipped/poisoned capture left behind).
+- Companion store failures persist on the miss path: frontend-cache store
+  "cannot write under <dir> (dir_create_all=true)" and hir-cache
+  "store failed at write ... reason=io-write" even to a private cache dir.
+
+Discrimination value: on the miss path the SAME capture dump is clean (all
+elements valid/empty) — only the decode-hit path produces the all-(-1) pool.
+So the refusing pool is one that (i) flat_pools_restore_all populated at
+decode, (ii) the hir-entry re-parse's reset does NOT clear, (iii) the fresh
+re-parse does NOT repopulate, and (iv) the capture dump encodes. It is NOT one
+of the pools the landed promotes cover. Next probe: print the refusing pool's
+DUMP POSITION (text-pool ordinal within flat_pools_dump_all) — the fixed
+section order names it without runtime introspection; or print pool identity
+at the enc_pool_head site.
+
+Repro (9 s, deterministic, candidate preserved at
+.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected):
+the standard p2_add native-build repro with SIMPLE_POOLDBG=1; full trace with
+per-element lens preserved at the lane's stage2-sanity frontend-failure log.
+
+## Annotation 2026-10-23 (lane D, lane 45 probe candidate @ c85b6b5de55 + probes): refusing pool located to dump_all's tail; unified mechanism hypothesis
+
+Probe candidate (pooldbg VALUE prints + storedbg) repro discriminated further:
+
+- The crash dump is `flat_pools_dump_all`'s TAIL: the refusing pool is one of
+  the last text pools of the whole dump (extend/pending section), immediately
+  after the final parser_state pool (the n=2 LOG001 warning pool, which is a
+  useful landmark). On the hit path its 5 elements are all dead (-1); the
+  pools dumped before it are clean. On the miss path the same-ordinal pool is
+  n=5 all-empty.
+- The n=5 size on BOTH paths for tail pools that p2_add (no enums, no
+  @unsafe, no extends) would leave EMPTY strongly suggests these pools carry
+  STALE content from a previously-parsed module in the same worker, not from
+  p2_add's own parse.
+
+Unified mechanism hypothesis (fits every observation including the lane-44
+monomorphize-phase second crash):
+1. `_fab_capture_pools` (module_assembly.spl:1388) is armed only by
+   frontend.spl:162 and managed_parse_group.spl:146; flat_pool_capture_take
+   disarms. SOME path leaves it armed across a later
+   parse_and_build_module_with_scope_owner, whose capture dump
+   (module_assembly.spl:1584-1609) then dumps pools that do not belong to the
+   module just parsed.
+2. On the decode-hit path the hir-phase re-parse reaches the dump with pools
+   still holding decode-restored elements whose strings died at the hir-entry
+   reset/scope boundary -> all-(-1) -> sanitize refusal -> poisoned capture
+   -> downstream 0xC0000005 AV.
+3. The io-write store failures are a SEPARATE defect (storedbg probe queued):
+   cache-ON-only, candidate-internal, dir_create_all succeeds, manual writes
+   to the same dir succeed; failure is inside file_write_exact (codec,
+   encode, or tagged-native write - the probe splits these).
+
+Next probe (one candidate): trace events for arm/take/dump with caller tags
+(print at flat_pool_capture_arm/take and at the module_assembly.spl:1584 dump
+gate: "armed-by" module path + which parse_and_build entry
+scoped|borrowed|reference_checked + cache hit/miss). That names the arming
+path and settles whether the dump belongs to the parsed module. The proper
+cure then is one of: (a) bind the capture to the parse that produced it (dump
+only pools the just-finished parse populated; skip dump when this call did
+not run parse_module_body), or (b) extend the promote coverage to the
+identified tail pools. (a) is preferred: re-caching a cache-hit module is
+wasted work even when the pools are valid.
+
+## Annotation 2026-10-23 (lane D, lane 46 capture-trace candidate): TWO distinct defects separated
+
+SIMPLE_CAPTURE_TRACE=1 + SIMPLE_POOLDBG=1 repro on the lane-46 candidate
+(preserved at .simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/
+simple.exe.rejected) prints arm/take/dump-gate per parse. Sequence per process:
+
+```
+arm
+dump-gate p2_add armed=1 stream=false borrowed=true  -> dump_all path
+take bytes=4582                                    <- VALID blob (borrowed path works)
+arm
+dump-gate p2_add armed=1 stream=false borrowed=false -> dump_for_cache path
+take bytes=-1                                      <- INVALID BLOB (rt_string_len -1!)
+arm
+dump-gate p2_add armed=1 stream=false borrowed=false -> dump_for_cache path
+[flat-pool] capture refused site=text.value item=0 (pools dead at this gate)
+take bytes=0
+```
+
+Defects separated:
+A. The UNSCOPED capture path (module_assembly.spl:1619-1622 else-branch ->
+   flat_pools_dump_for_cache) can produce a blob whose OWN handle is invalid
+   (take reads len=-1) even with NO sanitize refusal in that dump - the
+   serialization-scope wrap (dump_for_cache:1289-1302: begin scope, dump,
+   pause, promote, end) loses the blob. The borrowed/transient path
+   (dump_all direct) is clean (4582 bytes). An unscoped caller that actually
+   consumed that -1 blob would crash or store garbage.
+B. A later dump gate sees dead pools (the original all-(-1) refusal) - stale
+   or scope-killed pool elements at an unscoped gate after the hir-entry
+   boundary, matching the armed-capture hypothesis from the lane-45 note.
+
+Next actions: (1) name the unscoped caller(s) (extend the dump-gate print
+with a caller tag or a stack probe); (2) fix A by either making
+flat_pools_dump_for_cache return an owned blob verified by rt_string_len >= 0
+(retry without the serialization scope, or promote via a checked copy) or
+skipping unscoped captures; (3) fix B by binding the dump to the parse that
+populated the pools (skip when this call did not run parse_module_body).
+Repro: the 9 s p2_add repro with SIMPLE_CAPTURE_TRACE=1.
+
+## Annotation 2026-10-23 (lane D, lane 48b): root cause family identified - transient-scope reclaim of live-referenced strings (heisenbug)
+
+With fix A (unscoped capture -> dump_all) plus a blob-built len print, the
+capture trace shows:
+- dump#1 borrowed: blob-built 4582, take 4582 (valid).
+- dump#2 unscoped: blob-built 4582, take 4582 (valid - take=-1 GONE).
+- dump#3 unscoped: sanitize refusal mid-dump -> poisoned -> take 0 (correct).
+
+The take=-1 disappearance is HEISENBUG: the only delta from lane 47c (which
+showed take=-1 with the identical fix A and no read) is the blob-built eprint
+reading _fab_captured_blob.len() between assignment and take. An intervening
+read/allocation changes scope-reclaim timing and keeps the blob alive. The
+blob's bytes are a joined string independent of the pools; its HANDLE dies,
+so a scope reclaim between build and take frees live memory.
+
+Pool values at the refusing gate (lane 48b): the dump begins with six n=5
+pools whose contents match p2_add's own desugared if/and chain
+([0,1,2,3,"4,5,6,9"] = arm/body payload indices), i.e. they ARE this parse's
+pools; the 6th pool's five elements are dead handles whose strings were
+reclaimed between population (parse_module_body) and the dump, in the same
+call. Conclusion: the runtime transient-scope/GC reclaim frees strings that
+remain referenced from live pool arrays (arrays' element slots not honored as
+roots, or scoped arrays reclaimed despite external references). This is the
+runtime class-layout/scope-scanning family; compiler-side copies or read-
+keeping are timing workarounds, not cures.
+
+Owner-lane next actions: (1) runtime: audit transient-scope reclaim root
+scanning for array-element text slots (decl/extend/pending pools) and string
+payload promotion (rt_transient_heap_promote must copy payload, not just the
+header - lane-46 dump_for_cache take=-1 shows header-only promotion);
+(2) compiler mitigation until then: bind the capture dump to its parse (skip
+when this call did not run parse_module_body) to stop dumping reclaimed
+pools; (3) the io-write store failures are lane-env-specific (stage2-home
+sandbox) and lower priority.
+
+## Annotation 2026-10-23 (lane D, lane 49): capture dedup real but incomplete - refusing arm is another site
+
+The per-process capture dedup (frontend_parse_or_restore skips arm/take for an
+already-captured path) landed and is correct, but the stage2 sanity still
+refuses: the crash dump is armed by a DIFFERENT call path. In the crash block
+the frontend cache HITs (worker shared cache), so the worker's refusing dump
+is not the frontend.spl miss path - it is the worker's own first parse+store
+cycle (its store fails with the lane-env io-write defect, so its hir re-parse
+misses again and arms), or the managed_parse_group arm
+(managed_parse_group.spl:146), which the dedup does not cover.
+
+Next cycle: (1) caller-tag both arm sites (flat_pool_capture_arm gains a tag
+argument: frontend-miss | managed-group) and one lane to name the refusing
+armer exactly; (2) extend the per-process dedup to ALL arm sites (keyed by
+path, shared _fab_captured_paths) so a path is captured at most once per
+process no matter which subsystem parses it; (3) the store io-write defect
+(lane-env, stage2-home sandbox) remains the reason the worker re-parses at
+all - fixing it collapses most repeat-capture traffic.
+
+## Annotation 2026-10-23 (lane D, lane 50g): dedup verified - exposure reduced 3x, runtime reclaim confirmed as the cure
+
+Lane 50g (all-sites capture dedup, #4229) sanity ran 587 s with ZERO refusals
+through the early phase (previous lanes crashed within ~200 s), then 4
+refusals deep in the sanity. The dedup eliminated the repeat-capture crash
+cycles exactly as designed; the remaining refusals are FIRST captures in
+fresh worker processes (dedup is per-process) hitting the transient-scope
+reclaim heisenbug nondeterministically. This is the expected signature of
+the doc-#4228 diagnosis: compiler-side mitigation reduces exposure; only the
+runtime scope-stamp reclaim / promote-payload fix removes it. The stashed
+caller-tag arm trace (work/release-tip-20261023 stash "caller-tag-trace")
+names any remaining armer in one lane if the owner wants it.
+
+## Annotation 2026-10-24 (lane D, lanes 52-54): containment exhausted - runtime mid-scope reclaim of globals-referenced strings is the sole cure
+
+Lane 52 fixed the companion defects: hir-cache stores now succeed
+(stores=1 io_failed=0, first time in 15+ lanes) and the miss path is fully
+clean. The caller-tagged capture trace (lane-52/54 candidates) named the last
+refusing armer: tag=frontend-miss in the DELEGATED WORKER's first p2_add
+parse. Fixes landed and verified in-lane: (1) the loading-path parse streams
+(driver_source_pipeline_loading:176), (2) the hir bootstrap_entry reparse
+streams (driver_hir_pipeline_lowering:1916). Lane 54's trace confirms both
+took effect - the worker's refusing dump-gate now prints stream=true -
+yet the refusal PERSISTS at the same pool/site/item.
+
+Conclusion: the pool strings die DURING the parse, inside the parse's own
+transient scope, before the dump and before any scope end or promote. The
+only mechanism left is the runtime's allocation-triggered transient reclaim
+freeing strings that are referenced exclusively from module-global pool
+arrays (the scope GC roots the stack, not the globals - matching the
+lane-48b heisenbug where one extra allocation flipped survival). This is not
+compiler-fixable: containment (dedup, dump_all, blob promote, streaming at
+every identified site) is now complete and the crash persists.
+
+Owner-lane cure (runtime, src/runtime/runtime_native.c): the transient
+scope's reclaim/GC must treat module-global array slots as roots (or the
+decl/expr/stmt/extend/pending pool arrays must be registered as root
+owners), so scope-referenced strings survive until promote/scope-end.
+Repro: the 9 s p2_add repro on any lane-52+ candidate; the refusal fires
+deterministically in the delegated worker regardless of scope mode.
+
+## Annotation 2026-10-24 (lane D, runtime lead): string reclaim ignores scope_id
+
+Reading rt_core_reclaim_transient_immortal (src/runtime/runtime_native.c:2274)
+with the lane-54 evidence (stream=true gates still refuse): the STRING branch
+computes reclaim solely from the object's flags -
+  reclaim_string = (reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                   (reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
+- and the scope_id check (`*object_scope != scope_id`) applies ONLY to
+arrays/dicts/enums/closures/floats. A string is therefore reclaimed by ANY
+scope end, including a scope that did not create it, whenever its TRANSIENT
+flag is still set (i.e. it was never promoted). Transient scopes cannot nest
+(begin() returns 0 while one is active), so within a single parse no other
+scope end runs - but the worker's dump reads pool strings whose TRANSIENT
+flag survived from an EARLIER scope in the same process (an earlier module's
+parse, or the driver's scope that handed off the decode), and any subsequent
+scope end frees them regardless of ownership.
+
+Owner-lane fix candidates (runtime): (a) stamp strings with their creating
+scope id and check it in the reclaim loop (mirror the array branch); or
+(b) clear RT_CORE_STRING_FLAG_TRANSIENT at allocation time for strings that
+outlive their creating scope via registry transfer. Verify with the 9 s
+p2_add repro: the delegated worker's first frontend-miss dump must stop
+refusing with stream=true gates.
+
+## Annotation 2026-10-24 (lane D, lane 55): pool-family promotes succeed; refusal persists - runtime-only
+
+Lane 55 restored the lost blob promote AND added parser/decl/extend/pending +
+type pool-family promotes to the parse scope (the full promote-reachability
+gap). Result: NO "pool promote incomplete" warnings (all promotes succeeded),
+yet the delegated worker's capture refuses identically. The promote-
+reachability hypothesis is refuted as the cause; with dedup + dump_all +
+blob promote + streaming + pool promotes all in place, the dead pool handles
+can only come from the runtime reclaim itself (scope-GC / string-flag
+interaction documented above). The parse-scope promote coverage is kept: it
+is correct hardening and removes one entire death class, but the gate cure
+is the runtime reclaim fix alone.
+
+## Annotation 2026-10-24 (lane D, ABI finding): reserved has no free bits - the scope stamp needs a struct field
+
+RtCoreString.reserved (runtime_native.c:1445) is fully allocated: bit 0 =
+RT_CORE_STRING_FLAG_SHARED (deliberately overlaps the cp-count field, see the
+rt_string_char_code_at note at :3934), bits [29:0] = cp-count, plus
+RT_CORE_STRING_FLAG_TRANSIENT (bit 1) and SIMD_CACHE_FLAG_IS_ASCII. There is
+NO spare bit field for a creating-scope id, so cure candidate (a) cannot be a
+bit-pack; it requires adding `uint32_t transient_scope_id` to RtCoreString
+(safe within one build - the runtime is compiled into the seed and the
+candidates together, no cross-version ABI - but it shifts data[] and touches
+the hottest struct in the runtime). Candidate (b) (per-scope tracked-object
+lists instead of the single global rt_core_transient_heap_scope_objects) is
+the layout-preserving alternative. Both are owner-lane runtime changes; the
+compiler side remains fully contained as of lane 55.
+
+## Annotation 2026-10-24 (lane D, lane 56): scope-correct reclaim REFUTED as the sole cure
+
+Implemented the per-entry scope-stamp reclaim (parallel side-table, compaction,
+layout-preserving - work/scope-correct-reclaim-20261024) and verified in a full
+lane with the rebuilt Rust seed: the refusal is unchanged. The cross-scope
+reclaim-free theory is refuted. Combined with lanes 54-55 (refusals inside a
+single scope, pool promotes succeeding), the dead pool arrays/strings die with
+NO reclaim running - the remaining mechanisms are heap corruption (a buffer
+overwrite in the codec/restore path clobbering the pool array backing or string
+headers) or never-valid slots (i64 tags written into text slots at decode).
+Both require runtime heap debugging (guard instrumentation at the refusal
+site) - owner-lane work with runtime tooling. The scope-correct reclaim branch
+is preserved on origin for the owner: it fixes a real cross-scope ownership
+defect per code reading, but it is not the stage2 gate cure. All compiler-side
+hypotheses (14 PRs) and the two reclaim hypotheses are now tested and refuted
+or fixed; the blocker needs heap-level diagnosis.
+
+## Annotation 2026-10-24 (lane D, empirical narrowing): candidate codegen defect, differential seed-vs-candidate
+
+Build-free findings this cycle:
+- The stored frontend-cache blob is VALID: the would-be-refusing pool (6th text pool
+  of the tail, ordinal established in lanes 45/48b) is 5 EMPTY strings in the blob
+  (/tmp/p2blob repro, blob lines 43-48); neighboring content pools are intact.
+- The reader path is source-clean end to end: FlatPoolReader.next returns empty
+  lines as ""; flat_pool_unescape("") returns ""; dec_text/dec_text_into push
+  through clear+push with no uninitialized slots.
+- The seed (bin/simple.exe) runs the exact split probe
+  ("5\n\n\n\n\n".split("\n") + per-field len) CORRECTLY - all empty fields len=0.
+  So rt_string_split / rt_string_new(0) in runtime_native.c are correct.
+- The stage2 CANDIDATE cannot compile the same probe: full probe AVs
+  (0xC0000005); the minimal "a\n\nb".split("\n") probe fails HIR aggregation.
+  The seed and the candidate diverge on this exact construct class.
+
+Conclusion: the -1 pool elements on the decode-hit path are the candidate's
+miscompiled read of valid blob data - a stage2 candidate CODEGEN defect in the
+text-split / text-array / empty-field handling family, not heap corruption and
+not a runtime C bug. The seed-vs-candidate differential probe
+(build/scratch/splitprobe.spl pattern, run via any bootstrap_admission fixture
+temporarily) reproduces it in ~25 s. This is owner-lane codegen debugging with
+a now-minimal reproducer; the fixture was restored clean after probing.
+
+## Correction 2026-10-24 (lane D): probe conclusions retracted - refusal is entry- and construct-independent
+
+Control experiments invalidated the previous annotation's codegen claim:
+- The ORIGINAL hello_world.spl AVs under the same non-delegated invocation as
+  the split probes - the probe AVs were the NON-DELEGATED path crashing on ANY
+  entry (a separate second defect), not split miscompilation.
+- With the full delegated env, split probes (with and without empty fields)
+  fail with the SAME capture refused as p2_add - the refusal is entry- and
+  construct-INDEPENDENT. Any admitted entry + delegated env + warm cache
+  (second build = frontend-cache hit) reproduces the -1 refusal.
+What stands from the prior narrowing: the stored blob is valid (empty pools
+intact), the reader path is source-clean, and the seed runs the split-empty
+probe correctly. The defect is the candidate-compiled DECODE read of blob
+empty-field slots producing -1 handles - module-independent, hit-path-only.
+Minimal repro: build any bootstrap_admission entry twice with the delegated
+env; the second (cache-hit) build refuses at site=text.value item=0.
+
+## Addendum 2026-10-24 (lane D): seed-AOT differential blocked by pre-existing seed defects
+
+Attempted to complete the JIT-vs-AOT differential seed-side by seed-native-building
+the split probe: blocked twice by pre-existing seed issues, not this bug -
+(1) the seed's own native-build entry jit-fails on "Cannot infer field type:
+struct 'TextSpan' field 'end'" in src/app/cli/native_build_main.spl (JIT
+fallback to interpreter), then (2) SCV-E-ADMISSION derived-composition-identity-
+mismatch on the ad-hoc entry. So the seed-JIT-correct / candidate-AOT-broken
+differential stands but cannot be cheaply closed seed-side; the owner can
+complete it after the TextSpan/SCV seed nits, or debug the candidate-AOT
+decode read directly (candidate + the minimal warm-cache-hit repro above).
+
+Crash pattern (lane B log, 4 events): the SIGBUS site MOVES with each
+generation -- gen0 claimed=212 near lib.common.json.tokenizer /
+lib.common.ui.action; gen1 claimed=2 near app.ui.render.capability /
+gpu.engine2d.backend; gen2 claimed=84 near compiler.common.native_output_intent
+/ compiler.backend.feature_caps_types; gen3 claimed=24. No single
+reproducible module: consistent with accumulating heap corruption (the
+crash address follows allocation state, not a fixed bad access). HIR
+progress is monotonic regardless (1877+/2934 after 4 crashes) because the
+hir-cache stores each completed module before the next crash.
+
+## Lane B convergence update 2026-10-24 (afternoon): crash-after-store rhythm
+
+Eleven SIGBUS restarts in, the lane's behavior stabilized into a productive
+rhythm: each coordinator life completes one giant module and stores it to the
+hir-cache BEFORE crashing -- so completed giants never re-process.
+engine2d.backend, engine2d.framebuffer, and engine2d.virtio_gpu all completed
+this way; HIR reached 2377+/2934 (81%) with monotonic progress. The SIGBUS
+still fires at ~6-7 GB RSS shortly after each giant's store, consistent with
+the accumulating-corruption model: the fault follows total allocation volume,
+not a specific module. Net: the wrapper-restart + hir-cache design converts
+the admitted candidate's heap-corruption crashes from blocking to
+slowdown-only. Cure remains the owner lane's runtime reclaim work.
