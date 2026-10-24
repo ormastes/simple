@@ -1,0 +1,74 @@
+# Purpose: M-04 — cyclic macro, ambient CTFE effect, intro collision and
+# deterministic hygiene: correct diagnostic, no cacheable expansion.
+# @req M-04
+
+use std.spec.*
+use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_use_cacheable_v1,
+    macro_hygienic_name_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroSourceDefV1,
+    MacroSourceInvocationV1, MacroModuleSourceV1, project_macro_module_v1,
+    macro_symbol_collisions_v1, macro_def_key_of_v1}
+
+fn sdef(name: text, nested: [text], effects: [text], intros: [text]) -> MacroSourceDefV1:
+    var decls: [MacroIntroDecl] = []
+    for n in intros:
+        decls.push(MacroIntroDecl(kind: "fn", name_pattern: n, type_pattern: nil))
+    MacroSourceDefV1(def: MacroDef(name: name, params: ["x"], contract_intros: decls,
+        contract_injects: []), namespace: "macro", body_text: name + " body",
+        nested_macro_names: nested, declared_effects: effects, guard_ids: [], is_public: true)
+
+fn inv(region: text, name: text) -> MacroSourceInvocationV1:
+    MacroSourceInvocationV1(region_id: region, stable_invocation_id: "inv:" + region,
+        requested_name: name, invocation_text: name + "!(1)", args_text: "1",
+        hygiene_scope_id: "h:" + region, active_guard_id: "", active: true)
+
+fn module(defs: [MacroSourceDefV1], invs: [MacroSourceInvocationV1]) -> MacroModuleSourceV1:
+    MacroModuleSourceV1(package: "pkg", module: "m", source_id: "m.spl", defs: defs, invocations: invs)
+
+describe "M-04 macro diagnostics":
+    it "reports a nested cycle deterministically and refuses caching its users":
+        val src = module([sdef("ping", ["pong"], [], []), sdef("pong", ["ping"], [], []),
+            sdef("user", ["ping"], [], []), sdef("ok", [], [], [])],
+            [inv("r1", "ping"), inv("r2", "user"), inv("r3", "ok")])
+        val p = project_macro_module_v1(src, [])
+        expect(p.diagnostics.len()).to_equal(2)
+        expect(p.diagnostics[0].code).to_equal("E-MACRO-CYCLE")
+        expect(p.diagnostics[0].subject).to_equal("ping")
+        expect(p.diagnostics[1].subject).to_equal("pong")
+        expect(p.uncacheable_def_ids.len()).to_equal(3)
+        expect(macro_use_cacheable_v1(p.use_table.uses[0])).to_equal(false)
+        expect(macro_use_cacheable_v1(p.use_table.uses[1])).to_equal(false)
+        expect(macro_use_cacheable_v1(p.use_table.uses[2])).to_equal(true)
+        val again = project_macro_module_v1(src, [])
+        expect(macro_def_key_of_v1(again, "ping")).to_equal(macro_def_key_of_v1(p, "ping"))
+
+    it "ambient CTFE effect is diagnosed and uncacheable, admitted effect is not":
+        val p = project_macro_module_v1(module([sdef("envy", [], ["env:HOME"], []),
+            sdef("pure", [], ["ctfe:const-eval"], [])], [inv("r1", "envy"), inv("r2", "pure")]), [])
+        expect(p.diagnostics.len()).to_equal(1)
+        expect(p.diagnostics[0].code).to_equal("E-MACRO-AMBIENT-EFFECT")
+        expect(macro_use_cacheable_v1(p.use_table.uses[0])).to_equal(false)
+        expect(macro_use_cacheable_v1(p.use_table.uses[1])).to_equal(true)
+
+    it "imported uncacheable macro taints the importing use":
+        val a = project_macro_module_v1(module([sdef("envy", [], ["clock:now"], [])], []), [])
+        val b = project_macro_module_v1(MacroModuleSourceV1(package: "pkg", module: "b",
+            source_id: "b.spl", defs: [], invocations: [inv("r1", "envy")]), [a])
+        expect(macro_use_cacheable_v1(b.use_table.uses[0])).to_equal(false)
+
+    it "detects intro collisions between expansions and with module symbols":
+        val p = project_macro_module_v1(module([sdef("gen", [], [], ["make_x"])],
+            [inv("r1", "gen"), inv("r2", "gen")]), [])
+        expect(p.diagnostics.len()).to_equal(1)
+        expect(p.diagnostics[0].code).to_equal("E-MACRO-INTRO-COLLISION")
+        val shadows = macro_symbol_collisions_v1(p, ["make_x", "other"])
+        expect(shadows.len()).to_equal(1)
+        expect(shadows[0].code).to_equal("E-MACRO-INTRO-SHADOWS")
+
+    it "hygienic names are deterministic and distinct per site and definition":
+        val a = macro_hygienic_name_v1("defA", "m.spl#r1", "tmp")
+        expect(a).to_equal(macro_hygienic_name_v1("defA", "m.spl#r1", "tmp"))
+        expect(a == macro_hygienic_name_v1("defA", "m.spl#r2", "tmp")).to_equal(false)
+        expect(a == macro_hygienic_name_v1("defB", "m.spl#r1", "tmp")).to_equal(false)
+        expect(a.starts_with("tmp__h")).to_equal(true)
