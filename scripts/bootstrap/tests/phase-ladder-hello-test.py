@@ -6,6 +6,7 @@ Run on a POSIX host: python3 scripts/bootstrap/tests/phase-ladder-hello-test.py 
 """
 import argparse
 import concurrent.futures
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -35,7 +36,7 @@ def script(path, text):
     path.chmod(0o755)
 
 
-def check_case(base, production, shell, platform, case):
+def check_case(base, production, shell, platform, case, native_program=None):
     name, stdout, raw_exit, stderr, accepted = case
     root = base / (platform + "-" + name)
     root.mkdir()
@@ -43,6 +44,9 @@ def check_case(base, production, shell, platform, case):
     scripts = root / "scripts/bootstrap"
     scripts.mkdir(parents=True)
     shutil.copyfile(production, scripts / "phase-ladder-step.shs")
+    if native_program is not None:
+        shutil.copyfile(production.with_name("run-process-group-bounded-log-windows.py"),
+                        scripts / "run-process-group-bounded-log-windows.py")
     script(scripts / "build-next-phase-ci.shs", """#!/bin/sh
 set -eu
 case $1 in windows-*) exe=.exe ;; *) exe= ;; esac
@@ -60,11 +64,14 @@ fi
 cp "$FIXTURE_ROOT/hello-program" "$4"
 chmod +x "$4"
 """)
-    script(root / "hello-program", """#!/bin/sh
+    if native_program is None:
+        script(root / "hello-program", """#!/bin/sh
 cat "$FIXTURE_ROOT/native.stdout"
 cat "$FIXTURE_ROOT/native.stderr" >&2
 exit "$FIXTURE_EXIT"
 """)
+    else:
+        shutil.copyfile(native_program, root / "hello-program")
     (root / "native.stdout").write_bytes(stdout)
     (root / "native.stderr").write_bytes(stderr)
     handoff = root / "in" / (platform + "-p1")
@@ -77,13 +84,26 @@ exit "$FIXTURE_EXIT"
                GITHUB_OUTPUT=str(root / "github-output"))
     result = subprocess.run([shell, "scripts/bootstrap/phase-ladder-step.shs",
                              platform, "in", "out", "24"], cwd=root, env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=120 if native_program is not None else 30)
     (root / "runner.stdout").write_bytes(result.stdout)
     (root / "runner.stderr").write_bytes(result.stderr)
     evidence = root / "build/ladder/evidence/hello"
-    assert (evidence / "exit-status").read_text() == str(raw_exit) + "\n", name
-    assert (evidence / "stdout").read_bytes() == stdout, name
-    assert (evidence / "stderr").read_bytes() == stderr, name
+    if native_program is None:
+        assert (evidence / "exit-status").read_text() == str(raw_exit) + "\n", name
+        assert (evidence / "stdout").read_bytes() == stdout, name
+        assert (evidence / "stderr").read_bytes() == stderr, name
+    else:
+        receipt = dict(line.split("=", 1) for line in
+                       (evidence / "native-exit.env").read_text().splitlines())
+        assert receipt["native_exit_status"] == str(raw_exit), (name, receipt)
+        assert receipt["status"] == "complete", (name, receipt)
+        assert receipt["cleanup_status"] == "not-needed", (name, receipt)
+        assert receipt["root_exit_policy"] == "wait-job", (name, receipt)
+        assert receipt["helper_sha256"] == hashlib.sha256(
+            (scripts / "run-process-group-bounded-log-windows.py").read_bytes()).hexdigest()
+        assert (evidence / "combined-stdout-stderr.log").read_bytes() == stdout + stderr, name
+        assert (evidence / "collector-launch.stderr").read_bytes() == b"", name
     assert (evidence / "hello.spl").is_file(), name
     assert (evidence / ("hello" + exe)).is_file(), name
     phase = root / "out" / (platform + "-p2") / "PHASE"
@@ -95,7 +115,8 @@ exit "$FIXTURE_EXIT"
     else:
         assert rejected.read_bytes() == (root / "compiler").read_bytes(), name
         assert not list((root / "out").glob("*/PHASE")), name
-        assert "phase=" not in (root / "github-output").read_text() if (root / "github-output").exists() else True
+        if (root / "github-output").exists():
+            assert "phase=" not in (root / "github-output").read_text(), name
     return platform + ":" + name
 
 
@@ -109,7 +130,9 @@ def main():
     production = Path(__file__).resolve().parents[1] / "phase-ladder-step.shs"
     base = Path(tempfile.mkdtemp(prefix="phase-ladder-hello-"))
     print("evidence=" + str(base), flush=True)
-    work = [(platform, case) for platform in ("linux-x86_64", "windows-x86_64") for case in CASES]
+    # Windows needs actual PE fixtures and native Python; never emulate that
+    # authority using shell scripts. Both POSIX variants exercise this branch.
+    work = [(platform, case) for platform in ("linux-x86_64", "darwin-x86_64") for case in CASES]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = [pool.submit(check_case, base, production, args.shell, platform, case)
                    for platform, case in work]

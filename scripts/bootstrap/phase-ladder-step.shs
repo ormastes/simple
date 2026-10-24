@@ -235,13 +235,77 @@ fi
 # status and admit a program which prints the marker before failing. Preserve
 # the run independently and accept only the complete expected line.
 hello_status=0
-"$probe/hello$exe" > "$probe/stdout" 2> "$probe/stderr" || hello_status=$?
-printf '%s\n' "$hello_status" > "$probe/exit-status"
+hello_output=$probe/stdout
+case $platform in
+  windows-*)
+    # Git Bash truncates some nonzero DWORD exits (256, 512, 0x80000000)
+    # to zero. Launch the native PE directly through the existing Job Object
+    # collector and require its untruncated GetExitCodeProcess receipt too.
+    # Its log honestly combines native stdout and stderr; either stream must
+    # therefore contain only the expected Hello line. Launcher streams remain
+    # separate diagnostics, never mislabeled as native program output.
+    hello_status=125
+    hello_output=$probe/combined-stdout-stderr.log
+    hello_receipt=$probe/native-exit.env
+    hello_helper=$(pwd)/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    hello_python=
+    for hello_python_name in python python3; do
+      if hello_python_candidate=$(command -v "$hello_python_name") &&
+         "$hello_python_candidate" -c 'import ctypes, os, sys; sys.exit(0 if os.name == "nt" and hasattr(ctypes.WinDLL("kernel32"), "GetExitCodeProcess") else 1)' \
+         >> "$probe/python-provider.log" 2>&1; then
+        hello_python=$hello_python_candidate
+        break
+      fi
+    done
+    if [ -n "$hello_python" ] &&
+       [ -f "$hello_helper" ] && [ ! -L "$hello_helper" ] &&
+       hello_helper_sha=$(sha256sum "$hello_helper") &&
+       hello_parent_native=$(cygpath -am "$probe") &&
+       hello_program_native=$(cygpath -am "$probe/hello$exe"); then
+      hello_helper_sha=${hello_helper_sha%% *}
+      hello_collector_status=0
+      "$hello_python" "$hello_helper" --output-parent="$hello_parent_native" \
+        --log-leaf=combined-stdout-stderr.log --receipt-leaf=native-exit.env \
+        --helper-sha256="$hello_helper_sha" --max-bytes=1048576 \
+        --timeout-seconds=60 --term-grace-seconds=5 --root-exit-policy=wait-job \
+        -- "$hello_program_native" > "$probe/collector-launch.stdout" \
+        2> "$probe/collector-launch.stderr" || hello_collector_status=$?
+      printf '%s\n' "$hello_collector_status" > "$probe/collector-exit-status"
+      hello_helper_after=$(sha256sum "$hello_helper")
+      hello_helper_after=${hello_helper_after%% *}
+      if [ "$hello_collector_status" -eq 0 ] && [ -f "$hello_receipt" ] &&
+         [ ! -L "$hello_receipt" ] && [ -f "$hello_output" ] &&
+         [ ! -L "$hello_output" ] &&
+         [ "$hello_helper_after" = "$hello_helper_sha" ] &&
+         awk -F= 'NF < 2 || seen[$1]++ {bad=1} END {exit bad}' "$hello_receipt"; then
+        hello_status=0
+        hello_log_sha=$(sha256sum "$hello_output")
+        hello_log_sha=${hello_log_sha%% *}
+        hello_log_bytes=$(wc -c < "$hello_output" | tr -d '[:space:]')
+        for hello_field in schema=simple-bounded-process-log-v1 status=complete \
+          reason=child-exit raw_status=0 native_exit_status=0 \
+          cleanup_status=not-needed cleanup_wait_code=not-observed cleanup_last_error=not-observed \
+          bound_raw_status=not-observed process_group=windows-job termination=job-terminate \
+          combined_stream=stdout-stderr artifact_limit=none root_exit_policy=wait-job \
+          job_remnants_terminated=no log_leaf=combined-stdout-stderr.log \
+          max_bytes=1048576 timeout_seconds=60 term_grace_seconds=5 \
+          "helper_sha256=$hello_helper_sha" "log_sha256=$hello_log_sha" \
+          "bytes_captured=$hello_log_bytes"; do
+          grep -Fxq "$hello_field" "$hello_receipt" || hello_status=125
+        done
+      fi
+    fi
+    ;;
+  *)
+    "$probe/hello$exe" > "$probe/stdout" 2> "$probe/stderr" || hello_status=$?
+    printf '%s\n' "$hello_status" > "$probe/exit-status"
+    ;;
+esac
 printf 'phase-ladder-%s-ok\n' "$next" > "$probe/expected-lf.stdout"
 printf 'phase-ladder-%s-ok\r\n' "$next" > "$probe/expected-crlf.stdout"
 if [ "$hello_status" -ne 0 ] || {
-  ! cmp -s "$probe/stdout" "$probe/expected-lf.stdout" &&
-  ! cmp -s "$probe/stdout" "$probe/expected-crlf.stdout"
+  ! cmp -s "$hello_output" "$probe/expected-lf.stdout" &&
+  ! cmp -s "$hello_output" "$probe/expected-crlf.stdout"
 }; then
   mkdir -p "$out_dir/$platform-rejected-p$next"
   cp "./$bin" "$out_dir/$platform-rejected-p$next/"
