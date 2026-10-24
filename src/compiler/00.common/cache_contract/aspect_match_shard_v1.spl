@@ -21,6 +21,8 @@
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1,
+    active_guard_root_admissible_v1}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
     SemanticQueryKeyV1, SemanticQueryReadV1}
 
@@ -39,6 +41,7 @@ pub struct DirectoryJoinPointFactsV1:
     sorted_child_roots: [text]
     complete: bool
     negative_root: text
+    active_guard_root: text
     facts_key: text
 
 pub struct PointcutSelNodeV1:
@@ -143,16 +146,27 @@ pub fn directory_facts_key_v1(f: DirectoryJoinPointFactsV1) -> text:
     for p in f.sorted_join_points:
         facts.push(_point_fact_text(p))
     _h("aop-dir-facts/v1", [f.scope_id, _join(f.sorted_member_files), _join(facts),
-        _join(f.sorted_child_roots), f.negative_root, "{f.complete}"])
+        _join(f.sorted_child_roots), f.negative_root, f.active_guard_root, "{f.complete}"])
 
+# No static guard consulted: equivalent to an empty, complete ActiveGuardRoot.
+# Callers whose join points depend on `@when`/cfg/feature use the guarded form.
 pub fn directory_join_point_facts_v1(scope_id: text, member_files: [text],
         join_points: [JoinPointFactV1], child_roots: [text], complete: bool) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_guarded_v1(scope_id, member_files, join_points, child_roots,
+        complete, active_guard_root_empty_v1(""))
+
+# ActiveGuardRoot enters the facts key; an incomplete (unevaluable-guard) root
+# makes the facts incomplete, so its shards are never admitted (miss).
+pub fn directory_join_point_facts_guarded_v1(scope_id: text, member_files: [text],
+        join_points: [JoinPointFactV1], child_roots: [text], inventory_complete: bool,
+        guards: ActiveGuardRootV1) -> DirectoryJoinPointFactsV1:
+    val complete = inventory_complete and active_guard_root_admissible_v1(guards)
     val files = _sorted_texts(member_files)
     val points = _sorted_points(join_points)
     val f = DirectoryJoinPointFactsV1(scope_id: scope_id, sorted_member_files: files,
         sorted_join_points: points, sorted_child_roots: _sorted_texts(child_roots),
         complete: complete, negative_root: _negative_root(scope_id, files, points, complete),
-        facts_key: "")
+        active_guard_root: guards.root_digest, facts_key: "")
     DirectoryJoinPointFactsV1(..f, facts_key: directory_facts_key_v1(f))
 
 fn _is_ident(s: text) -> bool:
@@ -397,6 +411,7 @@ pub fn aspect_weave_plan_delta_v1(old_shard: PointcutMatchShardV1, old_apply: Di
 
 export JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1, PointcutMatchShardV1
 export AdviceFacetsV1, PointcutMatchCacheV1, PointcutMatchAcquireV1, WeavePlanDeltaV1
+export directory_join_point_facts_guarded_v1
 export directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1
 export pointcut_match_key_v1, pointcut_match_shard_compute_v1
 export pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1
