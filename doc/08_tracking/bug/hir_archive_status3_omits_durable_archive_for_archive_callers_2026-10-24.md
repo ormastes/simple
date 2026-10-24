@@ -141,3 +141,79 @@ fixing the encoder/decoder nil-scalar asymmetry.
 Verification costs a full Stage 2 rebuild (~40 min on this host): the defect is
 in the pure-Simple self-hosted driver and only takes effect in a rebuilt Stage 2
 binary.
+
+## CORRECTION 2026-10-24: the verdict above is WRONG — not a producer gap
+
+This record concluded "**producer gap**, not an over-strict consumer", on the
+strength of the producer comment at `driver_hir_pipeline_lowering.spl:795-800`
+("Archive callers still require their separate durable archive below").
+**Withdrawn.** Both the consumer check and the producer's status-3 behaviour are
+correct. The defect is one layer below both, in the generated HIR decoder.
+
+### What actually happens
+
+`src/compiler/20.hir/generated/hir_codec.spl` decoded every non-optional scalar
+as
+
+```simple
+val f = if raw == "N": nil else: flat_pool_parse_i64(raw)
+if f == nil: r.reject_malformed("nil_in_non_optional_scalar")
+```
+
+**nil's immediate is 3**, so a genuine i64 `3` compares equal to nil and the
+blob is refused. Measured against the Stage 2 compiler itself: `i64 3 -> nil`,
+`i64 7 -> 7`; bool and text are fine. 231 such sites existed.
+
+So the chain is: any module whose HIR carries a `3` in a non-optional scalar is
+refused at decode -> the codec refusal sets `store_refused_codec` -> the shard
+transaction returns **status 3** with no archive, exactly as designed -> the
+archive-production controller fails closed, exactly as designed. Measured:
+re-running `test_runner_build` with `SIMPLE_HIR_CACHE_SELFCHECK=1` gives
+**259/259 modules `reason=decode`**, and a one-file hello-world probe on the
+archive route reproduces in ~1 s.
+
+The entry module named in the logs
+(`src/app/cli/_CliMain/main_and_help.spl` for `compiler_cli_build`,
+`src/app/test_runner_new/main.spl` for `test_runner_build`) is not special — it
+is merely the first store attempted.
+
+### Why the earlier reasoning went wrong
+
+The producer comment is real and says what it says, but it describes the
+*cache-entry vs durable-archive* distinction, not this situation. I read a
+true sentence as an explanation of the observed failure without establishing
+that the refusal itself was legitimate. It was not: the codec was refusing
+every module for a reason that has nothing to do with archives.
+
+The two fix shapes rejected above remain correctly rejected, and for the reasons
+given — they would both have papered over a universal decode failure.
+
+### Corroboration this should have been found by
+
+`doc/08_tracking/bug/hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md`
+— "HIR codec writes integer 3 and bool true as nil under a stage-2 compiler" —
+is the **encoder half of this exact hazard**, fixed 2026-10-10
+(`hir_codec_support.spl:362-383`). The decoder half was never done. That record
+existed the whole time and names the mechanism outright.
+
+### Why only the archive route shows it
+
+The archive-production route requires `SIMPLE_BOOTSTRAP != "1"` plus a runtime
+bundle and strict tool authority (`driver_orchestration.spl:92-105`,
+`native_tool_authority_v1.spl:160-166`). The compiler-test matrix sets exactly
+that (`bootstrap-phase-verification.shs:878`, `:892`, `:921-923`), whereas
+Stage 2/3/4 builds run with `SIMPLE_BOOTSTRAP=1`
+(`bootstrap-from-scratch.sh:3630`, `:4157`, `:2691`) and take the non-archive
+route, which tolerates a codec refusal (`driver_hir_pipeline_lowering.spl:1252`
+counts status 3 as lowered). That is why Stage 2 itself builds 1,487 modules
+happily while the full-CLI build inside the matrix cannot complete one.
+
+### The fix
+
+In the generator (`src/app/compiler_schema/codec_gen.spl`, `_emit_dec`): refuse
+the wire nil sentinel on the **raw text**, before any typed local exists, then
+bind a plain `i64`/`bool`/`text`. No decoded scalar is ever compared against
+nil. `_emit_nil_scalar_reject` and its two call sites are deleted as redundant.
+Wire format unchanged; the encoder is untouched. 290 reject sites after
+regeneration (231 plus 59 optional-inner scalars that previously yielded
+`Some(nil)`), and zero `== nil` tests on decoded scalars.

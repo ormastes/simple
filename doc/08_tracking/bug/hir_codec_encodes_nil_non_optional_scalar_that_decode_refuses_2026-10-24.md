@@ -139,3 +139,36 @@ type-and-span overhead dominates, not the docstrings (~2 KB).
    rather than only under the sampling knob.
 4. Rename one of the two `decode` counters so a store refusal and a load
    rejection are not reported with the same word.
+
+## CORRECTION 2026-10-24: right symptom, wrong mechanism
+
+This record attributes the `reason=decode` refusal to an **encoder/decoder
+asymmetry** — the encoder writing a nil sentinel for a nil non-optional scalar
+with `w.ok` still true, while 231 decoder sites reject that byte. The asymmetry
+described is real as a code reading, but it is **not** what fails here, and the
+emphasis is wrong in a way that would send the next reader to the encoder.
+
+**The decoder misreads a legitimate value.** It decoded each non-optional scalar
+as `val f = if raw == "N": nil else: flat_pool_parse_i64(raw)` and then tested
+`f == nil`. **nil's immediate is 3**, so a genuine i64 `3` compares equal to nil
+and the blob is refused. Measured against the Stage 2 compiler: `i64 3 -> nil`,
+`i64 7 -> 7`.
+
+So no nil ever had to be written. Any module whose HIR carries a `3` in a
+non-optional scalar slot could never decode — measured as **259/259 modules
+`reason=decode`**, not an occasional asymmetry.
+
+What this record got right: that the failing step is decode rather than
+re-encode (measured, via `reason=decode bytes=69622` where a re-encode mismatch
+would print `reason=reencode`); that the optional-payload half is sound; and
+that `reason=unstable` collapses two distinct failures into one word. What it got
+wrong: naming the encoder as the side at fault, and calling the cause an
+asymmetry rather than a type-punning collision with nil's immediate.
+
+The encoder side of this same hazard was already fixed on 2026-10-10 —
+`hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md`, "HIR codec writes
+integer 3 and bool true as nil under a stage-2 compiler". **That record names the
+mechanism and should have been found from this one.** The decoder half is fixed
+by refusing the sentinel on the raw text before any typed local exists; see
+`hir_archive_status3_omits_durable_archive_for_archive_callers_2026-10-24.md`
+§ CORRECTION for the full chain.
