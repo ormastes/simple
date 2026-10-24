@@ -4148,7 +4148,21 @@ impl MirLowering:
         var dict_key_hir: HirType? = nil
         var dict_value_hir: HirType? = nil
         var declared_element_type: HirType? = nil
-        if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
+        # Optional-typed collection binder (`case Some(xs)` / nullable variant
+        # payload `[T]?`): the authored nil guard is the contract, so iterate
+        # the payload array with the inner element type (#143, binder was I64).
+        var optional_array_payload = false
+        var peeled_collection_hir: HirType? = self.for_collection_declared_type(collection_local, iter)
+        if val declared_collection_hir = peeled_collection_hir:
+            match declared_collection_hir.kind:
+                case HirTypeKind.Optional(opt_inner):
+                    match opt_inner.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            peeled_collection_hir = Some(opt_inner)
+                            optional_array_payload = true
+                        case _: ()
+                case _: ()
+        if val collection_hir_type = peeled_collection_hir:
             match collection_hir_type.kind:
                 case HirTypeKind.Dict(dict_key_t, dict_value_t):
                     dict_key_hir = Some(dict_key_t)
@@ -4251,8 +4265,16 @@ impl MirLowering:
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
-        if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
-            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span, declared_element_type)
+        var array_iter_local = collection_local
+        if optional_array_payload and not collection_is_erased_word:
+            if val opt_arr_mir = self.local_mir_type_of(collection_local):
+                match opt_arr_mir.kind:
+                    case MirTypeKind.Tuple(_):
+                        array_iter_local = self.option_payload_or_self(collection_local)
+                    case _: ()
+
+        if self.local_is_runtime_array(collection_local) or ((collection_is_erased_word or array_iter_local.id != collection_local.id) and element_type_from_hir):
+            return self.lower_for_array_indexed(var_, array_iter_local, element_type, body, source_span, declared_element_type)
 
         # Erased-collection lane: `for x in v` where v's declared type is the
         # type-erasure slot (`Any` / `Optional(Any)` — the JSON facade's `any?`
