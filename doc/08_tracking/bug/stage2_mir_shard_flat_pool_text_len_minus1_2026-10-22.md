@@ -1055,3 +1055,24 @@ mismatch on the ad-hoc entry. So the seed-JIT-correct / candidate-AOT-broken
 differential stands but cannot be cheaply closed seed-side; the owner can
 complete it after the TextSpan/SCV seed nits, or debug the candidate-AOT
 decode read directly (candidate + the minimal warm-cache-hit repro above).
+
+## Annotation 2026-10-24 (lane D, lane 58): split-field probe - split read VALID; kill is restore-write -> dump-read in-call
+
+The split-field discriminator (env-gated print of every blob.split("\n") field's
+rt_string_len in build_module_from_flat_pool_blob, lane-58 candidate on a clean
+SCV store): all 160 fields of the p2_add blob are VALID - 10 len=0 (the empty
+pool fields), 146 len=1, 2 len=26, 2 len=7 - ZERO len=-1 - and the capture
+refusal still fires. blob.split("\n"), the reader, and empty-field handling are
+INNOCENT in the candidate. The -1 handles are created between
+flat_pools_restore_all's pool-global write and the capture dump's read, ~100
+source lines apart in the same call, with no pool reset, no scope end
+(streaming gate: dump precedes scope end), and the dump reading the same
+module-global array object the restore wrote. The values are valid at write and
+dead at read inside one call frame. Also documented: probe experiments that
+temporarily modify admitted fixtures pollute the persistent SCV snapshot index
+(build/scv), poisoning subsequently-built candidates with
+snapshot-index-drift at runtime; clear the store and rebuild to recover.
+Owner next step: debugger watch on the refusing pool's array object between
+flat_pools_restore_all (module_assembly.spl:1456) and the capture dump
+(module_assembly.spl:1584-1609) in the delegated worker; the array's element 0
+transitions from a valid "" to rt_string_len=-1 within that window.
