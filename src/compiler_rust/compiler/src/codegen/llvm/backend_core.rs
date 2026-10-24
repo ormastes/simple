@@ -107,6 +107,19 @@ static LLVM_MEMPROF_ENABLED: OnceLock<bool> = OnceLock::new();
 pub(super) fn llvm_memprof_enabled() -> bool {
     *LLVM_MEMPROF_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_MEMPROF").map(|v| v == "1").unwrap_or(false))
 }
+/// LLVM OS/env triple suffix for a Windows target.
+///
+/// The env component must follow the target's linker flavor: a `-msvc` triple
+/// makes LLVM emit references to the MSVC CRT float marker `_fltused` in any
+/// function that touches floating point, which the mingw CRT does not define,
+/// so gnu-lane (ld.lld + llvm-mingw) links failed with `undefined symbol: _fltused`.
+fn windows_os_suffix(target: Target) -> &'static str {
+    match target.linker_flavor() {
+        simple_common::target::LinkerFlavor::Gnu => "pc-windows-gnu",
+        _ => "pc-windows-msvc",
+    }
+}
+
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
 
@@ -1162,7 +1175,7 @@ impl LlvmBackend {
         let os_str = match self.target.os {
             TargetOS::Linux => "unknown-linux-gnu",
             TargetOS::MacOS => "apple-darwin",
-            TargetOS::Windows => "pc-windows-msvc",
+            TargetOS::Windows => windows_os_suffix(self.target),
             TargetOS::FreeBSD => "unknown-freebsd",
             TargetOS::SimpleOS => "unknown-none-elf",
             TargetOS::Any | TargetOS::None => "unknown-unknown",
@@ -2106,5 +2119,23 @@ mod default_x86_64_cpu_tests {
         with_forced(Some("znver9-turbo"), || {
             assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
         });
+    }
+}
+
+#[cfg(test)]
+mod windows_triple_env_tests {
+    use super::windows_os_suffix;
+    use simple_common::target::Target;
+
+    #[test]
+    fn gnu_windows_target_emits_gnu_triple() {
+        let gnu = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        assert_eq!(windows_os_suffix(gnu), "pc-windows-gnu");
+    }
+
+    #[test]
+    fn msvc_windows_target_keeps_msvc_triple() {
+        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(windows_os_suffix(msvc), "pc-windows-msvc");
     }
 }
