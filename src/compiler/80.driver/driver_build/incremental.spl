@@ -82,6 +82,7 @@ fn incremental_hash_text(content: text) -> i64:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_src_fingerprint_memo: text = "@@unset@@"
+var _stdlib_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_portable_root_memo_v1: text = ""
 var _frontend_portable_authority_memo_v1: text = ""
 var _frontend_portable_digest_memo_v1: text = ""
@@ -174,6 +175,48 @@ fn native_build_compiler_source_fingerprint() -> text:
             fp = "{digest.substring(0, 16)}n{lines.len()}"
     _compiler_src_fingerprint_memo = fp
     fp
+
+pub fn native_build_spl_tree_fingerprint(root: text) -> text:
+    """Content fingerprint of every *.spl under `root` ("" when root is absent).
+
+    Per-file "path|size|sha256" lines in sorted walk order, digested via a
+    pid-scoped temp file (same method as the compiler-source fingerprint).
+    """
+    if not rt_dir_exists(root):
+        return ""
+    var lines: [text] = []
+    var dirs: [text] = [root]
+    var i = 0
+    while i < dirs.len():
+        val dir = dirs[i]
+        i = i + 1
+        val entries = incremental_sorted_text(dir_list(dir) ?? [])
+        for entry in entries:
+            val full = dir + "/" + entry
+            if rt_dir_exists(full):
+                dirs = dirs.push(full)
+            elif entry.ends_with(".spl"):
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    dir_create_all("build")
+    val tmp = "build/.spl_tree_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            fp = "{digest.substring(0, 16)}n{lines.len()}"
+    fp
+
+fn native_build_stdlib_source_fingerprint() -> text:
+    """Fingerprint of src/lib/**/*.spl — the stdlib is read as SOURCE on every
+    run and shapes the compiler's own behaviour, so it is a producer input
+    (live_object_key.sdn component producer_stdlib_src; closes known gap
+    stdlib_source). "" outside a repo checkout, like the compiler fingerprint.
+    """
+    if _stdlib_src_fingerprint_memo != "@@unset@@":
+        return _stdlib_src_fingerprint_memo
+    _stdlib_src_fingerprint_memo = native_build_spl_tree_fingerprint("src/lib")
+    _stdlib_src_fingerprint_memo
 
 fn native_build_frontend_source_fingerprint() -> text:
     """Fingerprint only parser/cache sources for front-end cache admission.
@@ -504,7 +547,11 @@ fn native_build_compiler_identity() -> text:
     val src_fp = native_build_compiler_source_fingerprint()
     val hash = native_build_compiler_executable_hash()
     if hash != "":
-        val compiler_fp = if src_fp == "": "embedded" else: src_fp
+        val lib_fp = native_build_stdlib_source_fingerprint()
+        val compiler_only_fp = if src_fp == "": "embedded" else: src_fp
+        # stdlib is a compiler-behaviour input (src/lib is interpreted as
+        # source every run); "" outside a checkout keeps the identity unchanged.
+        val compiler_fp = if lib_fp == "": compiler_only_fp else: "{compiler_only_fp}+stdlib:{lib_fp}"
         val runtime_path = sosix_env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
         val runtime_bundle = sosix_env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)

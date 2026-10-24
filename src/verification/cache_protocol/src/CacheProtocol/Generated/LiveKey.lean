@@ -50,6 +50,7 @@ inductive Field where
   | entry_deps_iface
   | entry_interface_digest
   | entry_module_witness
+  | producer_stdlib_src
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -88,6 +89,7 @@ def Field.name : Field → String
   | .entry_deps_iface => "entry_deps_iface"
   | .entry_interface_digest => "entry_interface_digest"
   | .entry_module_witness => "entry_module_witness"
+  | .producer_stdlib_src => "producer_stdlib_src"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -126,8 +128,9 @@ def Field.kind : Field → String
   | .entry_deps_iface => "scalar"
   | .entry_interface_digest => "scalar"
   | .entry_module_witness => "scalar"
+  | .producer_stdlib_src => "scalar"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
@@ -141,7 +144,6 @@ inductive Gap where
   | linker_binary_version
   | system_library_content
   | import_lib_export_sets
-  | stdlib_source
   | debug_info_path_prefix
   | advice_body_weave_root
   | hash_algorithm_tag
@@ -150,7 +152,7 @@ inductive Gap where
   | scope_key_unframed
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .ctfe_env_reads, .guard_id, .linker_binary_version, .system_library_content, .import_lib_export_sets, .stdlib_source, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe, .scope_key_unframed]
+def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .ctfe_env_reads, .guard_id, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe, .scope_key_unframed]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -346,6 +348,11 @@ theorem entry_module_witness_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .entry_module_witness ≠ k2 .entry_module_witness) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .entry_module_witness)
 
+-- pos 36 (scalar) bound to src/compiler/80.driver/driver_build/incremental.spl#native_build_stdlib_source_fingerprint
+theorem producer_stdlib_src_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .producer_stdlib_src ≠ k2 .producer_stdlib_src) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .producer_stdlib_src)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
@@ -384,11 +391,6 @@ theorem system_library_content_gap_invisible :
 /-- Known gap: the live key does not see `import_lib_export_sets`. -/
 theorem import_lib_export_sets_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .import_lib_export_sets ≠ j.gap .import_lib_export_sets :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `stdlib_source`. -/
-theorem stdlib_source_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .stdlib_source ≠ j.gap .stdlib_source :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 /-- Known gap: the live key does not see `debug_info_path_prefix`. -/
