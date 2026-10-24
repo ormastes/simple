@@ -273,3 +273,65 @@ quiet). So the smoke's exit-124 budget pressure is (a) the parallel
 lane's parse-pool blob lifetime (store failures force re-work) and (b)
 contention-sensitive codec/validation cost — both outside the lowering
 path itself.
+
+## Sibling line release/1.0.0 (ported with af10da4f592 / PR #4249)
+
+The release/1.0.0 line tracks this bug under its own update history. The two
+entries below back the fold-visitor regeneration and the env-restore unwrap
+landed here; the rest of that history stays on release/1.0.0.
+
+### Update 2026-10-24 (x86_64 Linux): `[]` literal SIGSEGV — ROOT CAUSE is the generated fold walker
+
+After #4217 (codec fail-closed) and #4230 (link fix), CI run 39952380127 (release/1.0.0 @
+`a5aa33bc618`, linux-cranelift) still failed Stage 2 sanity on this probe, now later:
+
+```
+#0 compiler.hir.generated.hir_visitor.walk_hir_type
+#1 walk_hir_expr      (ArrayLit arm)
+#2 walk_hir_stmt / #3 walk_hir_block
+#4 representation_boundary.unsafe_observations.representation_observe_function_v1
+#7 driver_hir_pipeline_passes.run_representation_manifest_pass
+```
+
+Bisected with the CI's rejected Stage 2 binary down to `fn main(): var out: [text] = []`. Every
+empty array literal crashes it (the empty path is where lowering stores `Some(default)` as the
+element type).
+
+Root cause, from gdb memory at the fault: the object `walk_hir_type` receives has a heap header
+in its first two words (`0x0000001800000007`, `0xf198715900000001`) and the real `HirType`
+pointer as payload at +16. In other words, it is the `Some` box. The generated fold walker
+`hir_visitor.spl` (from `src/app/compiler_schema/fold_gen.spl` `_fold_lines`) emitted
+`acc = walk_hir_type<C>(b_type_, acc, f)` for `ArrayLit(elements, type_: HirType?)`, passing the
+Option straight into a `HirType` parameter. Its sibling `hir_visit.spl` (`visitor_gen.spl`)
+already unwraps with `match b_type_: case Some(opt1): ...`. The interpreter tolerates the
+un-unwrapped form, so only native Stage 2 faults.
+
+Fix: `_fold_lines` unwraps optional NODE payloads the same way, and both fold walkers are
+regenerated. That covers every optional node child in `hir_visitor.spl` and `ast_visitor.spl`:
+ArrayLit/ArrayRepeat/DictLit element types, optional `else` blocks and optional values. The
+pin is `hir_generated_optional_child_spec` "fold walker source unwraps the optional ArrayLit
+element type" (fails on the old output, passes on the new).
+
+Two earlier hypotheses were disproven by CI and dropped (PR #4235, closed): first rewriting the
+nested optional if-expression that builds `elem_type` as statements (run 39963503260), then
+building the default `HirType` at the use site with the live span (run 39969828508). Both still
+SIGSEGVed at the same PC.
+
+### Update 2026-10-24: after the fold-walker fix, receiver gate fails on env restore (same Some-box class)
+
+With #4237, Stage 2 sanity passes on x86_64 Linux (CI run 39978925070), and the struct receiver
+guard passes. The positional dynload route on this fixture no longer SIGSEGVs, but it fails with
+`error: could not restore native-build cache environment` (`bootstrap_main.spl:455`). I reproduced
+this locally with the receiver-rejected candidate from CI run 39994046780. gdb shows
+`native_build_cache_restore(previous: text?)` receiving a `Some` box (header
+`0x0000001800000007`/`0xf198715900000001`, text pointer at +16). After `if previous == nil:
+return ...`, native Stage 2 passed the box itself to `sosix_env_set`. `sosix_admit_c_string`
+refused it, and `rt_env_set` was never called for the restore. Without an inherited
+`SIMPLE_NATIVE_BUILD_CACHE_DIR` the restore takes the remove branch and succeeds, which is why the
+sanity battery's positional probe passed.
+
+Fix: explicit `if val present = previous:` unwrap in `native_build_cache_restore` and
+`native_build_output_mode_restore`, marked against
+`optional_array_payload_narrowing_native_2026_10_21` (the same narrowing gap, applying to `text?`
+as well as arrays). Other `if x == nil: return` followed by using `x` as `T` sites are likely
+exposed the same way; they have not been audited.
