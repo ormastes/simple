@@ -9,9 +9,9 @@
 # the key the legacy ConcreteType path builds (`name:<symbol>` definition,
 # `canonical_type_id_of_concrete` argument ids).
 #
-# Hash agility: every stored digest is `<algo>:<hex>`; at most three
-# algorithms are admitted and an unknown or malformed tag is a MISS, never a
-# reinterpretation. Only sha256 is admitted until the algorithm registry lands.
+# Hash agility: instance keys are DigestV1 text from the shared registry
+# (hash_algorithm_registry_v1, at most three algorithms per identity); an
+# unknown or malformed tag is a MISS, never a reinterpretation.
 #
 # No locks: entries are set-once. A second publication of the SAME key with
 # DIFFERENT bytes is nondeterminism: the entry is quarantined (every later
@@ -29,37 +29,20 @@ use compiler.monomorphize.mono_key.{MonoSemanticKey, MonoArtifactKey,
     mono_artifact_key_canonical_text, mono_semantic_key_is_generic}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse,
+    digest_v1_identity_ok}
 
-pub val GENERIC_DIGEST_ALGOS_V1 = ["sha256"]   # admitted; at most three
-
-# `<algo>:<hex>` for an admitted algorithm, "" otherwise.
-pub fn generic_digest_tag_v1(algo: text, hex: text) -> text:
-    if not GENERIC_DIGEST_ALGOS_V1.contains(algo) or hex == "":
-        return ""
-    algo + ":" + hex
-
-# True iff `tagged` names an admitted algorithm with a lowercase-hex body of
-# that algorithm's width.
+# An instance key is admitted only as a parseable DigestV1 of a KNOWN,
+# collision-resistant algorithm (hash_algorithm_registry_v1). Unknown or
+# malformed tags, and fast fingerprints (xxh3/crc32), are a MISS.
 pub fn generic_digest_admitted_v1(tagged: text) -> bool:
-    val colon = tagged.index_of(":")
-    if colon <= 0:
-        return false
-    val algo = tagged.substring(0, colon)
-    if not GENERIC_DIGEST_ALGOS_V1.contains(algo):
-        return false
-    val hex = tagged.substring(colon + 1)
-    if algo == "sha256" and hex.len() != 64:
-        return false
-    var i = 0
-    while i < hex.len():
-        val c = hex.char_code_at(i)
-        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
-            return false
-        i = i + 1
-    true
+    match digest_v1_parse(tagged):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
 
+# The ConcreteTldrKey is already an algorithm-tagged DigestV1.
 pub fn generic_instance_key_v1(view: ConcreteTldrAstViewV1) -> text:
-    generic_digest_tag_v1("sha256", view.semantic_key)
+    view.semantic_key
 
 fn _join_ids_v1(ts: [MType]) -> text:
     var parts: [text] = []
@@ -103,6 +86,9 @@ pub fn generic_instance_semantic_key_v1(view: ConcreteTldrAstViewV1) -> [MonoSem
         return []
     [key]
 
+fn _instance_flight_key_v1(instance_key: text) -> text:
+    cache_single_flight_key_v1("generic.instance", instance_key)
+
 struct GenericInstanceEntryV1:
     semantic_text: text
     mir: [u8]
@@ -121,10 +107,24 @@ class GenericInstanceCacheV1:
         GenericInstanceCacheV1(entries: {}, flights: CacheSingleFlightV1.create(),
             hits: 0, misses: 0, quarantines: 0)
 
-    # Leader/waiter role for producing `instance_key`'s MIR or object.
-    me begin_produce(instance_key: text, request_id: text) -> bool:
-        val (role, _flight) = self.flights.join(cache_single_flight_key_v1("generic.instance", instance_key), request_id)
+    # Leader/waiter role for producing `instance_key`'s MIR. The leader joins
+    # with `now_ms` as its redrive start time and MUST end its flight: a
+    # successful put_mir completes it with the bytes; every failed put_mir
+    # and abandon_produce complete it with nil, so waiters re-produce instead
+    # of waiting forever. A leader that dies without either is re-driven by
+    # `redrive` once `timeout_ms` has passed.
+    me begin_produce(instance_key: text, request_id: text, now_ms: i64) -> bool:
+        val (role, _flight) = self.flights.join_at(_instance_flight_key_v1(instance_key), request_id, now_ms)
         role == SINGLE_FLIGHT_LEADER_V1
+
+    me abandon_produce(instance_key: text, request_id: text) -> bool:
+        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, nil)
+
+    me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
+        self.flights.redrive(now_ms, timeout_ms)
+
+    fn inflight_count() -> i64:
+        self.flights.inflight_count()
 
     me _entry_for(instance_key: text, semantic: MonoSemanticKey) -> [GenericInstanceEntryV1]:
         if not generic_digest_admitted_v1(instance_key):
@@ -145,8 +145,15 @@ class GenericInstanceCacheV1:
 
     # Set-once publication of target-neutral instance MIR. False when the key
     # is not admitted, names another instance, or the bytes differ from an
-    # earlier publication (quarantined).
+    # earlier publication (quarantined). Always ends `request_id`'s flight
+    # (bytes on success, nil on failure); a non-leader's completion is a no-op.
     me put_mir(instance_key: text, semantic: MonoSemanticKey, request_id: text, mir: [u8]) -> bool:
+        val ok = self._publish_mir(instance_key, semantic, mir)
+        val result: [u8]? = if ok: Some(mir) else: nil
+        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, result)
+        ok
+
+    me _publish_mir(instance_key: text, semantic: MonoSemanticKey, mir: [u8]) -> bool:
         val found = self._entry_for(instance_key, semantic)
         if found.len() == 0:
             return false
@@ -161,7 +168,6 @@ class GenericInstanceCacheV1:
         e.mir = mir
         e.has_mir = true
         self.entries[instance_key] = e
-        self.flights.complete(cache_single_flight_key_v1("generic.instance", instance_key), request_id, mir)
         true
 
     me get_mir(instance_key: text, semantic: MonoSemanticKey) -> [[u8]]:
@@ -206,6 +212,6 @@ class GenericInstanceCacheV1:
 pub fn generic_instance_cache_new() -> GenericInstanceCacheV1:
     GenericInstanceCacheV1.create()
 
-export GENERIC_DIGEST_ALGOS_V1, generic_digest_tag_v1, generic_digest_admitted_v1
+export generic_digest_admitted_v1
 export generic_instance_key_v1, generic_canonical_type_id_v1, generic_instance_semantic_key_v1
 export GenericInstanceCacheV1, generic_instance_cache_new
