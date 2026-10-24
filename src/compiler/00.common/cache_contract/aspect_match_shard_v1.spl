@@ -95,7 +95,7 @@ fn _h(domain: text, parts: [text]) -> text:
     var framed = "{domain}\u0000"
     for p in parts:
         framed = framed + "{p.len()}:{p}\u0000"
-    sha256_u8_hex(text_to_bytes(framed))
+    "sha256/" + sha256_u8_hex(text_to_bytes(framed))
 
 fn _sorted_texts(values: [text]) -> [text]:
     var out: [text] = []
@@ -346,7 +346,8 @@ pub fn pointcut_match_cache_new_v1() -> PointcutMatchCacheV1:
 pub fn pointcut_match_cache_acquire_v1(cache: PointcutMatchCacheV1, sel: PointcutSelectorV1,
         f: DirectoryJoinPointFactsV1) -> PointcutMatchAcquireV1:
     val key = pointcut_match_key_v1(sel, f)
-    val cacheable = sel.supported and f.complete
+    val cacheable = sel.supported and f.complete and aop_digest_known_v1(sel.selector_digest) and
+        aop_digest_known_v1(f.facts_key)
     if cacheable and cache.shards.contains_key(key):
         return PointcutMatchAcquireV1(cache: cache, key: key, shard: cache.shards[key],
             hit: true, cacheable: true)
@@ -408,19 +409,25 @@ export aspect_advice_mode_cacheable_v1, advice_apply_key_v1, aspect_weave_plan_d
 # query's positive read of the match result.
 pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1,
         shard: PointcutMatchShardV1, profile_digest: text) -> [SemanticQueryReadV1]:
+    # The v1 read manifest carries bare SHA-256 hex (its implied algorithm).
+    # Any other algorithm emits no reads, so the consumer sees no coverage
+    # (conservative), never a mislabelled digest.
+    val all = [f.facts_key, f.negative_root, shard.match_digest, sel.selector_digest]
+    for d in all:
+        if aop_digest_algo_v1(d) != "sha256": return []
     var coverage = SemanticCoverageV1.Conservative
     if shard.complete: coverage = SemanticCoverageV1.Complete
     val facts_q = SemanticQueryKeyV1(kind: "aop.directory_facts", stable_entity_id: f.scope_id,
-        semantic_profile_digest: profile_digest, parameter_digest: f.facts_key)
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(f.facts_key))
     val match_q = SemanticQueryKeyV1(kind: "aop.match", stable_entity_id: f.scope_id,
-        semantic_profile_digest: profile_digest, parameter_digest: pointcut_match_key_v1(sel, f))
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(pointcut_match_key_v1(sel, f)))
     val weave_q = SemanticQueryKeyV1(kind: "aop.weave", stable_entity_id: f.scope_id,
-        semantic_profile_digest: profile_digest, parameter_digest: shard.match_digest)
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(shard.match_digest))
     [SemanticQueryReadV1(producer: facts_q, consumer: match_q, facet: "membership:join-points",
-        ordinal: 0, consumed_fingerprint: f.facts_key, witness_digest: f.negative_root,
+        ordinal: 0, consumed_fingerprint: _hex(f.facts_key), witness_digest: _hex(f.negative_root),
         partition_id: f.scope_id, completeness: coverage),
      SemanticQueryReadV1(producer: match_q, consumer: weave_q, facet: "aop-match",
-        ordinal: 1, consumed_fingerprint: shard.match_digest, witness_digest: sel.selector_digest,
+        ordinal: 1, consumed_fingerprint: _hex(shard.match_digest), witness_digest: _hex(sel.selector_digest),
         partition_id: f.scope_id, completeness: coverage)]
 
 export aspect_match_forward_reads_v1
@@ -451,3 +458,44 @@ pub fn pointcut_match_universe_v1(sel: PointcutSelectorV1, dirs: [DirectoryJoinP
         reason: reason)
 
 export PointcutSelNodeV1, PointcutUniverseMatchV1, pointcut_match_universe_v1
+
+# Hash agility (doc/05_design/compiler/incremental_build/packed_binary_ast_v1.md
+# §8): every digest here is `<algo>/<hex>`. Persisted identity may only use a
+# collision-resistant registry algorithm (sha256=1, blake3=2, sha3-256=3; at
+# most three in use). This producer writes sha256. An unknown or fast-class
+# algorithm (xxh3-*, crc32) is ABSENT: never a match, never cacheable.
+pub fn aop_digest_algos_v1() -> [text]:
+    ["sha256", "blake3", "sha3-256"]
+
+pub fn aop_digest_algo_v1(d: text) -> text:
+    val i = d.find("/")
+    if i == nil: return ""
+    d.slice(0, i!)
+
+fn _hex(d: text) -> text:
+    val i = d.find("/")
+    if i == nil: return ""
+    d.slice(i! + 1, d.len())
+
+pub fn aop_digest_known_v1(d: text) -> bool:
+    if not aop_digest_algos_v1().contains(aop_digest_algo_v1(d)): return false
+    val h = _hex(d)
+    if h.len() != 64: return false
+    for ch in h.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")): return false
+    true
+
+# Negotiation over 1..3 digests per identity: a hit needs at least one KNOWN
+# algorithm present on both sides AND every such common digest equal.
+pub fn aop_digest_tables_match_v1(a: [text], b: [text]) -> bool:
+    if a.len() == 0 or a.len() > 3 or b.len() == 0 or b.len() > 3: return false
+    var common = 0
+    for x in a:
+        if not aop_digest_known_v1(x): continue
+        for y in b:
+            if aop_digest_known_v1(y) and aop_digest_algo_v1(x) == aop_digest_algo_v1(y):
+                if x != y: return false
+                common = common + 1
+    common > 0
+
+export aop_digest_algos_v1, aop_digest_algo_v1, aop_digest_known_v1, aop_digest_tables_match_v1
