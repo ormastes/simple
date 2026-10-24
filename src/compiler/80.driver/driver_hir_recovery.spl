@@ -153,6 +153,26 @@ pub fn hir_shard_recovery_inventory(queue: text, identity: text, paths: [text]) 
     val _released = file_unlock(fd)
     published
 
+# Rows the go-to-end walk will never claim (excluded at HIR). Published beside
+# the inventory under the same lock and the same must-match rule; the inventory
+# itself is untouched so close_inventory and the link path see every row.
+pub fn hir_shard_recovery_excluded(queue: text, identity: text, names: [text]) -> bool:
+    if identity == "": return false
+    var rows: [text] = [identity]
+    for name in names:
+        if name == "" or name.contains("\n"): return false
+        rows = rows.push(name)
+    val record = rows.join("\n")
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0: return false
+    var published = false
+    if file_exists("{queue}/excluded"):
+        published = file_read("{queue}/excluded") == record
+    else:
+        published = hir_shard_record_publish("{queue}/excluded", record)
+    val _released = file_unlock(fd)
+    published
+
 # Coordinator only, after every child has stopped. Acquire only unclaimed
 # inventory rows; existing worker claims and their terminals stay immutable.
 pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
@@ -178,11 +198,15 @@ pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
 pub fn hir_shard_recovery_unclaimed_count(queue: text) -> i64:
     val inventory = file_read("{queue}/inventory").split("\n")
     if inventory.len() < 2 or inventory[0] == "": return -1
+    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
     var unclaimed: i64 = 0
     var index: i64 = 1
     while index < inventory.len():
         val path = inventory[index]
         if path == "": return -1
+        if excluded.contains(path):
+            index = index + 1
+            continue
         if not file_exists("{hir_shard_record_base(queue, path)}.claim"):
             unclaimed = unclaimed + 1
         index = index + 1

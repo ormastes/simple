@@ -17,6 +17,7 @@
 # Unset, empty, "0" or "1" disables it and nothing changes.
 # Design and risks: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use std.io_runtime.{env_set, exit, getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 use std.nogc_sync_mut.sffi.process.{fork_shared_heap_v1, fork_child_exit, process_wait_raw}
@@ -54,6 +55,10 @@ pub fn native_mir_fork_workers_v1() -> i64:
 pub fn native_mir_fork_child_owner_v1(root_owner: text, index: i64, count: i64, attempt: i64) -> text:
     val base = "{root_owner}{HIR_SHARD_FORK_OWNER_MARK_V1}{index}/{count}"
     if attempt <= 0: base else: "{base}~r{attempt}"
+
+# Same predicate as the coordinator (CLI flags reach the root as the env value).
+pub fn native_mir_fork_fail_fast_v1(env_value: text, ci_value: text) -> bool:
+    compile_fail_fast_requested([], env_value, ci_value)
 
 # Re-fork share <index> after its child stopped. Only an UNFINISHED child left
 # residue: a child that ran to its end sealed its own failures and called
@@ -96,7 +101,7 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
     if not env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""):
         print "[mir-fork] refused: worker-count environment could not be cleared"
         return native_mir_fork_decline_v1(queue, root_owner)
-    val fail_fast = (env_get_nullable("SIMPLE_COMPILE_FAIL_FAST") ?? "") == "1"
+    val fail_fast = native_mir_fork_fail_fast_v1(env_get_nullable("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get_nullable("CI") ?? "")
     val parent_pid = getpid()
     var retries: [i64] = []
     var shares: [i64] = []

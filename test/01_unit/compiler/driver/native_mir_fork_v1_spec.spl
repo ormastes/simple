@@ -29,12 +29,13 @@ use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, getpid}
 use compiler.driver.driver_build.native_mir_fork_v1.{
     native_mir_fork_workers_of_v1, native_mir_fork_child_owner_v1,
-    native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1,
+    native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1, native_mir_fork_fail_fast_v1,
     NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
     hir_shard_recovery_seal, hir_shard_recovery_progress,
     hir_shard_recovery_failure_count, hir_shard_recovery_owner_tree_progress_v1,
-    hir_shard_recovery_inventory, hir_shard_recovery_unclaimed_count}
+    hir_shard_recovery_inventory, hir_shard_recovery_unclaimed_count,
+    hir_shard_recovery_excluded, hir_shard_recovery_close_inventory}
 
 fn fresh_ledger(tag: text) -> text:
     val dir = "build/test_tmp/native_mir_fork_{tag}_{getpid()}"
@@ -128,3 +129,26 @@ describe "MIR fork re-fork of a dead share":
         assert_equal(hir_shard_recovery_owner_tree_progress_v1(queue, "0/1@0"), 2)
         assert_equal(hir_shard_recovery_failure_count(queue), 1)
         val _removed = dir_remove_all(queue)
+
+describe "MIR fork excluded rows and fail-fast":
+    it "does not count go-to-end-excluded rows as unclaimed":
+        # @req REQ-SSPEC-COMPILER
+        step("does not count go-to-end-excluded rows as unclaimed")
+        val queue = fresh_ledger("excluded")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b", "mod.c"]))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 3)
+        assert_true(hir_shard_recovery_excluded(queue, "key", ["mod.b"]))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 2)
+        # Same record is idempotent; a different one is refused.
+        assert_true(hir_shard_recovery_excluded(queue, "key", ["mod.b"]))
+        assert_false(hir_shard_recovery_excluded(queue, "key", ["mod.c"]))
+        # The inventory is untouched, so close_inventory still sees every row.
+        assert_equal(hir_shard_recovery_close_inventory(queue, false), 3)
+        val _removed = dir_remove_all(queue)
+
+    it "keeps the root fail-fast predicate equal to the coordinator's":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the root fail-fast predicate equal to the coordinator's")
+        assert_false(native_mir_fork_fail_fast_v1("", ""))
+        assert_true(native_mir_fork_fail_fast_v1("1", ""))
+        assert_false(native_mir_fork_fail_fast_v1("0", ""))
