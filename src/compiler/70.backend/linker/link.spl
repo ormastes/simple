@@ -242,19 +242,23 @@ impl Linker:
 
         # 8. Write output
         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
-        val output_result: Result<i64, text> = self.write_output()
-        if output_result.is_err():
-            return LinkResult.Error(
-                message: "Output failed",
-                errors: self.errors
-            )
+        # match instead of is_err()/unwrap(): receiver-typed unwrap is unresolved in MIR.
+        var output_size: i64 = 0
+        match self.write_output():
+            case Ok(written_size):
+                output_size = written_size
+            case Err(_):
+                return LinkResult.Error(
+                    message: "Output failed",
+                    errors: self.errors
+                )
 
         val stats = LinkStats(
             input_count: self.readers.len() as i32,
             symbol_count: self.symbols.keys().len() as i32,
             instantiated_count: self.lazy_inst.instantiated.len() as i32,
             deferred_count: self.unresolved.len() as i32,
-            output_size: output_result.unwrap()
+            output_size: output_size
         )
 
         LinkResult.Success(
@@ -273,20 +277,20 @@ impl Linker:
                 print "[linker] Loading: {path}"
 
             # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
-            val reader_result: Result<SmfReaderImpl, text> = SmfReaderImpl.open(path)
-            if reader_result.is_err():
-                self.errors = self.errors.push(LinkError(
-                    kind: LinkErrorKind.InternalError,
-                    message: "Failed to open: {path}: {reader_result.unwrap_err()}",
-                    symbol: nil,
-                    location: Some(path)
-                ))
-                return Err("Failed to open {path}")
-
-            val reader = reader_result.unwrap()
-            self.readers = self.readers.push(reader)
-
-            # Load note.sdn metadata for lazy instantiation.
+            match SmfReaderImpl.open(path):
+                case Ok(reader):
+                    self.readers = self.readers.push(reader)
+                    val metadata: NoteSdnMetadata = reader.read_note_sdn()
+                    self.lazy_inst.load_metadata(path, metadata)
+                case Err(open_err):
+                    self.errors = self.errors.push(LinkError(
+                        kind: LinkErrorKind.InternalError,
+                        message: "Failed to open: {path}: {open_err}",
+                        symbol: nil,
+                        location: Some(path)
+                    ))
+                    return Err("Failed to open {path}")
+            # Load note.sdn metadata (done in the Ok arm above) for lazy instantiation.
             # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly
             # (smf_reader.spl:294), not a Result -- same bug class as
             # collect_deferred_hints below (the previous `.is_ok()`/
@@ -296,8 +300,6 @@ impl Linker:
             # no-op-safe merge over empty arrays plus an idempotent map
             # write, so calling it unconditionally is the correct restored
             # semantics, not a behavior change.
-            val metadata: NoteSdnMetadata = reader.read_note_sdn()
-            self.lazy_inst.load_metadata(path, metadata)
 
         Ok(())
 
@@ -380,14 +382,16 @@ impl Linker:
         for (symbol, symbol_hints) in by_symbol:
             if symbol_hints.len() > 1:
                 # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
-                val unify_result: Result<(), text> = self.unify_hints(symbol, symbol_hints)
-                if unify_result.is_err():
-                    self.errors = self.errors.push(LinkError(
-                        kind: LinkErrorKind.TypeMismatch,
-                        message: unify_result.unwrap_err(),
-                        symbol: Some(symbol),
-                        location: nil
-                    ))
+                match self.unify_hints(symbol, symbol_hints):
+                    case Ok(_):
+                        pass
+                    case Err(unify_err):
+                        self.errors = self.errors.push(LinkError(
+                            kind: LinkErrorKind.TypeMismatch,
+                            message: unify_err,
+                            symbol: Some(symbol),
+                            location: nil
+                        ))
 
         # `self.errors.any(_.kind == ...)` desugars to a placeholder lambda
         # (10.frontend/desugar/placeholder_lambda.spl) whose parameter type
@@ -412,8 +416,11 @@ impl Linker:
         var context_types: [HirType] = []
         for hint in hints:
             for site in hint.usage_sites:
-                if site.context_type.?:
-                    context_types = context_types.push(site.context_type.unwrap())
+                match site.context_type:
+                    case Some(context_ty):
+                        context_types = context_types.push(context_ty)
+                    case _:
+                        pass
 
         # Unify all context types
         if context_types.len() >= 2:
@@ -531,13 +538,15 @@ impl Linker:
             if reader_idx >= 0:
                 val reader = self.readers[reader_idx as i32]
                 # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
-                val code_result: Result<[u8], text> = reader.read_code(symbol)
-                if code_result.is_ok():
-                    objects = objects.push(ResolvedObject(
-                        name: symbol.name,
-                        code: code_result.unwrap(),
-                        symbol_type: symbol.ty
-                    ))
+                match reader.read_code(symbol):
+                    case Ok(code_bytes):
+                        objects = objects.push(ResolvedObject(
+                            name: symbol.name,
+                            code: code_bytes,
+                            symbol_type: symbol.ty
+                        ))
+                    case Err(_):
+                        pass
 
         # Link via mold
         backend.link(objects, self.config.output_path)?
