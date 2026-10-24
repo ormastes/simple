@@ -308,6 +308,15 @@ impl HirLowering:
         wrapper_payload = Some(HirPatternPayload.Tuple([inner]))
         HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: span), wrapper, wrapper_payload), type_: nil, span: span)
 
+    fn pattern_is_nil_literal(p: Pattern) -> bool:
+        match p.kind:
+            case PatternKind.Literal(value):
+                match value.kind:
+                    case ExprKind.NilLit: return true
+                    case _: ()
+            case _: ()
+        false
+
     me pattern_names_unit_variant(p: Pattern) -> bool:
         """True when `p` contains a bare immutable name that is a unit
         variant of some visible enum (directly, in an or-alternative, or
@@ -637,7 +646,7 @@ impl HirLowering:
                                 # Only when the wrapped pattern names a possible
                                 # unit variant: a plain `Some(x)` keeps its
                                 # existing lowering untouched.
-                                if wrapper_patterns.len() == 1 and self.pattern_names_unit_variant(wrapper_patterns[0]):
+                                if wrapper_patterns.len() == 1 and (self.pattern_names_unit_variant(wrapper_patterns[0]) or self.pattern_is_nil_literal(wrapper_patterns[0])):
                                     var wrapper_applies = false
                                     var slot_subject: HirType? = nil
                                     if val wrapper_subject = subject_type:
@@ -675,7 +684,17 @@ impl HirLowering:
                                     else:
                                         wrapper_applies = true
                                     if wrapper_applies:
-                                        val wrapped_inner = self.lower_match_pattern(wrapper_patterns[0], slot_subject)
+                                        var wrapped_inner = self.lower_match_pattern(wrapper_patterns[0], slot_subject)
+                                        # match_nil_subpattern_requires_declared_optional_slot_2026-10-24:
+                                        # `Ok(nil)` over `Result<T?, E>` -- the subject's own
+                                        # generic arguments prove the slot is Optional; carry
+                                        # that proof on the nil sub-pattern for MIR.
+                                        if self.pattern_is_nil_literal(wrapper_patterns[0]):
+                                            if val nil_slot_type = slot_subject:
+                                                match nil_slot_type.kind:
+                                                    case HirTypeKind.Optional(_):
+                                                        wrapped_inner = HirPattern(kind: wrapped_inner.kind, has_type_: true, type_: nil_slot_type, span: wrapped_inner.span)
+                                                    case _: ()
                                         return self.wrapper_pattern(variant_name, wrapped_inner, p.span)
                             case _: ()
             case PatternKind.Tuple(elements):

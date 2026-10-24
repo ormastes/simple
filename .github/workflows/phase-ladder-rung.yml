@@ -81,11 +81,27 @@ jobs:
           prefix=$(brew --prefix llvm)
           echo "DYLD_LIBRARY_PATH=$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "$prefix/bin" >> "$GITHUB_PATH"
+      # Windows default lane: MinGW UCRT (pinned llvm-mingw: clang + lld, no
+      # GCC, no Visual Studio), Rust host x86_64-pc-windows-gnullvm. MSVC stays
+      # available through SIMPLE_WINDOWS_ABI=msvc but CI builds gnu only.
+      - name: MinGW UCRT toolchain (windows-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'windows-x86_64'
+        run: |
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+          echo "SIMPLE_WINDOWS_ABI=gnu" >> "$GITHUB_ENV"
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
+          rustup set default-host x86_64-pc-windows-gnullvm
+          rustup toolchain install "$channel" --profile minimal
       - name: Climb one phase
         if: steps.sel.outputs.on == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ matrix.platform }}" = windows-x86_64 ]; then
+            . scripts/setup/windows-gitbash-bootstrap-env.shs
+            clang --version | head -1
+            ld.lld --version
+          fi
           mkdir -p build/ladder/in build/ladder/out
           sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ matrix.threads }}"
       # Upload even when a later step failed: a phase that passed sanity is kept.
