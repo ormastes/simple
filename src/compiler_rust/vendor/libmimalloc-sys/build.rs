@@ -59,6 +59,13 @@ fn main() {
         build.define("MI_DEBUG", "0");
     }
 
+    // clang/mingw ignores the MSVC-only `#pragma const_seg(".CRT$XLB")` used to
+    // register mimalloc's thread-exit hook, so per-thread heaps leak. Use FLS
+    // (FlsAlloc destructor callback) instead.
+    if target_os == "windows" && env::var("CARGO_CFG_TARGET_ENV").map_or(true, |e| e != "msvc") {
+        build.define("MI_WIN_USE_FLS", None);
+    }
+
     if build.get_compiler().is_like_msvc() {
         build.cpp(true);
     }
