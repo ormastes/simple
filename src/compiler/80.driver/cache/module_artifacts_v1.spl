@@ -11,7 +11,7 @@
 #       the projector validates and renders them into one `summary` section,
 #       and generic / inline bodies -- which a summary never carries -- follow
 #       as `generic` / `inline` sections, then `sif:` and the SIF text. The one
-#       freshness authority is the embedded source-sha256; the companion is
+#       freshness authority is the embedded, algorithm-tagged source digest; the companion is
 #       compiler-written and never importable as source.
 #
 # This is the single producer contract shared by `simple tldr`
@@ -31,6 +31,9 @@
 # edges; a declaration whose expansion has no source line of its own is not
 # carried; no HIR consumer reads the companion yet (the per-file scheduler PR).
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_text,
+    digest_v1_equal, HASH_ALGO_SHA256_V1}
+use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
@@ -54,7 +57,7 @@ use compiler.frontend.cache_artifact.public_summary_projector.{FrozenPublicFactV
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
-pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 4"
+pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 5"
 val MODULE_TLDR_LANG_V1: text = "1"
 
 
@@ -79,20 +82,40 @@ pub fn module_tldr_companion_render_v1(module_id: text, source: text) -> text:
     module_tldr_companion_render_sections_v1(module_id, source,
         module_tldr_sections_of_source_v1(source))
 
+# Producer digest of the source bytes: algorithm-tagged (`sha256:<hex>`), so a
+# reader on a host with another algorithm sees an unknown tag as a miss.
+fn _module_source_digest_text_v1(source: text) -> text:
+    match digest_v1_of_text(HASH_ALGO_SHA256_V1, source):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+# The recorded digest matches `source` only for a known algorithm whose
+# recomputed digest is byte-equal; an unknown or malformed tag is absent.
+fn _module_source_digest_matches_v1(recorded: text, source: text) -> bool:
+    match digest_v1_parse(recorded):
+        case Some(d):
+            match digest_v1_of_text(d.algo_id, source):
+                case Some(actual): digest_v1_equal(d, actual)
+                case nil: false
+        case nil: false
+
 # Producer path: `sections` come from the parsed module (AST-anchored).
 pub fn module_tldr_companion_render_sections_v1(module_id: text, source: text, sections: [text]) -> text:
     MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
-        "source-sha256: " + sha256_text(source) + "\n" +
+        "source-digest: " + _module_source_digest_text_v1(source) + "\n" +
         module_tldr_sections_render_v1(sections) +
         "sif:\n" + sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
 
 # (sections, sif) of a valid companion for `source`; sif is "" when invalid.
 fn _module_tldr_companion_split_v1(content: text, source: text) -> ([text], text):
-    val header = MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
-        "source-sha256: " + sha256_text(source) + "\n"
-    if not content.starts_with(header):
+    val prefix = MODULE_TLDR_COMPANION_HEADER_V1 + "\nsource-digest: "
+    if not content.starts_with(prefix):
         return ([], "")
-    val rest = content.substring(header.len())
+    val after = content.substring(prefix.len())
+    val line_end = after.index_of("\n")
+    if line_end < 0 or not _module_source_digest_matches_v1(after.substring(0, line_end), source):
+        return ([], "")
+    val rest = after.substring(line_end + 1)
     val (sections, consumed) = module_tldr_sections_parse_v1(rest)
     if consumed < 0:
         return ([], "")
@@ -120,7 +143,7 @@ pub fn module_tldr_companion_fresh_v1(path: text, source: text) -> bool:
     module_tldr_companion_body_v1(file_read(path), source) != ""
 
 # PublicSummaryV1 identity for a locally produced companion. The summary is a
-# VIEW: its only freshness authority is the embedded source-sha256.
+# VIEW: its only freshness authority is the embedded source digest.
 fn _module_summary_input_v1(module_id: text, source_path: text, source: text,
         facts: [FrozenPublicFactV1]) -> PublicSummaryProjectionInputV1:
     val source_digest = sha256_text(source)
