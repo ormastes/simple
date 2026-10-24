@@ -81,6 +81,7 @@ typedef SSIZE_T ssize_t;
 #include <process.h>
 #include <malloc.h>
 #include <windows.h>
+#include <psapi.h>
 #include "platform/windows_raw_mapping.h"
 #endif
 
@@ -3690,25 +3691,24 @@ int64_t rt_host_memory_headroom_bytes_v1(void) {
 
 /* Commit headroom (CommitLimit - CommitTotal) * PageSize via
  * K32GetPerformanceInfo, resolved with GetProcAddress because the symbol
- * lives in kernel32 on modern Windows but psapi.h placement varies by SDK.
- * The 104-byte PERFORMANCE_INFORMATION layout is read by documented offset
- * (CommitTotal@8, CommitLimit@16, PageSize@88) so no psapi.h type is needed.
+ * lives in kernel32 on modern Windows. Use the SDK's typed layout: PageSize is at
+ * offset 80 on Win64; offset 88 contains HandleCount and ProcessCount.
  * Same interpreter-first rationale as rt_host_memory_headroom_bytes_v1.
  * Returns 0 when unavailable; callers keep the extern path as fallback. */
 int64_t rt_host_commit_headroom_bytes_v1(void) {
 #if defined(_WIN32)
     HMODULE kernel32 = GetModuleHandleW(L"kernel32");
     if (!kernel32) return 0;
-    typedef int (WINAPI *QueryCommitFn)(void*, unsigned long);
+    typedef BOOL (WINAPI *QueryCommitFn)(PPERFORMANCE_INFORMATION, DWORD);
     QueryCommitFn query = (QueryCommitFn)(void (*)(void))GetProcAddress(kernel32, "K32GetPerformanceInfo");
     if (!query) return 0;
-    uint64_t raw[13];
-    memset(raw, 0, sizeof(raw));
-    *(uint32_t*)(void*)raw = (uint32_t)sizeof(raw); /* cb = 104 */
-    if (query((void*)raw, (unsigned long)sizeof(raw)) == 0) return 0;
-    uint64_t commit_total = raw[1];  /* offset 8 */
-    uint64_t commit_limit = raw[2];  /* offset 16 */
-    uint64_t page_size = raw[11];    /* offset 88 */
+    PERFORMANCE_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    info.cb = (uint32_t)sizeof(info);
+    if (query(&info, (DWORD)sizeof(info)) == 0) return 0;
+    uint64_t commit_total = info.CommitTotal;
+    uint64_t commit_limit = info.CommitLimit;
+    uint64_t page_size = info.PageSize;
     if (commit_limit < commit_total || page_size == 0) return 0;
     uint64_t headroom_pages = commit_limit - commit_total;
     if (headroom_pages > (uint64_t)INT64_MAX / page_size) return 0;

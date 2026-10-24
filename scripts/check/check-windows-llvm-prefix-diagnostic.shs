@@ -3,10 +3,27 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 detector="$repo_root/scripts/setup/platform-detect.shs"
+[ -f "$detector" ] || { printf 'missing production detector: %s\n' "$detector" >&2; exit 1; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-windows-llvm-prefix.XXXXXX")
 case "$tmp" in /*/simple-windows-llvm-prefix.*) ;; *) exit 1 ;; esac
-trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
-mkdir -p "$tmp/msvc prefix/bin" "$tmp/msvc prefix/lib" "$tmp/gnu/bin" "$tmp/gnu/lib"
+cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'FAIL: Windows LLVM prefix fixture (status %s)\n' "$status" >&2
+        for log in "$tmp"/*.out "$tmp"/*.err; do
+            [ -f "$log" ] || continue
+            printf '%s\n' "$log" >&2
+            tail -20 "$log" >&2
+        done
+    fi
+    rm -rf -- "$tmp"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$tmp/msvc prefix/bin" "$tmp/msvc prefix/lib" "$tmp/gnu/bin" "$tmp/gnu/lib" "$tmp/tools"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v sort)" > "$tmp/tools/sort"
+chmod +x "$tmp/tools/sort"
 printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/msvc prefix/bin/llvm-config"
 printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/gnu/bin/llvm-config"
 chmod +x "$tmp/msvc prefix/bin/llvm-config" "$tmp/gnu/bin/llvm-config"
@@ -28,7 +45,11 @@ run_detector() (
     LLVM_SYS_231_PREFIX="$2"
     SIMPLE_HOST_LLVM_ROOT="$3"
     SIMPLE_MINGW_ROOT="$tmp/no-mingw"
-    PATH=/usr/bin:/bin
+    SIMPLE_TARGET_OS=windows
+    LLVM_VERSIONS=23
+    # A host LLVM 23 llvm-config can replace the retained rejection path or
+    # emit version warnings. Only the detector's required sort is reachable.
+    PATH="$tmp/tools"
     . "$detector"
     printf 'found=%s\nprefix=%s\n' "$LLVM_FOUND" "$LLVM_PREFIX"
 )
