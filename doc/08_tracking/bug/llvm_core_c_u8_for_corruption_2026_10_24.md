@@ -22,3 +22,10 @@ Bounded parity review found the self-hosted Simple FOR/index lowering already
 uses its typed byte accessor and raw-to-U8 cast without generic decoding. It
 needs no source change. This is source evidence; actual P2→P3 and P3 self-rebuild
 remain unverified.
+
+The new MIR regression and LLVM/core-C native regression both passed on source
+49d094ff3c3f4db5ed4b02073536711ad771d5d9. The latter verified both byte layouts,
+all 256 values, repeated external-text copies and exact independently pinned
+manifest bytes. Enforced 8 GiB watchdogs completed quiescent with no observer
+errors. Source runtime/writer ABI remains unchanged; full compiler-chain and
+whole-suite verification is still pending.

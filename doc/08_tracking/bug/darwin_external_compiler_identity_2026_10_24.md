@@ -19,3 +19,11 @@ corrupted by a separate packed-byte iteration defect. Its source/runtime/tool
 snapshots and process cleanup checks passed. Retain that failed evidence under
 release-phase2-review/build/verify/native-identity-cycle2; do not interpret the
 linked fixture or original rejected Hello output as an admitted build.
+
+Native cycle 5 qualification passed with producer 174404706aa177a3f5695b34d03ea19798aa6134898f7b01e416c38635899677 and matching generation 03:
+repository-relative and canonical external native executables, receipt roundtrip
+and full generic action admission, plus digest/malformed/missing/changed-byte/
+permission/symlink rejection. Both watchdogs exited 0 with verified quiescence,
+enforced limits and no observer errors; all input identities remained stable.
+The only follow-up source correction selected this Darwin host's actual
+permission utility, /bin/test. Full Darwin P2 integration remains pending.
