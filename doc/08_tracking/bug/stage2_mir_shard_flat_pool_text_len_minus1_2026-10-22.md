@@ -1088,3 +1088,22 @@ watch the pool array element address), or (b) rebuild a candidate with
 debug-info emission enabled if the lane supports it, then lldb/cdb source-level
 watchpoints per the lane-58 annotation. This was the last environmental blocker
 on the diagnostic path; everything upstream is exonerated or fixed.
+
+## Addendum 2026-10-24 (lane D): cdb session facts - string VAs, child-follow pitfall, attach procedure
+
+Attempted the live catch this session; established:
+- The candidate image maps at 0x1_40000000; the refusal literal
+  "capture refused" sits at VA 0x14163caec, the pooldbg split-field format at
+  0x1416358ba (cdb: `s -a simple_exe L1A00000 "<literal>"` - plain `s -a 0 ...`
+  misses the image; oversized ranges error).
+- The AV fires in the delegated mir-shard WORKER (a child simple.exe), not the
+  debugged parent. cdb `-o` follows every descendant INCLUDING the candidate's
+  git spawns (noisy, and the session exits early); per-PID attach is clean but
+  the worker lives only seconds, too tight for shell polling.
+- Clean owner procedure: run the repro with the worker pre-launched as the
+  top-level process (or attach cdb to the newest D:\dev\simple simple.exe
+  child the instant the mir-shard line appears), `sxe -c ".echo HIT; r; u
+  @rip-24 L12; q" av; g`. At the fault, the dead handle sits in a register and
+  @rip-24 disassembly shows the pool-array read that produced it; the handle's
+  value (a tagged pointer) identifies the pool array element address for a
+  hardware watchpoint (`ba w8 <addr>`) on the next run.
