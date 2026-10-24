@@ -1,0 +1,59 @@
+use std.spec
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1, cache_retention_limits_load_v1}
+use std.io_runtime.{env_set}
+use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1, cache_eviction_plan_v1,
+    cache_eviction_admit_write_v1}
+
+fn e(branch: text, source: text, version: text, disk: i64, mem: i64, used: i64) -> CacheEntryUseV1:
+    CacheEntryUseV1(branch: branch, source: source, version_key: version, disk_bytes: disk,
+        memory_bytes: mem, last_used_ms: used)
+
+fn limits(mem: i64, disk: i64, branches: i64, versions: i64) -> CacheRetentionLimitsV1:
+    CacheRetentionLimitsV1(memory_max_bytes: mem, storage_max_bytes: disk, max_branches: branches,
+        kept_branches: ["main"], versions_per_source: versions)
+
+describe "cache eviction plan":
+    it "keeps the newest N versions per source per branch, all artifact kinds of a version together":
+        val entries = [e("main", "a.spl", "v1", 10, 0, 1), e("main", "a.spl", "v2", 10, 0, 2),
+            e("main", "a.spl", "v3", 10, 0, 3), e("main", "a.spl", "v3", 10, 0, 3),
+            e("main", "b.spl", "v1", 10, 0, 1)]
+        val plan = cache_eviction_plan_v1(entries, limits(1000, 1000, 4, 2))
+        expect(plan.evict).to_equal([0])
+
+    it "drops branches beyond the max, keeping configured branches first":
+        val entries = [e("main", "a.spl", "v1", 10, 0, 1), e("feature-x", "a.spl", "v1", 10, 0, 9),
+            e("feature-y", "a.spl", "v1", 10, 0, 5)]
+        val plan = cache_eviction_plan_v1(entries, limits(1000, 1000, 2, 3))
+        expect(plan.evict).to_equal([2])
+
+    it "then enforces storage and memory maxima by LRU":
+        val entries = [e("main", "a.spl", "v1", 50, 40, 1), e("main", "b.spl", "v1", 50, 40, 2),
+            e("main", "c.spl", "v1", 50, 40, 3)]
+        val plan = cache_eviction_plan_v1(entries, limits(40, 100, 4, 3))
+        expect(plan.evict).to_equal([0])
+        expect(plan.unload).to_equal([1])
+        expect(plan.disk_bytes_after).to_equal(100)
+        expect(plan.memory_bytes_after).to_equal(40)
+
+    it "refuses a write the plan cannot make room for":
+        val entries = [e("main", "a.spl", "v1", 90, 0, 1)]
+        val l = limits(1000, 100, 4, 3)
+        val plan = cache_eviction_plan_v1(entries, l)
+        expect(cache_eviction_admit_write_v1(plan, 10, l)).to_equal(true)
+        expect(cache_eviction_admit_write_v1(plan, 11, l)).to_equal(false)
+
+describe "cache retention limit loading":
+    it "prefers SIMPLE_CACHE_* over SIMPLE_HOST_CACHE_* over defaults":
+        val _a = env_set("SIMPLE_HOST_CACHE_MAX_BRANCHES", "7")
+        val _b = env_set("SIMPLE_CACHE_MAX_BRANCHES", "")
+        val _c = env_set("SIMPLE_HOST_CACHE_KEPT_BRANCHES", "main,release/1.0.0")
+        val _d = env_set("SIMPLE_CACHE_VERSIONS_PER_SOURCE", "5")
+        val _e = env_set("SIMPLE_HOST_CACHE_VERSIONS_PER_SOURCE", "2")
+        val loaded = cache_retention_limits_load_v1()
+        expect(loaded.max_branches).to_equal(7)
+        expect(loaded.kept_branches).to_equal(["main", "release/1.0.0"])
+        expect(loaded.versions_per_source).to_equal(5)
+        val _f = env_set("SIMPLE_HOST_CACHE_MAX_BRANCHES", "")
+        val _g = env_set("SIMPLE_HOST_CACHE_KEPT_BRANCHES", "")
+        val _h = env_set("SIMPLE_CACHE_VERSIONS_PER_SOURCE", "")
+        val _i = env_set("SIMPLE_HOST_CACHE_VERSIONS_PER_SOURCE", "")
