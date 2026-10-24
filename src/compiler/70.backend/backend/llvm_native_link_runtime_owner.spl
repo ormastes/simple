@@ -10,13 +10,30 @@
 #           runtime symbol classes yet.
 # The CLI flag `native-build --runtime-owner=<owner>` sets SIMPLE_RUNTIME_OWNER.
 
-use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_write_bytes_v1}
-use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_exists, file_hash_sha256, file_read_bytes, file_size_raw, dir_create_all}
+use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_cede_archive_file_for_machine_v1, runtime_owner_write_bytes_v1, runtime_owner_object_machine_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_exists, file_hash_sha256, file_read_bytes, file_read, file_write, file_size_raw, dir_create_all}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 
 pub fn llvm_runtime_owner_v1() -> Result<text, text>:
     runtime_owner_select_v1("", env_get("SIMPLE_RUNTIME_OWNER") ?? "")
+
+pub fn llvm_runtime_owner_coff_flavor_v1(hosted_os: text, target: text, mingw: bool) -> text:
+    """Explicit target ABI wins over the host; empty/host retains native routing."""
+    if target.ends_with("-windows-gnu") or target.ends_with("-windows-gnullvm"):
+        return "windows-gnu"
+    if target.ends_with("-windows-msvc"): return "windows-msvc"
+    if target != "" and target != "host": return ""
+    if hosted_os != "windows": return ""
+    if mingw: return "windows-gnu"
+    "windows-msvc"
+
+pub fn llvm_runtime_owner_gnu_machine_v1(target: text) -> i64:
+    if not target.ends_with("-windows-gnu") and not target.ends_with("-windows-gnullvm"):
+        return 0
+    if target.starts_with("x86_64-"): return 34404
+    if target.starts_with("aarch64-"): return 43620
+    0
 
 pub fn llvm_runtime_owner_compile_bundle_v1(owner: text, runtime_bundle: text,
         native_all: text, coff: bool) -> text:
@@ -30,10 +47,9 @@ pub fn llvm_runtime_owner_compile_owner_v1(owner: text, native_all: text,
         coff_native_all: bool) -> text:
     """Owner the C runtime objects are compiled for.
 
-    Ceding runs only on a host-MSVC COFF link. A native-all link it does not
-    cover (windows-gnu) keeps the Rust thread-handle owner under the default
-    `c`: otherwise the C family collides with Rust's merged-alias COMDAT
-    (eff83aaa8b4). ELF links never apply the rust define."""
+    COFF ceding covers both Windows ABIs. An uncovered native-all link keeps
+    the Rust thread-handle owner under the default `c`, avoiding rustc's
+    merged-alias COMDAT conflict. ELF links never apply the rust define."""
     if owner == "c" and native_all != "" and not coff_native_all: return "rust"
     owner
 
@@ -95,5 +111,73 @@ pub fn llvm_runtime_owner_c_archive_v1(native_all: text, c_objects: [text],
     print "[runtime-owner] c: ceded {ceded.undefined} Rust definitions in {ceded.members} members ({ceded.demoted} COMDATs demoted) -> {derived}"
     Ok(derived)
 
+fn _runtime_owner_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for i in 0..digest.len():
+        val byte = digest.char_code_at(i)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+    true
+
+pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
+        cache_root: text, target: text) -> Result<text, text>:
+    """C-owned GNU COFF projection, retaining the original runtime authority.
+
+    This is a local derived archive, not a new managed admission. GNU support
+    dependencies remain with the existing driver/runtime authority: no MSVC
+    LLVM-C.lib is fabricated, required or copied. Loose eager C objects must
+    precede this archive because the preserved ar index still names ceded names.
+    """
+    val machine = llvm_runtime_owner_gnu_machine_v1(target)
+    if machine == 0: return Err("runtime owner c: unsupported GNU COFF target {target}")
+    if c_objects.len() == 0: return Err("runtime owner c: GNU projection requires C objects")
+    val source_digest = file_hash_sha256(native_all)
+    if not _runtime_owner_digest_valid_v1(source_digest):
+        return Err("runtime owner c: cannot hash GNU archive {native_all}")
+    # Content compatibility excludes invocation-local paths (simple_rt_<PID>).
+    # Those actual paths are still read, machine-checked and content-bound below.
+    var identity = "runtime-owner-gnu-c-v1;abi-v1;{target};{machine};{source_digest}"
+    var objects: [[u8]] = []
+    for object in c_objects:
+        val digest = file_hash_sha256(object)
+        val bytes = file_read_bytes(object)
+        if not _runtime_owner_digest_valid_v1(digest) or sha256_u8_hex(bytes) != digest:
+            return Err("runtime owner c: cannot bind C object {object}")
+        if runtime_owner_object_machine_v1(bytes) != machine:
+            return Err("runtime owner c: C object machine differs from GNU target: {object}")
+        identity = identity + ";{digest}"
+        objects.push(bytes)
+    val key = sha256_text(identity)
+    val dir = cache_root + "/runtime_owner_gnu_c/" + key
+    val derived = dir + "/libsimple_native_all.a"
+    val seal = dir + "/projection.sdn"
+    val header = "schema: runtime-owner-gnu-c-cache-v1\ninput_identity_sha256: {key}\narchive_sha256: "
+    val owned = runtime_owner_object_definitions_v1(objects)
+    val ceded = match runtime_owner_cede_archive_file_for_machine_v1(native_all, owned, machine):
+        case Ok(result): result
+        case Err(reason): return Err(reason)
+    if file_hash_sha256(native_all) != source_digest:
+        return Err("runtime owner c: GNU source archive changed during projection")
+    if ceded.parsed == 0:
+        return Err("runtime owner c: no matching COFF members in GNU archive {native_all}")
+    if ceded.undefined == 0: return Ok(native_all)
+    if native_tool_strict_requested_v1():
+        return Err("runtime owner c: GNU archive still defines C-owned symbols; managed links require a pre-ceded authority")
+    val digest = sha256_u8_hex(ceded.bytes)
+    if not _runtime_owner_digest_valid_v1(digest):
+        return Err("runtime owner c: cannot hash GNU projection {derived}")
+    # Recompute from real inputs before trusting a cache hit: changing both
+    # derived bytes and their local receipt cannot authorize a different owner.
+    if file_exists(derived) and file_exists(seal):
+        if file_hash_sha256(derived) == digest and file_read(seal) == header + digest + "\n":
+            return Ok(derived)
+    if not dir_create_all(dir): return Err("runtime owner c: cannot create {dir}")
+    if not runtime_owner_write_bytes_v1(derived, ceded.bytes):
+        return Err("runtime owner c: cannot write GNU projection {derived}")
+    if file_hash_sha256(derived) != digest or not file_write(seal, header + digest + "\n"):
+        return Err("runtime owner c: cannot seal GNU projection {derived}")
+    return Ok(derived)
+
 export llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1, llvm_runtime_owner_compile_owner_v1
 export llvm_runtime_owner_c_archive_v1
+export llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_gnu_machine_v1, llvm_runtime_owner_c_gnu_archive_v1
