@@ -395,6 +395,28 @@ field.
 | `length` | u64 |
 | `checksum` | 8 bytes (the algorithm's first 8 bytes; xxh3_64 by default) |
 
+### 7.3 Writer/reader decisions (agreed between the codec and reader lanes, 2026-10-24)
+
+1. **`encoding` bit layout.** Bits 0-7 element kind (§2.2), bits 8-14 the
+   pool shape (flat-pool trace: 1 `[i64]`, 2 `[bool]`, 3 `[text]`, 4 `[[i64]]`,
+   5 `[[text]]`, 6 `[[[text]]]`, 7-9 scalars), bit 15 **REQUIRED**. An unknown
+   section id with REQUIRED set is a miss; without it, the section is ignored
+   (§4 step 6). The writer sets REQUIRED on every section it emits.
+2. **Section checksums are always filled** (xxh3-64, algo 17) by the writer;
+   readers verify them (corruption only, never identity).
+3. **Body digest (subject 3) range** is `[end of the 0x0000 section,
+   blob_bytes)`: the digest table cannot hash itself, and `0x0000` always sorts
+   first. The writer lays the blob out with a zero placeholder, hashes the
+   range, patches the subject-3 row (the last row of the table) and refreshes
+   the `0x0000` checksum.
+4. **Pool family ranges beyond §2.2:** parser-state pools `0x0480-0x049F`,
+   extend pools `0x04A0-0x04BF`, pending pools `0x04C0-0x04FF`; id = family
+   base + dump ordinal (CLEAR pools keep their ordinal and leave a gap).
+5. **`0x0503` schema text** (the flat-pool codec version) and **`0x0504`
+   cleared-pool rows** `(u32 id, u32 shape)`; a line-restore adapter renders
+   the reader process's own live values for those ids.
+6. **Publication:** temp `.{pid}.{xxh3}.tmp` → read-back compare → rename.
+
 ## 8. Hash agility (cross-cutting rule; also recorded in `src_based_tldr_build_v1.md`)
 
 Different servers and caches may use different hash algorithms; **at most

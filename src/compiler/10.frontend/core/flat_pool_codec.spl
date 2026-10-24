@@ -459,6 +459,41 @@ extern fn rt_string_len(value: text) -> i64
 var _flat_pool_sanitize_capture: bool = false
 var _flat_pool_capture_poisoned: bool = false
 
+# Packed-blob type trace (flat_pool_packed_v1.spl). While armed, every public
+# pool encoder records its shape tag in emission order, so the packed encoder
+# can type each line of the canonical blob without re-deriving the pool list.
+var _flat_pool_type_trace: [i64] = []
+var _flat_pool_type_trace_armed: bool = false
+var _flat_pool_type_trace_family: i64 = 0
+var _flat_pool_type_trace_clear_next: bool = false
+
+pub fn flat_pool_type_trace_arm_v1():
+    _flat_pool_type_trace = []
+    _flat_pool_type_trace_family = 0
+    _flat_pool_type_trace_armed = true
+
+pub fn flat_pool_type_trace_take_v1() -> [i64]:
+    val trace = _flat_pool_type_trace
+    _flat_pool_type_trace = []
+    _flat_pool_type_trace_armed = false
+    trace
+
+# Pool family of the pools encoded next (1 decl, 2 expr, 3 stmt, 4 type,
+# 5 parser state, 6 extend, 7 pending); recorded as family * 16 + shape tag.
+pub fn flat_pool_type_trace_family_v1(family: i64):
+    _flat_pool_type_trace_family = family
+
+# The NEXT encoded pool is process-local state (packed_binary_ast_v1.md §1
+# CLEAR): it stays in the line blob but never enters the packed blob.
+pub fn flat_pool_type_trace_clear_next_v1():
+    _flat_pool_type_trace_clear_next = true
+
+fn _flat_pool_trace(tag: i64):
+    if _flat_pool_type_trace_armed:
+        val clear = if _flat_pool_type_trace_clear_next: 1024 else: 0
+        _flat_pool_type_trace_clear_next = false
+        _flat_pool_type_trace.push(clear + _flat_pool_type_trace_family * 16 + tag)
+
 pub fn flat_pool_capture_sanitize_arm_v1():
     _flat_pool_sanitize_capture = true
     _flat_pool_capture_poisoned = false
@@ -588,6 +623,7 @@ fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
 pub fn flat_pool_enc_i64(pool: [i64]) -> text:
     if _flat_pool_validate_only:
         return ""
+    _flat_pool_trace(1)
     val handle = flat_pool_builder_new()
     flat_pool_enc_i64_into(handle, pool)
     flat_pool_builder_finish(handle)
@@ -595,6 +631,7 @@ pub fn flat_pool_enc_i64(pool: [i64]) -> text:
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
     if _flat_pool_validate_only:
         return ""
+    _flat_pool_trace(2)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 6, -1)
     var item = 0
@@ -604,6 +641,7 @@ pub fn flat_pool_enc_bool(pool: [bool]) -> text:
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
+    _flat_pool_trace(3)
     val handle = flat_pool_builder_new()
     flat_pool_enc_text_into(handle, pool)
     flat_pool_builder_finish(handle)
@@ -611,6 +649,7 @@ pub fn flat_pool_enc_text(pool: [text]) -> text:
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
     if _flat_pool_validate_only:
         return ""
+    _flat_pool_trace(4)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 8, -1)
     for inner in pool:
@@ -618,11 +657,13 @@ pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
+    _flat_pool_trace(5)
     val handle = flat_pool_builder_new()
     flat_pool_enc_text_list_into(handle, pool)
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
+    _flat_pool_trace(6)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 9, -1)
     for inner in pool:
@@ -836,12 +877,15 @@ pub fn flat_pool_dec_text_list_list_into(dest: [[[text]]], r: FlatPoolReader) ->
 # enc_/dec_ pattern recognises them uniformly.
 
 pub fn flat_pool_enc_scalar_i64(value: i64) -> text:
+    _flat_pool_trace(7)
     "{value}\n"
 
 pub fn flat_pool_enc_scalar_bool(value: bool) -> text:
+    _flat_pool_trace(8)
     if value: "1\n" else: "0\n"
 
 pub fn flat_pool_enc_scalar_text(value: text) -> text:
+    _flat_pool_trace(9)
     flat_pool_escape(value) + "\n"
 
 pub fn flat_pool_dec_scalar_i64(r: FlatPoolReader) -> i64:
@@ -854,6 +898,8 @@ pub fn flat_pool_dec_scalar_text(r: FlatPoolReader) -> text:
     flat_pool_unescape(r.next())
 
 export FLAT_POOL_CODEC_VERSION
+export flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1
+export flat_pool_type_trace_clear_next_v1
 export flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64
 export FlatPoolReader
 export flat_pool_enc_i64, flat_pool_enc_bool, flat_pool_enc_text
