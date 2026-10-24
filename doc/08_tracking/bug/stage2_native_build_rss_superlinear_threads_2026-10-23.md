@@ -71,3 +71,30 @@ The thread count is not the variable. The 16-thread baseline is from the **old**
 - `SIMPLE_MEMORY_LIMIT_MB` (`watchdog.rs:38-42`, `memory_guard.rs:32`) is a hard RSS kill, not admission.
 - `SIMPLE_MODULE_RSS_WARN_MB` only warns. `SIMPLE_PARSED_SOURCE_CACHE_MAX` caps the per-worker parse memo (default 256).
 - No RSS-aware admission exists. If one is wanted, the place is `NativeCompileAdmission::run`: block admission while RSS is above a `SIMPLE_NATIVE_RSS_BUDGET_MB`.
+
+## Addendum 2026-10-24: Linux runtime confirmation — the stage-2 BINARY leaks at run time
+
+The "worth a separate check of stage-2 compile RSS" note is confirmed on the
+Linux lane. Same host, same probe (`src/compiler/bootstrap_admission/p2_add.spl`,
+`native-build --backend llvm --runtime-bundle core-c-bootstrap --entry-closure
+--mode one-binary`):
+
+| stage-2 candidate | peak RSS | result |
+|---|---|---|
+| 4ab52ecd1f0 (pre-convergence, no b065988b5a2) | 2.17 GB total | build OK |
+| ea1a3a7879a (has b065988b5a2) | 4.06 GB coordinator alone | kernel OOM kill |
+
+Measured with `/usr/bin/time -v` on an otherwise quiet 7.6 GiB host. The
+post-change candidate grows past the host's RAM during the MIR phase of a
+trivial one-module probe, so the stage-2 sanity battery fails on this host
+class with `raw_status=137` (SIGKILL from the kernel OOM reaper; the bounded
+collector records `reason=child-signal`). The per-file promotions in
+`parser_promote_transient_owners` (par_errors/par_warnings/par_struct_names
+are reassigned per file, orphaning each promoted copy) plus per-module HIR
+promotions have no release path, so the growth is cumulative per file as the
+Windows curve suggests — but here it is fatal within a single small build,
+not just on 1,488-file runs.
+
+Workaround for memory-constrained hosts until the release/demote path lands:
+none found — disabling the HIR/parse shard workers does not bring the
+single-process footprint back under the host budget.
