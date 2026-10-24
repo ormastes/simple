@@ -11,6 +11,9 @@ use compiler.driver.driver_log_helpers.{log_debug, log_warn}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.driver.driver_source_loading.{_format_nll_error}
 use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 
 impl CompilerDriver:
     me borrow_check() -> bool:
@@ -26,7 +29,7 @@ impl CompilerDriver:
             # never links.
             var failed_names: [text] = []
             for name in self.ctx.mir_modules.keys():
-                val errors = check_mir_module(self.ctx.mir_modules[name])
+                val errors = self.borrow_check_module_scoped_v1(name)
                 if errors.len() > 0:
                     for err in errors:
                         self.go_to_end.record("borrow", name, _format_nll_error(err))
@@ -38,10 +41,31 @@ impl CompilerDriver:
                 print "[go-to-end] borrow: {failed_names.len()} module(s) failed; continuing with {self.ctx.mir_modules.len()}"
             return not self.ctx.has_errors()
         for name in self.ctx.mir_modules.keys():
-            val errors = check_mir_module(self.ctx.mir_modules[name])
+            val errors = self.borrow_check_module_scoped_v1(name)
             for err in errors:
                 self.ctx.add_error(_format_nll_error(err))
         not self.ctx.has_errors()
+
+    # Bug borrow_check_unscoped_rss_growth_2026_10_24: borrow check was the
+    # only per-module MIR-phase pass with no transient scope, so every
+    # checker/CFG/liveness allocation (~21-24 MB per module) stayed live for
+    # the rest of the process. Run each module in its own scratch scope, as
+    # MIR lowering does (_MirLowering/module_lowering.spl), and promote only
+    # the error list. The check reads the already-promoted MIR and writes no
+    # shared state, so the verdict is unchanged; if the scope is refused or
+    # promotion fails the module is re-checked unscoped (same verdict, old RSS).
+    fn borrow_check_module_scoped_v1(name: text) -> [NLLError]:
+        if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+            eprint("[borrow-scope] WARNING transient scope refused; checking UNSCOPED, arena retained: module={name}")
+            return check_mir_module(self.ctx.mir_modules[name])
+        val scoped_errors = check_mir_module(self.ctx.mir_modules[name])
+        val paused = transient_scope_pause()
+        val owned = paused and transient_promote(scoped_errors)
+        val ended = transient_scope_end()
+        if paused and owned and ended:
+            return scoped_errors
+        eprint("[borrow-scope] WARNING error-list promotion failed (paused={paused} owned={owned} ended={ended}); re-checking UNSCOPED: module={name}")
+        check_mir_module(self.ctx.mir_modules[name])
 
     fn format_borrow_error(err: NLLError) -> text:
         _format_nll_error(err)
