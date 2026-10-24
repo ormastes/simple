@@ -1,0 +1,198 @@
+# Perf baseline probe for the dyn-loadable vector provider on Windows.
+# Measures the two vector-provider hot paths with bench-style timing:
+#   db   : RowBitmap AND over 1 Mbit (32768 u32 words)
+#   http : HTTP FIND_CRLF scan over 1 MiB of request bytes
+# Modes: avx512 (normal DLL, host has AVX512F+BW), forced (forced-refusal DLL),
+#        scalar (no provider at all — the baseline the AVX512 numbers must beat).
+# Usage: vector_provider_perf_probe.spl <db|http> <avx512|forced|scalar> <dll> <sha256>
+# NOTE: interpreter-mode timings include interpreted staging overhead; the
+# provider kernel delta is reported alongside the end-to-end ns/op.
+
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, rt_write_u32s_to_raw}
+use std.nogc_sync_mut.db.accel.{RowBitmap}
+use nogc_sync_mut.db.vector_provider.{
+    RowBitmapVectorSessionV1, row_bitmap_vector_session_open_owned_v1,
+    row_bitmap_and_with_vector_provider_owned_v1,
+    row_bitmap_vector_session_close_owned_v1
+}
+use std.nogc_sync_mut.http_server.vector_parser.{
+    HttpVectorParserSessionV1, http_vector_parser_session_open_owned_v1,
+    http_vector_parser_session_close_owned_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_CAP_BITMAP_AND_U32,
+    SIMPLE_VECTOR_CAP_BITMAP_OR_U32,
+    SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_OP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_STATUS_OK, SimpleVectorKernelRequestV1
+}
+use os.smf.provider_loader.{
+    ProviderAdmissionRequestV1, PROVIDER_SESSION_OK,
+    provider_session_vector_call_owned_v1, provider_session_close_owned_v1
+}
+use std.nogc_sync_mut.sffi.system.{args}
+
+val DB_WORDS_V1: i64 = 32768
+val DB_ROW_COUNT_V1: i64 = 1048576
+val DB_OPS_V1: i64 = 5
+val HTTP_BYTES_V1: i64 = 1048576
+val HTTP_OPS_V1: i64 = 5
+
+fn now_ns() -> i64:
+    time_now_unix_micros() * 1000
+
+fn _admission(path: text, digest: text, grant: u64, required: u64) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: path, artifact_kind: "native",
+        expected_artifact_digest: digest,
+        granted_capability_bits: grant,
+        required_capability_bits: required,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0)
+
+fn _db_words() -> [u32]:
+    var words: [u32] = []
+    var i: i64 = 0
+    while i < DB_WORDS_V1:
+        words.push(0xA5A5A5A5u32)
+        i = i + 1
+    words
+
+fn bench_db_scalar() -> i32:
+    val left = _db_words()
+    val right = _db_words()
+    var out: [u32] = []
+    val start = now_ns()
+    var op: i64 = 0
+    while op < DB_OPS_V1:
+        out = []
+        var i: i64 = 0
+        while i < DB_WORDS_V1:
+            out.push(left[i as i32] & right[i as i32])
+            i = i + 1
+        op = op + 1
+    val total = now_ns() - start
+    print("PERF_DB mode=scalar ops={DB_OPS_V1} words={DB_WORDS_V1} total_ns={total} ns_per_op={total / DB_OPS_V1} provider_used=0/{DB_OPS_V1}")
+    0
+
+fn bench_db_provider(path: text, digest: text, mode: text) -> i32:
+    val caps = SIMPLE_VECTOR_CAP_BITMAP_AND_U32 | SIMPLE_VECTOR_CAP_BITMAP_OR_U32
+    val opened = row_bitmap_vector_session_open_owned_v1(
+        _admission(path, digest, caps, caps))
+    if opened.status != PROVIDER_SESSION_OK:
+        print("PERF_FAIL db session open: {opened.status} {opened.reason}")
+        return 1
+    var session = opened.session
+    val lhs = RowBitmap(row_count: DB_ROW_COUNT_V1, words: _db_words())
+    val rhs = RowBitmap(row_count: DB_ROW_COUNT_V1, words: _db_words())
+    var used: i64 = 0
+    val start = now_ns()
+    var op: i64 = 0
+    while op < DB_OPS_V1:
+        val called = row_bitmap_and_with_vector_provider_owned_v1(session, lhs, rhs)
+        session = called.session
+        if called.bitmap.row_count >= 0 and called.provider_used:
+            used = used + 1
+        op = op + 1
+    val total = now_ns() - start
+    val closed = row_bitmap_vector_session_close_owned_v1(session)
+    print("PERF_DB mode={mode} ops={DB_OPS_V1} words={DB_WORDS_V1} total_ns={total} ns_per_op={total / DB_OPS_V1} provider_used={used}/{DB_OPS_V1} close_status={closed.status}")
+    0
+
+fn bench_http_scalar() -> i32:
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < HTTP_BYTES_V1 - 2:
+        buf.push(65u8)
+        i = i + 1
+    buf.push(13u8)
+    buf.push(10u8)
+    val start = now_ns()
+    var op: i64 = 0
+    var found: i64 = -1
+    while op < HTTP_OPS_V1:
+        found = -1
+        var j: i64 = 0
+        while j < HTTP_BYTES_V1 - 1:
+            if buf[j as i32] == 13u8 and buf[(j + 1) as i32] == 10u8:
+                found = j
+                j = HTTP_BYTES_V1
+            else:
+                j = j + 1
+        op = op + 1
+    val total = now_ns() - start
+    print("PERF_HTTP mode=scalar bytes={HTTP_BYTES_V1} ops={HTTP_OPS_V1} total_ns={total} ns_per_op={total / HTTP_OPS_V1} provider_used=0/{HTTP_OPS_V1} found={found}")
+    0
+
+fn bench_http_provider(path: text, digest: text, mode: text) -> i32:
+    val caps = SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE | SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+    val opened = http_vector_parser_session_open_owned_v1(
+        _admission(path, digest, caps, caps))
+    if opened.status != PROVIDER_SESSION_OK:
+        print("PERF_FAIL http session open: {opened.status} {opened.reason}")
+        return 1
+    var session = opened.session
+    # 1 MiB of 'A' with a single CRLF at the very end: every scan runs the
+    # whole span. Fill via one raw u32 write (262144 words).
+    val ptr = raw_alloc(HTTP_BYTES_V1)
+    if ptr <= 0:
+        print("PERF_FAIL http raw alloc")
+        return 1
+    var fill: [u32] = []
+    var k: i64 = 0
+    while k < HTTP_BYTES_V1 / 4 - 1:
+        fill.push(0x41414141u32)
+        k = k + 1
+    fill.push(0x0A0D4141u32)
+    val wrote = rt_write_u32s_to_raw(ptr, fill)
+    var used: i64 = 0
+    var last_status: u64 = 99
+    var last_found: i64 = -2
+    val start = now_ns()
+    var op: i64 = 0
+    while op < HTTP_OPS_V1:
+        val req = SimpleVectorKernelRequestV1(
+            opcode: SIMPLE_VECTOR_OP_HTTP_FIND_CRLF,
+            left_address: ptr as u64, left_bytes: HTTP_BYTES_V1 as u64,
+            right_address: 0, right_bytes: 0, output_address: 0,
+            output_capacity_bytes: 0, argument: 0)
+        val called = provider_session_vector_call_owned_v1(
+            session.loader_session, session.find_crlf_query, req)
+        session.loader_session = called.session
+        if called.vector_call.call.response.status == SIMPLE_VECTOR_STATUS_OK:
+            used = used + 1
+            last_found = called.vector_call.call.response.scalar_result
+        last_status = called.vector_call.call.response.status
+        op = op + 1
+    val total = now_ns() - start
+    raw_free(ptr, HTTP_BYTES_V1)
+    val closed = http_vector_parser_session_close_owned_v1(session)
+    print("PERF_HTTP mode={mode} bytes={HTTP_BYTES_V1} ops={HTTP_OPS_V1} total_ns={total} ns_per_op={total / HTTP_OPS_V1} provider_used={used}/{HTTP_OPS_V1} response_status={last_status} found={last_found} fill_words={wrote} close_status={closed.status}")
+    0
+
+fn main() -> i32:
+    val argv = args()
+    # argv[0] is the probe source path; bench arguments follow positionally.
+    if argv.len() < 3:
+        print("usage: vector_provider_perf_probe.spl <db|http> <avx512|forced|scalar> [dll] [sha256]")
+        return 2
+    val which = argv[1]
+    val mode = argv[2]
+    if which == "db":
+        if mode == "scalar":
+            return bench_db_scalar()
+        if argv.len() < 5:
+            print("PERF_FAIL db provider modes need <dll> <sha256>")
+            return 2
+        return bench_db_provider(argv[3], argv[4], mode)
+    if which == "http":
+        if mode == "scalar":
+            return bench_http_scalar()
+        if argv.len() < 5:
+            print("PERF_FAIL http provider modes need <dll> <sha256>")
+            return 2
+        return bench_http_provider(argv[3], argv[4], mode)
+    print("PERF_FAIL unknown bench {which}")
+    2
