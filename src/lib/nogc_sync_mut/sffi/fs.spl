@@ -252,10 +252,13 @@ fn fs_read_text(path: text) -> text?:
 @unsafe(reason: "raw runtime ABI for rt_io_file_close", capabilities: [ffi])
 extern fn rt_io_file_close(fd: i64) -> bool
 
+@unsafe(reason: "i64 twin of rt_io_file_close; the seed dynamic SFFI dispatcher admits only all-i64 contracts and the hand-written interpreter close adapter is a unix-only stub (bug: seed file sessions fail at close on Windows, 2026-10-24)", capabilities: [ffi])
+extern fn rt_io_file_close_value(fd: i64) -> i64
+
 @always_inline
 fn io_file_close(fd: i64) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_io_file_close(fd)
+        rt_io_file_close_value(fd) != 0
 
 @unsafe(reason: "raw runtime ABI for rt_io_file_delete", capabilities: [ffi])
 extern fn rt_io_file_delete(path: text) -> bool
@@ -302,6 +305,19 @@ extern fn rt_io_file_open(path: text, mode: i64) -> i64
 
 @always_inline
 fn io_file_open(path: text, mode: i64) -> i64:
+    # ReadOnly/WriteOnly/Append route through the two-argument raw twins; the
+    # three-argument mixed (ptr,len,mode) text extern mis-passes path_len
+    # under seed-produced candidates, so seed-driven opens failed
+    # (bug stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22).
+    if mode == 0:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_io_file_open_read(rt_string_data(path), rt_string_len(path))
+    if mode == 1:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_io_file_open_write(rt_string_data(path), rt_string_len(path))
+    if mode == 3:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_io_file_open_append(rt_string_data(path), rt_string_len(path))
     unsafe(capabilities: [ffi]):
         rt_io_file_open(path, mode)
 

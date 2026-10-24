@@ -2317,6 +2317,18 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // runtime/src/value/sffi/file_io/io_file.rs:82,331,340.
     // The other 13 members are i64/bool-only and already correct.
     RuntimeFuncSpec::new("rt_io_file_open", &[I64, I64, I64], &[I64]), // path_ptr, path_len, mode -> fd
+    // Two-argument twins of rt_io_file_open for the modes Simple callers use
+    // (runtime io_file.rs). The three-argument mixed (ptr,len,mode) form is
+    // mis-passed by seed-produced candidates (path_len = -1 at the Rust ABI
+    // boundary), while these expand correctly on every producer
+    // (bug stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22).
+    RuntimeFuncSpec::new("rt_io_file_open_read", &[I64, I64], &[I64]),   // path_ptr, path_len -> fd
+    RuntimeFuncSpec::new("rt_io_file_open_write", &[I64, I64], &[I64]),  // path_ptr, path_len -> fd
+    RuntimeFuncSpec::new("rt_io_file_open_append", &[I64, I64], &[I64]), // path_ptr, path_len -> fd
+    // i64 twin of rt_io_file_close (bool return): the dynamic dispatcher
+    // admits only all-i64 -> i64 contracts, and the hand-written interpreter
+    // close adapter is a unix-only stub, so Windows closes always failed.
+    RuntimeFuncSpec::new("rt_io_file_close_value", &[I64], &[I64]),       // fd -> 0/1
     RuntimeFuncSpec::new("rt_io_file_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_io_file_delete", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),          // fd -> size

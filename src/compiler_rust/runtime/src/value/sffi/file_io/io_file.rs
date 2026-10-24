@@ -303,15 +303,35 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
         #[cfg(windows)]
         {
             let file = File::from_raw_handle(fd as *mut std::ffi::c_void);
-            let ok = file.sync_all().is_ok();
+            // FlushFileBuffers fails on read-only file handles, which made
+            // every read-mode close report `false` even though the handle is
+            // valid and is closed by the drop below. Honor the flush result
+            // only when the handle itself proves dead.
+            let flushed = file.sync_all().is_ok();
+            let alive = file.metadata().is_ok();
             drop(file);
-            ok
+            flushed || alive
         }
         #[cfg(not(windows))]
         {
             let _ = fd;
             false
         }
+    }
+}
+
+/// i64-returning twin of `rt_io_file_close` for the seed's dynamic SFFI
+/// dispatcher, which admits only all-i64 -> i64 contracts. The interpreter's
+/// hand-written `rt_io_file_close` adapter is unix-only (its `with_fd` and
+/// open are `#[cfg(not(unix))]` stubs returning `false`/`-1`), so on Windows
+/// every interpreter close went through that stub and failed; routing the
+/// Simple `io_file_close` through this twin reaches the real runtime close.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_close_value(fd: i64) -> i64 {
+    if rt_io_file_close(fd) {
+        1
+    } else {
+        0
     }
 }
 
