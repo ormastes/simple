@@ -53,6 +53,7 @@ inductive Field where
   | producer_stdlib_src
   | ctfe_env_inputs
   | scope_guard_context
+  | entry_deps_closure
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -94,6 +95,7 @@ def Field.name : Field → String
   | .producer_stdlib_src => "producer_stdlib_src"
   | .ctfe_env_inputs => "ctfe_env_inputs"
   | .scope_guard_context => "scope_guard_context"
+  | .entry_deps_closure => "entry_deps_closure"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -135,8 +137,9 @@ def Field.kind : Field → String
   | .producer_stdlib_src => "scalar"
   | .ctfe_env_inputs => "set"
   | .scope_guard_context => "scalar"
+  | .entry_deps_closure => "ordered"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
@@ -150,11 +153,10 @@ inductive Gap where
   | import_lib_export_sets
   | advice_body_weave_root
   | hash_algorithm_tag
-  | reexport_chain_closure
   | resolution_new_probe
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
+def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root, .hash_algorithm_tag, .resolution_new_probe]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -365,6 +367,11 @@ theorem scope_guard_context_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .scope_guard_context ≠ k2 .scope_guard_context) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .scope_guard_context)
 
+-- pos 39 (ordered) bound to src/compiler/80.driver/driver_build/incremental.spl#dependency_closure_v1
+theorem entry_deps_closure_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .entry_deps_closure ≠ k2 .entry_deps_closure) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .entry_deps_closure)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
@@ -403,11 +410,6 @@ theorem advice_body_weave_root_gap_invisible :
 /-- Known gap: the live key does not see `hash_algorithm_tag`. -/
 theorem hash_algorithm_tag_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .hash_algorithm_tag ≠ j.gap .hash_algorithm_tag :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `reexport_chain_closure`. -/
-theorem reexport_chain_closure_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .reexport_chain_closure ≠ j.gap .reexport_chain_closure :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 /-- Known gap: the live key does not see `resolution_new_probe`. -/
