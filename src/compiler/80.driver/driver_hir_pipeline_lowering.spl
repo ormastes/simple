@@ -105,6 +105,7 @@ use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_diges
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_module_encode_retained_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
@@ -1937,6 +1938,23 @@ impl CompilerDriver:
                     mem_snapshot_abort()
                     return false
                 bootstrap_lower_result.unwrap()
+            elif unstub_hir and src.content != "" and driver_hir_worker_skeleton_selected_v1(
+                    env_get("SIMPLE_HIR_SHARD") ?? "", env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""):
+                # Step-3 lazy restore: an opted-in HIR shard worker retained only
+                # the module SKELETON in phase 2 (surfaces). Re-parse this claimed
+                # module's full source before lowering -- the bootstrap-entry
+                # pattern above -- so its HIR equals the parent's.
+                dtrace("[DRV] branch=hir_worker_full_reparse")
+                val claimed_module_for_hir: ParserModule = parse_full_frontend_stage4_streaming(
+                    src.content, src.path, name, self.ctx.logger)
+                val claimed_lower_result = self.lower_retained_surface_module(
+                    lowering, claimed_module_for_hir, src.path, is_bootstrap_entry, src)
+                if claimed_lower_result.is_err():
+                    self.ctx.add_error(claimed_lower_result.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                claimed_lower_result.unwrap()
             elif unstub_hir and (self.ctx.modules[name] != nil):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
                 # makes entry-closure HIR lowering superlinear and bypasses the
