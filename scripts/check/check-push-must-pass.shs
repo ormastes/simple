@@ -19,13 +19,40 @@ ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
 RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
-MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-10}
+# Default blocking budget: 10s on an idle Linux host, scaled by a host factor
+# so a slow-but-correct gate is not turned into an ERROR by host speed alone.
+# The budget only bounds wall time -- it never changes any gate's verdict.
+# Measured 2026-10-24 on the 80-thread Windows host: push-tree-size alone
+# 8.0-11.4s and push-stage2-parent-runtime-inheritance 5.1-5.8s (git process
+# spawn is several times slower under MSYS), so every push ERRORed at 10s and
+# agents exported MUST_CHECK_PUSH_BUDGET_S=180 by hand.
+#   Windows (MINGW/MSYS/CYGWIN): x6
+#   Linux: x ceil(2 * loadavg1 / nproc), clamped to 1..6
+must_check_default_budget_s() {
+    _bf=1
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) _bf=6 ;;
+        *)
+            if [ -r /proc/loadavg ]; then
+                _bl=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+                _bn=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+                _bf=$(awk -v l="${_bl:-0}" -v n="${_bn:-1}" 'BEGIN { if (n < 1) n = 1; f = int((2 * l + n - 1) / n); if (f < 1) f = 1; if (f > 6) f = 6; print f }')
+            fi
+            ;;
+    esac
+    echo $(( 10 * _bf ))
+}
+MUST_CHECK_DEFAULT_PUSH_BUDGET_S=$(must_check_default_budget_s)
+MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-$MUST_CHECK_DEFAULT_PUSH_BUDGET_S}
 MUST_CHECK_BUDGET_MS=0
 MUST_CHECK_BUDGET_SPENT_MS=0
 MUST_CHECK_BLOCKING_RUN=0
 MUST_CHECK_BUDGET_OVERRUN=""
 TIMEOUT_BIN=""
-REMOTE_QUERY_TIMEOUT_S=3
+# ls-remote bound for base resolution. 3s was too tight: measured 0.7-1.0s
+# idle on Windows over HTTPS and well past 3s under load, and a timeout
+# made every new-branch push die "cannot verify published new-ref base".
+REMOTE_QUERY_TIMEOUT_S=${MUST_CHECK_REMOTE_QUERY_TIMEOUT_S:-15}
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -1166,7 +1193,16 @@ REBASED_LINES
 new_ref_published_base() {
     _nr_ref=$1
     _nr_tip=$2
-    case "$_nr_ref" in refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;; *) return 1 ;; esac
+    # `git push origin HEAD:refs/heads/<b>` reports the local ref as HEAD:
+    # resolve it to the checked-out branch; a detached HEAD has no upstream
+    # and takes the closest-published-line path below.
+    if [ "$_nr_ref" = HEAD ]; then
+        _nr_ref=$(git -C "$ROOT" symbolic-ref -q HEAD 2>/dev/null) || _nr_ref=HEAD
+    fi
+    case "$_nr_ref" in
+        refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;;
+        *) new_ref_closest_published_base "$_nr_tip"; return ;;
+    esac
     _nr_merge=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.merge" 2>/dev/null) || _nr_merge=""
     # `--get-all` may return several configured upstreams. Never let a mixed
     # release/main value drop into the ordinary-main fallback by accident.
@@ -1191,8 +1227,13 @@ new_ref_published_base() {
             case "$_nr_push_remote" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
             _nr_destination=${MUST_CHECK_PUSH_DESTINATION:-}
             case "$_nr_destination" in ''|-*) return 1 ;; esac
+            # A stale/forged tracking ref must never replace this live query
+            # (see --self-test-release-base); a failed query refuses, and says why.
             _nr_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" \
-                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || return 1
+                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || {
+                echo "push-must-check: ls-remote of $_nr_merge at the push destination failed or exceeded ${REMOTE_QUERY_TIMEOUT_S}s (MUST_CHECK_REMOTE_QUERY_TIMEOUT_S)" >&2
+                return 1
+            }
             _nr_sha=${_nr_line%%[[:space:]]*}
             _nr_seen_ref=${_nr_line#*[[:space:]]}
             [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
@@ -1203,10 +1244,29 @@ new_ref_published_base() {
             printf '%s\n' "$_nr_base"
             ;;
         *)
-            # Keep the historical main-based behavior for ordinary new refs.
-            git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            # No release upstream. With no upstream at all, base on the closest
+            # published protected line
+            # (main, release_phase3, release/*), as rebased pushes already do.
+            # Measuring a release-based branch against origin/main scanned
+            # every main..release difference and overran the push budget.
+            # Only for a branch with NO upstream at all: a configured
+            # non-release upstream (e.g. a near-match like release_phase30)
+            # keeps the historical origin/main base and must not gain release
+            # authority (--self-test-release-base).
+            if [ -z "$_nr_merge" ]; then
+                new_ref_closest_published_base "$_nr_tip"
+            else
+                git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            fi
             ;;
     esac
+}
+
+# Closest published protected line for a new ref without a usable release
+# upstream; falls back to the historical origin/main merge-base.
+new_ref_closest_published_base() {
+    rebased_push_published_base "$1" && return 0
+    git -C "$ROOT" merge-base "$1" origin/main
 }
 
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
@@ -1216,8 +1276,8 @@ new_ref_published_base() {
 case "$MUST_CHECK_PUSH_BUDGET_S" in
     ''|*[!0-9]*|0) echo "push-must-check: ERROR — nothing was checked (MUST_CHECK_PUSH_BUDGET_S must be a positive integer, got '$MUST_CHECK_PUSH_BUDGET_S')"; exit 2 ;;
 esac
-[ "$MUST_CHECK_PUSH_BUDGET_S" -eq 10 ] ||
-    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (default 10s)" >&2
+[ "$MUST_CHECK_PUSH_BUDGET_S" -eq "$MUST_CHECK_DEFAULT_PUSH_BUDGET_S" ] ||
+    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (host default ${MUST_CHECK_DEFAULT_PUSH_BUDGET_S}s)" >&2
 MUST_CHECK_BUDGET_MS=$(( MUST_CHECK_PUSH_BUDGET_S * 1000 ))
 # Tool selection (2026-09-24 fix): `command -v timeout` alone is unsafe on two
 # real hosts. (1) Stock macOS has no `timeout` at all — only Homebrew's
@@ -1361,6 +1421,16 @@ if [ "${1:-}" = --self-test-release-base ]; then
     [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
     [ "$(git -C "$ROOT" rev-list --count "$_st_release_one..$_st_tip")" -eq 1 ] || exit 2
     echo 'push-must-check: release-based new ref scans its one own commit: PASS'
+
+    # `git push origin HEAD:refs/heads/<b>` reports local ref HEAD.
+    [ "$(new_ref_published_base HEAD "$_st_tip")" = "$_st_release_one" ] || exit 2
+    echo 'push-must-check: HEAD local ref resolves to the checked-out branch: PASS'
+    # No upstream at all: base on the closest published line, not origin/main.
+    git -C "$ROOT" branch -q --unset-upstream fix/release || exit 2
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    [ "$(new_ref_published_base HEAD "$(git -C "$ROOT" rev-parse HEAD)")" = "$_st_release_one" ] || exit 2
+    git -C "$ROOT" branch -q --set-upstream-to=origin/release/1.0 fix/release || exit 2
+    echo 'push-must-check: upstream-less release-based new ref scans only its own commit: PASS'
 
     git -C "$ROOT" switch -q release/1.0
     printf 'release two\n' >> "$ROOT/release.txt"
