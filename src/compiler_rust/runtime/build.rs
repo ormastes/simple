@@ -9,6 +9,7 @@ mod runtime_export_scan;
 #[path = "src/runtime_signature_scan.rs"]
 mod runtime_signature_scan;
 
+#[cfg(not(test))]
 fn main() {
     emit_cdylib_soname();
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
@@ -212,7 +213,7 @@ fn runtime_symbol_declaration(
     canonical: Option<&runtime_signature_scan::RuntimeSignature>,
 ) -> String {
     let signature = match symbol {
-        "rt_alloc" => "(size: i64) -> *mut u8",
+        "rt_alloc" | "rt_struct_alloc" => "(size: i64) -> *mut u8",
         "rt_free" => "(ptr: *mut u8)",
         // The SFFI machine lane is I64, but the C owner returns a borrowed
         // pointer. Keep this linker declaration identical to linked_registry.
@@ -257,6 +258,27 @@ fn runtime_symbol_declaration(
     format!("pub fn {alias}{signature};")
 }
 
+#[cfg(test)]
+mod declaration_tests {
+    // Cargo does not run build-script unit tests. Execute via:
+    // sh scripts/check/check-runtime-symbol-declarations.shs
+    use super::{runtime_signature_scan, runtime_symbol_alias, runtime_symbol_declaration};
+
+    #[test]
+    fn struct_allocator_i64_machine_signature_keeps_pointer_return() {
+        let canonical = runtime_signature_scan::RuntimeSignature {
+            params: vec!["I64".to_string()],
+            returns: vec!["I64".to_string()],
+        };
+        let alias = runtime_symbol_alias("rt_struct_alloc");
+
+        assert_eq!(
+            runtime_symbol_declaration("rt_struct_alloc", &alias, Some(&canonical)),
+            "pub fn __simple_runtime_symbol_rt_struct_alloc(size: i64) -> *mut u8;"
+        );
+    }
+}
+
 fn canonical_runtime_symbol_declaration(
     alias: &str,
     canonical: Option<&runtime_signature_scan::RuntimeSignature>,
@@ -292,6 +314,8 @@ fn rust_abi_type(ty: &str) -> &'static str {
     }
 }
 
+// Standalone declaration tests need no C compiler or Cargo build dependencies.
+#[cfg(not(test))]
 fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");

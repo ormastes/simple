@@ -53,7 +53,8 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlow
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
@@ -574,7 +575,16 @@ impl CompilerDriver:
                 driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
                 val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
                 return Err("flat HIR row ownership promotion failed for {source_path}")
-        if not driver_promote_frontend_registry_owners():
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=missing_cache_scope_memo_promote
+        # driver_promote_frontend_registry_owners() omits
+        # frontend_parse_cache_promote_transient_owner: the frontend-cache
+        # scope memo (set on the first frontend_parse_cache_scope() call, often
+        # inside an earlier transient scope) died un-promoted, and the hir-cache
+        # store's header then concatenated a dead limb — rt_file_write_text
+        # failed every store (io-write), forcing a re-lower. Promote it here
+        # (paused state, same as the other owners in this chain).
+        val cache_scope_ok = frontend_parse_cache_promote_transient_owner()
+        if not (driver_promote_frontend_registry_owners() and cache_scope_ok):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
@@ -1903,7 +1913,7 @@ impl CompilerDriver:
                 # immediately before HIR lowering so real bodies are owned by
                 # this lowering pass rather than a stale arena-backed cache.
                 val bootstrap_module_for_hir: ParserModule = if src.content != "":
-                    parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                    parse_full_frontend_stage4_streaming(src.content, src.path, name, self.ctx.logger)
                 else:
                     self.ctx.modules[name]
                 val bootstrap_lower_result = self.lower_retained_surface_module(
