@@ -1,0 +1,63 @@
+"""GuardIdV1 / ActiveGuardRootV1: tagged, normalized, unevaluable => incomplete => miss."""
+
+use std.spec.*
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, guard_id_v1,
+    active_guard_root_v1, active_guard_root_admissible_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    directory_join_point_facts_v1, directory_join_point_facts_guarded_v1,
+    pointcut_selector_parse_v1, pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1}
+
+fn ev(kind: text, expr: text, evaluable: bool, active: bool) -> GuardEvalV1:
+    GuardEvalV1(guard: guard_id_v1(kind, expr), evaluable: evaluable, active: active)
+
+fn pts() -> [JoinPointFactV1]:
+    [JoinPointFactV1(id: "a/x.spl::foo", kind: "forward", symbol: "foo", attrs: ["logged"],
+        owner_file: "a/x.spl", base_body_digest: "b")]
+
+describe "GuardIdV1":
+    it "tags the digest and normalizes whitespace":
+        val a = guard_id_v1("when", "target_os ==  \"linux\"")
+        val b = guard_id_v1("when", " target_os == \"linux\" ")
+        expect(a.digest).to_equal(b.digest)
+        expect(a.digest.starts_with("sha256/")).to_equal(true)
+        expect(guard_id_v1("cfg", "x").digest == guard_id_v1("when", "x").digest).to_equal(false)
+    it "an unknown guard kind has no digest":
+        expect(guard_id_v1("bogus", "x").digest).to_equal("")
+
+describe "ActiveGuardRootV1":
+    it "is order independent and flips with a guard value":
+        val r1 = active_guard_root_v1("p", [ev("when", "a", true, true), ev("cfg", "b", true, false)])
+        val r2 = active_guard_root_v1("p", [ev("cfg", "b", true, false), ev("when", "a", true, true)])
+        val r3 = active_guard_root_v1("p", [ev("when", "a", true, false), ev("cfg", "b", true, false)])
+        expect(r1.root_digest).to_equal(r2.root_digest)
+        expect(r1.root_digest == r3.root_digest).to_equal(false)
+        expect(active_guard_root_admissible_v1(r1)).to_equal(true)
+    it "an unevaluable guard makes the root incomplete and inadmissible":
+        val r = active_guard_root_v1("p", [ev("when", "a", true, true), ev("when", "dyn()", false, false)])
+        expect(r.complete).to_equal(false)
+        expect(r.unevaluable).to_equal(["when:dyn()"])
+        expect(active_guard_root_admissible_v1(r)).to_equal(false)
+        expect(active_guard_root_admissible_v1(active_guard_root_v1("p", [ev("bogus", "x", true, true)]))).to_equal(false)
+
+describe "ActiveGuardRoot in the AOP directory key":
+    it "a guard flip changes the facts key and misses the shard":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val on = directory_join_point_facts_guarded_v1("a", ["a/x.spl"], pts(), [], true,
+            active_guard_root_v1("p", [ev("when", "feature_x", true, true)]))
+        val off = directory_join_point_facts_guarded_v1("a", ["a/x.spl"], pts(), [], true,
+            active_guard_root_v1("p", [ev("when", "feature_x", true, false)]))
+        expect(on.facts_key == off.facts_key).to_equal(false)
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, on)
+        val r2 = pointcut_match_cache_acquire_v1(r1.cache, sel, off)
+        expect(r2.hit).to_equal(false)
+        val r3 = pointcut_match_cache_acquire_v1(r2.cache, sel, on)
+        expect(r3.hit).to_equal(true)
+    it "an unevaluable guard makes the directory incomplete (never admitted)":
+        val f = directory_join_point_facts_guarded_v1("a", ["a/x.spl"], pts(), [], true,
+            active_guard_root_v1("p", [ev("when", "dyn()", false, false)]))
+        expect(f.complete).to_equal(false)
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("attr(logged)"), f)
+        expect(r.cacheable).to_equal(false)
+    it "unguarded facts equal an empty complete root":
+        expect(directory_join_point_facts_v1("a", ["a/x.spl"], pts(), [], true).complete).to_equal(true)
