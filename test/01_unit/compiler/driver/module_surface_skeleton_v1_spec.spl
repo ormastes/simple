@@ -1,0 +1,56 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn same_surface(path: text) -> bool:
+    val source = rt_file_read_text(path) ?? ""
+    val skeleton = module_surface_skeleton_v1(source)
+    val full = parse_full_frontend(source, path, "m", Logger(level: 0))
+    val skel = parse_full_frontend(skeleton, path, "m", Logger(level: 0))
+    val a = module_surface_canonical_digest_v1(full)
+    val b = module_surface_canonical_digest_v1(skel)
+    if a != b:
+        print "SURFACE MISMATCH {path}"
+    a == b and source.split("\n").len() == skeleton.split("\n").len()
+
+val FIXTURE: text = "use std.x.a\nexport use std.y.z\n\n@inline\nfn twice(a: i64) -> i64:\n    a * 2\n\npub fn add(a: i64,\n        b: i64) -> i64:\n    val c = a + b\n    c\n\nfn first<T>(xs: [T]) -> T:\n    xs[0]\n\npub struct P:\n    x: i64\n\nimpl P:\n    fn len() -> i64:\n        self.x\n    static fn make() -> P:\n        P(x: 1)\n\ntrait Shape:\n    fn area() -> i64:\n        0\n\nval LIMIT: i64 = 4\n"
+
+describe "module surface skeleton":
+    it "keeps every line, stubs non-generic bodies, keeps generic/inline/trait bodies":
+        val skel = module_surface_skeleton_v1(FIXTURE)
+        val lines = skel.split("\n")
+        expect(lines.len()).to_equal(FIXTURE.split("\n").len())
+        expect(skel.contains("val c = a + b")).to_equal(false)
+        expect(skel.contains("self.x")).to_equal(false)
+        expect(skel.contains("xs[0]")).to_equal(true)
+        expect(skel.contains("a * 2")).to_equal(true)
+        expect(skel.contains("        0")).to_equal(true)
+        expect(lines[7]).to_equal("pub fn add(a: i64,")
+
+    it "yields the same canonical surface digest as the full parse (fixture)":
+        val full = parse_full_frontend(FIXTURE, "fx.spl", "fx", Logger(level: 0))
+        val skel = parse_full_frontend(module_surface_skeleton_v1(FIXTURE), "fx.spl", "fx", Logger(level: 0))
+        expect(module_surface_canonical_digest_v1(skel)).to_equal(module_surface_canonical_digest_v1(full))
+
+    it "yields the same canonical surface digest on real compiler sources":
+        expect(same_surface("src/compiler/00.common/diagnostics/span.spl")).to_equal(true)
+        expect(same_surface("src/compiler/80.driver/sif/sif.spl")).to_equal(true)
+        expect(same_surface("src/compiler/80.driver/cache/gc/cache_eviction_plan_v1.spl")).to_equal(true)
+        expect(same_surface("src/compiler/80.driver/cache/daemon/cache_single_flight_v1.spl")).to_equal(true)
+        expect(same_surface("src/compiler/80.driver/cache/module_artifacts_v1.spl")).to_equal(true)
+        expect(same_surface("src/compiler/20.hir/hir_lowering/module_surface_types.spl")).to_equal(true)
+        expect(same_surface("src/lib/nogc_async_mut/async/future.spl")).to_equal(true)
+        expect(same_surface("src/compiler/80.driver/cache/daemon/cache_daemon_main.spl")).to_equal(true)
+
+    it "is a real 64-hex digest that distinguishes different surfaces":
+        val a = parse_full_frontend(FIXTURE, "fx.spl", "fx", Logger(level: 0))
+        val b = parse_full_frontend(FIXTURE.replace("pub fn add(a: i64,", "pub fn add(x: i64,"), "fx.spl", "fx", Logger(level: 0))
+        val da = module_surface_canonical_digest_v1(a)
+        expect(da.len()).to_equal(64)
+        expect(module_surface_canonical_digest_v1(b) != da).to_equal(true)
+        val c = parse_full_frontend(FIXTURE.replace("    val c = a + b", "    val c = a - b"), "fx.spl", "fx", Logger(level: 0))
+        expect(module_surface_canonical_digest_v1(c)).to_equal(da)
