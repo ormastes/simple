@@ -212,7 +212,7 @@ bin=build/bootstrap/stage$next/simple$exe
 # Absolute paths: Windows hello builds fail with "diagnostic staging
 # unavailable" only under harnesses; a relative output parent is that bug's
 # open hypothesis (stage2_sanity_diagnostic_staging_unavailable_2026-09-12).
-probe=$(pwd)/build/ladder-sanity
+probe=$evidence_root/hello
 rm -rf "$probe" && mkdir -p "$probe"
 printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.spl"
 "./$bin" --version
@@ -231,7 +231,23 @@ if ! "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"; then
   echo "phase-ladder: phase $next hello build failed" >&2
   exit 1
 fi
-"$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
+# POSIX sh has no pipefail: piping Hello to grep would hide its native exit
+# status and admit a program which prints the marker before failing. Preserve
+# the run independently and accept only the complete expected line.
+hello_status=0
+"$probe/hello$exe" > "$probe/stdout" 2> "$probe/stderr" || hello_status=$?
+printf '%s\n' "$hello_status" > "$probe/exit-status"
+printf 'phase-ladder-%s-ok\n' "$next" > "$probe/expected-lf.stdout"
+printf 'phase-ladder-%s-ok\r\n' "$next" > "$probe/expected-crlf.stdout"
+if [ "$hello_status" -ne 0 ] || {
+  ! cmp -s "$probe/stdout" "$probe/expected-lf.stdout" &&
+  ! cmp -s "$probe/stdout" "$probe/expected-crlf.stdout"
+}; then
+  mkdir -p "$out_dir/$platform-rejected-p$next"
+  cp "./$bin" "$out_dir/$platform-rejected-p$next/"
+  echo "phase-ladder: phase $next hello run failed (exit=$hello_status; evidence=$probe)" >&2
+  exit 1
+fi
 emit "$next" "$bin" true
 if [ "$next" -ge "${PHASE_LADDER_ESSENTIALS_FROM:-3}" ]; then
   build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"
