@@ -2,7 +2,7 @@
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 
@@ -62,6 +62,14 @@ var _windows_process_slots_v1: [WindowsProcessStateV1] = []
 # distinct. JobObject memory limits account committed bytes.
 @unsafe(reason: "reads a bounded native host memory snapshot and releases its buffer", capabilities: [ffi, raw_ptr])
 fn windows_available_memory_headroom_v1() -> Result<i64, text>:
+    # Interpreter-first: the runtime-C wrapper resolves under the bootstrap
+    # seed's pure interpreter, where the raw kernel32 heap externs below have
+    # no implementation (the probe errored and the build/preflight memory
+    # admission degraded to "available: 0 via unknown", refusing native-builds
+    # including devhub/caret entry-closure builds, 2026-10-24). 0 = snapshot
+    # unavailable: fall through to the extern path for full AOT fidelity.
+    val headroom = rt_host_memory_headroom_bytes_v1()
+    if headroom > 0: return Ok(headroom)
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for memory check")
     val status = HeapAlloc(heap, 8u32, 64u64)

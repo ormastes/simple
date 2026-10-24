@@ -3658,6 +3658,88 @@ int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
     exit(70);
 }
 
+/* Windows host memory headroom for the process-admission probe
+ * (2026-10-24, doc: 08_tracking/bug/seed_interp_windows_memory_probe_2026_10_24.md).
+ * std.nogc_sync_mut.io.windows_process_owner.windows_available_memory_headroom_v1
+ * must also run under the bootstrap seed's PURE interpreter, where the raw
+ * kernel32 heap externs (GetProcessHeap/HeapAlloc/HeapFree) backing the
+ * extern path have no registered implementation: the probe errored, and the
+ * native-build / bootstrap-preflight memory admission degraded to
+ * "available: 0 via unknown" and refused builds (including devhub/caret
+ * entry-closure builds). This wrapper performs the same snapshot in runtime
+ * C, where registered rt_* externs resolve under the interpreter, and returns
+ * min(ullAvailPhys, ullAvailPageFile), mirroring
+ * windows_capacity_headroom_v1. Returns 0 when the query fails or the
+ * platform is not Windows; callers keep the extern path as the fallback. */
+int64_t rt_host_memory_headroom_bytes_v1(void) {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status;
+    memset(&status, 0, sizeof(status));
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) return 0;
+    if (status.ullAvailPhys > (uint64_t)INT64_MAX) return 0;
+    if (status.ullAvailPageFile > (uint64_t)INT64_MAX) return 0;
+    uint64_t headroom = status.ullAvailPhys < status.ullAvailPageFile
+        ? status.ullAvailPhys
+        : status.ullAvailPageFile;
+    return (int64_t)headroom;
+#else
+    return 0;
+#endif
+}
+
+/* Commit headroom (CommitLimit - CommitTotal) * PageSize via
+ * K32GetPerformanceInfo, resolved with GetProcAddress because the symbol
+ * lives in kernel32 on modern Windows but psapi.h placement varies by SDK.
+ * The 104-byte PERFORMANCE_INFORMATION layout is read by documented offset
+ * (CommitTotal@8, CommitLimit@16, PageSize@88) so no psapi.h type is needed.
+ * Same interpreter-first rationale as rt_host_memory_headroom_bytes_v1.
+ * Returns 0 when unavailable; callers keep the extern path as fallback. */
+int64_t rt_host_commit_headroom_bytes_v1(void) {
+#if defined(_WIN32)
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32");
+    if (!kernel32) return 0;
+    typedef int (WINAPI *QueryCommitFn)(void*, unsigned long);
+    QueryCommitFn query = (QueryCommitFn)(void (*)(void))GetProcAddress(kernel32, "K32GetPerformanceInfo");
+    if (!query) return 0;
+    uint64_t raw[13];
+    memset(raw, 0, sizeof(raw));
+    *(uint32_t*)(void*)raw = (uint32_t)sizeof(raw); /* cb = 104 */
+    if (query((void*)raw, (unsigned long)sizeof(raw)) == 0) return 0;
+    uint64_t commit_total = raw[1];  /* offset 8 */
+    uint64_t commit_limit = raw[2];  /* offset 16 */
+    uint64_t page_size = raw[11];    /* offset 88 */
+    if (commit_limit < commit_total || page_size == 0) return 0;
+    uint64_t headroom_pages = commit_limit - commit_total;
+    if (headroom_pages > (uint64_t)INT64_MAX / page_size) return 0;
+    return (int64_t)(headroom_pages * page_size);
+#else
+    return 0;
+#endif
+}
+
+/* Available bytes on the volume holding `path` (Simple text value) via
+ * GetDiskFreeSpaceExW. Same interpreter-first rationale as
+ * rt_host_memory_headroom_bytes_v1. Returns 0 when unavailable; callers
+ * keep the extern path as fallback. */
+int64_t rt_host_disk_headroom_bytes_v1(int64_t path_value) {
+#if defined(_WIN32)
+    RtCoreString* path = rt_core_as_string(path_value);
+    if (!path || path->len == 0 || path->len >= 4096) return 0;
+    WCHAR wide[4096];
+    int converted = MultiByteToWideChar(CP_UTF8, 0, (LPCCH)path->data, (int)path->len, wide, 4095);
+    if (converted <= 0) return 0;
+    wide[converted] = L'\0';
+    ULARGE_INTEGER free_for_caller = {0};
+    if (!GetDiskFreeSpaceExW(wide, &free_for_caller, NULL, NULL)) return 0;
+    if (free_for_caller.QuadPart > (uint64_t)INT64_MAX) return 0;
+    return (int64_t)free_for_caller.QuadPart;
+#else
+    (void)path_value;
+    return 0;
+#endif
+}
+
 int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
     (void)argc;
     (void)argv;
