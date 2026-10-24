@@ -10,6 +10,7 @@
 # (plan §9.6): it never hits again and callers fall back to a reference
 # expansion. Newest-wins is never used.
 use std.common.text_bytes.{text_to_bytes}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_identity_digest_v1}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
 
@@ -36,8 +37,10 @@ class MacroExpansionCacheV1:
             if k == expand_key: return true
         false
 
-    # "hit" | "leader" | "waiter" | "quarantined"
+    # "hit" | "leader" | "waiter" | "quarantined" | "uncacheable" (key is not a
+    # collision-resistant tagged digest of a known algorithm => always a miss)
     me begin(expand_key: text, request_id: text) -> text:
+        if macro_identity_digest_v1(expand_key) == nil: return "uncacheable"
         if self._is_quarantined(expand_key): return "quarantined"
         if self._index(expand_key) >= 0: return "hit"
         val (role, _flight) = self.flights.join(cache_single_flight_key_v1("macro-expand", expand_key), request_id)
@@ -49,6 +52,7 @@ class MacroExpansionCacheV1:
     # true when published (or an identical republish); false when the key is
     # now quarantined for a differing expansion.
     me publish(expand_key: text, request_id: text, expansion: text) -> bool:
+        if macro_identity_digest_v1(expand_key) == nil: return false
         if self._is_quarantined(expand_key): return false
         val i = self._index(expand_key)
         if i >= 0:
