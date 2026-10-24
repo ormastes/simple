@@ -3308,6 +3308,11 @@ int64_t stdin_read_char(void) {
  * build is affected identically. Only the constructor-registration mechanism
  * below differs per compiler.
  */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
 static void rt_win_set_binary_stdio(void) {
     /* Same defect for FILES: every open()/fopen() in this runtime without an
      * explicit _O_BINARY / "b" (rt_file_write_text_at, rt_file_open, the
@@ -12217,7 +12222,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (end < (uint64_t)offset) return 0;
 #if defined(_WIN32)
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER file_size;
@@ -12836,7 +12841,7 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
          * ungated dump of the fopen failure on the candidate's actual read path. */
@@ -12964,7 +12969,7 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 4;
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) return 4;
@@ -13093,7 +13098,7 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_nil;
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
     size_t cap = 4096;
@@ -14901,7 +14906,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14942,7 +14947,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -15892,7 +15897,7 @@ int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) {
