@@ -141,38 +141,53 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
         # Publishing over the promoted batch's own array limbs deadlocks:
         # rt_array_get on the reclaimed transient slot spins in the runtime
         # heap registry mutex (gdb-verified 2026-10-23).
-        val facts_owned = transient_promote(batch.facts)
-        val known_owned = transient_promote(batch.known_families)
-        val incomplete_owned = transient_promote(batch.incomplete_families)
-        val aliases_owned = transient_promote(batch.aliases)
+        # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+        val facts_v: [ReverseReferenceOwnerFactV1] = batch.facts
+        val known_v: [text] = batch.known_families
+        val incomplete_v: [text] = batch.incomplete_families
+        val aliases_v: [ReverseReferenceSourceAliasV1] = batch.aliases
+        val facts_owned = transient_promote(facts_v)
+        val known_owned = transient_promote(known_v)
+        val incomplete_owned = transient_promote(incomplete_v)
+        val aliases_owned = transient_promote(aliases_v)
         # The array backings survive via the promotes above, but their ELEMENT
         # handles (the strings inside) were allocated in the ending scope too:
         # publish's contains/push dereferences them (string compare) and
         # SIGSEGVs on reclaimed content. Promote every element while the scope
         # is still paused; the runtime reclaim cure (owner lane) supersedes.
+        # Element/field arguments go through typed locals for the same
+        # mono workaround as above.
         var elements_owned = facts_owned and known_owned and incomplete_owned and aliases_owned
         var ki = 0
-        while ki < batch.known_families.len() and elements_owned:
-            elements_owned = transient_promote(batch.known_families[ki])
+        while ki < known_v.len() and elements_owned:
+            val known_e: text = known_v[ki]
+            elements_owned = transient_promote(known_e)
             ki = ki + 1
         var ii = 0
-        while ii < batch.incomplete_families.len() and elements_owned:
-            elements_owned = transient_promote(batch.incomplete_families[ii])
+        while ii < incomplete_v.len() and elements_owned:
+            val incomplete_e: text = incomplete_v[ii]
+            elements_owned = transient_promote(incomplete_e)
             ii = ii + 1
         var fi = 0
-        while fi < batch.facts.len() and elements_owned:
-            val fact = batch.facts[fi]
-            elements_owned = transient_promote(fact.projection_kind) and
-                transient_promote(fact.subject_identity) and
-                transient_promote(fact.consumer_identity) and
-                transient_promote(fact.evidence_digest) and
+        while fi < facts_v.len() and elements_owned:
+            val fact: ReverseReferenceOwnerFactV1 = facts_v[fi]
+            val fact_kind: text = fact.projection_kind
+            val fact_subject: text = fact.subject_identity
+            val fact_consumer: text = fact.consumer_identity
+            val fact_digest: text = fact.evidence_digest
+            elements_owned = transient_promote(fact_kind) and
+                transient_promote(fact_subject) and
+                transient_promote(fact_consumer) and
+                transient_promote(fact_digest) and
                 transient_promote(fact)
             fi = fi + 1
         var ai = 0
-        while ai < batch.aliases.len() and elements_owned:
-            val alias = batch.aliases[ai]
-            elements_owned = transient_promote(alias.identity) and
-                transient_promote(alias.source) and
+        while ai < aliases_v.len() and elements_owned:
+            val alias: ReverseReferenceSourceAliasV1 = aliases_v[ai]
+            val alias_identity: text = alias.identity
+            val alias_source: text = alias.source
+            elements_owned = transient_promote(alias_identity) and
+                transient_promote(alias_source) and
                 transient_promote(alias)
             ai = ai + 1
         # Publish PUSHES into the phase-owner globals; their backings also
@@ -183,10 +198,10 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
         elements_owned = transient_promote(_reverse_reference_incomplete_families_v1) and elements_owned
         elements_owned = transient_promote(_reverse_reference_source_aliases_v1) and elements_owned
         if elements_owned:
-            _rr_module_batch_facts_g_v1 = batch.facts
-            _rr_module_batch_known_g_v1 = batch.known_families
-            _rr_module_batch_incomplete_g_v1 = batch.incomplete_families
-            _rr_module_batch_aliases_g_v1 = batch.aliases
+            _rr_module_batch_facts_g_v1 = facts_v
+            _rr_module_batch_known_g_v1 = known_v
+            _rr_module_batch_incomplete_g_v1 = incomplete_v
+            _rr_module_batch_aliases_g_v1 = aliases_v
         else:
             _rr_module_batch_valid_g_v1 = false
     _reverse_reference_module_index_v1 = nil
