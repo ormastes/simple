@@ -734,3 +734,23 @@ fn import_alias_of_colliding_name_does_not_bind_importers_own_function() {
         "shim's add_header must not call itself through the alias"
     );
 }
+
+/// A VOID-typed (erased) receiver must not qualify a builtin-collection
+/// method as `void.contains_key`: backend suffix recovery binds such a name to
+/// an unrelated user method (`AdaptiveMap.contains_key` on a dict -> SEGV).
+/// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+#[test]
+fn void_receiver_builtin_collection_method_is_not_void_qualified() {
+    let mir = compile_to_mir(
+        "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n\nfn nothing():\n    pass\n\nfn probe() -> bool:\n    nothing().contains_key(\"x\")\n",
+    )
+    .expect("compile");
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe");
+    let insts: Vec<_> = probe.blocks.iter().flat_map(|b| &b.instructions).collect();
+    let dump = format!("{insts:?}");
+    assert!(
+        insts.iter().all(|i| !matches!(i, MirInst::MethodCallStatic { func_name, .. }
+            if func_name.contains('.') && func_name.ends_with("contains_key"))),
+        "erased receiver must stay bare: {dump}"
+    );
+}

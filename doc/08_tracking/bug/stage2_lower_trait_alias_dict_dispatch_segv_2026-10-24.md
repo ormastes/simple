@@ -1,7 +1,7 @@
 # Stage 2 SEGV in HIR `lower_trait`: private dict alias field dispatches to `AdaptiveMap.contains_key`
 
 - **Date:** 2026-10-24
-- **Status:** source workaround landed (this record); seed root cause open.
+- **Status:** seed root cause fixed (import_loader declaring-scope alias expansion + MIR `void.` builtin guard); source workaround reverted. Needs a stage2 rebuild from the fixed seed to close.
 - **Binary:** stage 2, x86_64-pc-windows-gnu, built by the Rust seed at `9feac254cae`
   (`.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-gnu/simple.exe.manual-wa-fltused`).
 - **Blocks:** stage 3. Stage 2 cannot compile any module that declares a trait.
@@ -79,3 +79,25 @@ Other dict-alias-typed fields that may have the same exposure (not observed
 crashing): `FunctionBoundsMap`, `FunctionTypeParametersMap`, `MutableSymbolsMap`,
 `SubstitutionMap`, `TypeEnvironment` (30.types), `HirTypeBindings`
 (hir_definitions), `SymbolNameMap` (70.backend), `ValueCaptureMap` (00.common).
+
+## Seed fix (2026-10-24)
+
+Measured with a Rust unit test: the private alias field resolved to `Void` (not
+`Any`) in the importer, and MIR emitted `MethodCallStatic("void.contains_key")`.
+
+- `hir/lower/import_loader.rs`: an imported class/struct's field types are
+  expanded through the declaring module's own non-refined `type` aliases before
+  registration, so the field is a `Dict` in every importer.
+- `mir/lower/lowering_expr_method.rs`: a `void.`/`Any.` qualifier on a
+  builtin-collection method name is dropped, so every backend takes the
+  tag-dispatched builtin instead of suffix-binding a user method.
+- Tests: `import_loader::private_alias_dict_tests` (4) and
+  `seed_regression_tests::void_receiver_builtin_collection_method_is_not_void_qualified`;
+  each fails with its fix disabled.
+- `types.spl` workaround reverted (alias `HirTraitsByName` restored).
+
+Audit of the other listed aliases (`FunctionBoundsMap`, `FunctionTypeParametersMap`,
+`MutableSymbolsMap`, `SubstitutionMap`, `TypeEnvironment`, `HirTypeBindings`,
+`SymbolNameMap`, `ValueCaptureMap`): each is declared in the same file as the
+class field that uses it, which is exactly the shape the import_loader fix now
+covers. No source change needed.
