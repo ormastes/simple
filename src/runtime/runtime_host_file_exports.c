@@ -239,7 +239,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     DWORD access = readonly != 0 ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     DWORD protect = readonly != 0 ? PAGE_READONLY : PAGE_READWRITE;
     DWORD map_access = readonly != 0 ? FILE_MAP_READ : FILE_MAP_WRITE;
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(path);
     if (file == INVALID_HANDLE_VALUE) return 0;
