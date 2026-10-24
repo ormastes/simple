@@ -2334,6 +2334,23 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
+        // A `void.`/`Any.` qualifier is erasure, not a nominal owner: an
+        // unresolvable field type (e.g. a module-private dict alias seen from
+        // an importer) reaches here typed VOID. Qualifying a builtin-collection
+        // name with it lets backend suffix recovery bind an unrelated user
+        // method (`AdaptiveMap.contains_key` on a dict handle -> SEGV). Emit
+        // the bare name so every backend takes the tag-dispatched builtin.
+        // doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+        let func_name = match func_name.split_once('.') {
+            Some(("void" | "Any" | "any", bare))
+                if bare == method
+                    && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len()) =>
+            {
+                bare.to_string()
+            }
+            _ => func_name,
+        };
+
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).
