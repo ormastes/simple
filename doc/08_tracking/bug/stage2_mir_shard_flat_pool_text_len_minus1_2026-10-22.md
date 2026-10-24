@@ -1065,3 +1065,74 @@ reproducible module: consistent with accumulating heap corruption (the
 crash address follows allocation state, not a fixed bad access). HIR
 progress is monotonic regardless (1877+/2934 after 4 crashes) because the
 hir-cache stores each completed module before the next crash.
+
+
+## Restoration 2026-10-24 (lane D): rebase-dropped evidence restored
+
+The release-branch rebase onto release-phase3 dropped three lane-D addenda
+from this document. They are decision records for the active bisection; the
+full original text survives in the history of work/bisect-probe2-20261024.
+Restored in compact form:
+
+1. Lane 58 split-field probe: all 160 blob.split("\n") fields of the p2_add
+   frontend-cache blob are VALID (10 len=0 empties, 146 len=1, 2 len=26,
+   2 len=7; ZERO len=-1) and the capture refusal still fires. blob.split, the
+   reader, and empty-field handling are innocent; the -1 handles are created
+   between flat_pools_restore_all's write and the capture dump's read, ~100
+   source lines apart, no pool reset, no scope end. Also: fixture-probing
+   pollutes build/scv's snapshot index (snapshot-index-drift); clear and
+   rebuild to recover.
+2. Debugger prevention: five cdb approaches all produced ZERO refusals
+   (allocation-order-sensitive defect; debug-thread injection perturbs the
+   heap enough to prevent it), while 160 extra prints still reproduced.
+   Close-path = debugger-free print-bisection, ~2-3 lane cycles. cdb facts:
+   refusal literal VA 0x14163caec; attach to the SECOND simple.exe (worker ==
+   parent binary; ~2 s lifetime).
+3. Lane 59 bisect probe 1: sanitized dump immediately after parse_module_body
+   shows parses 1-2 CLEAN (4582 bytes), parses 3-4 POISONED (4588/4352) in the
+   same worker process; refusal and AV follow. Kill is INSIDE
+   parse_module_body, heap-context-dependent, building across repeated parses.
+
+## Annotation 2026-10-24 (lane D, lane 60 bisect probe 2): poisoned BEFORE decl-0's parse
+
+Probe-2 candidate (in-parser dumps at decl-loop i==1 and i==3, env
+SIMPLE_BISECT2=1; committed on work/bisect-probe2-20261024) on the 30 s
+warm-cache repro (verbatim, four parses of p2_add):
+
+    parse 1: [bisect2] after-decl i=1 bytes=820 poisoned=false
+             [bisect2] after-decl i=3 bytes=1348 poisoned=false
+             [bisect]  post-parse bytes=4582 poisoned=false
+    parse 2: (identical, all false)
+    parse 3: [bisect2] after-decl i=1 bytes=823 poisoned=true
+             [bisect2] after-decl i=3 bytes=1346 poisoned=true
+             [bisect]  post-parse bytes=4349 poisoned=true
+    parse 4: (identical to parse 3, post-parse 4351)
+    refusals: 8, RC=139
+
+Interpretation: the decl loop increments i, probes at the TOP of iteration
+i==1, and only then parses decl 0 (tag_bool). parse_module_body's own
+prologue between entry and the loop is inert (var declarations only). So on
+parse 3 the pool arrays are ALREADY poisoned before the first declaration is
+parsed: the corruptor acts in the inter-parse window (post-parse-2 dump was
+CLEAN), in the hit-path restore, or in the caller tail between restore and
+the loop. The bisect moves out of the parser body to the restore/inter-parse
+boundary. Deterministic shape: parses 1-2 always clean, 3-4 always poisoned.
+
+## Coordination 2026-10-24 (lane D): branch move + worktree lanes
+
+Lane D's work moved to work/bootstrap-tip-v2, based on the rebased
+origin/release/1.0 (per owner directive). Probe 3 (lane 61, branch
+work/bisect-probe3-20261024) instruments four env-gated (SIMPLE_BISECT3) dump
+sites with a per-process sequence counter: A = miss-path entry before
+reset_all_pools (inherited pools), B = immediately after parse_module_body,
+C = after the transient-scope pause (promote boundary), D = hit-path
+immediately after flat_pools_restore_all. Result matrix: A poisoned ->
+inter-parse teardown; D poisoned -> restore write; A/D clean, B poisoned ->
+parse fill; all clean until refusal -> caller-tail/frame corruption.
+
+Lane-environment note: the shared checkout D:/dev/simple now carries a live
+parallel agent's uncommitted restructure, and the stage3 authority guard
+(scripts/check/lib/bootstrap-stage3/authority.shs:5220) requires a fully
+clean tree incl. submodules (gitlink-dirty abort). All lane-D lanes therefore
+run in isolated clean worktrees off the pushed work branches; the shared
+checkout is left untouched for the parallel agent.
