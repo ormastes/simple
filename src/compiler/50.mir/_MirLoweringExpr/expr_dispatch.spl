@@ -2,7 +2,7 @@
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
-use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use std.io_runtime.{env_get_nullable}
 use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
@@ -3092,7 +3092,19 @@ impl MirLowering:
     me lower_return_expr(value: HirExpr?) -> LocalId:
         # Return's payload is HirExpr? (Optional): Some(expr) for
         # `return expr`, nil for a bare `return`.
-        if val rv = value:
+        # `return <expr>` inside a function whose MIR signature returns Unit
+        # (e.g. `-> ()` with `return ()`) must terminate exactly like a bare
+        # `return`, as the implicit tail does (function_lowering.spl,
+        # `return_type.kind == MirTypeKind.Unit` -> terminate_return(nil)).
+        # Ret(Some(unit_temp)) made Cranelift emit `return v53` against a
+        # signature with no result (cranelift_unit_fn_return_unit_value_2026-10-24).
+        # The value is still lowered for its side effects.
+        var return_value: HirExpr? = value
+        if val unit_rv = value:
+            if self.current_mir_signature_returns_unit():
+                self.lower_expr(unit_rv)
+                return_value = nil
+        if val rv = return_value:
             var br = self.builder
             # Lower for the DECLARED return slot, so a conditional returned
             # from a scalar-optional function boxes per arm.
@@ -3182,6 +3194,18 @@ impl MirLowering:
         val ret_temp = br2.new_temp(MirType.unit())
         self.builder = br2
         ret_temp
+
+    me current_mir_signature_returns_unit() -> bool:
+        # Mirrors the backend's build_signature: `main` always returns i64.
+        var cur_builder = self.builder
+        match cur_builder.current_function:
+            case Some(active_fn):
+                if active_fn.name == "main":
+                    return false
+                match active_fn.signature.return_type.kind:
+                    case MirTypeKind.Unit: true
+                    case _: false
+            case None: false
 
     me emit_pending_finally_for_transfer() -> ():
         """Run active finally blocks inner-to-outer before a nonlocal exit.
