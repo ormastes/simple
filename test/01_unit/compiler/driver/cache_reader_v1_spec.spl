@@ -1,0 +1,41 @@
+use std.spec
+use std.async.poll.{Poll}
+use compiler.driver.cache.reader.cache_reader_v1.{CacheBlobPortV1, cache_reader_read_v1,
+    CACHE_READER_KIND_TLDR_V1}
+use compiler.driver.cache.daemon.cache_daemon_lifecycle.{CacheDaemonLifecycle}
+
+struct FakeBlobPort:
+    present: bool
+    refuse: bool
+
+impl CacheBlobPortV1 for FakeBlobPort:
+    fn get_blob(kind: text, digest: text, max_bytes: i64) -> Result<[u8]?, text>:
+        if self.refuse: return Err("refused")
+        if self.present: Ok(Some([1u8, 2u8, 3u8])) else: Ok(nil)
+
+fn ready_len(port: FakeBlobPort, lifecycle: CacheDaemonLifecycle) -> i64:
+    val future = cache_reader_read_v1(port, lifecycle, CACHE_READER_KIND_TLDR_V1, "d1", 1024, 5)
+    match future.poll():
+        case Poll.Ready(blob):
+            match blob:
+                case Some(bytes): bytes.len()
+                case nil: -1
+        case Poll.Pending: -2
+
+describe "CacheReader":
+    it "completes with the verified blob on a hit":
+        expect(ready_len(FakeBlobPort(present: true, refuse: false), CacheDaemonLifecycle.create(0))).to_equal(3)
+
+    it "completes with nil on a miss or a refusal":
+        expect(ready_len(FakeBlobPort(present: false, refuse: false), CacheDaemonLifecycle.create(0))).to_equal(-1)
+        expect(ready_len(FakeBlobPort(present: true, refuse: true), CacheDaemonLifecycle.create(0))).to_equal(-1)
+
+    it "returns nil without touching the port when daemon admission is closed":
+        val lifecycle = CacheDaemonLifecycle.create(0)
+        lifecycle.admission_open = false
+        expect(ready_len(FakeBlobPort(present: true, refuse: false), lifecycle)).to_equal(-1)
+
+    it "balances the daemon request counter":
+        val lifecycle = CacheDaemonLifecycle.create(0)
+        val _n = ready_len(FakeBlobPort(present: true, refuse: false), lifecycle)
+        expect(lifecycle.request_count).to_equal(0)
