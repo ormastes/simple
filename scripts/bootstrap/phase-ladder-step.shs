@@ -21,6 +21,8 @@
 # essentials/STATUS (ok | failed | not-built: <reason>). A failed essential is
 # recorded, never hidden, and does not stop the compiler climbing; writes
 # essentials=<ok>/<total> to $GITHUB_OUTPUT.
+# Phases below PHASE_LADDER_ESSENTIALS_FROM (default 3) record not-built, so
+# early rungs spend their time climbing.
 set -eu
 platform=${1:?platform} in_dir=${2:?in-dir} out_dir=${3:?out-dir} threads=${4:-4}
 exe=
@@ -37,6 +39,8 @@ best_handoff() {
   echo "$bp $bd"
 }
 
+# Artifact downloads drop the exec bit.
+chmod +x "$in_dir"/*/simple* 2>/dev/null || :
 set -- $(best_handoff "$platform")
 have=$1 have_dir=${2:-}
 emit() { # <phase> <binary> <climbed>
@@ -58,7 +62,11 @@ build_essentials() {
   for spec in simple_cli:src/app/cli/main.spl \
               simple_test_runner:src/app/test_runner_new/main.spl \
               simple_build_runner:src/app/buildrunner/main.spl; do
-    name=${spec%%:*} entry=${spec#*:} out=$ess/$name$exe
+    # Separate commands: FreeBSD sh expands every word of one command before
+    # assigning, so $name would be unset under set -u.
+    name=${spec%%:*}
+    entry=${spec#*:}
+    out=$ess/$name$exe
     total=$((total + 1))
     rc=0
     RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
@@ -152,4 +160,11 @@ printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.sp
 "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"
 "$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
 emit "$next" "$bin" true
-build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"
+if [ "$next" -ge "${PHASE_LADDER_ESSENTIALS_FROM:-3}" ]; then
+  build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"
+else
+  mkdir -p "$out_dir/$platform-p$next/essentials"
+  for name in simple_cli simple_test_runner simple_build_runner; do
+    echo "$name=not-built: phase $next is below ${PHASE_LADDER_ESSENTIALS_FROM:-3}" >> "$out_dir/$platform-p$next/essentials/STATUS"
+  done
+fi

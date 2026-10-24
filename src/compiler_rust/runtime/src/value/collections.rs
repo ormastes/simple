@@ -2874,6 +2874,8 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
     // crashed reading the dangling module in surface_build.
     if value.is_heap() {
         let root_ptr = value.as_heap_ptr();
+        // Scope-owned registered roots are walked, never treated as persistent:
+        // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
             slot.borrow().as_ref().is_some_and(|scope| {
                 scope

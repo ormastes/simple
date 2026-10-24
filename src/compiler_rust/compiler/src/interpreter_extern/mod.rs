@@ -143,6 +143,8 @@ pub mod qmp_socket;
 pub mod host_wm_bridge;
 pub mod host_gpu_lane;
 pub mod win32_hosted;
+#[cfg(windows)]
+pub mod windows_abi;
 pub mod enum_sffi;
 pub mod vulkan;
 
@@ -3529,6 +3531,22 @@ pub(crate) fn call_extern_function_with_values(
     // `*const c_char` returns as raw pointers (observable as `.len() == -1`).
     if name.starts_with("rt_vulkan_") && vulkan::signature_of(name).is_some() {
         return vulkan::dispatch(name, &evaluated);
+    }
+
+    // Direct Win64 ABI externs declared in
+    // src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl (GetProcessHeap,
+    // HeapAlloc/HeapFree, CreateProcessW, JobObject management, the
+    // ProcThread attribute-list trio, ReadFile/CreateFileW, and the BCrypt
+    // family). The final native link already admits these names (see
+    // is_windows_system_prefix in the native project tooling), but the
+    // interpreter's extern dispatch had no registration for them, so the JIT
+    // interp-call bridge died with "function not found: GetProcessHeap" once
+    // stub fallback was disabled (windows_pty_owner.spl reaches them while
+    // the native-build driver spawns worker processes). Route the exact
+    // declared set to real Win32 FFI in windows_abi; Windows hosts only.
+    #[cfg(windows)]
+    if windows_abi::is_supported_name(name) {
+        return windows_abi::dispatch(name, &evaluated);
     }
 
     // capability gap. None of these five families has a real native

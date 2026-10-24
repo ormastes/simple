@@ -150,6 +150,9 @@ class BorrowChecker:
                 val kind = if local.short_mutable: BorrowKind.Mutable else: BorrowKind.Shared
                 nll.record_short_parameter(local.id.id, kind, local.short_boundary)
 
+        # Retirement is limited to fully scanned straight-line reference facts.
+        nll.borrow_graph.reference_retirement_safe = func.blocks.len() == 1
+
         # Analyze borrows in the function
         self.analyze_mir_borrows(func, nll)
 
@@ -312,6 +315,17 @@ class BorrowChecker:
 
     me analyze_instruction(inst: MirInst, nll: NLLChecker, point: i64):
         """Analyze a single MIR instruction for borrows."""
+        # Retirement is limited to fully scanned straight-line reference facts.
+        # A value-returning call can return an alias; unknown/aggregate operations
+        # can retain one. Neither permits guessed reference lifetime shortening.
+        match inst.kind:
+            case Ref(_, _, _) | Copy(_, _) | Move(_, _) | Drop(_) | Const(_, _, _):
+                pass
+            case Call(dest, _, _):
+                if dest.?:
+                    nll.borrow_graph.reference_retirement_safe = false
+            case _:
+                nll.borrow_graph.reference_retirement_safe = false
         match inst.kind:
             case Ref(dest, borrow_kind, place):
                 # This creates a borrow
@@ -333,6 +347,7 @@ class BorrowChecker:
                 nll.record_use(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.borrow_graph.note_reference_alias(dest_local.id, src_local.id)
                 nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case Move(dest, src):
@@ -341,6 +356,7 @@ class BorrowChecker:
                 nll.record_move(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.borrow_graph.note_reference_alias(dest_local.id, src_local.id)
                 nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case TransferOut(dest, source, _, mode, _, _):

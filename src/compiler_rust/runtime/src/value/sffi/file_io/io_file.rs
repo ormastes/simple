@@ -300,18 +300,53 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
         // Windows twin of the Unix branch: reconstruct the File from the
         // HANDLE the Simple side carries, surface a write-back error, then
         // genuinely close via drop.
+        //
+        // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+        // handles opened without write access, so a read-only session's close
+        // reported failure and FileTextSession reads came back Err even though
+        // every byte was read (measured: "file text close failed" from
+        // std.io_runtime.read_file_text under the seed). A close must surface
+        // real write-back errors, not a refused no-op flush: when sync fails,
+        // probe the handle with a zero-length write — denied on read-only
+        // handles (close is genuinely fine), allowed on writable ones (the
+        // sync failure was real, keep reporting it). C parity: close == 0.
         #[cfg(windows)]
         {
-            let file = File::from_raw_handle(fd as *mut std::ffi::c_void);
-            let ok = file.sync_all().is_ok();
+            use std::io::Write as _;
+            let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+            // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+            // handles opened without write access, so a read-only session's
+            // close reported failure and FileTextSession reads came back Err
+            // even though every byte was read. A close must surface real
+            // write-back errors, not a refused no-op flush: when the flush
+            // fails, probe the handle with a zero-length write — denied on
+            // read-only handles (close is genuinely fine), allowed on writable
+            // ones (the flush failure was real, keep reporting it).
+            let flushed = file.sync_all().is_ok();
+            let read_only = !flushed && file.write(&[]).is_err();
             drop(file);
-            ok
+            flushed || read_only
         }
         #[cfg(not(windows))]
         {
             let _ = fd;
             false
         }
+    }
+}
+
+/// i64-returning twin of `rt_io_file_close` for the seed's dynamic SFFI
+/// dispatcher, which admits only all-i64 -> i64 contracts. The interpreter's
+/// hand-written `rt_io_file_close` adapter is unix-only (its `with_fd` and
+/// open are `#[cfg(not(unix))]` stubs returning `false`/`-1`), so on Windows
+/// every interpreter close went through that stub and failed; routing the
+/// Simple `io_file_close` through this twin reaches the real runtime close.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_close_value(fd: i64) -> i64 {
+    if rt_io_file_close(fd) {
+        1
+    } else {
+        0
     }
 }
 

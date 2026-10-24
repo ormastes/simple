@@ -566,6 +566,14 @@ pub fn clear_expr_registry() {
 
 /// Plain interpreter extern names that may be routed through rt_interp_call.
 fn interp_call_uses_extern_dispatch(name: &str) -> bool {
+    // Direct Win64 ABI externs (GetProcessHeap, CreateProcessW, ...) carry no
+    // rt_/spl_ prefix but ARE implemented by the interpreter's extern
+    // dispatch (windows_abi); admit them so rt_interp_call reaches the real
+    // FFI instead of the terminal "function not found" arm.
+    #[cfg(windows)]
+    if crate::interpreter::interpreter_extern::windows_abi::is_supported_name(name) {
+        return true;
+    }
     matches!(
         name,
         "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln"

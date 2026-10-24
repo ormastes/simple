@@ -171,19 +171,28 @@ impl ModuleSurfaceBuilder:
         self.index_by_path_lookup_index(canonical_path) >= 0
 
     me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
+        # @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=by_value_struct_arg_corrupts_field
+        # Same transport family as 65d9f2afadc: a 30-limb ParserModule passed
+        # by value through method-call hops can read back garbage fields
+        # (name.len() == -1, non-false nogc_strict). Bind at entry.
+        val module_binding: ParserModule = module
         val canonical_path = module_surface_canonical_path(source.path)
-        self.add_parsed_canonical(module, source, source_index, canonical_path)
+        self.add_parsed_canonical(module_binding, source, source_index, canonical_path)
 
     me add_parsed_canonical(module: ParserModule, source: SourceFile, source_index: i64, canonical_path: text) -> Result<(), text>:
+        # @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=by_value_struct_arg_corrupts_field
+        val module_binding: ParserModule = module
         if self.frozen:
             return Err("module surface builder is frozen")
         if self.index_by_path_lookup_index(canonical_path) >= 0:
             return Err("module surface already exists for physical source: {canonical_path}")
-        val surface_result = module_surface_from_module(module, source, source_index)
+        val surface_result = module_surface_from_module(module_binding, source, source_index)
         if surface_result.is_err():
             return Err(surface_result.unwrap_err())
+        # @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=by_value_struct_arg_corrupts_field
+        val surface_binding: ModuleSurface = surface_result.unwrap()
         self.add_surface_canonical(
-            surface_result.unwrap(), source, canonical_path)
+            surface_binding, source, canonical_path)
 
     # Commit an already-built surface to the persistent registry.  Streaming
     # parsing builds the compact surface while the parse arena is still
@@ -192,14 +201,18 @@ impl ModuleSurfaceBuilder:
     me add_surface_canonical(
         surface: ModuleSurface, source: SourceFile, canonical_path: text
     ) -> Result<(), text>:
+        # @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=by_value_struct_arg_corrupts_field
+        val surface_binding: ModuleSurface = surface
         self.add_surface_canonical_identity(
-            surface, source.module_name, canonical_path)
+            surface_binding, source.module_name, canonical_path)
 
     # Streaming commit accepts only retained scalar owners. A SourceFile value
     # created in the parser scope must never cross this persistent boundary.
     me add_surface_canonical_identity(
         surface: ModuleSurface, module_name: text, canonical_path: text
     ) -> Result<(), text>:
+        # @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=by_value_struct_arg_corrupts_field
+        val surface_binding: ModuleSurface = surface
         if self.frozen:
             return Err("module surface builder is frozen")
         if self.index_by_path_lookup_index(canonical_path) >= 0:
@@ -254,10 +267,10 @@ impl ModuleSurfaceBuilder:
                 return Err("module surface name disagrees with its path derivation: path={canonical_path} module_name={module_name} derived={admit_derived}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_canonical_identity(
-            module_name, surface_index, surface.canonical_name)
+            module_name, surface_index, surface_binding.canonical_name)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
-        self.surfaces = self.surfaces.push(surface)
+        self.surfaces = self.surfaces.push(surface_binding)
         self.index_by_path_record(canonical_path, surface_index)
         Ok(())
 

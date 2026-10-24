@@ -20,7 +20,7 @@ use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
-use app.io.mod.{env_get, file_write, file_remove, dir_remove}
+use app.io.mod.{env_get, env_set, file_write, file_remove, dir_remove}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 
@@ -322,6 +322,14 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
         if launcher_dir == "":
             return empty
         line = launcher_dir + "/launch"
+    # The ConPTY spawn inherits this process environment (pty_spawn takes no
+    # env parameter), and TUIs such as Codex refuse to start when TERM is
+    # "dumb" or unset. The POSIX launcher forces TERM=xterm-256color per pane;
+    # mirror that contract here so smux panes behave the same on Windows.
+    if _is_windows():
+        val term = env_get("TERM") ?? ""
+        if term == "" or term == "dumb":
+            val _set = env_set("TERM", "xterm-256color")
     # The PTY is opened at the slot's geometry, so size the slot first.
     if cols > 0 and rows > 0:
         val _r = smux_resize(scope.session_id, scope.window_id, pane_id, cols, rows)
@@ -438,6 +446,10 @@ fn pane_key_bytes(key: text) -> text:
         return "\x1b[A"
     if key == "down":
         return "\x1b[B"
+    if key == "right":
+        return "\x1b[C"
+    if key == "left":
+        return "\x1b[D"
     if key == "ctrl-c":
         return "\x03"
     ""
@@ -455,6 +467,10 @@ fn pane_key_tmux_name(key: text) -> text:
         return "Up"
     if key == "down":
         return "Down"
+    if key == "right":
+        return "Right"
+    if key == "left":
+        return "Left"
     if key == "ctrl-c":
         return "C-c"
     ""

@@ -2,7 +2,7 @@
 # only the real captured flat payload and canonical result records do.
 use compiler.driver.driver_build.managed_parse_group_contract.*
 use compiler.driver.driver_build.managed_parse_group_result.*
-use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take, flat_pool_capture_already_captured, flat_pool_capture_record, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_first_error_get}
 use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
@@ -143,9 +143,19 @@ fn managed_parse_group_module_v1(owner: ManagedParseGroupOwnerV1, module: Manage
                 Err(_invalid): ()
     # Explicit invalid/mismatched cache authority or decode is a miss. An I/O
     # failure or parser-reported policy error above is not hidden by a reparse.
-    flat_pool_capture_arm()
+    # Capture at most once per path per process: a repeat dump of an identical
+    # module re-exposes the transient-scope reclaim poison window (lane-48b
+    # trace and doc stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md).
+    val _already_captured = flat_pool_capture_already_captured(module.source_path)
+    if not _already_captured:
+        flat_pool_capture_arm()
     var parsed = parse_and_build_module_scoped(parse_source, module.source_path, false)
-    val blob = flat_pool_capture_take()
+    val blob = if _already_captured:
+        ""
+    else:
+        flat_pool_capture_take()
+    if not _already_captured:
+        flat_pool_capture_record(module.source_path)
     if parser_has_errors(): return managed_parse_group_errors_v1(module)
     if domain_blocks.len() > 0: parsed.domain_blocks = domain_blocks
     val _completed = desugar_module(parsed)

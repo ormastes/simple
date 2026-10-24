@@ -10,7 +10,7 @@ WORKFLOW = ROOT / '.github/workflows/candidate.yml'
 
 
 def routing_block(text):
-    begin = '          release_line=$(printf'
+    begin = '          release_line=${VERSION%%-*}'
     end = '          integration_pr_number=$(jq -r '
     if text.count(begin) != 1 or text.count(end) != 1:
         raise ValueError('routing extraction boundaries must be unique')
@@ -28,7 +28,7 @@ def admission_block(text):
 
 
 def evaluate(text, version, ancestry='diverged', commit='release-sha',
-             admission=False, release_ref='release/1.0'):
+             admission=False, release_ref='release/1.0.0'):
     # Git transport is a deterministic fixture; execute the actual workflow
     # shell route, exact-head check, and both ancestry guards without fetching.
     shell = r'''set -eu
@@ -69,16 +69,18 @@ class CandidateReleaseRouting(unittest.TestCase):
         cls.admission = (ROOT / '.github/workflows/pr-admission.yml').read_text()
 
     def test_routing_extraction_rejects_missing_or_duplicate_boundary(self):
-        for changed in (self.source.replace('          release_line=$(printf', '          moved_route=$(printf'),
-                        self.source + '\n          release_line=$(printf',
+        for changed in (self.source.replace('          release_line=${VERSION%%-*}', '          moved_route=${VERSION%%-*}'),
+                        self.source + '\n          release_line=${VERSION%%-*}',
                         self.source.replace('          integration_pr_number=$(jq -r ', '          replaced_boundary=')):
             with self.subTest(length=len(changed)), self.assertRaises(ValueError):
                 routing_block(changed)
 
     def test_version_derived_route(self):
-        for version, expected in [('1.0.0-rc.1', 'release/1.0'),
-                                  ('1.0.0-beta.2', 'release/1.0'),
-                                  ('2.3.4', 'release/2.3')]:
+        for version, expected in [('1.0.0-rc.1', 'release/1.0.0'),
+                                  ('1.0.0-beta.2', 'release/1.0.0'),
+                                  ('1.0.0', 'release/1.0.0'),
+                                  ('2.3.4', 'release/2.3.4'),
+                                  ('2.3.4-alpha.0', 'release/2.3.4')]:
             with self.subTest(version=version):
                 result = evaluate(self.source, version)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -98,7 +100,7 @@ class CandidateReleaseRouting(unittest.TestCase):
         self.assertNotIn('ROUTE=', result.stdout)
 
     def test_admission_guard_never_exempts_work_branch_alias(self):
-        for ref in ('release/1.0', 'release_phase3'):
+        for ref in ('release/1.0.0', 'release_phase3'):
             for ancestry in ('main-in-release', 'release-in-main', 'equal'):
                 with self.subTest(ref=ref, ancestry=ancestry):
                     result = evaluate(self.admission, '', ancestry,
@@ -113,7 +115,8 @@ class CandidateReleaseRouting(unittest.TestCase):
         checks = [line.strip() for line in self.admission.splitlines()
                   if line.strip().startswith('[[ "$RELEASE_REF" =~ ')]
         self.assertEqual(len(checks), 1)
-        for ref, accepted in [('release/1.0', True), ('release/2.3', True),
+        for ref, accepted in [('release/1.0.0', True), ('release/2.3.4', True),
+                              ('release/1.0', False), ('release/1.0.0-rc.1', False),
                               ('release_phase3', False), ('main', False),
                               ('release/1.0/extra', False), ('release/1x0', False)]:
             with self.subTest(ref=ref):

@@ -1,9 +1,15 @@
 # Stage-2 sanity: stage2_module_path_naming probe SIGSEGVs the worker (2026-10-22)
 
-Status: OPEN — blocks the full stage2 sanity battery; p2_add (the compile/run
-admission probe) PASSES. Phase 3 + phase-2 validation proceed provisionally
-from the hello-world gate per the parallel collection policy (descendants
-unadmitted until this closes).
+Status: RESOLVED 2026-10-24 — Stage 2 is ADMITTED on release/1.0.0
+(`docs(bug): Stage 2 is ADMITTED…` b56c3e203ff, PR #4260): both admission
+receipts published for admitted candidate
+206bfd58409c78ca3015d45276c7333ee0909a47452995cbc653126deb9da3af
+(stage3-planner-admission.receipt + managed-stage4-planner-admission-v2.env).
+The mandatory test matrix gates 3/4. Historical body below records the
+SIGSEGV investigation (HIR codec encoder nil-scalar asymmetry #4255, the
+generated fold walker #4237 / 0e2d7ab2997, the codec optional payload bind
+51671a18d8a, the env-restore Some-box unwrap 5bfd06216a3, reverse-reference
+phase-owner promotion 9a79de084e9/3159810d701/a33fd8a2fb5).
 
 ## Symptom
 
@@ -635,6 +641,133 @@ a different site from the codec-encoder bind above. Re-test it on a candidate
 that carries #4232 before treating it as a separate defect.
 
 ## Update 2026-10-24 (x86_64 Linux): `[]` literal SIGSEGV — ROOT CAUSE is the generated fold walker
+## Update: flatten workaround IMPLEMENTED (release/1.0, 2026-10-22)
+
+`ModuleSurfaceParserOwner` no longer has a `value: ParserModule` class
+field. It now stores ONE SLOT PER ParserModule LIMB (30 handle-sized
+fields: texts, Dicts, arrays, bools, i64s) with an annotated typed-local
+rebind per limb in `new()`, and the new exported
+`module_surface_owner_value(owner) -> ParserModule` reconstructs the
+ParserModule by named construction at the use site. Call sites migrated
+to the reconstruction as the single sanctioned read path:
+- `module_surface_from_owner` (all `owner.value.*` reads replaced by the
+  reconstructed `module_local`)
+- `driver_native_parser_impls_are_enum_templates_v1`,
+  `driver_native_parser_is_declaration_only`,
+  `driver_native_parser_can_persist_objectless` (typed local `value` bind)
+
+Single-field class reads/writes of handle-sized types are exercised
+throughout the self-hosted candidate; the 30-limb reconstruction only
+relies on those. The proper repair (compiler class-field layout/copy for
+large inline structs) remains open — this workaround should be reverted
+once it lands.
+
+Same session also fixed: `src/compiler_rust/Cargo.lock` had 273 orphaned
+entries after the LLVM-major-23 gate slimmed llvm-sys (110-221,
+stacker/psm, gumdrop, pest, semver 0.11); every `cargo build --locked`
+seed lane failed. Regenerated offline against vendored sources.
+## Update: HIR-phase campaign (same session, release/1.0)
+
+Fix landed order (PR #4162 = 85b31bb4802 + 43921b1dbd3 + 8a447adbdb4):
+
+1. `driver_register_parser_module_source_aliases_v1` took ParserModule BY
+   VALUE → SIGSEGV (garbage Dict handles). Now routed through the flattened
+   `ModuleSurfaceParserOwner`; callers typed-bind Dict values and unwraps.
+2. gdb disassembly at the next crash PROVED seed-emitted mis-dispatch:
+   `ldr x8,[x27,#352]; mov x0,x8; bl EnumContractTable.has` — `.has` on the
+   `HirFieldTypesByName` ALIAS-typed class field resolved to the wrong
+   struct's method (x0 held the Dict header word 0x2000000003). All 10
+   alias-typed dict fields of class HirLowering expanded to literal dict
+   types. Literal-typed fields resolve correctly (ParserModule.enums.has).
+   Proper repair: seed/frontend method resolution on alias-typed receivers.
+3. After those: no crash; sanity passes ALL surface phases; p2_add HIR
+   lowering RUNS but `driver_publish_reverse_reference_parse_scope_v1`
+   fails at the facts step. SIMPLE_NSCOPE_HIR_TRACE=1 sub-step trace:
+   seal OK, scope-end OK, reverse_reference_module_publish_v1 FAILED.
+   Env-gated refusal-reason trace landed to name the guard.
+
+## Update: publish gate root cause DEFINITIVE (2026-10-23)
+
+Traced (`SIMPLE_NSCOPE_HIR_TRACE=1`) through the retained p2_add HIR path:
+seal OK, scope-end OK, `reverse_reference_module_publish_v1` refuses with
+`batch_token=1023114373 gen=1/1 active=true sealed=true valid=true` — every
+guard correct EXCEPT the batch's token limb, which reads back garbage after
+`transient_promote` of the Option carrier + transient scope end. The promoted
+Option keeps referencing the reclaimed transient slot; the token limb is
+clobbered first, and with the token check relaxed the publish body then HANGS
+on the same stale arrays (facts/aliases limbs). Reverted the relaxation —
+clean refusal beats a hang.
+
+Root cause class: the candidate's `transient_promote` of an Option<struct>
+carrier does not survive scope end (same by-value/aggregate-transport family
+as every other 2026-10-22/23 finding). The reverse-reference batch machinery
+cannot be unblocked by source-level guard tweaks; it needs either (a) a
+candidate/seed promote repair, or (b) restructuring the batch out of the
+promoted-Option pattern (module-scope scalar/array limbs promoted
+individually, mirroring the ModuleSurfaceParserOwner flatten).
+
+Gate state: stage2 compile 1487/1487 clean; sanity passes ALL surface phases;
+p2_add HIR lowering RUNS to completion; blocked ONLY at the reverse-reference
+batch publication above.
+
+## Update: frontier moved past publish (2026-10-23, post scalar-mirror)
+
+With the parallel session's scalar-mirror workaround (ab07dfa3567) in, the
+p2_add worker now completes the retained HIR lowering (52.9 s for the tiny
+module — pathological slowness remains) and stores it to the hir-cache, then
+fails at:
+
+  NOGC-POLICY-001: cached HIR ownership policy disagrees with its declaring
+  source
+
+A second state-dependent failure mode is a spinlock hang
+(`__aarch64_swp4_rel` atomic-swap loop, gdb SIGINT stop) in the HIR shard
+worker when the flock-based shard-recovery queue dir is in a stale state —
+fresh queue dirs avoid it. Frontier blockers now: (1) NOGC-POLICY-001 policy
+gate (parallel session's active lane), (2) shard-recovery spinlock hang,
+(3) 52.9 s pathological HIR time for a 487-byte module.
+
+## Update: publish deadlock FIXED (2026-10-23, PR #4189)
+
+The deterministic phase=hir hang was gdb-caught as a spinlock:
+`__aarch64_cas4_acq <- Mutex<i64>::lock <- is_registered_heap_ptr <-
+validate_heap_obj <- rt_array_get <- reverse_reference_module_publish_v1`.
+The promoted batch Option's scalar limbs were mirrored (ab07dfa3567) but
+its ARRAY limbs still referenced reclaimed transient slots; publish's
+merge loop read them and spun in the runtime heap registry mutex. Fix:
+seal promotes each array limb pre-scope-end (handles still valid) and
+mirrors the persistent handles into module globals; publish merges from
+the mirrors. Verified: the worker that hung now completes HIR (65 s —
+pathological slowness persists) and exits normally.
+
+Remaining frontier for the stage2 smoke (exit 124): the hir-cache STORE
+fails at rt_file_write_text (io-write, even to a private cache dir), so
+the module is re-lowered on the next pass — doubling an already ~65 s
+HIR phase and blowing the smoke's per-probe budget. This is the parallel
+lane's documented io-write/encode-pool defect; see
+stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
+
+## Update: the ~65 s HIR phase is NOT lowering (2026-10-23)
+
+SIMPLE_HIR_PHASE_PROFILE=1 on the p2_add worker:
+`total=1ms imports=0ms declare=0ms enums=0ms functions=1ms/5` — HIR
+lowering of the 487-byte module takes ONE millisecond. The 30–65 s
+phase=hir dt is entirely post-lowering, inside the store chain
+(hir_cache_store's own scope: encode + hir_module_decode_stable + write)
+plus heap-registry mutex contention that varies 30–65 s with system load
+(the worker sometimes finishes in <40 s under gdb when the host is
+quiet). So the smoke's exit-124 budget pressure is (a) the parallel
+lane's parse-pool blob lifetime (store failures force re-work) and (b)
+contention-sensitive codec/validation cost — both outside the lowering
+path itself.
+
+## Sibling line release/1.0.0 (ported with af10da4f592 / PR #4249)
+
+The release/1.0.0 line tracks this bug under its own update history. The two
+entries below back the fold-visitor regeneration and the env-restore unwrap
+landed here; the rest of that history stays on release/1.0.0.
+
+### Update 2026-10-24 (x86_64 Linux): `[]` literal SIGSEGV — ROOT CAUSE is the generated fold walker
 
 After #4217 (codec fail-closed) and #4230 (link fix), CI run 39952380127 (release/1.0.0 @
 `a5aa33bc618`, linux-cranelift) still failed Stage 2 sanity on this probe, now later:
@@ -672,6 +805,7 @@ building the default `HirType` at the use site with the live span (run 399698285
 SIGSEGVed at the same PC.
 
 ## Update 2026-10-24: after the fold-walker fix, receiver gate fails on env restore (same Some-box class)
+### Update 2026-10-24: after the fold-walker fix, receiver gate fails on env restore (same Some-box class)
 
 With #4237, Stage 2 sanity passes on x86_64 Linux (CI run 39978925070), and the struct receiver
 guard passes. The positional dynload route on this fixture no longer SIGSEGVs, but it fails with
@@ -689,3 +823,15 @@ Fix: explicit `if val present = previous:` unwrap in `native_build_cache_restore
 `optional_array_payload_narrowing_native_2026_10_21` (the same narrowing gap, applying to `text?`
 as well as arrays). Other `if x == nil: return` followed by using `x` as `T` sites are likely
 exposed the same way; they have not been audited.
+
+
+## Update 2026-10-24 (later): CLOSED — Stage 2 admitted
+
+The chain above converged: after #4237 (fold walker), 51671a18d8a (codec
+optional payload bind), 5bfd06216a3 (env-restore explicit unwrap), and the
+reverse-reference owner-promotion fixes (9a79de084e9, 3159810d701,
+a33fd8a2fb5), the stage-2 admission lane reached sanity + struct receiver +
+publish and emitted both admission receipts (PR #4260, b56c3e203ff,
+admitted candidate 206bfd58409c). The mandatory test matrix gates 3/4 at
+admission time. Residual `if x == nil: return` then-use-as-`T` sites noted
+above remain un-audited; file a new bug if one surfaces in another route.

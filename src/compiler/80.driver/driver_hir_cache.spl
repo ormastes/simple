@@ -69,6 +69,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_getpid() -> i64
+extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_file_move(src: text, dst: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
@@ -475,7 +476,17 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val final_path = hir_cache_path(key, parser_classification != "")
     val tmp = final_path + ".{rt_getpid()}.tmp"
     val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
-    if not rt_file_write_text(tmp, header + "\n" + hir_cache_entry_encode_body(warnings, blob, parser_classification)):
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
+    # The store write fails (rt_core_string_bytes NULL -> -1) when any limb
+    # of the concatenated content is a dead transient handle. Bind each part
+    # with wellformed checks so the env-gated trace names the dead limb.
+    val body_text: text = hir_cache_entry_encode_body(warnings, blob, parser_classification)
+    val content_text: text = header + "\n" + body_text
+    if (sosix_env_get_nullable("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1":
+        eprint("[hir-cache-store] wf_content={rt_heap_ref_wellformed(content_text)} wf_header={rt_heap_ref_wellformed(header)} wf_body={rt_heap_ref_wellformed(body_text)} wf_warnings={rt_heap_ref_wellformed(warnings)} wf_blob={rt_heap_ref_wellformed(blob)}")
+        if rt_heap_ref_wellformed(content_text): eprint("[hir-cache-store] content_len={content_text.len()}")
+        if rt_heap_ref_wellformed(body_text): eprint("[hir-cache-store] body_len={body_text.len()}")
+    if not rt_file_write_text(tmp, content_text):
         # A failed write can leave a partial temp (disk full is the measured
         # case, P-INFRA-3); it was never unlinked and never reported.
         val _partial = rt_file_delete(tmp)
