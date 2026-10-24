@@ -12,6 +12,9 @@ requirement history in
 The additive semantic-cache work package (generic TLDR, AOP directory cache,
 macro references) is
 [`generic_aop_macro_semantic_cache_plan_2026-10-24.md`](../../../03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md).
+Cache invalidation completeness, update-policy gaps and the Lean verification plan
+(what is proved today vs. the live key) are in
+[`cache_invalidation_formal_verification_2026-10-24.md`](cache_invalidation_formal_verification_2026-10-24.md).
 
 Status words: **implemented** = landed on `release/1.0.0` with the cited
 path:line and a live caller; **implemented, uncalled** = the module landed but
