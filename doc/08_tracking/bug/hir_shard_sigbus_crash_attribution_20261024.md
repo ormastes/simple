@@ -196,3 +196,49 @@ Also worth attention in the same lane: the cache-admission churn (200
 SELFCHECK FAILED + 24 unstable-store refusals in one log) — even with lower
 RSS, refused stores keep giant modules uncached and re-lowered, which is what
 places a giant module at the crash boundary every life.
+
+## Native Windows counterexample: one-module HIR crash
+
+The Windows campaign on 2026-10-24 reproduced an access violation with just
+`src/compiler/70.backend/feature_caps_types.spl` as the admitted source and
+entry. The producer is the previously admitted Phase 2 executable at
+`D:/dev/simple-lane64/.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe`,
+SHA-256 `70ce821aa79dc190cb6fb206ce90651f5e93cef9e46a33963ab992a13e70e19b`.
+That exact producer separately compiled and executed the Windows Hello fixture.
+
+The isolated invocation selected `native-build --target x86_64-pc-windows-msvc
+--backend llvm --source src/compiler/70.backend/feature_caps_types.spl
+--entry src/compiler/70.backend/feature_caps_types.spl --entry-closure
+--threads 24 --emit-object`, with a private cache and output under
+`C:/dev/simple-phase34-resume-20261024/repro-feature-caps`. The complete argv
+is retained in the campaign tool history; runtime source was the isolated
+checkout's `src/runtime` and the timeout was 600 seconds.
+
+The bounded collector completed normally with native exit status 1, retaining
+`build.log` and `build.receipt` in that directory. Its HIR queue
+`cache/default/frontend/queue-32780-0` contains one terminal row: `CRASH`,
+owner `0/4@0`, the exact feature-caps source path, and `UNCACHED`. The log
+records `status=CRASH exit=-1073741819 claimed=1 sealed=1 finished=false`;
+that worker status is Windows access violation `0xC0000005`. No object was
+qualified. The enclosing build's exit 1 is distinct from its worker's exception.
+
+The concurrently collected Phase 3 initially sealed the same exception for
+`common/io/traits`, `common/binary_io`, and `compiler/70.backend/feature_caps_types`.
+All three also occur in the macOS cohort above. Replacement workers retain
+passing terminals and continue the finite inventory; a child crash does not
+make the live collector terminal. Its retained live log is
+`C:/dev/simple-phase34-resume-20261024/phase3/.build.log.tmp.38652` and its
+queue is `phase3/cache/default/frontend/queue-36072-0` under that campaign.
+
+This first-module counterexample excludes cumulative retention of earlier
+lowered modules as the sole explanation for this Windows failure. It does
+not disprove a separate macOS retention problem or establish a shared root
+cause. The common trait declarations are a discriminator to investigate,
+not proof of a trait-lowering defect. A native stack is still required.
+
+Two reduced enum/trait controls under the ignored `build` tree were attempted
+with private caches and 24 threads; both stopped at
+`SCV-E-ADMISSION: derived-composition-identity-mismatch`, before parsing.
+Their receipts live under `C:/dev/simple-phase34-resume-20261024/hir-controls`.
+They establish no enum/trait language result; their admission failure must
+not be counted as an additional HIR crash or bypassed to claim a PASS.
