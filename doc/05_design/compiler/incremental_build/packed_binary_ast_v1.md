@@ -138,7 +138,7 @@ All integers little-endian. File offset 0 is 64-byte aligned by construction;
 every section starts at a 64-byte boundary (one cache line; 8-byte arrays
 trivially aligned; pages are 4 KiB multiples of 64).
 
-### 2.1 Header (fixed 128 bytes)
+### 2.1 Header (fixed 128 bytes) — SUPERSEDED by §7.1 (64-byte header + digest table) after the `.spab` reconciliation and the hash-agility rule
 
 | off | size | field | notes |
 |---|---|---|---|
@@ -158,7 +158,7 @@ Endianness is fixed LE; alignment is fixed 64; neither is a field (a reader
 on a BE host byte-swaps on read, which the validation step (§4) handles by
 checking the magic's byte order).
 
-### 2.2 Section table (immediately after header, 32 bytes/entry)
+### 2.2 Section table (immediately after header, 32 bytes/entry) — entry layout SUPERSEDED by §7.2 (tagged checksum); id ranges below stand
 
 | field | size | notes |
 |---|---|---|
@@ -339,3 +339,151 @@ GC does) so it is not re-validated on every request.
 | **Cross-file ref (unfilled)** | `decl_imports` → `0x0701` table; `module_path_slot` → header `module_key`; `named_type_layout_owners` if it can cross modules |
 | **Index/offset** | every `[text]` → str_index; every `[[i64]]`/`[[text]]`/`[[[text]]]` → (offset,count) + child flat array |
 | **Keep** | all scalar `[i64]`/`[bool]` node fields, span pools (as u32), type tags |
+
+## 7. Final layout — reconciliation with the proposed shared `.spab` format
+
+The TLDR lane proposed a shared `.spab` layout (header 96 B LE: magic
+`SPLARTF1`, u16 `format_version`, u16 `header_bytes`, u32 `flags`,
+u32 `section_count`, u32 `section_table_offset`, `source_sha256[32]`,
+`compiler_identity_sha256[32]`, u64 `blob_bytes`; 32-B section entries
+`u32 id, u32 encoding, u64 offset (64-aligned), u64 length, u64 xxh3_64`;
+AST ids `0x0001–0x00FF`, TLDR `0x0100` summary / `0x0101` generic /
+`0x0102` inline / `0x0103` SIF / `0x0104` handle-dep table; path
+`artifacts/v1/<sha2>/<sha>-<compiler>.spab`, temp+rename). Verdict per point,
+then the final layout that **replaces §2.1–§2.2 above**.
+
+| Point | Verdict | Change |
+|---|---|---|
+| `xxh3_64` per section with sha256 in the header | **Enough for corruption, not for identity.** A 64-bit fast checksum localises a torn/flipped section and allows lazy per-section verification; it is not collision-resistant, so it must never be used for dedup, for cross-host trust or as a cache key. The collision-resistant **body** digest in the digest table is what a remote/shared hit must verify (§4 step 5). Local hits may verify sections lazily. | keep 8 bytes per section; tag the algorithm (§8); forbid using it as identity |
+| Header fixed `source_sha256[32]` / `compiler_identity_sha256[32]` | **Rejected** by the hash-agility rule (§8): a bare fixed-algorithm field cannot carry a second algorithm or a different length. | header shrinks to 64 B and points at a **digest table** section (`0x0000`) of 1..3 algorithm-tagged digests per identity |
+| 96-byte header, `section_table_offset` free | 96 is not a multiple of 64, so either the table or the first section is misaligned unless padded. | header 64 B; section table at offset 64; first section at the next 64-B boundary after the table |
+| Endianness | LE fixed; the 8-byte magic read as LE detects a swapped reader; no field needed. | same |
+| Versioning | `u16 format_version` alone cannot express "readable by older readers". | add `u16 min_reader_version`; per-section `u16 encoding` carries the section's own schema; unknown **required** section ⇒ miss |
+| AST id range `0x0001–0x00FF` | **Too small.** The inventory keeps ~115 pools (K/I/X) plus child flat arrays, string pool, set-once map and xref table. | AST node sections `0x0001–0x00FF` decl, `0x0200–0x02FF` expr, `0x0300–0x03FF` stmt, `0x0400–0x04FF` type/span (see §2.2); TLDR range `0x0100–0x01FF` kept exactly as proposed |
+| TLDR ids | fine; missing the sections #4388 and #4386 need | add `0x0105` macro definition table, `0x0106` macro use table (`00.common/cache_contract/macro_reference_manifest_v1.spl` `MacroDefinitionTableV1`/`MacroUseTableV1`, rendered today by `module_artifacts_v1.spl:139-140`), `0x0107` **reserved** generic template section (#4389 is not on `release/1.0.0`), `0x0108` lazy TLDR table index (`cache/reader/tldr_table_v1.spl`, #4386) |
+| `0x0104` handle-dep table | this is the lazy cross-module pointer table of §2.7 | one table, id `0x0104`, layout §2.7, saved unfilled |
+| Path `artifacts/v1/<sha2>/<sha>-<compiler>.spab` | the path bakes in one algorithm; two caches using different algorithms would collide on `<sha>` meaning. | `artifacts/v1/<algo>/<d2>/<digest>-<calgo>-<cdigest>.spab` where `<algo>`/`<calgo>` are registry names (§8.2); temp+rename unchanged |
+
+### 7.1 Final header (64 bytes, LE)
+
+| off | size | field |
+|---|---|---|
+| 0 | 8 | magic `SPLARTF1` |
+| 8 | 2 | `format_version` (this doc = 1) |
+| 10 | 2 | `min_reader_version` |
+| 12 | 2 | `header_bytes` (64) |
+| 14 | 2 | `section_entry_bytes` (32) |
+| 16 | 4 | `flags` (bit0 desugared, bit1 has_tldr, bit2 strings_utf8_validated, bit3 target_dependent) |
+| 20 | 4 | `section_count` |
+| 24 | 8 | `section_table_offset` (64) |
+| 32 | 8 | `blob_bytes` |
+| 40 | 16 | `module_key` (xxh3_128 of the logical path — a **local index key**, never identity; see §8) |
+| 56 | 8 | reserved (zero) |
+
+Identity (source content, compiler identity, body digest) lives in the
+digest table section `0x0000` (§8.3), so the header has no fixed-algorithm
+field.
+
+### 7.2 Final section entry (32 bytes)
+
+| field | size |
+|---|---|
+| `id` | u32 |
+| `encoding` | u16 (element kind + section schema, §2.2) |
+| `checksum_algo` | u16 (registry id, §8.2; `0` = none) |
+| `offset` | u64 (multiple of 64) |
+| `length` | u64 |
+| `checksum` | 8 bytes (the algorithm's first 8 bytes; xxh3_64 by default) |
+
+## 8. Hash agility (cross-cutting rule; also recorded in `src_based_tldr_build_v1.md`)
+
+Different servers and caches may use different hash algorithms; **at most
+three** algorithms may be in use at once. The design must not assume one.
+
+### 8.1 Rules
+
+1. **Every persisted digest is `(algo_id, length, bytes)`**, never a bare
+   fixed-width field. Applies to blob headers, section checksums, cache keys,
+   receipts, manifests and CAS cell names.
+2. **Algorithm registry** with a security class per entry (§8.2).
+   Cross-host / remote / shared identity **must** use a collision-resistant
+   algorithm; fast fingerprints are allowed only as in-memory or local
+   indexes **with full verification** against a collision-resistant digest
+   (the same rule as the id scopes' bloom + 128-bit fallback).
+3. **Negotiation.** A reader or server advertises its supported algorithm ids;
+   a producer writes 1..3 digests per identity; a hit requires at least one
+   algorithm in common **and** that digest to match. Cache keys and paths are
+   namespaced by algorithm (`<algo>/<digest>`), so identical content under two
+   algorithms never collides and never aliases.
+4. **Migration is schema-compatible.** Adding or removing an algorithm changes
+   the digest table contents, not `format_version`. An **unknown** algorithm
+   id makes that digest **absent** (⇒ miss if it was the only one), never a
+   match; a table with zero known entries is a miss.
+5. **Truncation is not an algorithm.** The id-scope 32/16-bit ids and the
+   8-byte section checksums are derived values tagged with their source
+   algorithm; they are never persisted as identity.
+
+### 8.2 Registry (initial)
+
+| id | name | output | class | use |
+|---|---|---|---|---|
+| 0 | none | – | – | checksum absent |
+| 1 | `sha256` | 32 B | collision-resistant | identity, receipts, CAS, remote |
+| 2 | `blake3` | 32 B | collision-resistant | identity (faster; `src/lib/common/crypto/blake3.spl` exists) |
+| 3 | `sha3-256` | 32 B | collision-resistant | reserved (`sha3.spl` exists) |
+| 16 | `xxh3-128` | 16 B | fast fingerprint | local keys, in-memory ids, module_key |
+| 17 | `xxh3-64` | 8 B | fast fingerprint | section checksums |
+| 18 | `crc32` | 4 B | fast fingerprint | SDN seals (`#sdn-crc32`) only |
+
+Ids ≥ 0x8000 are private/experimental and never leave a host. The registry
+is one SDN file read by producer and reader (proposed
+`config/cache/hash_algorithms.sdn`) and mirrored in
+`src/compiler/00.common/cache_contract/hash_algorithm_registry_v1.spl`.
+
+### 8.3 Digest table section `0x0000`
+
+Entries of 16 + `length` bytes, 8-aligned: `u16 subject` (1 = source
+content, 2 = compiler identity, 3 = blob body `[section_table_offset+…, blob_bytes)`,
+4 = target identity, 5 = TLDR companion identity), `u16 algo_id`,
+`u16 length`, `u16 reserved`, `u64 reserved`, then `bytes`. At most 3 entries
+per subject; sorted by (subject, algo_id) for determinism. The reader picks
+the first entry whose `algo_id` it supports and verifies it; for subject 3 a
+remote/shared hit requires a collision-resistant class.
+
+### 8.4 Audit — hard-coded algorithm assumptions on `release/1.0.0`
+
+Every site below assumes exactly one algorithm (and often one hex length).
+Under rule 1 each becomes a tagged digest; the list is the migration work
+package, not a defect list — the code is correct for one algorithm.
+
+| Site | Assumption | Required change |
+|---|---|---|
+| `src/compiler/10.frontend/frontend_parse_cache.spl:126` | key = `xxh3_128_text(content)` | key = `<algo>/<digest>`; xxh3 stays allowed (local, with `:168` body check) |
+| `frontend_parse_cache.spl:168,175` | `FRONTEND_CACHE_CHECKSUM_PREFIX + sha256_text(blob)` | tagged checksum line |
+| `src/compiler/10.frontend/frontend_shared_parse_cas_v1.spl:49` | `digest.len() != 64` ⇒ invalid | validate against registry length for the tagged algo |
+| `frontend_shared_parse_cas_v1.spl:126,172` | `sha256_text(snapshot) != digest`, `sha256_text(current) == source_sha` | verify with the tagged algorithm |
+| `src/compiler/80.driver/cache/module_artifacts_v1.spl:82,89,123` | companion header line `source-sha256:` | `source-digest: <algo>:<hex>`; reader accepts any known algo (up to 3 lines) |
+| `src/compiler/80.driver/cache/package_tldr_metadata.spl:160,169,197` | `PackageTldrHeaderV1` payload and per-section digests are `sha256_text` | tag `payload_digest` and `section.digest`; `.tld` header version bump |
+| `src/compiler/80.driver/cache/reverse_reference_receipt.spl:136,270,307` | `.rr` receipt pointer/content = sha256 | tagged pointer `(algo, bytes)` |
+| `src/compiler/80.driver/cache/shared_generation_store.spl:43,72,76` | `value.len() == 64` name check; body digest sha256 | tagged generation names `<algo>-<hex>` |
+| `src/compiler/80.driver/driver_build/incremental.spl:173,210,242` (+55 more `sha256`/`xxh3` sites in the file) | `digest.len() == 64` gates; mixed sha256 keys and xxh3 temp names | tagged manifest fields; temp names may stay xxh3 (not identity) |
+| `src/compiler/80.driver/driver_hir_cache.spl:129,144,154` | HIR key `sha256_text(parts.join(""))`, `source_digest.len() != 64`, path digest sha256 | tagged HIR key; length check via registry |
+| `src/compiler/80.driver/cache/action_key.spl:176,189,236,253` | action key / `simple/interface/v1` / dep-interfaces / resolution-witness digests = sha256 | tagged; the canonical encoding stays, only the outer hash is tagged |
+| `src/compiler/80.driver/cache/cas/verified_cas_kind_registry_v1.spl:75-85` | kind descriptors embed `digest=sha256-exact-canonical…` in the kind id string | kind descriptor names the **class** (collision-resistant), the algo comes from the cell's tag |
+| `src/compiler/00.common/cache_contract/macro_reference_manifest_v1.spl:111-142` | `macro_hash_v1`, `macro_def_key_v1`, `macro_expand_key_v1`, `macro_absence_witness_v1` return one untagged hex | return `(algo, bytes)`; `ConcreteTldrKey` (generic plan §3.2) must follow the same shape before #4389 lands |
+| `src/compiler/80.driver/cache/id_scope_v1.spl:73` | `id_of_key(xxh3_128_text(value))` | fine (in-memory fingerprint class); record the source algo in the scope |
+| Also untagged (from `git grep sha256_text|xxh3_128_text`): `cache/cas_store.spl`, `cas/verified_cas_store.spl`, `cas_batch_transaction.spl`, `block/block_key.spl`, `binary_object_action.spl`, `catalog/cache_catalog_projection.spl`, `closure/three_payload_closure_packer.spl`, `cold_hir_*` publication/SMF sections, `00.common/cache_contract/{public_summary_v1, semantic_facet_manifest_v1, semantic_owner_revision_v1, hir_owned_artifact_cache_v1, three_payload_execution_v3}.spl`, `cache_root.spl` (project root = sha of path) | one algorithm each | same treatment; link receipts in `cold_hir_*`/SMF sections carry the tag in their section header |
+
+No algorithm registry exists today (`git grep -i 'hash_algo|algo_id|HashAlgorithm'` over `src/compiler` and `src/lib/common/crypto` returns nothing). Available implementations: `sha256`, `sha3`, `sha512`, `blake2/blake2s/blake3`, `xxh3`, `xxhash`, `crc32` under `src/lib/common/crypto/`.
+
+### 8.5 Spec additions (to §5)
+
+6. **Hash negotiation** — producer writes `{sha256, blake3}`; reader A supports
+   only `blake3` ⇒ hit; reader B supports only `sha3-256` ⇒ miss with reason
+   `no-common-digest-algorithm`; a tampered `sha256` entry with an intact
+   `blake3` entry ⇒ miss (any present known digest that fails ⇒ miss, never
+   "pick the one that matches").
+7. **Namespace isolation** — identical content stored under two algorithms
+   yields two paths; neither lookup returns the other's cell.
+8. **Unknown algorithm** — a digest table whose only entry has id `0x7FFF`
+   is a miss; a table with `{0x7FFF, sha256}` verifies via sha256.
