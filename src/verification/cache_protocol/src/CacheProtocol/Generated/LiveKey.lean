@@ -58,6 +58,7 @@ inductive Field where
   | prelower_copyable_full_source
   | prelower_build_module_set
   | persisted_digest_algorithm
+  | advice_call_only_weave
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -104,6 +105,7 @@ def Field.name : Field → String
   | .prelower_copyable_full_source => "prelower_copyable_full_source"
   | .prelower_build_module_set => "prelower_build_module_set"
   | .persisted_digest_algorithm => "persisted_digest_algorithm"
+  | .advice_call_only_weave => "advice_call_only_weave"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -150,8 +152,9 @@ def Field.kind : Field → String
   | .prelower_copyable_full_source => "scalar"
   | .prelower_build_module_set => "ordered"
   | .persisted_digest_algorithm => "scalar"
+  | .advice_call_only_weave => "scalar"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure, .prelower_interface_lines, .prelower_copyable_full_source, .prelower_build_module_set, .persisted_digest_algorithm]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure, .prelower_interface_lines, .prelower_copyable_full_source, .prelower_build_module_set, .persisted_digest_algorithm, .advice_call_only_weave]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
@@ -161,10 +164,9 @@ inductive Gap where
   | linker_binary_version
   | system_library_content
   | import_lib_export_sets
-  | advice_body_weave_root
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root]
+def allGaps : List Gap := [.linker_binary_version, .system_library_content, .import_lib_export_sets]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -400,6 +402,11 @@ theorem persisted_digest_algorithm_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .persisted_digest_algorithm ≠ k2 .persisted_digest_algorithm) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .persisted_digest_algorithm)
 
+-- pos 44 (scalar) bound to src/compiler/50.mir/mir_aop_injection.spl#make_advice_call_inst
+theorem advice_call_only_weave_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .advice_call_only_weave ≠ k2 .advice_call_only_weave) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .advice_call_only_weave)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
@@ -418,11 +425,6 @@ theorem system_library_content_gap_invisible :
 /-- Known gap: the live key does not see `import_lib_export_sets`. -/
 theorem import_lib_export_sets_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .import_lib_export_sets ≠ j.gap .import_lib_export_sets :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `advice_body_weave_root`. -/
-theorem advice_body_weave_root_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .advice_body_weave_root ≠ j.gap .advice_body_weave_root :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 end CacheProtocol.Live
