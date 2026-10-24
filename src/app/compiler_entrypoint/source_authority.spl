@@ -9,6 +9,9 @@ use app.compiler_entrypoint.source_manifest_membership.{compiler_source_manifest
 use app.compiler_entrypoint.derived_composition.{compiler_source_authority_selectors_v1,
     compiler_source_selector_relative_v1}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
     scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
@@ -81,6 +84,42 @@ fn compiler_source_authority_binding_reason_v1(
     "ok"
 
 fn compiler_source_authority_validate_v1(
+    root: text, cache_root: text, snapshot: ScvCompileSnapshotV1,
+    expected_digest: text, expected_generation: i64, inherited: bool
+) -> CompilerSourceAuthorityV1:
+    # Decoded inventory, manifest rows and membership scratch do not escape.
+    # An existing active OR paused scope remains entirely caller-owned. A
+    # refused begin keeps the original validation behavior without retirement.
+    if transient_array_scope_state_v1() != 0:
+        return compiler_source_authority_validate_unscoped_v1(
+            root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    if not transient_scope_begin():
+        return compiler_source_authority_validate_unscoped_v1(
+            root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    val result = compiler_source_authority_validate_unscoped_v1(
+        root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    # The validation call graph contains no unconditional pause/end. Its only
+    # nested begin (entry validation) ends scratch only when it owns that begin.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 1:
+        # A paused scope still belongs to this successful begin. Retire it
+        # before allocating the invalid result. State 0 is already retired.
+        if scope_state == 2:
+            val ended = transient_scope_end()
+        return compiler_source_authority_invalid_v1("source-authority-scratch-state-invalid")
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return compiler_source_authority_invalid_v1("source-authority-scratch-pause-failed")
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    # Construct failure results AFTER retirement; result may now be dangling.
+    if not retained:
+        return compiler_source_authority_invalid_v1("source-authority-scratch-promote-failed")
+    if not ended:
+        return compiler_source_authority_invalid_v1("source-authority-scratch-end-failed")
+    result
+
+fn compiler_source_authority_validate_unscoped_v1(
     root: text, cache_root: text, snapshot: ScvCompileSnapshotV1,
     expected_digest: text, expected_generation: i64, inherited: bool
 ) -> CompilerSourceAuthorityV1:
