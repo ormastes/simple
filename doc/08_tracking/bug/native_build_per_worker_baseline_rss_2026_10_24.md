@@ -30,8 +30,9 @@ MirLowering + borrow imports). RSS in MB at the end of each phase:
 | cold_receipts (= mono start) | 1986 | 1986 | 4934-5127 | 5171 |
 | mono + MIR setup plateau | 3151 (A/A: 3151) | 3151 | 10507 | 8701 |
 
-Growth law: pre-mono is ~linear at 9.7-10.9 MB/module (204/472/1471 = 9.7/10.5/10.9). The mono + MIR-setup
-step is superlinear up to ~470 modules: 5.7 MB/module at 204, 11.8 at 472, ~11.6 at 1471 (33 GB - 16 GB).
+Growth law: pre-mono is ~linear at 9.7-10.9 MB/module (204/472/1471 = 9.7/10.5/10.9). Mono alone is
+superlinear: ~2.5 MB/module at 204, 7.7 at 472 (4934 -> 8580), 11.6 at 1471 (16 -> 33 GB). Mono + MIR-setup
+plateau: 5.7 MB/module at 204, 11.8 at 472 (the 1471 run adds a further 33 -> 36 GB setup step).
 Per-phase at 472: parse 1.9, HIR loop 3.4, validate 1.0, enum contract 1.3, cold receipts 1.5 MB/module.
 
 ## Culprits
