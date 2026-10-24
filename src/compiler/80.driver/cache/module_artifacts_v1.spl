@@ -23,11 +23,14 @@
 # complete old or complete new file, and racing producers of the same source
 # write identical bytes, so the last rename winning is harmless.
 #
-# Known gaps (named, not filled): extraction is indentation-aware TEXT, not
-# AST-derived; macro expansions and inline (non-generic) bodies are not
-# carried; no HIR consumer reads the sections yet -- substituting them for a
-# dependency is only sound inside a per-file job that compiles that
-# dependency's own body separately (the per-file scheduler PR).
+# Sections are AST-anchored (module_tldr_ast_sections_v1): the producer's
+# parsed module decides which declarations exist (including parser/macro
+# produced ones) and their kind -- generic (type params) and inline (`@inline`
+# / `const fn`) bodies included -- while the block text comes from the source
+# at the declaration line. Known gaps (named, not filled): a declaration whose
+# expansion has no source line of its own is not carried; no HIR consumer reads
+# the sections yet -- that is only sound inside a per-file job that compiles
+# each dependency's own body separately (the per-file scheduler PR).
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
@@ -36,8 +39,9 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.sif.sif.{sif_of_source, sif_validate}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
     module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
+use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_sections_of_module_v1}
 
-pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 2"
+pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 3"
 val MODULE_TLDR_LANG_V1: text = "1"
 
 var _module_artifact_tmp_seq_v1: i64 = 0
@@ -60,9 +64,14 @@ pub fn module_tldr_companion_path_v1(root: text, logical_path: text) -> text:
     root + "/" + rel + ".tldr"
 
 pub fn module_tldr_companion_render_v1(module_id: text, source: text) -> text:
+    module_tldr_companion_render_sections_v1(module_id, source,
+        module_tldr_sections_of_source_v1(source))
+
+# Producer path: `sections` come from the parsed module (AST-anchored).
+pub fn module_tldr_companion_render_sections_v1(module_id: text, source: text, sections: [text]) -> text:
     MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
         "source-sha256: " + sha256_text(source) + "\n" +
-        module_tldr_sections_render_v1(module_tldr_sections_of_source_v1(source)) +
+        module_tldr_sections_render_v1(sections) +
         "sif:\n" + sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
 
 # (sections, sif) of a valid companion for `source`; sif is "" when invalid.
@@ -125,15 +134,16 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     val module_id = module_artifact_module_id_v1(source_path)
     # The one parse: fills the full-AST caches as a side effect of the
     # ordinary frontend cache boundary.
-    val _parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
+    val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
     if not module_artifact_publish_atomic_v1(tldr_path,
-            module_tldr_companion_render_v1(module_id, source)):
+            module_tldr_companion_render_sections_v1(module_id, source,
+                module_tldr_sections_of_module_v1(parsed, source))):
         return "tldr publish failed: {tldr_path}"
     ""
 
 export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1
 export module_tldr_companion_render_v1, module_tldr_companion_body_v1
-export module_tldr_companion_sections_v1
+export module_tldr_companion_sections_v1, module_tldr_companion_render_sections_v1
 export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_artifacts_emit_v1
