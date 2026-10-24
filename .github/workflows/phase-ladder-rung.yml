@@ -12,9 +12,14 @@ on:
       lanes:
         type: string
         required: true
+      build_jobs:
+        description: "Build job override; 0 retains the automatic lane default"
+        type: number
+        default: 0
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   native:
@@ -26,11 +31,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4 }
-          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4 }
-          - { platform: darwin-arm64, os: macos-15, threads: 3 }
-          - { platform: darwin-x86_64, os: macos-15-intel, threads: 4 }
-          - { platform: windows-x86_64, os: windows-2025, threads: 4 }
+          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4, selfhost_threads: 2 }
+          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4, selfhost_threads: 2 }
+          - { platform: darwin-arm64, os: macos-15, threads: 3, selfhost_threads: 1 }
+          - { platform: darwin-x86_64, os: macos-15-intel, threads: 4, selfhost_threads: 2 }
+          - { platform: windows-x86_64, os: windows-2025, threads: 4, selfhost_threads: 2 }
     defaults:
       run:
         shell: bash
@@ -46,6 +51,23 @@ jobs:
         if: steps.sel.outputs.on == 'true'
         with:
           persist-credentials: false
+      - name: Select build jobs
+        if: steps.sel.outputs.on == 'true'
+        id: build_jobs
+        env:
+          REQUESTED_BUILD_JOBS: ${{ inputs.build_jobs }}
+          DEFAULT_BUILD_JOBS: ${{ matrix.threads }}
+          DEFAULT_SELFHOST_JOBS: ${{ matrix.selfhost_threads }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          jobs=$REQUESTED_BUILD_JOBS
+          selfhost_jobs=$jobs
+          if [ "$jobs" = 0 ] && [ "$EVENT_NAME" != workflow_dispatch ]; then jobs=$DEFAULT_BUILD_JOBS; selfhost_jobs=$DEFAULT_SELFHOST_JOBS; fi
+          case "$jobs" in ''|0*|*[!0-9]*) echo "build_jobs must be an integer from 1 through 256" >&2; exit 2 ;; esac
+          [ "${#jobs}" -le 3 ] && [ "$jobs" -le 256 ] || { echo "build_jobs must be an integer from 1 through 256" >&2; exit 2; }
+          echo "count=$jobs" >> "$GITHUB_OUTPUT"
+          echo "selfhost_count=$selfhost_jobs" >> "$GITHUB_OUTPUT"
+          echo "Selected build jobs: seed=$jobs selfhost=$selfhost_jobs"
       - name: Previous rungs' handoffs
         if: steps.sel.outputs.on == 'true' && inputs.rung > 1
         uses: actions/download-artifact@v4
@@ -53,6 +75,16 @@ jobs:
           pattern: ladder-*
           path: build/ladder/in
           merge-multiple: true
+      # Every rung resumes from the highest phase any ladder run on this branch
+      # (this one included) already proved, so phases are never rebuilt.
+      - name: Proven handoffs (any run)
+        if: steps.sel.outputs.on == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          lanes="${{ matrix.platform }}"
+          [ "$lanes" = linux-riscv64 ] && lanes="linux-riscv64 linux-x86_64"
+          sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in $lanes
       - name: Rust toolchain (riscv64 cross runtime)
         if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-riscv64'
         run: |
@@ -96,6 +128,13 @@ jobs:
         if: steps.sel.outputs.on == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Automatic runs retain the lane's memory-sized self-host count;
+          # an explicit manual selection applies to both compiler generations.
+          PHASE_LADDER_SELFHOST_THREADS: ${{ steps.build_jobs.outputs.selfhost_count }}
+          CARGO_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
         run: |
           if [ "${{ matrix.platform }}" = windows-x86_64 ]; then
             . scripts/setup/windows-gitbash-bootstrap-env.shs
@@ -103,7 +142,7 @@ jobs:
             ld.lld --version
           fi
           mkdir -p build/ladder/in build/ladder/out
-          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ matrix.threads }}"
+          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}"
       # Upload even when a later step failed: a phase that passed sanity is kept.
       - uses: actions/upload-artifact@v4
         if: always() && steps.sel.outputs.on == 'true'
@@ -122,26 +161,54 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Select build jobs
+        id: build_jobs
+        env:
+          REQUESTED_BUILD_JOBS: ${{ inputs.build_jobs }}
+          DEFAULT_BUILD_JOBS: 2
+          DEFAULT_SELFHOST_JOBS: 1
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          jobs=$REQUESTED_BUILD_JOBS
+          selfhost_jobs=$jobs
+          if [ "$jobs" = 0 ] && [ "$EVENT_NAME" != workflow_dispatch ]; then jobs=$DEFAULT_BUILD_JOBS; selfhost_jobs=$DEFAULT_SELFHOST_JOBS; fi
+          case "$jobs" in ''|0*|*[!0-9]*) echo "build_jobs must be an integer from 1 through 256" >&2; exit 2 ;; esac
+          [ "${#jobs}" -le 3 ] && [ "$jobs" -le 256 ] || { echo "build_jobs must be an integer from 1 through 256" >&2; exit 2; }
+          echo "count=$jobs" >> "$GITHUB_OUTPUT"
+          echo "selfhost_count=$selfhost_jobs" >> "$GITHUB_OUTPUT"
+          echo "Selected build jobs: seed=$jobs selfhost=$selfhost_jobs"
       - uses: actions/download-artifact@v4
         if: inputs.rung > 1
         with:
           pattern: ladder-freebsd-*
           path: build/ladder/in
           merge-multiple: true
+      - name: Proven handoffs (any run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in freebsd-x86_64
       - name: Climb one phase in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          PHASE_LADDER_SELFHOST_THREADS: ${{ steps.build_jobs.outputs.selfhost_count }}
+          CARGO_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
         with:
           usesh: true
           mem: 12288
-          envs: GH_TOKEN
+          envs: GH_TOKEN BUILD_JOBS PHASE_LADDER_SELFHOST_THREADS CARGO_BUILD_JOBS SIMPLE_HOST_MAX_THREADS SIMPLE_HOST_MAX_BUILD_JOBS SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS
           prepare: |
             pkg install -y bash curl git gmake pkgconf zstd llvm gh
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
           run: |
             set -eu
             . "$HOME/.cargo/env"
+            # The automatic 12 GB VM default remains one self-host thread;
+            # explicit manual build_jobs overrides arrive through the VM env.
             # The synced checkout is owned by another uid; without this git refuses it
             # ("dubious ownership") and SCV fails with git-event-source-unavailable.
             git config --global --add safe.directory "$(pwd -P)"
@@ -149,7 +216,7 @@ jobs:
             # Record the verdict instead of failing the VM run: the action copies
             # build/ files back to the host only when the run succeeds.
             rc=0
-            sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out 2 || rc=$?
+            sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out "$BUILD_JOBS" || rc=$?
             echo "$rc" > build/ladder/rc
       - uses: actions/upload-artifact@v4
         if: always()

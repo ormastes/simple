@@ -5,7 +5,8 @@
 # a build cache with integrity checking.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use std.io_runtime.{file_read_nullable}
+use std.io_runtime.{file_read_nullable, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
 use compiler.driver.cache.integration.shadow_mode.{
@@ -592,8 +593,19 @@ fn native_build_cache_scope_key(
 fn incremental_mkdir_p(path: text) -> bool:
     dir_create_all(path)
 
+# Readers (another build, the cache daemon) must never see a torn MIR cache
+# entry or incremental manifest: write a temp file beside the target, then
+# rename over it. The temp name is unique per process and content, so racing
+# writers never share one, and identical content makes the last rename benign.
 fn incremental_file_write_text(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    val temp = "{path}.{getpid()}.{xxh3_128_text(content)}.tmp"
+    if not rt_file_write_text(temp, content):
+        val _removed = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _cleaned = file_delete(temp)
+        return false
+    true
 
 fn incremental_parent_dir(path: text) -> text:
     val slash = path.last_index_of("/")

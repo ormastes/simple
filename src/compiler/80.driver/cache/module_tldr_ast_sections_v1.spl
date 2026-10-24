@@ -1,0 +1,129 @@
+# AST-anchored TLDR companion sections.
+#
+# The parsed module (ParserModule, from the producer's one parse) is the
+# authority for WHICH declarations exist and what they are: kind, generic-ness
+# (type_params), inline / const-fn bodies, and their source line. Macro- and
+# desugar-produced declarations therefore appear exactly when the parser
+# produced them. The section TEXT is then taken from the source at that
+# declaration's line with the same indentation rule as the text extractor
+# (module_tldr_sections_v1), so the wire format is unchanged.
+#
+# Kinds beyond the text extractor: `inline` -- a non-generic function whose
+# body an importer needs (`@inline` attribute or `const fn`).
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_block_at_v1}
+
+fn _function_kind_v1(type_param_count: i64, is_const: bool, attribute_names: [text]) -> text:
+    if type_param_count > 0:
+        return "generic"
+    if is_const or attribute_names.contains("inline"):
+        return "inline"
+    ""
+
+fn _decl_name_follows_v1(rest: text, name: text) -> bool:
+    if not rest.starts_with(name):
+        return false
+    if rest.len() == name.len():
+        return true
+    val next = rest.substring(name.len(), name.len() + 1)
+    next == ":" or next == "<" or next == "(" or next == " " or next == "="
+
+# Some parser declarations (structs among them, measured on the seed) carry
+# an unset span (line 0). The parsed name and kind stay authoritative; the
+# 1-based line is then the first top-level declaration of that name.
+pub fn module_tldr_decl_line_v1(span_line: i64, lines: [text], keywords: [text], name: text) -> i64:
+    if span_line > 0:
+        return span_line
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val decl = if line.starts_with("pub "): line.substring(4) else: line
+        for keyword in keywords:
+            if decl.starts_with(keyword + " ") and
+                    _decl_name_follows_v1(decl.substring(keyword.len() + 1), name):
+                return i + 1
+        i = i + 1
+    0
+
+# `@inline` directly above the declaration (attributes are not always kept
+# on ParserFunction).
+fn _inline_marked_above_v1(lines: [text], line: i64) -> bool:
+    var i = line - 2
+    while i >= 0 and lines[i].starts_with("@"):
+        if lines[i].trim() == "@inline" or lines[i].starts_with("@inline("):
+            return true
+        i = i - 1
+    false
+
+pub fn module_tldr_sections_of_module_v1(module: ParserModule, source: text) -> [text]:
+    """Ordered "<kind>|<block>" entries for the parsed module's top-level
+    declarations, in source order."""
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var anchor_lines: [i64] = []
+    var anchor_kinds: [text] = []
+    for name in module.structs.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.structs[name].span.line, lines, ["struct"], name))
+        anchor_kinds.push("layout")
+    for name in module.classes.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.classes[name].span.line, lines, ["class"], name))
+        anchor_kinds.push("layout")
+    for name in module.enums.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.enums[name].span.line, lines, ["enum"], name))
+        anchor_kinds.push("layout")
+    for name in module.bitfields.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.bitfields[name].span.line, lines, ["bitfield"], name))
+        anchor_kinds.push("layout")
+    for name in module.traits.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.traits[name].span.line, lines, ["trait"], name))
+        anchor_kinds.push("trait")
+    for name in module.type_aliases.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.type_aliases[name].span.line, lines, ["type"], name))
+        anchor_kinds.push("type")
+    for name in module.constants.keys():
+        anchor_lines.push(module_tldr_decl_line_v1(module.constants[name].span.line, lines, ["val", "const", "var"], name))
+        anchor_kinds.push("const")
+    for impl_ in module.impls:
+        anchor_lines.push(impl_.span.line)
+        anchor_kinds.push("impl")
+    for name in module.functions.keys():
+        val f = module.functions[name]
+        var attribute_names: [text] = []
+        for attribute in f.attributes:
+            attribute_names.push(attribute.name)
+        if _inline_marked_above_v1(lines, f.span.line):
+            attribute_names.push("inline")
+        val kind = _function_kind_v1(f.type_params.len(), f.is_const, attribute_names)
+        if kind != "" and not f.is_method:
+            anchor_lines.push(f.span.line)
+            anchor_kinds.push(kind)
+    module_tldr_sections_at_anchors_v1(source, anchor_lines, anchor_kinds)
+
+# Source-ordered, de-duplicated sections for (line, kind) anchors (1-indexed
+# lines; non-positive lines are ignored). Split out so it is testable without
+# constructing a ParserModule.
+pub fn module_tldr_sections_at_anchors_v1(source: text, anchor_lines: [i64], anchor_kinds: [text]) -> [text]:
+    var order: [i64] = []
+    var i = 0
+    while i < anchor_lines.len():
+        var duplicate = anchor_lines[i] <= 0
+        for seen in order:
+            if anchor_lines[seen] == anchor_lines[i]:
+                duplicate = true
+        if not duplicate:
+            order.push(i)
+            var j = order.len() - 1
+            while j > 0 and anchor_lines[order[j - 1]] > anchor_lines[i]:
+                order[j] = order[j - 1]
+                j = j - 1
+            order[j] = i
+        i = i + 1
+    val source_lines = source.replace("\r\n", "\n").split("\n")
+    var out: [text] = []
+    for index in order:
+        val block = module_tldr_block_at_v1(source_lines, anchor_lines[index] - 1, anchor_kinds[index])
+        if block != "":
+            out.push(anchor_kinds[index] + "|" + block)
+    out
+
+export module_tldr_sections_of_module_v1, module_tldr_sections_at_anchors_v1
+export module_tldr_decl_line_v1

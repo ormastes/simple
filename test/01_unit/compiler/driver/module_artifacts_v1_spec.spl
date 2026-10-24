@@ -1,0 +1,37 @@
+use std.spec
+use compiler.driver.cache.module_artifacts_v1.{MODULE_TLDR_COMPANION_HEADER_V1,
+    module_artifact_module_id_v1, module_tldr_companion_path_v1,
+    module_tldr_companion_render_v1, module_tldr_companion_body_v1,
+    module_artifact_publish_atomic_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val SOURCE_A: text = "pub fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+val SOURCE_A_BODY_EDIT: text = "pub fn add(a: i64, b: i64) -> i64:\n    b + a\n"
+
+describe "module artifacts v1 (TLDR companion producer)":
+    it "derives module ids and companion paths from logical paths":
+        expect(module_artifact_module_id_v1("./src/lib/common/text.spl")).to_equal("src.lib.common.text")
+        expect(module_tldr_companion_path_v1("out", "src/app/x.spl")).to_equal("out/src/app/x.tldr")
+
+    it "binds the companion to the exact source bytes":
+        val rendered = module_tldr_companion_render_v1("m", SOURCE_A)
+        expect(rendered.starts_with(MODULE_TLDR_COMPANION_HEADER_V1 + "\n")).to_equal(true)
+        expect(module_tldr_companion_body_v1(rendered, SOURCE_A) != "").to_equal(true)
+        # Any source change (even body-only) makes the companion stale.
+        expect(module_tldr_companion_body_v1(rendered, SOURCE_A_BODY_EDIT)).to_equal("")
+
+    it "keeps the interface body identical across a body-only edit":
+        val a = module_tldr_companion_body_v1(module_tldr_companion_render_v1("m", SOURCE_A), SOURCE_A)
+        val b = module_tldr_companion_body_v1(module_tldr_companion_render_v1("m", SOURCE_A_BODY_EDIT), SOURCE_A_BODY_EDIT)
+        expect(a).to_equal(b)
+
+    it "rejects a truncated companion":
+        val rendered = module_tldr_companion_render_v1("m", SOURCE_A)
+        expect(module_tldr_companion_body_v1(rendered.substring(0, rendered.len() - 5), SOURCE_A)).to_equal("")
+
+    it "publishes through temp + rename and overwrites":
+        val path = "build/test_tmp/module_artifacts_v1/a/b.tldr"
+        expect(module_artifact_publish_atomic_v1(path, "one")).to_equal(true)
+        expect(module_artifact_publish_atomic_v1(path, "two")).to_equal(true)
+        expect(rt_file_read_text(path)).to_equal("two")

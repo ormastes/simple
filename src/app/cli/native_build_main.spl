@@ -1130,6 +1130,95 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         if selective: return ("fail", "")
     if outcome == "link": (outcome, queue_dir) else: (outcome, "")
 
+# ===== Focused-capsule shard pre-pass (exact Stage3/Stage4) =================
+#
+# The exact focused capsules (bootstrap_focused_native_build.spl) drive the
+# driver in process and never reach the coordinator above, so before this they
+# ran HIR, MIR and codegen serially in one process. The driver side of every
+# shard ledger is environment-driven and lane-agnostic (driver_hir_cache.spl
+# hir_shard_owns, driver_aot_pipeline.spl aot_compile), so the capsule shards
+# by re-executing ITSELF with the identical argv (`base`) plus the shard flag:
+# every worker therefore runs the exact same capsule options (sources, strip,
+# opt level, arena decls, entry-closure env) as the final in-process build.
+#
+#   1. HIR workers (--hir-shard=i/n): each lowers only the modules it claims,
+#      reading every other module through its surface, into the HIR cache.
+#   2. MIR workers (--mir-shard=i/n, allow_mir only): each lowers + emits the
+#      objects of its claimed modules into the shared native object cache.
+#
+# Returns the sealed MIR ledger the caller installs as SIMPLE_MIR_SHARD_LINK
+# (the in-process build then links from it and lowers nothing), "" for the
+# ordinary in-process build, or "fail" for a MIR aggregate failure (some
+# module did not PASS: the link is blocked, exactly as in run_mir_shards).
+# Everything else -- disabled, no worker budget, HIR warm-up failure,
+# ineligible lane (MIR fallback) -- degrades to the unsharded in-process build,
+# so sharding can never turn a working capsule into a failing one by itself.
+# Opt-outs: SIMPLE_HIR_SHARDING=0, SIMPLE_MIR_SHARDING=0.
+pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_mir: bool) -> text:
+    if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
+            (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+            (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != "":
+        return ""      # a shard child (or an externally driven link); never recurse
+    if (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1" or args.contains("--clean"):
+        return ""      # every worker would wipe the shared object scope
+    # Workers must be the RUNNING compiler: the MIR link admits objects by the
+    # source fingerprint only, so a different binary (e.g. a stale
+    # SIMPLE_BINARY) must never produce them. No self path, no sharding.
+    val simple_bin = self_exe()
+    if simple_bin == "" or not file_exists(simple_bin):
+        eprint "[capsule-shard] disabled: running compiler path unavailable"
+        return ""
+    val timeout_ms = native_build_timeout_ms(args)
+    # Workers write no run evidence: the memory snapshot is O_EXCL (a worker
+    # would take the parent's file); the phase profile and progress events belong to the
+    # final build. Blank both for the spawn window only.
+    val old_mem_snapshot = env_get("SIMPLE_MEM_SNAPSHOT_FILE") ?? ""
+    val old_phase_file = env_get("SIMPLE_COMPILER_PHASE_PROFILE_FILE") ?? ""
+    val old_progress_events = env_get("SIMPLE_BUILD_PROGRESS_EVENTS") ?? ""
+    env_set("SIMPLE_MEM_SNAPSHOT_FILE", "")
+    env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "")
+    env_set("SIMPLE_BUILD_PROGRESS_EVENTS", "")
+    var hir_ok = true
+    val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
+            env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
+    if hir_count > 1:
+        val hir_queue = shard_ledger_queue_dir(args, "queue", "hir-shard")
+        if hir_queue == "":
+            hir_ok = false
+        else:
+            print "[capsule-shard] hir shards={hir_count} ledger={hir_queue}"
+            val hir_run = run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
+                "SIMPLE_HIR_SHARD_OWNER", base, hir_queue, args, hir_count, hir_count,
+                simple_bin, timeout_ms)
+            hir_ok = hir_run.code == 0
+            if not hir_ok:
+                eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules}); in-process build redoes HIR and reports it"
+    var result = ""
+    val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
+    if allow_mir and hir_ok and mir_flag != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
+        val parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+        if parallel > 1:
+            val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
+            if mir_queue != "":
+                val count = native_build_mir_shard_count(parallel)
+                print "[capsule-shard] mir shards={count} parallel={parallel} ledger={mir_queue}"
+                val mir_run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
+                    "SIMPLE_MIR_SHARD_OWNER", base, mir_queue, args, count, parallel,
+                    simple_bin, timeout_ms)
+                val outcome = native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
+                    mir_run.total_claims, mir_run.all_stopped)
+                if outcome == "link":
+                    result = mir_queue
+                elif outcome == "fail":
+                    eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
+                    result = "fail"
+                else:
+                    eprint "[capsule-shard] MIR shards recorded no module verdict (lane ineligible or no HIR inventory); falling back to in-process MIR"
+    env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
+    env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
+    env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
+    result
+
 # Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
 # writes per-module declaration summaries
 # (compiler/80.driver/driver_build/native_mir_shard_export_v1.spl). Returns the

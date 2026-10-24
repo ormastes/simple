@@ -1,0 +1,40 @@
+#!/bin/sh
+# Ladder resume: fetch the highest handoff (<platform>-p<N>/) that an earlier
+# phase-ladder run on this branch already produced, so a new run climbs from
+# the last proven phase instead of rebuilding phase 1 from the Rust seed.
+#
+#   sh scripts/bootstrap/phase-ladder-resume.shs <in-dir> <platform>...
+#
+# Looks up each ladder-<platform>-r<rung> artifact by name, the newest
+# unexpired one on this branch (this run included); a cancelled run that
+# only finished rung 1 still counts. phase-ladder-step.shs then climbs from the
+# highest <platform>-p<N>/PHASE it finds. Needs GH_TOKEN with actions:read; a
+# lookup or download failure only means "nothing to resume", never a failure.
+set -u
+in_dir=${1:?in-dir}
+shift
+repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}
+branch=${GITHUB_REF_NAME:?GITHUB_REF_NAME}
+mkdir -p "$in_dir"
+for platform in "$@"; do
+  for rung in 4 3 2 1; do
+    name="ladder-$platform-r$rung"
+    run=$(gh api "repos/$repo/actions/artifacts?name=$name&per_page=30" --jq \
+      "[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == \"$branch\")] | sort_by(.created_at) | last | .workflow_run.id // empty" \
+      2>/dev/null) || run=
+    [ -n "$run" ] || continue
+    tmp="$in_dir/.resume-$name"
+    rm -rf "$tmp"
+    gh run download "$run" -R "$repo" -n "$name" -D "$tmp" >/dev/null 2>&1 || { rm -rf "$tmp"; continue; }
+    # Rung numbers are not phases (a resumed run's r1 can hold phase 3), so
+    # keep every rung's newest handoff; the step climbs from the highest PHASE.
+    for d in "$tmp/$platform"-p*/; do
+      [ -f "$d/PHASE" ] || continue
+      dest="$in_dir/$(basename "$d")"
+      [ -e "$dest" ] || cp -R "$d" "$dest"
+      echo "phase-ladder-resume: $platform phase $(cat "$d/PHASE") from run $run ($name)"
+    done
+    rm -rf "$tmp"
+  done
+done
+exit 0
