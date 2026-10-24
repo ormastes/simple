@@ -15,9 +15,13 @@
 # Named gaps: ParserModule carries no macro definitions/invocations yet, so
 # the producer input is MacroModuleSourceV1 rather than a parsed module; CTFE
 # reads are not modelled (ctfe read root is the fixed "none" digest);
-# `active_guard_id` is a proposed GuardId (no GuardId type exists yet).
+# Guards are GuardIdV1 (compiler.common.cache_contract.guard_id_v1); the
+# expand key's active-guard root is ActiveGuardRootV1.root_digest, and an
+# inadmissible (incomplete) root makes every use conservative (cache miss).
 
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.guard_id_v1.{GuardIdV1, GuardEvalV1, ActiveGuardRootV1,
+    active_guard_root_v1, active_guard_root_admissible_v1}
 use compiler.frontend.parser.macro_registry.{MacroDef, macro_def_contract_canonical_text,
     macro_def_generated_public_names}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
@@ -34,7 +38,7 @@ pub struct MacroSourceDefV1:
     body_text: text
     nested_macro_names: [text]
     declared_effects: [text]
-    guard_ids: [text]
+    guard_ids: [GuardIdV1]
     is_public: bool
 
 pub struct MacroSourceInvocationV1:
@@ -44,7 +48,7 @@ pub struct MacroSourceInvocationV1:
     invocation_text: text
     args_text: text
     hygiene_scope_id: text
-    active_guard_id: text
+    active_guard_id: text    # guard_id_v1(kind, expr).digest, "" = unguarded
     active: bool
 
 pub struct MacroModuleSourceV1:
@@ -128,6 +132,8 @@ class _KeyCtxV1:
     imported: [MacroModuleProjectionV1]
     names: [text]
     keys: [text]
+    guard_root: ActiveGuardRootV1
+    evals: [GuardEvalV1]
     visiting: [text]
     cyclic: [text]
 
@@ -179,7 +185,7 @@ fn _entry_without_keys(src: MacroModuleSourceV1, imported: [MacroModuleProjectio
     MacroDefinitionEntryV1(def_id: _local_def_id(src, d), macro_name: d.def.name, generation: 1,
         contract_digest: sha256_text(contract), body_digest: sha256_text(d.body_text),
         hygiene_schema: "macro-hygiene/v1", declared_effects: _sorted_unique(d.declared_effects),
-        dependent_macros: _sorted_unique(deps), guard_ids: _sorted_unique(d.guard_ids),
+        dependent_macros: _sorted_unique(deps), guard_ids: _guard_digests(d.guard_ids),
         is_public: d.is_public, generated_member_names: members,
         generated_member_root: _member_root(members),
         exported_surface_digest: macro_hash_v1("macro-exported-surface/v1", [contract, _member_root(members)]))
@@ -234,10 +240,17 @@ pub fn package_macro_name_index_v1(package: text,
         entries.push(MacroNameMembershipV1(scoped_name: n, def_ids: _sorted_unique(ids)))
     package_macro_name_index_build_v1(package, entries)
 
+# Default profile: no guard evaluations (complete, admissible empty root).
 pub fn project_macro_module_v1(src: MacroModuleSourceV1,
         imported: [MacroModuleProjectionV1]) -> MacroModuleProjectionV1:
+    project_macro_module_guarded_v1(src, imported, "sha256/" + sha256_text("macro-profile/default"), [])
+
+# `evals` come from the guard evaluator (aop_source_guard_evals_v1 once landed).
+pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], profile_digest: text,
+        evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
     var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [],
-        cyclic: [])
+        cyclic: [], guard_root: active_guard_root_v1(profile_digest, evals), evals: evals)
     # Definitions, sorted by canonical scoped id.
     var ids: [text] = []
     for d in src.defs:
@@ -301,7 +314,17 @@ fn _use_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], ctx: _
     var key = ""
     var member_root = ""
     var candidates = 0
-    if inv.active:
+    var active = inv.active
+    var guard_conservative = not active_guard_root_admissible_v1(ctx.guard_root)
+    if inv.active_guard_id != "":
+        var found = false
+        for e in ctx.evals:
+            if e.guard.digest == inv.active_guard_id:
+                found = true
+                if e.evaluable: active = e.active
+                else: guard_conservative = true
+        if not found and ctx.evals.len() > 0: guard_conservative = true
+    if active:
         val li = _local_index(src, inv.requested_name)
         if li >= 0:
             candidates = 1
@@ -322,7 +345,7 @@ fn _use_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], ctx: _
         active_guard_id: inv.active_guard_id, generated_symbols_digest: _member_root([]),
         resolution_candidate_root: scope_root, has_absence_witness: false, absence_witness: "",
         expand_key: "", status: MacroUseStatusV1.Inactive, coverage: "complete")
-    if not inv.active:
+    if not active:
         return u
     if candidates == 1:
         u.has_resolved_def = true
@@ -330,15 +353,16 @@ fn _use_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], ctx: _
         u.resolved_def_key = key
         u.generated_symbols_digest = member_root
         u.expand_key = macro_expand_key_v1(key, inv_digest, args_digest, inv.hygiene_scope_id,
-            sha256_text("ctfe:none"), inv.active_guard_id)
+            sha256_text("ctfe:none"), ctx.guard_root.root_digest)
         u.status = MacroUseStatusV1.Resolved
+        if guard_conservative: u.coverage = "conservative"
         return u
     # Negative (0) or ambiguous (>1) resolution: an absence witness bound to the
     # complete candidate scope, so a new/removed definition invalidates it.
     u.status = MacroUseStatusV1.Unresolved
     u.has_absence_witness = true
     u.absence_witness = macro_absence_witness_v1(inv.requested_name, scope_root)
-    if candidates > 1: u.coverage = "conservative"
+    if candidates > 1 or guard_conservative: u.coverage = "conservative"
     u
 
 pub fn macro_def_key_of_v1(p: MacroModuleProjectionV1, macro_name: text) -> text:
@@ -504,3 +528,9 @@ pub fn macro_symbol_collisions_v1(p: MacroModuleProjectionV1,
             out.push(MacroDiagnosticV1(code: "E-MACRO-INTRO-SHADOWS", subject: n,
                 message: "macro-introduced '{n}' shadows a declaration of module {p.module}"))
     out
+
+fn _guard_digests(guards: [GuardIdV1]) -> [text]:
+    var out: [text] = []
+    for g in guards:
+        out.push(g.digest)
+    _sorted_unique(out)
