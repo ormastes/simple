@@ -7,9 +7,10 @@ use std.nogc_sync_mut.sffi.host.{heap_registry_count}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 
-# Existing checked native ABI; only verifies registry membership/bounds and
-# never dereferences an unregistered receiver. No replacement runtime shim.
-extern fn rt_struct_receiver_valid<T>(receiver: T, byte_offset: i64, access_width: i64) -> bool
+# Existing pure value-formation probe. This does NOT establish allocation
+# membership or liveness: raw seed-AOT rt_alloc records are not registered by
+# rt_struct_alloc. Lifetime evidence is churn plus exact retained-field checks.
+extern fn rt_heap_ref_wellformed<T>(receiver: T) -> bool
 
 var assertions = 0
 
@@ -20,21 +21,21 @@ fn checked(condition: bool, label: text):
     assertions = assertions + 1
 
 fn same_record(actual: CompileSourceInventoryReadV1, expected: CompileSourceInventoryReadV1):
-    checked(rt_struct_receiver_valid(actual, 0, 1), "retained ReadV1 root has valid registered storage")
+    checked(rt_heap_ref_wellformed(actual), "ReadV1 root has reference formation only")
     checked(actual.valid and expected.valid, "both inventories admitted")
     checked(actual.reason == expected.reason, "reason")
     checked(actual.digest == expected.digest, "authenticated digest")
     checked(actual.inventory != nil and expected.inventory != nil, "optional inventory present")
     val a = actual.inventory!
     val e = expected.inventory!
-    checked(rt_struct_receiver_valid(a, 0, 1), "retained inventory has valid registered storage")
+    checked(rt_heap_ref_wellformed(a), "inventory has reference formation only")
     checked(a.schema_version == e.schema_version, "schema")
     checked(a.generation == e.generation, "generation")
     checked(a.entries.len() == e.entries.len(), "entry count")
     for index in 0..e.entries.len():
         val left = a.entries[index]
         val right = e.entries[index]
-        checked(rt_struct_receiver_valid(left, 0, 1), "retained row has valid registered storage")
+        checked(rt_heap_ref_wellformed(left), "row has reference formation only")
         checked(left.source_identity == right.source_identity, "source identity")
         checked(left.content_digest == right.content_digest, "content digest")
         checked(left.semantic_digest == right.semantic_digest, "semantic digest")
@@ -44,11 +45,36 @@ fn same_record(actual: CompileSourceInventoryReadV1, expected: CompileSourceInve
         checked(left.byte_count == right.byte_count, "byte count")
 
 fn allocation_churn():
+    val salt = assertions
     var checksum = 0
     for index in 0..256:
-        val pieces = "churn-{index}-retired-buffer-overwrite|alpha|beta|gamma".split("|")
-        checksum = checksum + pieces[0].len()
-    checked(checksum > 0, "allocation churn executed")
+        # Distinct 64-byte texts and all three actual result record shapes
+        # exercise reuse of freed field/record allocations, not just arrays.
+        val content = sha256_text("churn-content-{salt}-{index}")
+        val semantic = sha256_text("churn-semantic-{salt}-{index}")
+        val exports = sha256_text("churn-export-{salt}-{index}")
+        val initializer = sha256_text("churn-initializer-{salt}-{index}")
+        val provider = sha256_text("churn-provider-{salt}-{index}")
+        val row = CompileSourceInventoryEntryV1(
+            "src/churn/replacement-{salt}-{index}.spl", content, semantic,
+            exports, initializer, provider, 900000 + index)
+        val inventory = CompileSourceInventoryV1(1, 800000 + index, [row])
+        val read = CompileSourceInventoryReadV1(
+            true, "churn-{salt}-{index}", content, Some(inventory))
+        val selected = read.inventory!
+        val item = selected.entries[0]
+        checksum = checksum + selected.generation + selected.schema_version
+        checksum = checksum + item.byte_count + item.source_identity.len()
+        checksum = checksum + item.content_digest.len() + item.semantic_digest.len()
+        checksum = checksum + item.export_digest.len() + item.initializer_digest.len()
+        checksum = checksum + item.provider_digest.len() + read.digest.len() + read.reason.len()
+        if item.content_digest.starts_with("a"): checksum = checksum + 17
+        if item.semantic_digest.starts_with("b"): checksum = checksum + 19
+        if item.export_digest.starts_with("c"): checksum = checksum + 23
+        if item.initializer_digest.starts_with("d"): checksum = checksum + 29
+        if item.provider_digest.starts_with("e"): checksum = checksum + 31
+    checked(checksum > 0, "record and 64-byte-text allocation churn executed")
+    print "scv-reader-scratch churn_records=256 digest_fields=1280 checksum={checksum}"
 
 fn real_scope_witness():
     checked(transient_array_scope_state_v1() == 0, "initial scope state0")

@@ -37,7 +37,9 @@ that scope retirement reads. Those source facts do not replace native proof.
 
 The fixture authenticates captured bytes independently, decodes its reference
 outside the new wrapper, compares every retained row field after allocation
-churn, and verifies the root/inventory/rows against the actual struct registry.
+churn, and checks reference formation only. Formation does not prove allocation
+membership or liveness. Lifetime evidence is exact retained data after churn,
+actual managed-heap reclamation, and paired OS memory observations.
 A separate dynamic heap allocation/count decrease witnesses real reclamation
 without dereferencing discarded allocations. A constant-zero provider cannot
 pass that witness. Caller states0/1/2 and malformed pointer/header/row/traversal
@@ -60,3 +62,22 @@ its independent reference graph and all-field comparisons are equal work in
 baseline and changed profiles. A subsequent actual parent pre-child measurement is
 required before claiming a whole-pipeline memory improvement. No cap increase,
 forced cache keys, full Phase3 retry or native execution occurred in this task.
+
+
+Final-cycle fixture correction, native attempt2 still UNRUN: the first baseline
+build passed69modules(7cached/62fresh), native0/quiescent1. Its run deliberately
+assert-aborted at ordinal8 in the unsupported struct-registry check. The new
+reader wrapper was not present in that baseline; no deep-promotion conclusion
+follows. Seed StructInit uses raw `rt_alloc`, whereas `rt_struct_receiver_valid`
+checks the separate registry populated only by `rt_struct_alloc`. Core-C's own
+encoder comment documents that raw AOT structs are not registered there.
+
+The corrected fixture calls existing `rt_heap_ref_wellformed` as a defensive
+formation probe only. Every field comparison and the independent canonical
+hash remain mandatory. Churn now allocates five distinct64-byte digest strings
+and real ReadV1/Inventory/Entry/Option/array shapes per iteration; all record
+fields and digest prefix bytes affect an observable checksum. No known-freed
+witness pointer is dereferenced. Predicted final counter remains3,767,706 for
+42,813 rows; it is not an actual pass. Original source/manifests/native abort
+evidence are frozen separately. This is the final feature cycle6; no further
+source repair or native retry is authorized after its terminal result.
