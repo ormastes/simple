@@ -959,6 +959,16 @@ pub(crate) fn compile_interp_call<M: Module>(
         // `val (a,b,c) = rt_http_request(...)`) read them correctly. Scalar
         // returns keep the historical unbox unchanged.
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
+        // Direct Win64 ABI externs (GetProcessHeap/HeapAlloc/CreateProcessW/...)
+        // carry no rt_/spl_ prefix but declare raw scalar i64 destinations
+        // (pointers/DWORDs) exactly like the rt_*/spl_ bridge family. Without
+        // this their InterpCall result stays a boxed RuntimeValue and JIT'd
+        // callers read the tagged word as a raw pointer (segfaulted inside
+        // RtlAllocateHeap when path_identity.spl passed the boxed GetProcessHeap
+        // result into HeapAlloc).
+        #[cfg(windows)]
+        let is_extern_bridge =
+            is_extern_bridge || crate::interpreter::interpreter_extern::windows_abi::is_supported_name(func_name);
         let keep_boxed_result = boxed_result || interp_call_keeps_boxed_result(func_name);
         let value = if !keep_boxed_result
             && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64) || interp_call_returns_f64(func_name))
