@@ -55,6 +55,10 @@ struct FiberSchedV1:
     pending: [i64]
     steals_local: i64
     steals_remote: i64
+    # Parks the caller knows will resolve without new admissions (IO in
+    # flight). While > 0 the progress rule must not overcommit: the IO wakes
+    # someone. The carrier sets it from its reactor before each admit.
+    external_inflight: i64
     error: text
 
 fn fiber_sched_new(worker_socket: [i64], budget: i64) -> FiberSchedV1:
@@ -67,7 +71,7 @@ fn fiber_sched_new(worker_socket: [i64], budget: i64) -> FiberSchedV1:
     if budget <= 0: err = "budget must be positive"
     FiberSchedV1(budget: budget, reserved: 0, overcommits: 0, worker_socket: worker_socket,
                  queues: queues, fiber_state: [], fiber_est: [], fiber_worker: [], fiber_token: [],
-                 pending: [], steals_local: 0, steals_remote: 0, error: err)
+                 pending: [], steals_local: 0, steals_remote: 0, external_inflight: 0, error: err)
 
 fn fiber_sched_submit(s: FiberSchedV1, est_bytes: i64) -> FiberSchedV1:
     """Register a fiber (id = submission index) as pending admission."""
@@ -124,7 +128,7 @@ fn fiber_sched_admit(s: FiberSchedV1) -> FiberSchedV1:
     var t = s
     while t.pending.len() > 0 and t.reserved + t.fiber_est[t.pending[0]] <= t.budget:
         t = _fs_admit_head(t)
-    if t.pending.len() > 0 and fiber_sched_runnable_count(t) == 0:
+    if t.pending.len() > 0 and fiber_sched_runnable_count(t) == 0 and t.external_inflight == 0:
         t = _fs_admit_head(t)
     t
 
