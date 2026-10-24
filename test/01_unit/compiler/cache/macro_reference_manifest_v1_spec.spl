@@ -1,0 +1,137 @@
+# Purpose: P1 contract for macro definition/use TLDR sections (plan 2026-10-24 §6, P5).
+# Canonical MacroDefKey / MacroExpandKey, codec roundtrip, corruption and bounds.
+# @req M-02
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{
+    MacroDefIdV1, MacroDefinitionEntryV1, MacroDefinitionTableV1, MacroUseV1,
+    MacroUseTableV1, MacroUseStatusV1, macro_def_id_canonical_v1,
+    macro_def_key_v1, macro_expand_key_v1, macro_absence_witness_v1,
+    macro_definition_table_encode_v1, macro_definition_table_decode_v1,
+    macro_use_table_encode_v1, macro_use_table_decode_v1,
+    macro_definition_table_valid_v1, macro_use_table_valid_v1,
+    macro_use_status_tag_v1, macro_use_forward_read_manifest_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_read_manifest_valid_v1}
+
+fn d(v: text) -> text: sha256_text(v)
+
+fn def_id(module: text, binder: text) -> MacroDefIdV1:
+    MacroDefIdV1(package: "pkg", module: module, namespace: "macro", binder: binder)
+
+fn entry(binder: text, body: text) -> MacroDefinitionEntryV1:
+    MacroDefinitionEntryV1(def_id: def_id("a", binder), macro_name: binder, generation: 1,
+        contract_digest: d("contract"), body_digest: d(body), hygiene_schema: "hygiene/v1",
+        declared_effects: [], dependent_macros: [], guard_ids: [], is_public: true,
+        generated_member_names: ["gen_" + binder], generated_member_root: d("gen_" + binder),
+        exported_surface_digest: d("surface"))
+
+fn use_record(region: text) -> MacroUseV1:
+    MacroUseV1(invoking_source_id: "b.spl", region_id: region, stable_invocation_id: "inv:" + region,
+        requested_scoped_name: "double", has_resolved_def: true,
+        resolved_def_id: macro_def_id_canonical_v1(def_id("a", "double")), resolved_def_key: d("defkey"),
+        invocation_ast_digest: d("double(1)"), argument_digest: d("1"),
+        hygiene_scope_id: "h0", active_guard_id: "", generated_symbols_digest: d("none"),
+        resolution_candidate_root: d("cands"), has_absence_witness: false, absence_witness: "",
+        expand_key: d("k"), status: MacroUseStatusV1.Resolved, coverage: "complete")
+
+describe "MacroDefKey canonical identity":
+    it "is deterministic and domain separated from MacroExpandKey":
+        val e = entry("double", "x + x")
+        val k1 = macro_def_key_v1(e, d("nested"))
+        val k2 = macro_def_key_v1(e, d("nested"))
+        expect(k1).to_equal(k2)
+        val x = macro_expand_key_v1(k1, d("inv"), d("args"), "h0", d("ctfe"), "")
+        expect(x == k1).to_equal(false)
+
+    it "changes with body or nested read root but not with generation":
+        val e = entry("double", "x + x")
+        val base = macro_def_key_v1(e, d("nested"))
+        expect(macro_def_key_v1(entry("double", "x * 2"), d("nested")) == base).to_equal(false)
+        expect(macro_def_key_v1(e, d("nested2")) == base).to_equal(false)
+        var e2 = entry("double", "x + x")
+        e2.generation = 99
+        expect(macro_def_key_v1(e2, d("nested"))).to_equal(base)
+
+    it "scoped id keeps same spelling in two modules distinct":
+        val a = macro_def_id_canonical_v1(def_id("a", "double"))
+        val b = macro_def_id_canonical_v1(def_id("b", "double"))
+        expect(a == b).to_equal(false)
+
+    it "absence witness depends on requested name and candidate root":
+        val w = macro_absence_witness_v1("triple", d("root1"))
+        expect(w == macro_absence_witness_v1("triple", d("root2"))).to_equal(false)
+        expect(w == macro_absence_witness_v1("quad", d("root1"))).to_equal(false)
+
+describe "MacroDefinitionTableV1 codec":
+    it "roundtrips and rejects corruption":
+        val table = MacroDefinitionTableV1(schema: 1, module_id: "pkg/a",
+            entries: [entry("quad", "double(double(x))"), entry("double", "x + x")])
+        expect(macro_definition_table_valid_v1(table)).to_equal(true)
+        val bytes = macro_definition_table_encode_v1(table)
+        val back = macro_definition_table_decode_v1(bytes)
+        expect(back.ok).to_equal(true)
+        expect(macro_definition_table_encode_v1(back.value)).to_equal(bytes)
+        val bad = bytes.replace("double", "doubIe")
+        expect(macro_definition_table_decode_v1(bad).ok).to_equal(false)
+        expect(macro_definition_table_decode_v1("garbage").ok).to_equal(false)
+
+    it "rejects unsorted or duplicate entries (order is canonical scoped id)":
+        val dup = MacroDefinitionTableV1(schema: 1, module_id: "pkg/a",
+            entries: [entry("double", "a"), entry("double", "b")])
+        expect(macro_definition_table_valid_v1(dup)).to_equal(false)
+        val unsorted = MacroDefinitionTableV1(schema: 1, module_id: "pkg/a",
+            entries: [entry("double", "a"), entry("quad", "b")])
+        expect(macro_definition_table_valid_v1(unsorted)).to_equal(false)
+
+describe "MacroUseTableV1 codec":
+    it "roundtrips resolved and absence records":
+        var missing = use_record("r2")
+        missing.requested_scoped_name = "triple"
+        missing.has_resolved_def = false
+        missing.resolved_def_id = ""
+        missing.resolved_def_key = ""
+        missing.has_absence_witness = true
+        missing.absence_witness = macro_absence_witness_v1("triple", d("cands"))
+        missing.status = MacroUseStatusV1.Unresolved
+        val table = MacroUseTableV1(schema: 1, module_id: "pkg/b", uses: [use_record("r1"), missing])
+        expect(macro_use_table_valid_v1(table)).to_equal(true)
+        val bytes = macro_use_table_encode_v1(table)
+        val back = macro_use_table_decode_v1(bytes)
+        expect(back.ok).to_equal(true)
+        expect(back.value.uses.len()).to_equal(2)
+        expect(macro_use_status_tag_v1(back.value.uses[1].status)).to_equal("unresolved")
+        expect(back.value.uses[1].absence_witness).to_equal(missing.absence_witness)
+        expect(macro_use_table_encode_v1(back.value)).to_equal(bytes)
+
+    it "rejects a resolved record that also carries an absence witness":
+        var bad = use_record("r1")
+        bad.has_absence_witness = true
+        bad.absence_witness = d("w")
+        val table = MacroUseTableV1(schema: 1, module_id: "pkg/b", uses: [bad])
+        expect(macro_use_table_valid_v1(table)).to_equal(false)
+
+describe "forward reads for the .rr v2 projection":
+    it "resolved use reads macro.def positively plus name membership":
+        val m = macro_use_forward_read_manifest_v1(use_record("r1"), d("profile"))
+        expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
+        expect(m.consumer.kind).to_equal("macro.expand")
+        expect(m.ordered_reads.len()).to_equal(2)
+        expect(m.ordered_reads[0].producer.kind).to_equal("macro.def")
+        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(d("defkey"))
+        expect(m.ordered_reads[1].facet).to_equal("membership:macro-name")
+
+    it "unresolved use carries an absence read bound to its witness":
+        var missing = use_record("r2")
+        missing.has_resolved_def = false
+        missing.resolved_def_id = ""
+        missing.resolved_def_key = ""
+        missing.has_absence_witness = true
+        missing.absence_witness = macro_absence_witness_v1("double", d("cands"))
+        missing.status = MacroUseStatusV1.Unresolved
+        val m = macro_use_forward_read_manifest_v1(missing, d("profile"))
+        expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
+        expect(m.ordered_reads[0].producer.kind).to_equal("macro.resolve")
+        expect(m.ordered_reads[0].facet).to_equal("absence:macro-name")
+        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(missing.absence_witness)
