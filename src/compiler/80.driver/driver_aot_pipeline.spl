@@ -6,6 +6,7 @@ use compiler.driver.driver_aot_output.*
 use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*
 use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning, log_build_progress, log_build_progress_failure}
 use compiler.driver.driver_ice_boundary.{ice_boundary_finalize}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
 # both-format branch below die post-link with `error[E1002]: function
@@ -159,6 +160,8 @@ impl CompilerDriver:
                 return self.go_to_end_finish_v1(0, [])
             return CompileResult.CodegenError(msg)
         log_phase("aot:lower_to_mir:done")
+        # @workaround bug=mir_phase_rss_retention_2026_10_24 reason=flat HIR store (second copy of every module row) outlived the only readers, MIR lowering
+        bootstrap_hir_modules_reset()
         log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
             self.ctx.mir_modules.len(), "lower_to_mir", 4, 6, 0, 0, "running")
 
@@ -531,6 +534,10 @@ impl CompilerDriver:
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
 
+    me mir_shard_drop_cold_receipts_v1():
+        # workaround(mir-shard-cold-receipts): see native_mir_shard_eligible_v1.
+        self.ctx.cold_hir_typed_receipts = []
+
     fn native_mir_shard_eligible_v1() -> bool:
         """Shards publish per-module objects only; lanes whose final step needs
         more than object paths (cold-HIR object persistence, collection
@@ -540,7 +547,13 @@ impl CompilerDriver:
             driver_mir_selective_explicit_native_eligible_v1(self)
         else:
             self.native_staged_codegen_eligible_v1()
-        val receipts_clear = self.ctx.cold_hir_typed_receipts.len() == 0
+        # workaround(mir-shard-cold-receipts): the bootstrap CLI always captures cold-HIR
+        # typed receipts (package-index markers are never published), which made every
+        # shard worker/link child refuse. Receipts only feed cold object persistence,
+        # which the shard worker/link child drops (see mir_shard_drop_cold_receipts_v1).
+        # Bug: doc/08_tracking/bug/mir_shard_worker_refuses_cold_receipts_2026-10-24.md
+        val shard_child = native_mir_shard_queue_v1() != "" or native_mir_shard_link_ledger_v1() != ""
+        val receipts_clear = shard_child or self.ctx.cold_hir_typed_receipts.len() == 0
         val no_budget = self.ctx.options.collection_memory_budget_bytes < 0
         val not_clean = (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
         val eligible = lane_ok and receipts_clear and no_budget and not_clean
@@ -568,6 +581,7 @@ impl CompilerDriver:
             val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
             val _completed = hir_shard_recovery_complete(queue, owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
+        self.mir_shard_drop_cold_receipts_v1()
         var shard_state = NativeStagedCodegenStateV1.begin(0)
         shard_state.active = true
         shard_state.shard_queue = queue
@@ -682,6 +696,7 @@ impl CompilerDriver:
         and run the ordinary compile_to_native verdict + link over them."""
         if not self.native_mir_shard_eligible_v1():
             return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
+        self.mir_shard_drop_cold_receipts_v1()
         val admitted = if driver_mir_selective_enabled_v1():
             driver_mir_selective_admit_link_v1(self, native_mir_shard_link_ledger_v1())
         else:

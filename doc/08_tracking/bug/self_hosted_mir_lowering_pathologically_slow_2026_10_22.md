@@ -77,3 +77,9 @@ first/largest driver modules) still needs a profile.
    and the buffered line was lost (all surviving worker lines are eprint or
    explicitly flushed). The refusal print now ends with `stdout_flush()` —
    anything a shard worker prints on a path that exits non-zero must flush.
+
+## Addendum 2026-10-24: root cause of the pin
+
+The fixed RSS is the post-mono resident set while `driver_warm_mir_logical_names_v1`
+walks 0..next_symbol_id (2^50 after mono). See
+`mir_warm_names_dense_symbol_walk_hang_2026_10_24.md`.
