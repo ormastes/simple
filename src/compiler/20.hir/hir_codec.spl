@@ -549,6 +549,33 @@ fn hir_module_decode(blob: text) -> HirModule?:
         return nil
     Some(module)
 
+# Why hir_module_decode returned nil, for the store self-check diagnostic. Same
+# steps and order as hir_module_decode; "" when it would decode. The reader
+# failure names its kind, detail, cursor line and the token at the cursor, so a
+# `reason=decode` refusal can be traced to one field from the log alone.
+fn hir_module_decode_reason(blob: text) -> text:
+    if blob == "":
+        return "empty"
+    val nl = blob.index_of("\n")
+    if nl < 0:
+        return "no_header_line"
+    val header = blob.substring(0, nl)
+    if header != hir_codec_header():
+        return "header_mismatch len={header.len()}"
+    var r = FlatPoolReader.new(blob.substring(nl + 1, blob.len()))
+    val module = hc_dec_hir_module(r)
+    val raw_at = if r.pos > 0 and r.pos <= r.lines.len(): r.lines[r.pos - 1] else: ""
+    val at = if raw_at.len() > 48: raw_at.substring(0, 48) else: raw_at
+    if module.representation_declarations.len() > 0:
+        return "representation_declarations={module.representation_declarations.len()}"
+    if not r.ok:
+        return "reader kind={r.failure_kind} detail={r.failure_detail} line={r.pos}/{r.lines.len()} token={at}"
+    if r.pos != r.lines.len() - 1:
+        return "trailing line={r.pos}/{r.lines.len()} token={at}"
+    if r.lines[r.pos] != "":
+        return "unterminated line={r.pos}"
+    ""
+
 # Cache admission is stricter than the raw codec decoder. A structurally valid
 # but lossy or non-deterministic frame must not become a cache hit or durable
 # shard completion. Callers own the temporary decode/re-encode allocations.
@@ -693,7 +720,7 @@ export hir_canonical_codec_header, hir_canonical_codec_rules_identity_v1
 export hir_canonical_codec_identity_v1
 export hir_canonical_codec_generated_available_v1
 export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
-export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
+export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason, hir_module_decode_reason
 export hir_module_has_rt_hal
 export hir_fn_scalars_at_v1
 export hir_module_first_fn_name_v1
