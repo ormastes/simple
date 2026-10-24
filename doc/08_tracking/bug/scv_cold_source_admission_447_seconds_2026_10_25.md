@@ -49,6 +49,36 @@ this is not a controlled speedup or overhead comparison. The two-second goal
 remains OPEN, c635/ongoing Phase 3 remain provisional, and current source,
 snapshot, failure and physical-validation policy is preserved.
 
+### Later a0ca cold observation and warm-path limits
+
+With source `60304aa7e52dd069937a3a9d764a8edd59c38b97`, the later a0ca
+invocation recorded inventory 299.1433388 seconds and snapshot 213.2329141
+seconds: **512.3762529 seconds combined**. Retained raw aggregate:
+`C:/dev/simple-phase3-a0ca-storage-20261025/evidence/scv-cost-handoff-observed.sdn`.
+It counted 42,813 checked reads (301,454,503 bytes), 200,000 facet hashes,
+17,360 materializations, 34,720 copy/write operations and 52,080 verifications.
+Nested buckets still overlap. This and the prior 436.2691951-second invocation
+are observations, not a controlled regression, speedup or overhead comparison.
+
+The bounded source audit is
+`C:/dev/simple-phase3-a0ca-storage-20261025/evidence/warm-scv-memory-handoff.md`,
+SHA256 `5f2118e273d7efcd3cb62a13fb0cea341e8b9854c8c0b12905a702f22f99fe1d`.
+`COLD_INIT=0` can return a valid existing snapshot before materialization
+(`compile_snapshot.spl:696–704`), but does not guarantee unchanged generation
+or a two-second path. Directory-alias reconciliation still enumerates and
+reads regular child files (`inventory_aliases.spl:65–136`, reads at 121–125).
+Inventory read/decode remains in `inventory_events.spl:706–709`,
+`compile_snapshot.spl:189–192` and `source_authority.spl:97–105`.
+The audit pins each source file; snapshot owner SHA256 is
+`58810b5f419bc05c19faa746ef71c2b5d3ac5eb1290e8f1faaab5131d248b7d2`.
+
+The parent remained resident at about 2.584 GB during child execution. No
+heap-live counter was captured, so RSS does not establish recoverable memory.
+The job stopped at 5,864,952 KiB against its 5,859,375 KiB cap and became
+quiescent. This failed full attempt is retained; it provides no Phase 3
+qualification. No warm retry, new probe or production change was made for this
+audit. The two-second goal and required negative-oracle gates remain open.
+
 ### Small native contracts
 
 The new instrumentation preserves 103 existing function signatures, using

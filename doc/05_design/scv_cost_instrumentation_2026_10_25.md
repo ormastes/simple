@@ -99,6 +99,33 @@ speedup or a tracing-overhead measurement. The producer and ongoing Phase 3
 remain provisional and unqualified; all existing failure and physical-validation
 requirements remain. No live source or cache was changed to obtain this record.
 
+### Later cold measurement and bounded warm-path audit
+
+Source `60304aa7e52dd069937a3a9d764a8edd59c38b97` with a0ca recorded
+299.1433388 seconds inventory plus 213.2329141 seconds snapshot, totaling
+512.3762529 seconds. The raw aggregate is retained at
+`C:/dev/simple-phase3-a0ca-storage-20261025/evidence/scv-cost-handoff-observed.sdn`.
+Counts were 42,813 reads / 301,454,503 bytes, 200,000 facet hashes,
+17,360 materializations, 34,720 copy/write operations and 52,080 verifications.
+Subbuckets overlap; this is not a controlled comparison with the prior
+436.2691951-second measurement and establishes no speed or overhead claim.
+
+The read-only audit at
+`C:/dev/simple-phase3-a0ca-storage-20261025/evidence/warm-scv-memory-handoff.md`
+has SHA256 `5f2118e273d7efcd3cb62a13fb0cea341e8b9854c8c0b12905a702f22f99fe1d`
+and pins its exact source files. `COLD_INIT=0` may reuse an exact valid snapshot
+before materialization (`compile_snapshot.spl:696–704`), while alias enumeration
+and fresh child-file reads remain (`inventory_aliases.spl:65–136`, reads
+121–125). Inventory read/decode repeats at `inventory_events.spl:706–709`,
+`compile_snapshot.spl:189–192` and `source_authority.spl:97–105`. A warm token
+alone therefore promises neither unchanged generation nor two-second admission.
+
+Observed parent RSS reached about 2.584 GB during child execution; without a
+heap-live counter it cannot identify recoverable allocations. The guarded full
+attempt stopped at 5,864,952 KiB against 5,859,375 KiB and became quiescent.
+No warm retry or source/cache change accompanied this audit. Preserve the
+failure and all source-validation oracles; no full Phase 3 qualification follows.
+
 ### Retained native evidence
 
 The later full producer is SHA256
