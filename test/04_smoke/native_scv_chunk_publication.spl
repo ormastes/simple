@@ -45,9 +45,13 @@ fn main() -> i64:
 
     # Writer A has only a prefix. Reader sees no final name. Writer B then
     # publishes all bytes; A finishes afterward and loses without overwriting.
+    # Bytes are converted explicitly: the bootstrap seed's implicit text->[u8]
+    # coercion produces storage the seed cannot hash or write (see the seed
+    # boxed-u8 splice hazard), which would mask the SCV behaviour under test.
+    val content_bytes = text_to_utf8_bytes(content)
     check("A partial private write", file_create_exclusive(private_a, "fn main"))
     check("partial stage does not expose final", not file_exists(final_path))
-    check("B complete publication", scv_compile_snapshot_write_chunk_v1(cache, stage_b, digest, content))
+    check("B complete publication", scv_compile_snapshot_write_chunk_v1(cache, stage_b, digest, content_bytes))
     check("reader sees complete winner", same_bytes(final_path, content))
     check("A still owns private prefix", same_bytes(private_a, "fn main"))
     check("A completes privately", file_write_bytes(private_a, text_to_utf8_bytes(content)))
@@ -56,7 +60,7 @@ fn main() -> i64:
     check("winner unchanged", same_bytes(final_path, content))
     check("B stage empty", dir_list(stage_b).len() == 0)
     # A warm hit must not need or create any private stage.
-    check("warm hit needs no stage directory", scv_compile_snapshot_write_chunk_v1(cache, root + "/absent-stage", digest, content))
+    check("warm hit needs no stage directory", scv_compile_snapshot_write_chunk_v1(cache, root + "/absent-stage", digest, content_bytes))
     check("warm hit retains complete bytes", same_bytes(final_path, content))
 
     # Invalid staged content cannot create a final object.
@@ -70,7 +74,7 @@ fn main() -> i64:
 
     # A corrupt existing final is preserved as evidence, never repaired in place.
     check("corrupt final installed", file_create_exclusive(bad_final, "corrupt"))
-    check("corrupt warm winner rejected", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, bad_digest, "expected"))
+    check("corrupt warm winner rejected", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, bad_digest, text_to_utf8_bytes("expected")))
     check("racing good stage", file_create_exclusive(bad_stage, "expected"))
     check("corrupt racing winner rejected", not scv_compile_snapshot_publish_staged_chunk_v1(bad_stage, bad_final, bad_digest))
     check("corrupt winner preserved", same_bytes(bad_final, "corrupt"))
@@ -87,7 +91,7 @@ fn main() -> i64:
     val collision_digest = "sha256_" + sha256_text("collision")
     val collision = stage_a + "/.scv-chunk-" + collision_digest
     check("collision installed", file_create_exclusive(collision, "owned prefix"))
-    check("collision refused", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, collision_digest, "collision"))
+    check("collision refused", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, collision_digest, text_to_utf8_bytes("collision")))
     check("collision preserved", same_bytes(collision, "owned prefix"))
     check("collision final absent", not file_exists(chunks + "/" + collision_digest + ".blob"))
 
@@ -98,14 +102,14 @@ fn main() -> i64:
         payload = payload + "source payload — 한글\r\n"
     val cold_start = time_now_nanos()
     for index in 0..16:
-        val bytes = payload + str(index)
-        val key = "sha256_" + sha256_text(bytes)
+        val bytes = text_to_utf8_bytes(payload + str(index))
+        val key = "sha256_" + sha256_text(payload + str(index))
         check("cold batch {index}", scv_compile_snapshot_write_chunk_v1(cache, stage_b, key, bytes))
     val cold_ns = time_now_nanos() - cold_start
     val warm_start = time_now_nanos()
     for index in 0..16:
-        val bytes = payload + str(index)
-        val key = "sha256_" + sha256_text(bytes)
+        val bytes = text_to_utf8_bytes(payload + str(index))
+        val key = "sha256_" + sha256_text(payload + str(index))
         check("warm batch {index}", scv_compile_snapshot_write_chunk_v1(cache, root + "/absent-stage", key, bytes))
     val warm_ns = time_now_nanos() - warm_start
     check("no per-file stage entries remain", dir_list(stage_b).len() == 0)
