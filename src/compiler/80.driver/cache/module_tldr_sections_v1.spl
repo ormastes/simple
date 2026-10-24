@@ -1,0 +1,131 @@
+# TLDR companion sections: the parts of a module an importer needs that the
+# SIF header lines do not carry.
+#
+#   layout   full top-level struct / class / enum / bitfield block (fields)
+#   trait    full trait block (method signatures + default bodies)
+#   type     type alias block
+#   const    top-level val / const block (the value expression)
+#   impl     impl / extend header plus its member HEADER lines (no bodies)
+#   generic  full generic function (`fn name<...>`), body included, because
+#            monomorphization in the importer needs it
+#
+# Extraction is indentation-aware over the raw source: a top-level declaration
+# owns every following indented or blank line. Non-generic function bodies
+# are deliberately excluded; their headers are already in the SIF part list.
+#
+# Wire form, one record per section, self-delimiting:
+#   section: <kind> <char-count>\n<exactly char-count chars>\n
+# The reader rejects any record whose count or kind is malformed, so a
+# truncated or spliced companion never yields partial sections.
+#
+# API is primitive-returning ("<kind>|<text>" entries) to stay usable across
+# module boundaries under the self-hosted child class-erasure bug.
+
+val TLDR_SECTION_PREFIX_V1: text = "section: "
+
+fn _tldr_strip_pub_v1(line: text) -> text:
+    if line.starts_with("pub "): line.substring(4) else: line
+
+fn _tldr_is_generic_fn_v1(decl: text) -> bool:
+    if not decl.starts_with("fn "):
+        return false
+    val lt = decl.index_of("<")
+    val paren = decl.index_of("(")
+    lt > 0 and (paren < 0 or lt < paren)
+
+pub fn module_tldr_section_kind_v1(line: text) -> text:
+    """Section kind for one top-level source line; "" when it starts no section."""
+    if line == "" or line.starts_with(" ") or line.starts_with("\t") or line.starts_with("#"):
+        return ""
+    val decl = _tldr_strip_pub_v1(line)
+    if decl.starts_with("struct ") or decl.starts_with("class ") or
+            decl.starts_with("enum ") or decl.starts_with("bitfield "):
+        return "layout"
+    if decl.starts_with("trait "):
+        return "trait"
+    if decl.starts_with("type "):
+        return "type"
+    if decl.starts_with("val ") or decl.starts_with("const "):
+        return "const"
+    if decl.starts_with("impl ") or decl.starts_with("extend "):
+        return "impl"
+    if _tldr_is_generic_fn_v1(decl):
+        return "generic"
+    ""
+
+fn _tldr_member_header_v1(line: text) -> bool:
+    val t = line.trim()
+    val d = _tldr_strip_pub_v1(t)
+    d.starts_with("fn ") or d.starts_with("me ") or d.starts_with("static fn ")
+
+pub fn module_tldr_sections_of_source_v1(source: text) -> [text]:
+    """Ordered "<kind>|<block text>" entries extracted from `source`."""
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var out: [text] = []
+    var i = 0
+    while i < lines.len():
+        val kind = module_tldr_section_kind_v1(lines[i])
+        if kind == "":
+            i = i + 1
+            continue
+        var end = i + 1
+        while end < lines.len() and (lines[end] == "" or lines[end].starts_with(" ") or
+                lines[end].starts_with("\t")):
+            end = end + 1
+        var last = end - 1
+        while last > i and lines[last].trim() == "":
+            last = last - 1
+        var block: [text] = [lines[i]]
+        var j = i + 1
+        while j <= last:
+            if kind != "impl" or _tldr_member_header_v1(lines[j]):
+                block.push(lines[j])
+            j = j + 1
+        out.push(kind + "|" + block.join("\n"))
+        i = end
+    out
+
+pub fn module_tldr_sections_render_v1(entries: [text]) -> text:
+    var out = ""
+    for entry in entries:
+        val bar = entry.index_of("|")
+        if bar <= 0:
+            continue
+        val body = entry.substring(bar + 1)
+        out = out + TLDR_SECTION_PREFIX_V1 + entry.substring(0, bar) + " " +
+            "{body.len()}" + "\n" + body + "\n"
+    out
+
+fn _tldr_kind_valid_v1(kind: text) -> bool:
+    kind == "layout" or kind == "trait" or kind == "type" or kind == "const" or
+        kind == "impl" or kind == "generic"
+
+# Parses the section records at the start of `text`. Returns (entries,
+# consumed chars); consumed is -1 when any record is malformed.
+pub fn module_tldr_sections_parse_v1(text: text) -> ([text], i64):
+    var entries: [text] = []
+    var pos = 0
+    while text.substring(pos).starts_with(TLDR_SECTION_PREFIX_V1):
+        val rest = text.substring(pos)
+        val nl = rest.index_of("\n")
+        if nl < 0:
+            return ([], -1)
+        val head = rest.substring(TLDR_SECTION_PREFIX_V1.len(), nl)
+        val sp = head.index_of(" ")
+        if sp <= 0:
+            return ([], -1)
+        val kind = head.substring(0, sp)
+        val count = head.substring(sp + 1).to_i64() ?? -1
+        if not _tldr_kind_valid_v1(kind) or count < 0:
+            return ([], -1)
+        val body_start = nl + 1
+        if body_start + count + 1 > rest.len():
+            return ([], -1)
+        if rest.substring(body_start + count, body_start + count + 1) != "\n":
+            return ([], -1)
+        entries.push(kind + "|" + rest.substring(body_start, body_start + count))
+        pos = pos + body_start + count + 1
+    (entries, pos)
+
+export module_tldr_section_kind_v1, module_tldr_sections_of_source_v1
+export module_tldr_sections_render_v1, module_tldr_sections_parse_v1

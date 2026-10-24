@@ -4,9 +4,11 @@
 #       SIMPLE_SHARED_PARSE_CAS_ROOT is configured, the cross-process shared
 #       parse CAS (frontend.spl frontend_parse_or_restore ->
 #       frontend_shared_parse_store_v1, temp + no-replace publish); and
-#   (2) the module's TLDR companion (`<root>/<logical path>.tldr`): a versioned
-#       header binding it to the exact source bytes, followed by the module's
-#       canonical, self-sealing SIF interface text (sif/sif.spl).
+#   (2) the module's TLDR companion (`<root>/<logical path>.tldr`, version 2):
+#       a header binding it to the exact source bytes, the declaration
+#       sections an importer needs (module_tldr_sections_v1: layouts, traits,
+#       type aliases, constant values, impl member headers, generic function
+#       bodies), then `sif:` and the canonical, self-sealing SIF interface text.
 #
 # This is the single producer contract shared by `simple tldr`
 # (src/app/cli/tldr_entry.spl) and the test runner's refresh step, which
@@ -21,19 +23,21 @@
 # complete old or complete new file, and racing producers of the same source
 # write identical bytes, so the last rename winning is harmless.
 #
-# Known gap (named, not filled): SIF parts come from the v1 textual header
-# extractor (action_key.source_interface_parts). They carry declaration
-# headers only -- no generic/inline bodies, layouts, trait impl tables,
-# constant values or macro expansions -- so they identify interface changes
-# but cannot yet replace lowering a dependency.
+# Known gaps (named, not filled): extraction is indentation-aware TEXT, not
+# AST-derived; macro expansions and inline (non-generic) bodies are not
+# carried; no HIR consumer reads the sections yet -- substituting them for a
+# dependency is only sound inside a per-file job that compiles that
+# dependency's own body separately (the per-file scheduler PR).
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.sif.sif.{sif_of_source, sif_validate}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
+    module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
 
-pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 1"
+pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 2"
 val MODULE_TLDR_LANG_V1: text = "1"
 
 var _module_artifact_tmp_seq_v1: i64 = 0
@@ -58,18 +62,36 @@ pub fn module_tldr_companion_path_v1(root: text, logical_path: text) -> text:
 pub fn module_tldr_companion_render_v1(module_id: text, source: text) -> text:
     MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
         "source-sha256: " + sha256_text(source) + "\n" +
-        sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
+        module_tldr_sections_render_v1(module_tldr_sections_of_source_v1(source)) +
+        "sif:\n" + sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
 
-# Returns the SIF body when `content` is a valid companion for `source`, else "".
-pub fn module_tldr_companion_body_v1(content: text, source: text) -> text:
+# (sections, sif) of a valid companion for `source`; sif is "" when invalid.
+fn _module_tldr_companion_split_v1(content: text, source: text) -> ([text], text):
     val header = MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
         "source-sha256: " + sha256_text(source) + "\n"
     if not content.starts_with(header):
-        return ""
-    val body = content.substring(header.len())
+        return ([], "")
+    val rest = content.substring(header.len())
+    val (sections, consumed) = module_tldr_sections_parse_v1(rest)
+    if consumed < 0:
+        return ([], "")
+    val tail = rest.substring(consumed)
+    if not tail.starts_with("sif:\n"):
+        return ([], "")
+    val body = tail.substring(5)
     if sif_validate(body) != "":
-        return ""
+        return ([], "")
+    (sections, body)
+
+# Returns the SIF body when `content` is a valid companion for `source`, else "".
+pub fn module_tldr_companion_body_v1(content: text, source: text) -> text:
+    val (_sections, body) = _module_tldr_companion_split_v1(content, source)
     body
+
+# "<kind>|<text>" sections of a valid companion (empty when invalid).
+pub fn module_tldr_companion_sections_v1(content: text, source: text) -> [text]:
+    val (sections, body) = _module_tldr_companion_split_v1(content, source)
+    if body == "": [] else: sections
 
 pub fn module_tldr_companion_fresh_v1(path: text, source: text) -> bool:
     if not file_exists(path):
@@ -112,5 +134,6 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
 export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1
 export module_tldr_companion_render_v1, module_tldr_companion_body_v1
+export module_tldr_companion_sections_v1
 export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_artifacts_emit_v1
