@@ -1,0 +1,40 @@
+use std.spec
+use compiler.borrow.borrow_check.mod.{BorrowChecker}
+use compiler.mir.mir_data.*
+
+fn pin_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn pin_body(insts: [MirInst]) -> MirBody:
+    MirBody(name: "pin_lifetime", blocks: [MirBlock(id: BlockId.new(0), label: nil, instructions: insts, terminator: MirTerminator.Ret(nil))], locals: [], arg_count: 0, return_ty: MirType.i64())
+
+fn pin_ref() -> MirInst:
+    pin_inst(MirInstKind.Ref(LocalId(id: 1), MirBorrowKind.Shared, MirPlace(local: LocalId(id: 0), projection: [])))
+
+fn pin_call(ref_local: i64) -> MirInst:
+    pin_inst(MirInstKind.Call(nil, MirOperand.copy(LocalId(id: 9)), [MirOperand.copy(LocalId(id: ref_local))]))
+
+fn pin_errors(insts: [MirInst]) -> i64:
+    var checker = BorrowChecker.create()
+    checker.check_function(pin_body(insts))
+    checker.errors.len()
+
+describe "straight-line resource borrow lifetime":
+    it "allows release after a synchronous reference call completes":
+        expect(pin_errors([pin_ref(), pin_call(1), pin_inst(MirInstKind.Drop(LocalId(id: 0)))])).to_equal(0)
+
+    it "rejects release before a later reference call":
+        expect(pin_errors([pin_ref(), pin_inst(MirInstKind.Drop(LocalId(id: 0))), pin_call(1)])).to_be_greater_than(0)
+
+    it "retains a copied reference until its call completes":
+        expect(pin_errors([pin_ref(), pin_inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1))), pin_inst(MirInstKind.Drop(LocalId(id: 0))), pin_call(2)])).to_be_greater_than(0)
+
+    it "allows release after a copied reference call completes":
+        expect(pin_errors([pin_ref(), pin_inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1))), pin_call(2), pin_inst(MirInstKind.Drop(LocalId(id: 0)))])).to_equal(0)
+
+    it "retains a moved reference alias until its later call":
+        expect(pin_errors([pin_ref(), pin_inst(MirInstKind.Move(LocalId(id: 2), LocalId(id: 1))), pin_inst(MirInstKind.Drop(LocalId(id: 0))), pin_call(2)])).to_be_greater_than(0)
+
+    it "retains a borrow across a call with an unknown returned alias":
+        val returning_call = pin_inst(MirInstKind.Call(LocalId(id: 2), MirOperand.copy(LocalId(id: 9)), [MirOperand.copy(LocalId(id: 1))]))
+        expect(pin_errors([pin_ref(), returning_call, pin_inst(MirInstKind.Drop(LocalId(id: 0)))])).to_be_greater_than(0)

@@ -1951,6 +1951,34 @@ impl MirLowering:
                 case _: ()
         -1
 
+    me fn_field_declared_owner(receiver: HirExpr, receiver_local: LocalId) -> text:
+        # Declared-type owner recovery for the fn-field callee fallback: only
+        # consulted when struct_value_syms has no entry for the receiver.
+        # Tried in the same order the surrounding recovery paths trust:
+        # remembered HIR type on the lowered local, then the receiver
+        # expression's declared type (param/local annotation). Returns the
+        # bare struct/class name (class identity for classes), "" otherwise.
+        var owner_sym = SymbolId(id: -1)
+        if val remembered = self.find_local_hir_type(receiver_local.id):
+            match remembered.kind:
+                case HirTypeKind.Named(sym, _):
+                    owner_sym = sym
+                case _: ()
+        if owner_sym.id < 0:
+            if val declared = self.receiver_declared_type(receiver):
+                match declared.kind:
+                    case HirTypeKind.Named(sym, _):
+                        owner_sym = sym
+                    case _: ()
+        if owner_sym.id < 0:
+            return ""
+        if val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id):
+            if owner_symbol.kind == SymbolKind.Class:
+                return mir_class_identity(owner_symbol)
+            if owner_symbol.name != "":
+                return owner_symbol.name
+        ""
+
     fn declared_static_method_receiver_symbol_v1(receiver: HirExpr) -> i64:
         # This receiver is already detached from the outer MethodCall enum
         # payload. Only a declaration symbol is a type-valued receiver; a
@@ -2020,7 +2048,6 @@ impl MirLowering:
         b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         temp
-
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
@@ -2571,10 +2598,19 @@ impl MirLowering:
             var bytes_receiver_has_declaration = false
             val declared_bytes_receiver_type = self.receiver_declared_type(receiver)
             if declared_bytes_receiver_type != nil:
-                bytes_receiver_has_declaration = true
                 val found_bytes_receiver_type = declared_bytes_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                # Only a Str or a user (Named) declaration is authoritative.
+                # An inferred-but-wrong declaration (e.g. `val t = s.trim()`
+                # recorded as a non-text placeholder) must fall through to the
+                # lowered-local proof below, else `.bytes()` dies as
+                # "unresolved method call: bytes"
+                # (doc/08_tracking/bug/mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23.md).
                 match found_bytes_receiver_type.kind:
-                    case HirTypeKind.Str: bytes_receiver_is_text = true
+                    case HirTypeKind.Str:
+                        bytes_receiver_has_declaration = true
+                        bytes_receiver_is_text = true
+                    case HirTypeKind.Named(_, _):
+                        bytes_receiver_has_declaration = true
                     case _: ()
             # The lowered MIR local is authoritative when an expression has
             # no declaration (concat/call receivers commonly have nil or
@@ -5094,6 +5130,19 @@ impl MirLowering:
                 # even when the receiver's incidental struct-value memo missed.
                 # Reuse the evaluated receiver and capture the typed callable
                 # before lowering arguments through its actual signature.
+                # Defensive fallback (seed-native registry miss documented
+                # in doc/08_tracking/bug/seed_codegen_interp_native_divergence
+                # _2026-10-12.md): the struct_value_syms entry for the
+                # receiver local is absent on the native lane, but the
+                # owner is recoverable from the receiver's DECLARED type
+                # (remembered HIR type on the lowered local, then the
+                # receiver expression's declared type). Seeding the memo
+                # lets the declared-layout path below recover the field
+                # owner exactly as the struct-value path would have.
+                if not self.struct_value_syms.contains(unresolved_receiver_local.id):
+                    val recovered_field_owner = self.fn_field_declared_owner(receiver, unresolved_receiver_local)
+                    if recovered_field_owner != "":
+                        self.struct_value_syms[unresolved_receiver_local.id] = recovered_field_owner
                 if val field_call = self.try_lower_function_field_call(receiver, unresolved_receiver_local, method, args):
                     return field_call
                 self.reject_unresolved_method_call_v1(receiver, method)

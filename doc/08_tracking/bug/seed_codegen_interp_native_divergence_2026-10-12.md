@@ -99,6 +99,41 @@ compile the self-hosted compiler with an eprint inside
 (`find_local_hir_type` hit/miss + both rendered types) — native vs
 interpreted — on this exact repro.
 
+## Second symptom site (2026-10-12 r10 cycle): self-name resolution inside the declaring module
+
+The r10 lane cycle's matrix (snapshot built 06:58 Oct 12 — VERIFIED to
+include #3225: the same binary compiles the `sdn_diff_repro` 13-liner with
+ZERO payload mismatches, so the enum-payload MIR-evidence fallback works
+natively) shows 7 errors, ALL at `src/lib/common/sdn/value.spl:48` in the
+test_runner closure:
+
+- `undefined variable SdnValue at :48:9` — the enum's OWN NAME fails to
+  resolve INSIDE its declaring module.
+- `unresolved method call: Float at :48:9` (span misattributed to the
+  `SdnValue.Float(f)` static-fn body at line 48).
+- 4x `SdnValue.Array/Dict: payload type mismatch` + 1x B5b multi-wildcard —
+  the cascade from the failed self-name resolution.
+
+The SAME binary compiles `sdn/value.spl` cleanly in the repro closure. The
+failure is therefore UPSTREAM of the #3225 fallback (which is confirmed
+working natively): closure-content-dependent self-name/surface resolution
+inside the declaring module — matching this doc's signature exactly
+(closure-specific content flips native-lane registry/symbol state; the
+interpreted lane is unaffected).
+
+This is the second confirmed symptom SITE of the one divergence: (1) enum
+payload comparison metadata (original repro), (2) enum self-name resolution
+in-module (this cycle). Both are decision points reading name-keyed or
+id-keyed registries that the seed-native lane corrupts data-dependently.
+
+## compiler_cli_build status this cycle
+
+The cli row showed 0 [ERROR] lines and NO crash-signature line; it was
+killed mid-HIR (1576/2534 modules) by the cycle verdict after the runner
+row failed. The 2026-10-12-040049 cranelift shard crash (doc:
+cli_cranelift_shard_crash_module_2026-10-12.md) did NOT recur — inconclusive:
+either cleared by interim divergence-adjacent work or simply not reached
+before the kill. Track on the next full cycle.
 ## Linux release_phase3 follow-up (2026-10-16)
 
 The canonical Stage 2 test-runner build reproduced the `SdnValue.Array`

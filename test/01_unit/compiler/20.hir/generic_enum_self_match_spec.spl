@@ -1,0 +1,26 @@
+# Regression: doc/08_tracking/bug/hir_generic_enum_self_match_2026-10-23.md
+# UNEXECUTED: written against the fixed src/compiler; stage2ref is prebuilt and cannot run it.
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+fn lower_errors(source: text) -> i64:
+    val parsed = parse_full_frontend(source, "gesm.spl", "gesm", Logger(level: 0))
+    expect(parser_has_errors()).to_be(false)
+    var lowering = HirLowering.with_filename("gesm.spl")
+    val module = lowering.lower_module(parsed)
+    lowering.errors.len()
+
+describe "match self inside a generic enum's own method":
+    it "lowers Ok(_)/Err(_)/Ok(v)/Err(e) arms without HIR errors":
+        step("FailSafeResult<T> shape from failsafe/core.spl")
+        val src = "pub enum Res<T>:\n    Ok(T)\n    Err(text)\n\n    fn is_ok() -> bool:\n        match self:\n            case Ok(_): true\n            case Err(_): false\n\n    fn unwrap_or(default: T) -> T:\n        match self:\n            case Ok(v): v\n            case Err(_): default\n"
+        expect(lower_errors(src)).to_equal(0)
+
+    it "still rejects a bare generic subject outside the enum's own methods":
+        step("free function with an unparameterized subject keeps the diagnostic")
+        val src = "pub enum Res<T>:\n    Ok(T)\n    Err(text)\n\nfn bad(r: Res) -> bool:\n    match r:\n        case Ok(_): true\n        case Err(_): false\n"
+        expect(lower_errors(src) > 0).to_be(true)

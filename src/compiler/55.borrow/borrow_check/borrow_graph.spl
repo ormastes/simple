@@ -553,6 +553,12 @@ pub class BorrowGraph:
     loan_definitions: Dict<i64, Borrow>
     loan_aliases: Dict<i64, [LoanAlias]>
 
+    # Reference identities remain attached to direct Copy/Move aliases.
+    # Alias sets intentionally retain overwritten identities conservatively.
+    reference_borrows: Dict<i64, [i64]>
+    reference_last_use: Dict<i64, i64>
+    reference_retirement_safe: bool
+
     # Legacy direct-return API. CFG callers use record_loan_escape instead.
     returned_locals: [i64]
 
@@ -570,6 +576,9 @@ pub class BorrowGraph:
             point_borrows: {},
             next_borrow_id: 0,
             borrow_dest: {},
+            reference_borrows: {},
+            reference_last_use: {},
+            reference_retirement_safe: false,
             loan_definitions: {},
             loan_aliases: {},
             returned_locals: [],
@@ -634,6 +643,7 @@ pub class BorrowGraph:
         (a move at ANY earlier point on the walk that has not been killed
         by a reassignment), not only moves recorded at this same point.
         """
+        self.note_reference_use(point, place)
         for moved_place in self.moved_now:
             if place_conflicts_with(place, moved_place):
                 self.errors = self.errors.push(borrowerror_use_after_move(place, point))
@@ -659,6 +669,7 @@ pub class BorrowGraph:
         a use-after-move: it reads memory the first move already
         invalidated.
         """
+        self.note_reference_use(point, place)
         for moved_place in self.moved_now:
             if place_conflicts_with(place, moved_place):
                 self.errors = self.errors.push(borrowerror_use_after_move(place, point))
@@ -702,10 +713,68 @@ pub class BorrowGraph:
     me note_borrow_dest(borrow_id: i64, dest_local: i64):
         """Record the reference temp a borrow was materialized into."""
         self.borrow_dest[borrow_id] = dest_local
+        var ids: [i64] = self.reference_borrows[dest_local] ?? []
+        if not ids.contains(borrow_id):
+            ids = ids.push(borrow_id)
+        self.reference_borrows[dest_local] = ids
         if self.loan_definitions.contains_key(borrow_id):
             val loan: Borrow = self.loan_definitions[borrow_id]
             val alias = LoanAlias(loan_id: borrow_id, place: place_local(dest_local))
             self.loan_aliases[loan.borrow_point] = loan_alias_append(self.aliases_at(loan.borrow_point), alias)
+
+    me note_reference_alias(dest_local: i64, source_local: i64):
+        """Keep borrow identity when a reference local is copied or moved."""
+        val source_ids: [i64] = self.reference_borrows[source_local] ?? []
+        var dest_ids: [i64] = self.reference_borrows[dest_local] ?? []
+        for id in source_ids:
+            if not dest_ids.contains(id):
+                dest_ids = dest_ids.push(id)
+        self.reference_borrows[dest_local] = dest_ids
+
+    me note_reference_use(point: i64, place: Place):
+        match place.base:
+            case Local(local_id):
+                val ids: [i64] = self.reference_borrows[local_id] ?? []
+                for id in ids:
+                    val old_point = self.reference_last_use[id] ?? -1
+                    if point > old_point:
+                        self.reference_last_use[id] = point
+            case _:
+                pass
+
+    fn reference_identity_escapes(borrow_id: i64) -> bool:
+        for local_id in self.returned_locals:
+            val ids: [i64] = self.reference_borrows[local_id] ?? []
+            if ids.contains(borrow_id):
+                return true
+        return false
+
+    me check_consumes_after_propagation(point: i64):
+        """Check consumes after incoming borrows reach this program point.
+
+        Only a proven straight-line reference-use scan permits retirement.
+        An unused reference remains pending, and an escaping reference never
+        retires here. Unknown operations and CFG bodies retain conservative
+        borrows; they do not gain speculative last-use admission.
+        """
+        val consumed: [Place] = self.moved_places[point] ?? []
+        if consumed.len() == 0:
+            return
+        val borrow_set = self.get_or_create_borrows(point)
+        val active = borrowset_active_list(borrow_set.borrows)
+        for borrow in active:
+            if self.reference_retirement_safe and not self.reference_identity_escapes(borrow.id):
+                val last_use = self.reference_last_use[borrow.id] ?? -1
+                if last_use >= 0 and last_use < point:
+                    continue
+            for place in consumed:
+                if place_conflicts_with(borrow.place, place):
+                    self.errors = self.errors.push(BorrowError(
+                        message: "Cannot consume borrowed value: {place_to_text(place)}",
+                        borrow: borrow,
+                        conflicting: borrow,
+                        point: point
+                    ))
 
     fn aliases_at(point: i64) -> [LoanAlias]:
         if self.loan_aliases.contains_key(point): return self.loan_aliases[point]
@@ -756,6 +825,7 @@ pub class BorrowGraph:
             self.errors = self.errors.push(BorrowError(
                 message: "short borrow crosses suspension: {reason}",
                 has_borrow: true, borrow: loan, point: point))
+
 
     me note_returned_local(local_id: i64):
         """Record that `local_id` is named by a `Ret` operand in this function."""

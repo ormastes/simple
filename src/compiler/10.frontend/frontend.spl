@@ -8,7 +8,7 @@
 
 use compiler.frontend.parser_types.{ParserModule, DomainBlock}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped, parse_and_build_module_in_borrowed_scope}
-use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
+use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take, flat_pool_capture_already_captured, flat_pool_capture_record}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
@@ -159,14 +159,22 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
                 frontend_parse_cache_note_hit()
                 return shared_module.unwrap()
         frontend_parse_cache_note_miss()
-        flat_pool_capture_arm()
+        val _already_captured = flat_pool_capture_already_captured(file_path)
+        if not _already_captured:
+            flat_pool_capture_set_tag("frontend-miss")
+            flat_pool_capture_arm()
         val fresh = if borrowed_scope:
             parse_and_build_module_in_borrowed_scope(parse_source, file_path)
         else:
             parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
         if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
             print "[M4 parse] module={file_path} work=1 imports={fresh.imports.len()}"
-        val captured_blob = flat_pool_capture_take()
+        val captured_blob = if _already_captured:
+            ""
+        else:
+            flat_pool_capture_take()
+        if not _already_captured:
+            flat_pool_capture_record(file_path)
         val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val stored = frontend_parse_cache_store(key, captured_blob)
         val _shared_stored = frontend_shared_parse_store_v1(raw_source_sha,
