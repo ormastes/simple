@@ -1,0 +1,113 @@
+# Process-run externs and the raw stderr/stdout writers through the real
+# pure-Simple pipeline: source -> parse_full_frontend -> HirLowering ->
+# MirLowering (where the text-extern ABI registry is applied) -> MirToLlvm.
+#
+# Regression: Stage-2-built binaries failed every child spawn with status 4
+# without forking. MIR passed rt_interp_cstr(cmd) as ONE word to the C owner
+# rt_process_run_bounded(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes),
+# so cmd_len received the args handle and args received timeout_ms. The seed's
+# process_c_runtime_arg_indices (calls.rs) always split cmd; the pure-Simple
+# twin text_arg_indices (text_extern_abi.spl) lacked those rows. The same
+# pointer bridge handed rt_stderr_write -- which decodes a tagged RuntimeValue
+# -- a bare char*, so stderr_write printed the pointer as an integer.
+#
+# Runs the production .spl sources under the seed interpreter; it proves the
+# MIR call shape, not a native-built binary (see the native probe in the
+# commit message for that).
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn lower_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "MIR_LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.process_text_abi", CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn call_line(output: text, marker: text) -> text:
+    for line in output.split("\n"):
+        if line.contains(marker) and line.contains("call "):
+            return line
+    ""
+
+fn top_level_arg_count(line: text, marker: text) -> i64:
+    val start_idx = line.find(marker)
+    if start_idx < 0:
+        return -1
+    val body = line.substring(start_idx + marker.len())
+    var depth = 1
+    var commas = 0
+    var saw = false
+    var i = 0
+    while i < body.len():
+        val ch = body[i]
+        if ch == "(":
+            depth = depth + 1
+            saw = true
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                if not saw:
+                    return 0
+                return commas + 1
+        elif ch == "," and depth == 1:
+            commas = commas + 1
+        elif ch != " ":
+            saw = true
+        i = i + 1
+    -1
+
+fn count_calls(output: text, marker: text) -> i64:
+    var n = 0
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains(marker):
+            n = n + 1
+    n
+
+describe "process-run extern text ABI (pure-Simple MIR twin of process_c_runtime_arg_indices)":
+    it "passes rt_process_run_bounded cmd as (ptr, len): five words, not four":
+        val source = "extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)\n\n" +
+            "fn probe(cmd: text, args: [text]) -> i64:\n    val (o, e, s) = rt_process_run_bounded(cmd, args, 300000, 16777216)\n    s\n"
+        val output = lower_to_llvm(source, "process_bounded_abi_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        val line = call_line(output, "rt_process_run_bounded_tuple(")
+        assert_true(line != "", "expected the LLVM tuple facade call")
+        assert_equal(5, top_level_arg_count(line, "rt_process_run_bounded_tuple("), "cmd must cross as (ptr, len): " + line)
+        assert_equal(1, count_calls(output, "rt_string_data("), "cmd data pointer extracted once")
+        assert_equal(1, count_calls(output, "rt_string_len("), "cmd length extracted once")
+        assert_equal(0, count_calls(output, "rt_interp_cstr("), "no one-word pointer bridge on a pair-split cmd")
+
+    it "passes rt_process_run cmd as (ptr, len): three words":
+        val source = "extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)\n\n" +
+            "fn probe(cmd: text, args: [text]) -> i64:\n    val (o, e, s) = rt_process_run(cmd, args)\n    s\n"
+        val output = lower_to_llvm(source, "process_run_abi_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        val line = call_line(output, "rt_process_run_tuple(")
+        assert_true(line != "", "expected the LLVM tuple facade call")
+        assert_equal(3, top_level_arg_count(line, "rt_process_run_tuple("), "cmd must cross as (ptr, len): " + line)
+
+    it "leaves a different-arity rt_process_run declaration unsplit":
+        val source = "extern fn rt_process_run(cmd: text) -> i64\n\nfn probe(cmd: text) -> i64:\n    rt_process_run(cmd)\n"
+        val output = lower_to_llvm(source, "process_run_one_arg_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_equal(0, count_calls(output, "rt_string_len("), "semantic-arity guard must keep the one-arg import unsplit")
+
+    it "hands rt_stderr_write the tagged text value, not a bridged char*":
+        val source = "extern fn rt_stderr_write(s: text)\n\nfn probe(msg: text):\n    rt_stderr_write(msg)\n"
+        val output = lower_to_llvm(source, "stderr_write_abi_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        val line = call_line(output, "rt_stderr_write(")
+        assert_true(line != "", "expected a call to rt_stderr_write")
+        assert_equal(1, top_level_arg_count(line, "rt_stderr_write("), "one tagged word: " + line)
+        assert_equal(0, count_calls(output, "rt_interp_cstr("), "the tagged value must not be stripped to a C string")

@@ -102,6 +102,22 @@ fn text_arg_indices(func_name: text) -> [i64]?:
         # rt_process_run_with_limits: cmd is (ptr, len) -- env_process.rs:1269.
         case "rt_process_run_with_limits" | "rt_process_run_bounded_bytes":
             return Some([0])
+        # Process-run owners whose C ABI is (cmd_ptr, cmd_len, SplArray* args,
+        # ...): runtime_native.c rt_process_run / rt_process_run_inherit,
+        # runtime_process.c rt_process_run_timeout / rt_process_run_bounded,
+        # runtime_process_owned.c rt_process_run_owned_{,observed_}bounded_value
+        # and rt_process_owned_v3_start_value. Twin of the seed's
+        # process_c_runtime_arg_indices (calls.rs), which expands cmd to
+        # (ptr, len) for exactly these. Missing here, the extern pointer bridge
+        # passed ONE word (rt_interp_cstr(cmd)) to the five-word
+        # rt_process_run_bounded: cmd_len got the args handle, args got
+        # timeout_ms, and every Stage-2-built child spawn returned status 4
+        # without forking (SCV-E-ADMISSION: git-event-source-unavailable).
+        # NOT listed: rt_process_spawn{,_async,_guarded} and
+        # rt_process_execute -- their C owners take (char*, char**, count) and
+        # native callers reach them through the *_value facades instead.
+        case "rt_process_run" | "rt_process_run_inherit" | "rt_process_run_timeout" | "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value" | "rt_process_owned_v3_start_value":
+            return Some([0])
         case "rt_file_open":
             return Some([0])
         # FileHandle providers consume (path_ptr, path_len[, mode]), matching
@@ -204,6 +220,17 @@ fn text_extern_semantic_arity(func_name: text) -> i64?:
             Some(2)
         case "rt_file_write_bytes":
             Some(2)
+        # Process owners: the semantic facade arity. A different-arity
+        # declaration (e.g. the wasm backend's `rt_process_run(cmd) -> i64`
+        # import) is not this C owner and is left unsplit.
+        case "rt_process_run" | "rt_process_run_inherit":
+            Some(2)
+        case "rt_process_run_timeout":
+            Some(3)
+        case "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value":
+            Some(4)
+        case "rt_process_owned_v3_start_value":
+            Some(6)
         case "rt_io_file_open":
             Some(2)
         case "rt_io_file_exists" | "rt_io_file_delete":
@@ -276,4 +303,19 @@ fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature,
         return "rt_file_write_bytes_array"
     nil
 
+# Externs whose `text` argument(s) are consumed as a complete tagged
+# RuntimeValue and must cross the boundary UNCHANGED: no rt_interp_cstr
+# pointer bridge, no (ptr, len) split, no re-box. rt_stderr_write /
+# rt_stdout_write (runtime_native.c, `int64_t (int64_t value)`, and the Rust
+# twin io_print.rs) decode the value with rt_core_as_string; handed the bare
+# char* the bridge produced, the decode failed and the pointer was printed as
+# an integer. The seed lists neither name in any table, so it already passes
+# the value through. Only `text`-typed parameters are bridged, so the
+# `[u8]` / `i64` declarations of the same names are unaffected.
+fn tagged_text_value_arg_indices(func_name: text) -> [i64]?:
+    match func_name:
+        case "rt_stderr_write" | "rt_stdout_write": return Some([0])
+        case _: return nil
+
 export file_write_bytes_array_alias_target
+export tagged_text_value_arg_indices
