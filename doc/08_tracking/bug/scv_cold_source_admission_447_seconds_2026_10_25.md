@@ -23,6 +23,34 @@ timestamps do not independently attribute every second to hashing or copying.
 
 ## Narrow diagnostic evidence
 
+### Actual instrumented full-source cost
+
+The later c635 invocation emitted 217.0206669 seconds for inventory and
+219.2485282 seconds for snapshot, 436.2691951 seconds combined. Its 42,811
+checked inventory reads returned 301,440,540 bytes and took 187.3925877 seconds;
+42,811 existence probes took 2.2722196 seconds. Event reduction took
+16.5924507 seconds, including 199,990 measured hash calls taking 3.9391721 seconds.
+Snapshot materialization counted 17,360 operations and 216.4006080 seconds,
+with 34,720 chunk-publication/destination copy-or-write operations taking
+147.9561401 seconds and 52,080 explicit verification operations taking
+65.3718626 seconds.
+
+These buckets overlap: materialization contains copy/verification, event
+contains hashing, and copy includes internal chunk verification. They do not
+identify separate open/write/readback costs, and must not be added as disjoint
+wall time. Retained exact line and timing receipt:
+`C:/dev/simple-scv-measured-io-review-20261025/actual-cost-line.txt` and
+`C:/dev/simple-scv-measured-io-review-20261025/timing-receipt.sdn`.
+Original live log:
+`C:/dev/simple-phase3-c635-storage-20261025/phase3/.build.log.tmp.36860`.
+
+The source/materialization counts differ from the earlier 447.96-second run;
+this is not a controlled speedup or overhead comparison. The two-second goal
+remains OPEN, c635/ongoing Phase 3 remain provisional, and current source,
+snapshot, failure and physical-validation policy is preserved.
+
+### Small native contracts
+
 The new instrumentation preserves 103 existing function signatures, using
 16 old-arity nil-forwarding wrappers and explicit new diagnostic symbols.
 All 43 relevant call sites match declared arities; the existing trace carrier

@@ -66,6 +66,41 @@ blanket cached-native-caller invalidation or change the existing trace layout.
 
 ## Required review and validation
 
+### Measured full-source invocation with the instrumentation
+
+The c635 Phase 3 invocation emitted its actual aggregate before frontend build
+work at
+`C:/dev/simple-phase3-c635-storage-20261025/phase3/.build.log.tmp.36860`.
+The exact line and timing receipt are frozen separately at
+`C:/dev/simple-scv-measured-io-review-20261025/actual-cost-line.txt` and
+`C:/dev/simple-scv-measured-io-review-20261025/timing-receipt.sdn`.
+Its inventory total is 217.0206669 seconds and snapshot total 219.2485282 seconds,
+436.2691951 seconds combined. The two-second goal remains unmet.
+
+| Measured bucket | Calls | Seconds |
+|---|---:|---:|
+| Direct file existence | 42,811 | 2.2722196 |
+| Checked inventory read | 42,811 | 187.3925877 |
+| Event reduction | 42,811 | 16.5924507 |
+| Facet hash | 199,990 | 3.9391721 |
+| Snapshot materialization | 17,360 | 216.4006080 |
+| Chunk publication/destination copy or write | 34,720 | 147.9561401 |
+| Explicit verification | 52,080 | 65.3718626 |
+
+Successful inventory reads returned 301,440,540 bytes. These are nested buckets:
+event time includes hashing, copy includes internal chunk verification, and
+materialization includes copy and explicit verification. Do not add them as
+disjoint wall time or treat the counters as all host I/O. The cost line itself
+does not break copy time into write/open/readback components.
+
+This is one observed invocation with different input and materialization counts
+from the earlier 447.96-second observation. It is not a comparable before/after
+speedup or a tracing-overhead measurement. The producer and ongoing Phase 3
+remain provisional and unqualified; all existing failure and physical-validation
+requirements remain. No live source or cache was changed to obtain this record.
+
+### Retained native evidence
+
 The later full producer is SHA256
 `c63563672c95353d5475814ec0bc7241ca51b59c2e16646902c6f3a7a977873a`,
 with 1,501 fresh units, zero reused and zero failed. Its default Hello evidence
