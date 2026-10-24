@@ -121,8 +121,15 @@ impl CompilerDriver:
         if staged_batch < 0:
             return CompileResult.CodegenError(
                 "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)")
+        # A requested batch that this lane refuses used to fall back silently
+        # to whole-program MIR; name the reason so a bootstrap default that
+        # did not take effect is visible in the stage log.
+        val staged_reason = self.native_staged_codegen_eligible_reason_v1()
+        if staged_batch > 0 and staged_reason != "":
+            print "[staged-codegen] refused batch={staged_batch} reason={staged_reason}; MIR is held whole-program"
+            stdout_flush()
         self.native_staged_codegen = NativeStagedCodegenStateV1.begin(
-            if self.native_staged_codegen_eligible_v1(): staged_batch else: 0)
+            if staged_reason == "": staged_batch else: 0)
         val mir_ok = self.lower_to_mir()
         if not mir_ok:
             for err in self.ctx.errors:
@@ -497,20 +504,36 @@ impl CompilerDriver:
             self.native_staged_codegen.lowering_failed = true
         val batch_index = self.native_staged_codegen.batches_flushed + 1
         log_phase("aot:staged_codegen:batch:start index={batch_index} modules={batch_names.len()}")
+        val go_to_end = go_to_end_enabled_v1()
+        # go-to-end: the lowering loop recorded each failed module's errors
+        # against its name and kept its MIR out of ctx.mir_modules
+        # (go_to_end_record_mir_failure_v1), but the context still holds the
+        # error text. Absorb it (has_message skips what is already recorded)
+        # or the `error_count_value == 0` gates below would withhold every
+        # object of a batch that merely CONTAINS a failed module.
+        if go_to_end and self.ctx.error_count_value > 0:
+            self.go_to_end_absorb_errors_v1("mir")
         if not self.native_staged_codegen.lowering_failed:
             if not self.verify_lowered_mir_v1():
                 self.native_staged_codegen.verify_failed = true
+                if go_to_end:
+                    self.go_to_end_withhold_staged_batch_v1(batch_names, batch_index)
         if not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             if not self.borrow_check():
                 self.native_staged_codegen.borrow_failed = true
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+        # `verify_failed` is part of both gates: under go-to-end the verify
+        # errors were absorbed above, so the error count alone no longer
+        # proves the batch is valid.
+        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+                not self.native_staged_codegen.verify_failed:
             val _async_state_machines = self.process_async()
             if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
                 self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
             self.weave_aop()
             self.apply_debug_trace()
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+                not self.native_staged_codegen.verify_failed:
             if self.ctx.freeze_storage_registry_for_schedule(
                     self.native_staged_codegen.scheduled_names) == "invalid":
                 self.ctx.add_error("staged native codegen: typed storage registry is malformed before batch {batch_index}")
@@ -527,6 +550,10 @@ impl CompilerDriver:
                 return false
         for released_name in batch_names:
             self.ctx.evict_mir_module(released_name)
+        if go_to_end:
+            # The verify verdict is per batch under go-to-end (the batch was
+            # recorded and withheld above); a later batch must not inherit it.
+            self.native_staged_codegen.verify_failed = false
         self.native_staged_codegen.batches_flushed = batch_index
         log_build_progress("native_staged", "modules",
             self.native_staged_codegen.modules_flushed,
@@ -535,6 +562,22 @@ impl CompilerDriver:
             self.native_staged_codegen.cache_hit_count, "running")
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
+
+    me go_to_end_withhold_staged_batch_v1(batch_names: [text], batch_index: i64):
+        """go-to-end after a MIR verify failure inside a staged batch. The
+        verifier reports fatal findings through ctx.add_error without a
+        per-module channel, so the granularity here is the BATCH: every module
+        of the batch is recorded (stage mir) and excluded, the verify errors
+        become `(unattributed)` rows, and nothing of this batch reaches a
+        backend (RB-19A: invalid MIR never reaches codegen). Later batches
+        still lower and emit; the build still fails with the manifest."""
+        self.go_to_end_absorb_errors_v1("mir")
+        for withheld_name in batch_names:
+            self.go_to_end.record("mir", withheld_name,
+                "withheld: MIR verify failed in staged batch {batch_index} (see the unattributed rows)")
+            self.go_to_end.exclude(withheld_name)
+        print "[go-to-end] MIR verify: staged batch {batch_index} withheld ({batch_names.len()} module(s)); continuing with the next batch"
+        stdout_flush()
 
     fn native_mir_shard_eligible_v1() -> bool:
         """Shards publish per-module objects only; lanes whose final step needs
