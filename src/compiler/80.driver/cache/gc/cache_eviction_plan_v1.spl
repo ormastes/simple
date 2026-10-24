@@ -1,0 +1,161 @@
+# Cache eviction plan under CacheRetentionLimitsV1 (metadata/cache_limits.spl).
+#
+# Pure planning over entry usage records; the daemon applies the plan. Order:
+#   1. per branch, per source file: keep the `versions_per_source` most
+#      recently used versions of that source's artifacts (AST / TLDR / object
+#      versions are separate artifact kinds of one version key), LRU the rest;
+#   2. drop whole branches beyond `max_branches`, always keeping the configured
+#      `kept_branches` (main + release lines) first, then the most recently
+#      used others;
+#   3. evict least recently used survivors until on-disk bytes fit
+#      `storage_max_bytes`;
+#   4. unload least recently used in-memory survivors until in-RAM bytes fit
+#      `memory_max_bytes` (unload only; the on-disk entry stays).
+# Writes are refused when even a full plan cannot make room
+# (cache_eviction_admit_write_v1), per the AOP formal design's rule that
+# eviction falling behind rejects/skips writes rather than overshooting.
+#
+# Bookkeeping is plain values computed by the daemon's single loop: no locks.
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
+
+struct CacheEntryUseV1:
+    branch: text
+    source: text
+    version_key: text
+    disk_bytes: i64
+    memory_bytes: i64
+    last_used_ms: i64
+
+struct CacheEvictionPlanV1:
+    evict: [i64]       # entry indices removed from disk (and memory)
+    unload: [i64]      # entry indices dropped from memory only
+    disk_bytes_after: i64
+    memory_bytes_after: i64
+
+fn _newest_first_v1(entries: [CacheEntryUseV1], indices: [i64]) -> [i64]:
+    var out: [i64] = []
+    for index in indices:
+        var j = out.len()
+        out.push(index)
+        while j > 0 and entries[out[j - 1]].last_used_ms < entries[index].last_used_ms:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = index
+    out
+
+fn _branch_last_used_v1(entries: [CacheEntryUseV1], alive: [bool], branch: text) -> i64:
+    var newest: i64 = -1
+    var i = 0
+    while i < entries.len():
+        if alive[i] and entries[i].branch == branch and entries[i].last_used_ms > newest:
+            newest = entries[i].last_used_ms
+        i = i + 1
+    newest
+
+pub fn cache_eviction_plan_v1(entries: [CacheEntryUseV1], limits: CacheRetentionLimitsV1) -> CacheEvictionPlanV1:
+    var alive: [bool] = []
+    var in_memory: [bool] = []
+    for entry in entries:
+        alive.push(true)
+        in_memory.push(entry.memory_bytes > 0)
+    var evict: [i64] = []
+    var unload: [i64] = []
+
+    # 1. Versions per source within a branch.
+    var groups: [text] = []
+    for entry in entries:
+        val group = entry.branch + "\u0000" + entry.source
+        if not groups.contains(group):
+            groups.push(group)
+    for group in groups:
+        var members: [i64] = []
+        var i = 0
+        while i < entries.len():
+            if entries[i].branch + "\u0000" + entries[i].source == group:
+                members.push(i)
+            i = i + 1
+        var versions_seen: [text] = []
+        for index in _newest_first_v1(entries, members):
+            val version = entries[index].version_key
+            if not versions_seen.contains(version):
+                versions_seen.push(version)
+            var rank = 0
+            while versions_seen[rank] != version:
+                rank = rank + 1
+            if rank >= limits.versions_per_source:
+                alive[index] = false
+                evict.push(index)
+
+    # 2. Branch count: kept branches first, then most recently used.
+    var branches: [text] = []
+    for entry in entries:
+        if not branches.contains(entry.branch):
+            branches.push(entry.branch)
+    var ranked: [text] = []
+    for kept in limits.kept_branches:
+        if branches.contains(kept) and not ranked.contains(kept):
+            ranked.push(kept)
+    var others: [text] = []
+    for branch in branches:
+        if not ranked.contains(branch):
+            var j = others.len()
+            others.push(branch)
+            val used = _branch_last_used_v1(entries, alive, branch)
+            while j > 0 and _branch_last_used_v1(entries, alive, others[j - 1]) < used:
+                others[j] = others[j - 1]
+                j = j - 1
+            others[j] = branch
+    for branch in others:
+        ranked.push(branch)
+    var position = 0
+    for branch in ranked:
+        if position >= limits.max_branches:
+            var i = 0
+            while i < entries.len():
+                if alive[i] and entries[i].branch == branch:
+                    alive[i] = false
+                    evict.push(i)
+                i = i + 1
+        position = position + 1
+
+    # 3. Storage bytes, LRU across survivors.
+    var all: [i64] = []
+    var disk: i64 = 0
+    var memory: i64 = 0
+    var i = 0
+    while i < entries.len():
+        if alive[i]:
+            all.push(i)
+            disk = disk + entries[i].disk_bytes
+            if in_memory[i]:
+                memory = memory + entries[i].memory_bytes
+        i = i + 1
+    val newest = _newest_first_v1(entries, all)
+    var cursor = newest.len() - 1
+    while disk > limits.storage_max_bytes and cursor >= 0:
+        val index = newest[cursor]
+        alive[index] = false
+        evict.push(index)
+        disk = disk - entries[index].disk_bytes
+        if in_memory[index]:
+            memory = memory - entries[index].memory_bytes
+            in_memory[index] = false
+        cursor = cursor - 1
+
+    # 4. Memory bytes: unload LRU in-memory survivors.
+    cursor = newest.len() - 1
+    while memory > limits.memory_max_bytes and cursor >= 0:
+        val index = newest[cursor]
+        if alive[index] and in_memory[index]:
+            in_memory[index] = false
+            unload.push(index)
+            memory = memory - entries[index].memory_bytes
+        cursor = cursor - 1
+
+    CacheEvictionPlanV1(evict: evict, unload: unload,
+        disk_bytes_after: disk, memory_bytes_after: memory)
+
+# Admit a write of `incoming_bytes` only if it fits after the plan.
+pub fn cache_eviction_admit_write_v1(plan: CacheEvictionPlanV1, incoming_bytes: i64,
+        limits: CacheRetentionLimitsV1) -> bool:
+    incoming_bytes >= 0 and plan.disk_bytes_after + incoming_bytes <= limits.storage_max_bytes
