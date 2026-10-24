@@ -142,6 +142,8 @@ pub fn resolve_native_build_entry(
 /// Returns exit code (0 = success).
 #[no_mangle]
 pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
+    // native-all / self-hosted CLI path: enforce SIMPLE_MEMORY_LIMIT_MB.
+    crate::watchdog::start_memory_guard("native-build");
     let args_vec = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
         // ponytail: bootstrap binaries currently mix the C array ABI with the
         // Rust RuntimeValue ABI. Prefer process argv when the native runtime
