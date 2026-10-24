@@ -69,6 +69,10 @@ typedef SSIZE_T ssize_t;
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/statvfs.h>
+#define RT_HAVE_STATVFS 1
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -3734,6 +3738,18 @@ int64_t rt_host_disk_headroom_bytes_v1(int64_t path_value) {
     if (!GetDiskFreeSpaceExW(wide, &free_for_caller, NULL, NULL)) return 0;
     if (free_for_caller.QuadPart > (uint64_t)INT64_MAX) return 0;
     return (int64_t)free_for_caller.QuadPart;
+#elif defined(RT_HAVE_STATVFS)
+    RtCoreString* path = rt_core_as_string(path_value);
+    if (!path || path->len == 0 || path->len >= 4096) return 0;
+    char narrow[4096];
+    memcpy(narrow, path->data, (size_t)path->len);
+    narrow[path->len] = '\0';
+    if (strlen(narrow) != (size_t)path->len) return 0;
+    struct statvfs stat_buf;
+    if (statvfs(narrow, &stat_buf) != 0) return 0;
+    unsigned __int128 available =
+        (unsigned __int128)stat_buf.f_bavail * (unsigned __int128)stat_buf.f_frsize;
+    return available > (unsigned __int128)INT64_MAX ? INT64_MAX : (int64_t)available;
 #else
     (void)path_value;
     return 0;
