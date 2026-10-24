@@ -1,0 +1,49 @@
+# Purpose: @when guards and CTFE effects recovered from macro source into the
+# macro def table / use records (plan 2026-10-24 §6.1-6.2, M-04).
+# @req M-02 M-04
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_use_status_tag_v1,
+    macro_use_cacheable_v1}
+use compiler.common.cache_contract.guard_id_v1.{guard_id_v1}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{
+    macro_module_source_from_parse_guarded_v1, macro_guard_scan_v1, macro_effects_of_source_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_guarded_v1}
+
+val SRC = "@when(true)\nmacro dbl(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n@end\nmacro adder(n: Int const) -> (returns result: Int):\n    emit result:\n        env_get(\"HOME\")\n\nfn user() -> i64:\n@when(false)\n    val a = dbl!(1)\n@else\n    val a = dbl!(2)\n@end\n    a\n"
+
+describe "macro guards and CTFE effects from source":
+    it "scans @when/@else branches into guard ids and evaluations":
+        val scan = macro_guard_scan_v1(SRC)
+        expect(scan.evals.len()).to_equal(3)
+        expect(scan.evals[0].guard.digest).to_equal(guard_id_v1("when", "true").digest)
+        expect(scan.evals[0].active).to_equal(true)
+        expect(scan.evals[1].active).to_equal(false)
+        expect(scan.evals[2].guard.canonical_expr).to_equal("!(false)")
+        expect(scan.evals[2].active).to_equal(true)
+        expect(scan.inactive_use_names).to_equal(["dbl"])
+
+    it "derives CTFE and ambient effects; start_ is not rt_":
+        expect(macro_effects_of_source_v1(["n=const"], "env_get(\"X\")")).to_equal(["ctfe:const-eval", "env:read"])
+        expect(macro_effects_of_source_v1(["x"], "start_x + 1").len()).to_equal(0)
+
+    it "fills the def table and use records from a real parse":
+        val _m = parse_full_frontend(SRC, "guard_fixture.spl", "guard_fixture", Logger(level: 0))
+        val (src, evals) = macro_module_source_from_parse_guarded_v1("pkg", "guard_fixture",
+            "guard_fixture.spl", SRC)
+        expect(src.defs.len()).to_equal(2)
+        expect(src.defs[0].guard_ids.len()).to_equal(1)
+        expect(src.defs[1].def.params).to_equal(["n"])
+        expect(src.defs[1].declared_effects).to_equal(["ctfe:const-eval", "env:read"])
+        expect(src.invocations.len()).to_equal(2)
+        expect(src.invocations[0].region_id).to_equal("dbl#0")
+        expect(src.invocations[0].active).to_equal(false)
+        expect(src.invocations[1].active).to_equal(true)
+        val p = project_macro_module_guarded_v1(src, [], "sha256:p", evals)
+        expect(p.def_table.entries.len()).to_equal(2)
+        expect(macro_use_status_tag_v1(p.use_table.uses[0].status)).to_equal("inactive")
+        expect(macro_use_status_tag_v1(p.use_table.uses[1].status)).to_equal("resolved")
+        expect(macro_use_cacheable_v1(p.use_table.uses[1])).to_equal(true)
+        expect(p.uncacheable_def_ids.len()).to_equal(1)

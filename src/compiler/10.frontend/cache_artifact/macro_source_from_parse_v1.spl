@@ -7,9 +7,22 @@
 # next parse resets them.
 #
 # The region id and stable invocation id are `<name>#<ordinal among same-name
-# invocations>`, so an unrelated edit elsewhere in the file keeps them (line/col
-# stay in the pools for navigation only). Named gaps: guards and CTFE effects
-# are not parsed from macro sources yet (active, no effects).
+# invocations>` (active and guard-inactive invocations counted together, in
+# source order), so an unrelated edit or a guard flip keeps them; line/col stay
+# in the pools for navigation only.
+#
+# @when guards and CTFE effects are recovered from the macro SOURCE:
+# - guards: the line preprocessor blanks inactive @when branches before the
+#   parser runs, so branches are re-read from the ORIGINAL source. Each branch
+#   is GuardIdV1("when", <chain>) where the chain folds in the enclosing
+#   branches and the negation of earlier siblings; it is evaluated with the
+#   preprocessor's own condition evaluator. Invocations inside an inactive
+#   branch are kept as inactive records (so a guard flip re-resolves them);
+#   macro definitions inside an inactive branch are not seen (named gap).
+# - effects: there is no effect-declaration syntax for macros. A `const`
+#   parameter declares compile-time evaluation (ctfe:const-eval, admitted); a
+#   body calling an ambient host API declares that ambient effect, which
+#   macro_effect_admitted_v1 rejects, making the macro uncacheable.
 
 use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl}
 use compiler.frontend.cache_artifact.macro_reference_projector.{MacroSourceDefV1,
@@ -17,7 +30,9 @@ use compiler.frontend.cache_artifact.macro_reference_projector.{MacroSourceDefV1
 use compiler.frontend.core._Ast.decl_nodes.{macro_fact_def_count, macro_fact_def_name_at,
     macro_fact_def_params_at, macro_fact_def_contract_at, macro_fact_def_body_at,
     macro_fact_def_nested_at, macro_fact_use_count, macro_fact_use_name_at,
-    macro_fact_use_args_at}
+    macro_fact_use_args_at, macro_fact_def_line_at, macro_fact_use_line_at}
+use compiler.common.cache_contract.guard_id_v1.{GuardIdV1, GuardEvalV1, guard_id_v1}
+use compiler.frontend.core.parser_preprocessor.{_pp_eval_condition}
 
 fn _split_csv(value: text) -> [text]:
     if value == "": return []
@@ -53,36 +68,252 @@ pub fn macro_contract_intros_v1(contract: text) -> [MacroIntroDecl]:
         at = rest.find("intro ")
     out
 
+# ---------------------------------------------------------------------------
+# CTFE effects
+# ---------------------------------------------------------------------------
+
+# "<call prefix>=<effect>"
+fn _ambient_effects_table() -> [text]:
+    ["env_get=env:read", "env_set=env:write", "file_read=fs:read", "file_write=fs:write",
+     "file_exists=fs:read", "time_now=clock:now", "clock_now=clock:now", "random=random",
+     "getpid=process:id", "rt_=runtime:extern"]
+
+pub fn macro_effects_of_source_v1(params: [text], body: text) -> [text]:
+    var out: [text] = []
+    for p in params:
+        if p.ends_with("=const") and not out.contains("ctfe:const-eval"):
+            out.push("ctfe:const-eval")
+    for entry in _ambient_effects_table():
+        val eq = entry.find("=")
+        val call = entry.substring(0, eq)
+        val effect = entry.substring(eq + 1, entry.len())
+        if _has_call(body, call) and not out.contains(effect):
+            out.push(effect)
+    out
+
+# `prefix` at an identifier start (not inside a longer word such as `start_`).
+fn _has_call(body: text, prefix: text) -> bool:
+    var i = 0
+    while i < body.len():
+        val rel = body.substring(i, body.len()).find(prefix)
+        if rel < 0: return false
+        val at = i + rel
+        if at == 0 or not _is_word_char(body.substring(at - 1, at)): return true
+        i = at + 1
+    false
+
+fn _param_names(params: [text]) -> [text]:
+    var out: [text] = []
+    for p in params:
+        if p.ends_with("=const"):
+            out.push(p.substring(0, p.len() - 6))
+        else:
+            out.push(p)
+    out
+
+# ---------------------------------------------------------------------------
+# @when guards
+# ---------------------------------------------------------------------------
+
+pub struct MacroGuardScanV1:
+    line_guard: [text]            # per 0-based line: innermost branch guard digest ("" = unguarded)
+    evals: [GuardEvalV1]
+    inactive_use_names: [text]
+    inactive_use_args: [text]
+    inactive_use_lines: [i64]     # 1-based
+
+fn _paren_cond(line: text) -> text:
+    val open = line.find("(")
+    val close = line.rfind(")")
+    if open < 0 or close <= open: return ""
+    line.substring(open + 1, close).trim()
+
+fn _is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _scan_bang_calls(line: text, names: [text], args: [text], lines: [i64], line_no: i64):
+    var i = 0
+    while i < line.len():
+        val rel = line.substring(i, line.len()).find("!(")
+        if rel < 0: break
+        val at = i + rel
+        var start = at
+        while start > 0 and _is_word_char(line.substring(start - 1, start)):
+            start = start - 1
+        if start < at:
+            var depth = 0
+            var j = at + 1
+            var close = -1
+            while j < line.len():
+                val c = line.substring(j, j + 1)
+                if c == "(": depth = depth + 1
+                if c == ")":
+                    depth = depth - 1
+                    if depth == 0:
+                        close = j
+                        break
+                j = j + 1
+            names.push(line.substring(start, at))
+            args.push(if close > at + 1: line.substring(at + 2, close) else: "")
+            lines.push(line_no)
+        i = at + 2
+
+fn _eval(cond: text) -> bool:
+    cond != "" and _pp_eval_condition(cond)
+
+pub fn macro_guard_scan_v1(source: text) -> MacroGuardScanV1:
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var line_guard: [text] = []
+    var evals: [GuardEvalV1] = []
+    var seen: [text] = []
+    var chain: [text] = []          # per depth: current branch's chain expr
+    var prior: [text] = []          # per depth: negated earlier siblings
+    var parent_chain: [text] = []
+    var parent_active: [bool] = []
+    var taken: [bool] = []          # per depth: an earlier sibling was taken
+    var active: [bool] = []         # per depth: current branch active
+    var names: [text] = []
+    var args: [text] = []
+    var use_lines: [i64] = []
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        val t = line.trim()
+        val is_when = t.starts_with("@when(")
+        val is_elif = t.starts_with("@elif(") and chain.len() > 0
+        val is_else = t == "@else" and chain.len() > 0
+        val is_end = t == "@end"
+        if is_when:
+            val c = _paren_cond(t)
+            val parent = if chain.len() > 0: chain[chain.len() - 1] else: ""
+            val pa = if active.len() > 0: active[active.len() - 1] else: true
+            val on = pa and _eval(c)
+            parent_chain.push(parent)
+            parent_active.push(pa)
+            chain.push(if parent == "": c else: parent + " && " + c)
+            prior.push("!(" + c + ")")
+            taken.push(on)
+            active.push(on)
+        elif is_elif:
+            val d = chain.len() - 1
+            val c = _paren_cond(t)
+            val base = if parent_chain[d] == "": prior[d] else: parent_chain[d] + " && " + prior[d]
+            chain[d] = base + " && " + c
+            val on = parent_active[d] and not taken[d] and _eval(c)
+            active[d] = on
+            taken[d] = taken[d] or on
+            prior[d] = prior[d] + " && !(" + c + ")"
+        elif is_else:
+            val d = chain.len() - 1
+            chain[d] = if parent_chain[d] == "": prior[d] else: parent_chain[d] + " && " + prior[d]
+            val on = parent_active[d] and not taken[d]
+            active[d] = on
+            taken[d] = true
+        elif is_end and chain.len() > 0:
+            chain.pop()
+            prior.pop()
+            parent_chain.pop()
+            parent_active.pop()
+            taken.pop()
+            active.pop()
+        if (is_when or is_elif or is_else) and chain.len() > 0:
+            val g = guard_id_v1("when", chain[chain.len() - 1])
+            if not seen.contains(g.digest):
+                seen.push(g.digest)
+                evals.push(GuardEvalV1(guard: g, evaluable: g.canonical_expr != "",
+                    active: active[active.len() - 1]))
+        if chain.len() > 0 and not (is_when or is_elif or is_else or is_end):
+            line_guard.push(guard_id_v1("when", chain[chain.len() - 1]).digest)
+            if not active[active.len() - 1] and not t.starts_with("#"):
+                _scan_bang_calls(line, names, args, use_lines, line_no)
+        else:
+            line_guard.push("")
+    MacroGuardScanV1(line_guard: line_guard, evals: evals, inactive_use_names: names,
+        inactive_use_args: args, inactive_use_lines: use_lines)
+
+fn _line_guard(scan: MacroGuardScanV1, line: i64) -> text:
+    if line < 1 or line > scan.line_guard.len(): return ""
+    scan.line_guard[line - 1]
+
+fn _guard_of(scan: MacroGuardScanV1, digest: text) -> GuardIdV1:
+    for e in scan.evals:
+        if e.guard.digest == digest: return e.guard
+    GuardIdV1(kind: "when", canonical_expr: "", digest: digest)
+
+# ---------------------------------------------------------------------------
+
 pub fn macro_module_source_from_parse_v1(package: text, module: text,
         source_id: text) -> MacroModuleSourceV1:
+    val (src, _evals) = macro_module_source_from_parse_guarded_v1(package, module, source_id, "")
+    src
+
+# As above, plus @when guard ids/evaluations from the ORIGINAL (pre-
+# preprocessor) `source`; "" means no guard information (all unguarded).
+pub fn macro_module_source_from_parse_guarded_v1(package: text, module: text,
+        source_id: text, source: text) -> (MacroModuleSourceV1, [GuardEvalV1]):
+    val scan = macro_guard_scan_v1(source)
     var defs: [MacroSourceDefV1] = []
     var i = 0
     while i < macro_fact_def_count():
         val contract = macro_fact_def_contract_at(i)
-        val def = MacroDef(name: macro_fact_def_name_at(i), params: _split_csv(macro_fact_def_params_at(i)),
+        val raw_params = _split_csv(macro_fact_def_params_at(i))
+        val body = macro_fact_def_body_at(i)
+        val def = MacroDef(name: macro_fact_def_name_at(i), params: _param_names(raw_params),
             contract_intros: macro_contract_intros_v1(contract), contract_injects: [])
+        var guards: [GuardIdV1] = []
+        val g = _line_guard(scan, macro_fact_def_line_at(i))
+        if g != "":
+            guards.push(_guard_of(scan, g))
         defs.push(MacroSourceDefV1(def: def, namespace: "macro",
-            body_text: contract + "\n" + macro_fact_def_body_at(i),
+            body_text: contract + "\n" + body,
             nested_macro_names: _split_csv(macro_fact_def_nested_at(i)),
-            declared_effects: [], guard_ids: [], is_public: true))
+            declared_effects: macro_effects_of_source_v1(raw_params, body),
+            guard_ids: guards, is_public: true))
         i = i + 1
-    var invs: [MacroSourceInvocationV1] = []
-    var seen: [text] = []
+    var u_names: [text] = []
+    var u_args: [text] = []
+    var u_lines: [i64] = []
+    var u_active: [bool] = []
     var j = 0
     while j < macro_fact_use_count():
-        val name = macro_fact_use_name_at(j)
+        u_names.push(macro_fact_use_name_at(j))
+        u_args.push(macro_fact_use_args_at(j))
+        u_lines.push(macro_fact_use_line_at(j))
+        u_active.push(true)
+        j = j + 1
+    var k = 0
+    while k < scan.inactive_use_names.len():
+        var at = u_lines.len()
+        var m = 0
+        while m < u_lines.len():
+            if u_lines[m] > scan.inactive_use_lines[k]:
+                at = m
+                break
+            m = m + 1
+        u_names.insert(at, scan.inactive_use_names[k])
+        u_args.insert(at, scan.inactive_use_args[k])
+        u_lines.insert(at, scan.inactive_use_lines[k])
+        u_active.insert(at, false)
+        k = k + 1
+    var invs: [MacroSourceInvocationV1] = []
+    var seen: [text] = []
+    var n = 0
+    while n < u_names.len():
+        val name = u_names[n]
         var ordinal = 0
         for s in seen:
             if s == name: ordinal = ordinal + 1
         seen.push(name)
         val region = "{name}#{ordinal}"
-        val args = macro_fact_use_args_at(j)
         invs.push(MacroSourceInvocationV1(region_id: region,
             stable_invocation_id: region, requested_name: name,
-            invocation_text: name + "!(" + args + ")", args_text: args,
-            hygiene_scope_id: region, active_guard_id: "", active: true))
-        j = j + 1
-    MacroModuleSourceV1(package: package, module: module, source_id: source_id,
-        defs: defs, invocations: invs)
+            invocation_text: name + "!(" + u_args[n] + ")", args_text: u_args[n],
+            hygiene_scope_id: region, active_guard_id: _line_guard(scan, u_lines[n]),
+            active: u_active[n]))
+        n = n + 1
+    (MacroModuleSourceV1(package: package, module: module, source_id: source_id,
+        defs: defs, invocations: invs), scan.evals)
 
 export macro_contract_intros_v1, macro_module_source_from_parse_v1
+export macro_module_source_from_parse_guarded_v1, macro_guard_scan_v1, MacroGuardScanV1
+export macro_effects_of_source_v1
