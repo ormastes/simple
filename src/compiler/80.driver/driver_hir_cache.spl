@@ -264,7 +264,8 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirMod
         return nil
     # A hit decodes ONCE. The stability gate (decode + full re-encode + compare)
     # already ran on the STORE side for every published entry
-    # (hir_cache_store_in_owned_scope refuses an unstable frame), and the
+    # (hir_cache_store_in_owned_scope refuses an unstable frame, or admits its
+    # re-encode fixed point under SIMPLE_HIR_CACHE_ADMIT_REENCODE=1), and the
     # checksum above pins the bytes, so re-encoding here re-proved a property
     # the entry could not have lost. Measured 2026-10-19 (Phase 4 full CLI,
     # 2702 hits, 940 MB of entries): ~196 ms per hit, ~9 min serial, with the
@@ -441,7 +442,7 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     _hir_cache_note_store_attempt()
     if parser_classification != "" and
             not hir_cache_parser_record_valid_v1(parser_classification): return false
-    val blob = hir_module_encode(module)
+    var blob = hir_module_encode(module)
     if blob == "":
         _hir_cache_refuse("codec")
         # Name the refused payload once: a bare `codec` count hid that every
@@ -467,10 +468,26 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
             return false
     elif hir_module_decode_stable(blob) == nil:
         # Same fail-closed gate without the named diagnostic when the knob is
-        # not due: an unstable frame is never published, silently counted.
-        _hir_cache_refuse("unstable")
-        _hir_cache_note_first_refusal("unstable", module.path)
-        return false
+        # not due -- but the stable check collapses two distinct failures
+        # (hir_codec.spl: hir_module_decode_stable): a blob the decoder
+        # refuses, and a decodable blob whose re-encode differs byte-for-byte
+        # (encoder non-determinism). The first can never be cached: a hit
+        # could not decode. The second is admitted only under the explicit
+        # opt-in SIMPLE_HIR_CACHE_ADMIT_REENCODE=1, and what is published is
+        # the re-encode fixed point, so a hit decodes a self-consistent frame
+        # (see _hir_cache_admit_reencode_blob_v1).
+        if hir_module_decode(blob) == nil:
+            _hir_cache_refuse("decode")
+            if not _hir_cache_decode_refusal_noted:
+                _hir_cache_note_first_refusal("decode", module.path)
+            return false
+        val admitted = _hir_cache_admit_reencode_blob_v1(module.path, blob)
+        if admitted == "":
+            _hir_cache_refuse("reencode")
+            if not _hir_cache_reencode_refusal_noted:
+                _hir_cache_note_first_refusal("reencode", module.path)
+            return false
+        blob = admitted
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key, parser_classification != "")
@@ -520,7 +537,7 @@ fn hir_cache_store_failures() -> i64:
 
 # True when the LAST store refusal was an I/O write/rename failure (disk-full
 # class: the cache genuinely cannot serve this build). Codec refusals
-# (encode reject, selfcheck, unstable roundtrip) are fail-closed EVIDENCE
+# (encode reject, selfcheck, decode/reencode roundtrip refusal) are fail-closed EVIDENCE
 # gates, not I/O failures: the module is still correct in memory and the
 # main build lowers it on the cache miss. Shard lanes use this to treat a
 # codec refusal as "not stored" (UNCACHED) instead of a worker failure --
@@ -544,7 +561,9 @@ fn _hir_cache_refuse(reason: text):
 val HIR_CACHE_STORE_RATE_EVERY: i64 = 64
 var _hir_cache_store_attempts: i64 = 0
 var _hir_cache_codec_refusal_noted: bool = false
-var _hir_cache_unstable_refusal_noted: bool = false
+var _hir_cache_decode_refusal_noted: bool = false
+var _hir_cache_reencode_refusal_noted: bool = false
+var _hir_cache_admission_noted: bool = false
 
 # Prints BEFORE counting the new attempt, so every printed attempt has
 # finished and attempts - stored - refused - io_failed is exact.
@@ -562,11 +581,41 @@ fn _hir_cache_note_first_refusal(reason: text, path: text, detail: text = ""):
     if reason == "codec":
         if _hir_cache_codec_refusal_noted: return
         _hir_cache_codec_refusal_noted = true
-    elif reason == "unstable":
-        if _hir_cache_unstable_refusal_noted: return
-        _hir_cache_unstable_refusal_noted = true
+    elif reason == "decode":
+        if _hir_cache_decode_refusal_noted: return
+        _hir_cache_decode_refusal_noted = true
+    elif reason == "reencode":
+        if _hir_cache_reencode_refusal_noted: return
+        _hir_cache_reencode_refusal_noted = true
     val detail_part = if detail != "": " detail={detail}" else: ""
     eprint("[hir-cache-store] refused reason={reason}{detail_part} module={path}; entry not stored (further {reason} refusals are only counted)")
+
+# Opt-in admission for a decodable-but-not-byte-stable frame (the store
+# refusal formerly reported only as reason=unstable once its decode step is
+# proven OK). What is published is the re-encode fixed point
+# blob2 = encode(decode(blob)) with encode(decode(blob2)) == blob2 verified,
+# so a cache hit decodes a self-consistent frame and every downstream
+# re-encode of the hit (validation twins, shard receipts) reproduces the
+# stored bytes instead of a fresh permutation. Off by default: the fixed-
+# point check proves consistency, not that decode is lossless, so caching
+# these frames stays an explicit operator decision
+# (SIMPLE_HIR_CACHE_ADMIT_REENCODE=1). Returns "" when not admitted or when
+# no fixed point exists; else the blob to publish.
+fn _hir_cache_admit_reencode_blob_v1(path: text, blob: text) -> text:
+    if (sosix_env_get_nullable("SIMPLE_HIR_CACHE_ADMIT_REENCODE") ?? "") != "1":
+        return ""
+    val decoded = hir_module_decode(blob)
+    if decoded == nil:
+        return ""
+    val fixed = hir_module_encode(decoded.unwrap())
+    if fixed == "":
+        return ""
+    if hir_module_decode_stable(fixed) == nil:
+        return ""
+    if not _hir_cache_admission_noted:
+        _hir_cache_admission_noted = true
+        eprint("[hir-cache-store] admitted reason=reencode module={path}; published re-encode fixed point (SIMPLE_HIR_CACHE_ADMIT_REENCODE=1; further admissions are only counted in stores=)")
+    fixed
 
 # Write-time round-trip self-check knob -> mode "all" | "sampled" | "off".
 # SIMPLE_HIR_CACHE_SELFCHECK=1 checks every store, =0 never; the host-config
