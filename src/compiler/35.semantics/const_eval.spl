@@ -15,6 +15,19 @@ use compiler.common.diagnostics.span.{Span}
 use std.common.string_core.{str_to_lower}
 use std.nogc_sync_mut.io_runtime.{env_get}
 
+# Environment variables compile-time evaluation may read. Every name here
+# MUST also be in NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1
+# (80.driver/cache/native_build_environment_identity.spl) so a change to
+# its value changes the live object key (live_object_key.sdn gap
+# ctfe_env_reads, closed). Any other name is rejected: an unrecorded
+# CTFE input would let a stale object be reused.
+pub val CTFE_ENV_INPUTS_V1: [text] = [
+    "BOOTSTRAP_MINIMAL",
+    "BOOTSTRAP_NO_C",
+    "BOOTSTRAP_NO_EVAL",
+    "BOOTSTRAP_NO_GPU"
+]
+
 @always_inline
 fn _sys_env_bool_from_text(raw_value: text) -> bool:
     val value = str_to_lower(raw_value)
@@ -568,6 +581,8 @@ impl ConstEvaluator:
                 val key = self.eval(args[0].value)?
                 match key:
                     case EvaluatedConstValue.String(env_name):
+                        if not CTFE_ENV_INPUTS_V1.contains(env_name):
+                            return Err(ConstEvalError.NotConstant("sys_env_bool(\"{env_name}\"): not a declared CTFE env input (CTFE_ENV_INPUTS_V1)", span))
                         val value = env_get(env_name)
                         Ok(EvaluatedConstValue.Bool(_sys_env_bool_from_text(value)))
                     case _:
