@@ -2,6 +2,52 @@
 
 Status: OPEN; finite repair and verification queue, not compiler qualification.
 
+## Later terminal evidence: old producer and partial objects
+
+The earlier live-collector observations below are historical. The original
+Phase 3 collector subsequently terminated with log overflow (exit 125,
+64 MiB cap): 873 HIR rows passed, 24 crashed, and 544 of 1,441 were
+unattempted. Its terminal receipt is
+`C:/dev/simple-phase34-resume-20261024/phase3/build.receipt`. It produced no
+qualified Phase 3 compiler. The source checkout advanced during that diagnostic
+run, so the run also lacks a consistent frozen-source admission.
+
+Separate, isolated per-unit builds used the unchanged Phase 2 producer SHA256
+`70ce821aa79dc190cb6fb206ce90651f5e93cef9e46a33963ab992a13e70e19b`,
+with 24 threads and normal source/cache validation. The final 32-unit epoch
+terminated with 29 passes and three failures. Together with nine earlier passes,
+38 requested objects have clean process receipts, nonempty AMD64 COFF files,
+positive symbol counts, and retained size/SHA256 evidence. The authoritative
+summary and format proof are:
+
+- `C:/dev/simple-phase34-resume-20261024/partial-objects/worker2/epoch3/summary.sdn`
+- `C:/dev/simple-phase34-resume-20261024/partial-objects/worker2/epoch3/coff-proof.sdn`
+
+These are partial diagnostic objects. Their individual entry/closure identities
+do not establish reuse in the original full Phase 3 build or reduce its admitted
+remaining-object count. No additional old-producer epoch is scheduled.
+
+| Original entry | Observed terminal boundary | Result |
+|---|---|---|
+| `src/compiler/10.frontend/core/interpreter/value.spl` | MIR worker passed and requested 39,597-byte object was emitted; collector later timed out and reaped the job | FAIL, exit 124 |
+| `src/lib/nogc_sync_mut/ptr/raw.spl` | MIR worker passed and emitted a 2,725-byte intermediate object; parent access violation prevented requested output publication | FAIL, normalized exit 139 (`0xC0000005`) |
+| `src/lib/common/json/tokenizer.spl` | MIR worker passed and emitted a 23,997-byte intermediate object; parent access violation prevented requested output publication | FAIL, normalized exit 139 (`0xC0000005`) |
+
+The first failing boundaries are process completion and parent output
+publication; no retained crash stack proves their root causes. A worker PASS
+or intermediate object cannot substitute for a successful parent receipt.
+Per-row evidence is retained in epoch directories `06`, `16`, and `30` as
+`failure-boundary.sdn`, alongside original arguments and collector receipts.
+Exact regressions for all three are prepared in
+`partial-objects/worker2/new_producer_regressions.py`; they have not run with
+the repaired producer and require clean completion plus the requested object.
+
+The repaired seed SHA256
+`5d86a2e420d1be12d75ffcd50b41676ab3138b4e947770d0a834962b6f35660a`
+passed five canonical preflight checks at frozen source `a3ea4530e3a`.
+Its Phase 2 build was live when this evidence was recorded. This is seed
+preflight evidence only, not Phase 2 admission or Phase 3/4 qualification.
+
 Inventory source anchor: release/1.0.0 commit
 `0275bb4815b` (merge of PR #4327). The audit inspected the last week's
 Windows/bootstrap bug records and workaround markers in active compiler and
