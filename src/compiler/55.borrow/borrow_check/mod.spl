@@ -432,7 +432,7 @@ class BorrowChecker:
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
                 if self.is_direct_named_call_v1(func):
-                    self.record_short_call_contract(func, args, nll, point)
+                    self.record_direct_call_contract_v1(func, args, nll, point)
                 else:
                     self.record_indirect_call_contract_v1(func, args, nil, nll, point)
                 # A non-unit call (re)initializes its destination, which kills
@@ -441,7 +441,7 @@ class BorrowChecker:
                     nll.record_assign(point, Place.local(dest_local.id))
                     # MIR lacks a return-loan summary. Conservatively retain
                     # argument provenance until typed call summaries reach MIR.
-                    self.record_call_result_loans(args, dest_local, nll, point)
+                    self.record_call_result_loans(args, dest_local, nll, point, self.is_direct_named_call_v1(func))
 
             case MirInstKind.BinOp(dest, _, left, right) | MirInstKind.CheckedBinOp(dest, _, left, right):
                 self.record_operand_use(left, nll, point)
@@ -641,13 +641,13 @@ class BorrowChecker:
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
                 if self.is_direct_named_call_v1(func):
-                    self.record_short_call_contract(func, args, nll, point)
+                    self.record_direct_call_contract_v1(func, args, nll, point)
                 else:
                     self.record_indirect_call_contract_v1(func, args, nil, nll, point)
                 if unwind == nil:
                     if val dest_local = dest:
                         nll.record_assign(point, Place.local(dest_local.id))
-                        self.record_call_result_loans(args, dest_local, nll, point)
+                        self.record_call_result_loans(args, dest_local, nll, point, self.is_direct_named_call_v1(func))
                 else:
                     # A terminator event executes on BOTH successor edges.
                     # Neither normal nor unwind-only outputs can be revived
@@ -674,7 +674,26 @@ class BorrowChecker:
             case MirTerminator.Abort(_):
                 pass_do_nothing("carries only a diagnostic message, no MIR operand")
 
-    me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64):
+    # Legacy (non-`@no_gc(strict)`) modules never receive checked call
+    # contracts: `publish_short_call_contracts` fills the map only for strict
+    # modules, and the driver's param-effect admission skips inference for
+    # them ("Legacy modules retain their existing policy"). Demanding a checked
+    # contract there rejected every `f(&mut x)`, even a plain local callee.
+    # Strict modules keep the full check. Indirect calls are unaffected: they
+    # stay conservative outside strict mode by explicit design.
+    # doc/08_tracking/bug/legacy_direct_call_short_contract_unsatisfiable_2026-10-24.md
+    me record_direct_call_contract_v1(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
+        if self.nogc_strict:
+            self.record_short_call_contract(callee, args, nll, point)
+
+    me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64, direct: bool = false):
+        # Same legacy policy for result provenance: an unknown-layout result
+        # (class 2, e.g. `Result<(), Enum>` or a struct) of a direct legacy
+        # call does not inherit argument loans. Explicitly reference-bearing
+        # results (class 1) and short-marked destinations still do.
+        if direct and not self.nogc_strict and self.local_declarations.contains_key(destination.id):
+            val legacy_declaration: MirLocal = self.local_declarations[destination.id]
+            if not legacy_declaration.short_borrow and mir_type_loan_payload_class(legacy_declaration.type_) == 2: return
         if not self.result_retains_loans(destination, nll, point): return
         var sources: [Place] = []
         for argument in args:
