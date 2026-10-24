@@ -455,19 +455,32 @@ fn bootstrap_register_flat_function_values():
         module_index = module_index + 1
 
 fn bootstrap_register_imported_exact_externs_v1(lowering_in: MirLowering, module_name: text) -> MirLowering:
+    # Preserve the established entrypoint. The flat store has names, not paths.
+    bootstrap_register_imported_exact_externs_with_context_v1(lowering_in, module_name, -1)
+
+fn bootstrap_register_imported_exact_externs_with_context_v1(lowering_in: MirLowering,
+        module_name: text, consumer_index: i64) -> MirLowering:
     var lowering = lowering_in
+    val consumer_raw_name = if consumer_index >= 0 and consumer_index < bootstrap_hir_module_count():
+        bootstrap_hir_module_name_at(consumer_index)
+    else: module_name
     val consumers = mir_imported_extern_consumers_v1(lowering.symbols, module_name)
     val owners = mir_imported_extern_owner_keys_v1(consumers)
     var visited: Dict<text, bool> = {}
+    var first_indices: Dict<text, i64> = {}
     var provider_index = 0
     while provider_index < bootstrap_hir_module_count():
-        val provider_name = bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(provider_index))
+        val provider_raw_name = bootstrap_hir_module_name_at(provider_index)
+        val provider_name = bootstrap_mir_logical_module_name(provider_raw_name)
         val key = mir_provider_callable_key(provider_name, "")
         if owners.has(key):
             if visited.has(key):
-                lowering.error_fatal("ambiguous imported extern provider owner", nil)
+                val first_index = first_indices[key]
+                val first_raw_name = bootstrap_hir_module_name_at(first_index)
+                lowering.error_fatal("ambiguous imported extern provider owner: consumer_module=\"{consumer_raw_name}\" consumer_index={consumer_index} consumer_path=\"\" consumer_path_available=false canonical_owner=\"{key}\" first_provider_index={first_index} first_provider_name=\"{first_raw_name}\" first_provider_path=\"\" second_provider_index={provider_index} second_provider_name=\"{provider_raw_name}\" second_provider_path=\"\" provider_paths_available=false", nil)
             else:
                 visited[key] = true
+                first_indices[key] = provider_index
                 var declarations: [HirFunction] = []
                 var index = 0
                 while index < bootstrap_hir_module_function_count(provider_index):
@@ -516,7 +529,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     lowering.current_function_names = _bootstrap_function_value_names
     lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
-    lowering = bootstrap_register_imported_exact_externs_v1(lowering, logical_module_name)
+    lowering = bootstrap_register_imported_exact_externs_with_context_v1(lowering, logical_module_name, module_index)
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
     # an enum-variant const (not a field-load on an undefined base) and `S(..)`
     # reclassifies to an inline aggregate construct (not a call to an undefined
@@ -985,7 +998,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             lowering.record_exact_extern_declaration_v1(declaration)
         lowering.callable_link_names = _bootstrap_callable_link_names
         lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
-        lowering.record_imported_exact_extern_modules_v1(hir_module.name, providers)
+        lowering.record_imported_exact_extern_modules_with_context_v1(hir_module.name, hir_module.path, providers)
         lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions
@@ -1110,7 +1123,7 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         lowering.record_exact_extern_declaration_v1(declaration)
     lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
-    lowering.record_imported_exact_extern_modules_v1(hir_module.name, providers)
+    lowering.record_imported_exact_extern_modules_with_context_v1(hir_module.name, hir_module.path, providers)
     lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
     # Same module-constant registration as the entry path above: non-entry

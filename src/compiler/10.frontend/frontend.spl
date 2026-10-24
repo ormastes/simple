@@ -14,6 +14,8 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_load_v1, frontend_shared_parse_store_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
+use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_enabled_v1, frontend_spab_load_v1, frontend_spab_store_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_take_trace, flat_pool_capture_take_refs}
 use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.common.diagnostics.span.{Span}
@@ -131,6 +133,12 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         xxh3_128_text("frontend-advisory-cache-v1|" + source_key + "|" + advisory_cache_identity)
     else:
         source_key
+    if key != "" and frontend_spab_enabled_v1():
+        # Packed .spab hit first (frontend_spab_cache_v1.spl); any doubt falls
+        # through to the line cache and then a real parse.
+        if val packed_hit = frontend_spab_load_v1(key, parse_source, file_path):
+            frontend_parse_cache_note_hit()
+            return packed_hit
     if key != "":
         val load_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val cached_blob = frontend_parse_cache_load(key)
@@ -177,6 +185,9 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             flat_pool_capture_record(file_path)
         val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val stored = frontend_parse_cache_store(key, captured_blob)
+        if frontend_spab_enabled_v1() and captured_blob != "":
+            val _spab_stored = frontend_spab_store_v1(key, file_path, captured_blob, flat_pool_capture_take_trace(),
+                flat_pool_capture_take_refs())
         val _shared_stored = frontend_shared_parse_store_v1(raw_source_sha,
             parse_source, shared_target_identity, file_path, captured_blob)
         if frontend_cache_boundary_profile_enabled():

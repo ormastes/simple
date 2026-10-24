@@ -1,0 +1,238 @@
+# Fiber scheduler core (v1) — per-worker run queues, socket-local work stealing,
+# deadlock-free memory admission. Design:
+# doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3-4.
+#
+# A fiber is a stackless state machine identified by an i64 id; the caller owns
+# its state and supplies `step(id) -> FiberStepV1`. This module owns only
+# scheduling state, as a value: every operation returns the updated state.
+# The pure core is single-carrier and deterministic (spec-runnable on the seed);
+# the multi-thread carrier maps each `queues[w]` onto a per-thread deque.
+#
+# Admission (never deadlocks):
+#   * a fiber is admitted only while `reserved + est <= budget`;
+#   * PROGRESS RULE: when no admitted fiber can run (every admitted fiber is
+#     parked, or none is admitted) and fibers are still pending, the head of the
+#     pending list is admitted even over budget. Parked fibers only wait on IO
+#     or on other fibers' results, so admitting one more fiber is always enough
+#     to make progress; the overshoot is bounded by one fiber's estimate and is
+#     counted in `overcommits`;
+#   * `fiber_sched_prioritize` moves a pending fiber (e.g. the producer a parked
+#     fiber waits on) to the head of the pending list.
+
+val FIBER_STEP_DONE: i64 = 0
+val FIBER_STEP_YIELD: i64 = 1
+val FIBER_STEP_PARK: i64 = 2
+
+val FIBER_STATE_PENDING: i64 = 0
+val FIBER_STATE_READY: i64 = 1
+val FIBER_STATE_PARKED: i64 = 2
+val FIBER_STATE_DONE: i64 = 3
+
+struct FiberStepV1:
+    kind: i64
+    token: i64
+
+fn fiber_step_done() -> FiberStepV1:
+    FiberStepV1(kind: FIBER_STEP_DONE, token: 0)
+
+fn fiber_step_yield() -> FiberStepV1:
+    FiberStepV1(kind: FIBER_STEP_YIELD, token: 0)
+
+fn fiber_step_park(token: i64) -> FiberStepV1:
+    """Suspend until `fiber_sched_wake(token)`; token > 0."""
+    FiberStepV1(kind: FIBER_STEP_PARK, token: token)
+
+struct FiberSchedV1:
+    budget: i64
+    reserved: i64
+    overcommits: i64
+    worker_socket: [i64]
+    queues: [[i64]]
+    fiber_state: [i64]
+    fiber_est: [i64]
+    fiber_worker: [i64]
+    fiber_token: [i64]
+    pending: [i64]
+    steals_local: i64
+    steals_remote: i64
+    # Parks the caller knows will resolve without new admissions (IO in
+    # flight). While > 0 the progress rule must not overcommit: the IO wakes
+    # someone. The carrier sets it from its reactor before each admit.
+    external_inflight: i64
+    error: text
+
+fn fiber_sched_new(worker_socket: [i64], budget: i64) -> FiberSchedV1:
+    """`worker_socket[w]` = socket of worker w (e.g. [0,0,1,1] for 2x2)."""
+    var queues: [[i64]] = []
+    for _w in worker_socket:
+        queues = queues.push([])
+    var err = ""
+    if worker_socket.len() == 0: err = "no workers"
+    if budget <= 0: err = "budget must be positive"
+    FiberSchedV1(budget: budget, reserved: 0, overcommits: 0, worker_socket: worker_socket,
+                 queues: queues, fiber_state: [], fiber_est: [], fiber_worker: [], fiber_token: [],
+                 pending: [], steals_local: 0, steals_remote: 0, external_inflight: 0, error: err)
+
+fn fiber_sched_submit(s: FiberSchedV1, est_bytes: i64) -> FiberSchedV1:
+    """Register a fiber (id = submission index) as pending admission."""
+    var t = s
+    val id = t.fiber_state.len()
+    t.fiber_state = t.fiber_state.push(FIBER_STATE_PENDING)
+    t.fiber_est = t.fiber_est.push(if est_bytes > 0: est_bytes else: 0)
+    t.fiber_worker = t.fiber_worker.push(-1)
+    t.fiber_token = t.fiber_token.push(0)
+    t.pending = t.pending.push(id)
+    t
+
+fn fiber_sched_prioritize(s: FiberSchedV1, fiber: i64) -> FiberSchedV1:
+    """Move a still-pending fiber to the head of the admission order."""
+    var t = s
+    var rest: [i64] = []
+    var found = false
+    for id in t.pending:
+        if id == fiber: found = true
+        else: rest = rest.push(id)
+    if found:
+        var head: [i64] = [fiber]
+        for id in rest: head = head.push(id)
+        t.pending = head
+    t
+
+fn _fs_least_loaded_worker(s: FiberSchedV1) -> i64:
+    var best = 0
+    for w in 0..s.queues.len():
+        if s.queues[w].len() < s.queues[best].len(): best = w
+    best
+
+fn _fs_admit_head(s: FiberSchedV1) -> FiberSchedV1:
+    var t = s
+    val id = t.pending[0]
+    var rest: [i64] = []
+    for i in 1..t.pending.len(): rest = rest.push(t.pending[i])
+    t.pending = rest
+    if t.reserved + t.fiber_est[id] > t.budget: t.overcommits = t.overcommits + 1
+    t.reserved = t.reserved + t.fiber_est[id]
+    val w = _fs_least_loaded_worker(t)
+    t.fiber_state[id] = FIBER_STATE_READY
+    t.fiber_worker[id] = w
+    t.queues[w] = t.queues[w].push(id)
+    t
+
+fn fiber_sched_runnable_count(s: FiberSchedV1) -> i64:
+    var n = 0
+    for q in s.queues: n = n + q.len()
+    n
+
+fn fiber_sched_admit(s: FiberSchedV1) -> FiberSchedV1:
+    """Admit pending fibers in order while they fit; apply the progress rule."""
+    var t = s
+    while t.pending.len() > 0 and t.reserved + t.fiber_est[t.pending[0]] <= t.budget:
+        t = _fs_admit_head(t)
+    if t.pending.len() > 0 and fiber_sched_runnable_count(t) == 0 and t.external_inflight == 0:
+        t = _fs_admit_head(t)
+    t
+
+fn _fs_take_bottom(s: FiberSchedV1, w: i64) -> FiberSchedV1:
+    var t = s
+    var q: [i64] = []
+    for i in 0..(t.queues[w].len() - 1): q = q.push(t.queues[w][i])
+    t.queues[w] = q
+    t
+
+fn _fs_take_top(s: FiberSchedV1, w: i64) -> FiberSchedV1:
+    var t = s
+    var q: [i64] = []
+    for i in 1..t.queues[w].len(): q = q.push(t.queues[w][i])
+    t.queues[w] = q
+    t
+
+fn _fs_victim(s: FiberSchedV1, w: i64, same_socket: bool) -> i64:
+    """Fullest other queue on the same (or another) socket, -1 if none."""
+    var best = -1
+    for v in 0..s.queues.len():
+        if v != w and s.queues[v].len() > 0 and (s.worker_socket[v] == s.worker_socket[w]) == same_socket:
+            if best < 0 or s.queues[v].len() > s.queues[best].len(): best = v
+    best
+
+fn _fs_socket_idle(s: FiberSchedV1, socket: i64) -> bool:
+    for v in 0..s.queues.len():
+        if s.worker_socket[v] == socket and s.queues[v].len() > 0: return false
+    true
+
+struct FiberPickV1:
+    sched: FiberSchedV1
+    fiber: i64
+
+fn fiber_sched_pick(s: FiberSchedV1, w: i64) -> FiberPickV1:
+    """Worker w takes its own bottom (LIFO); else steals a same-socket top;
+    crosses sockets only when w's whole socket is idle. fiber = -1 if none."""
+    var t = s
+    if t.queues[w].len() > 0:
+        val id = t.queues[w][t.queues[w].len() - 1]
+        return FiberPickV1(sched: _fs_take_bottom(t, w), fiber: id)
+    var v = _fs_victim(t, w, true)
+    if v >= 0:
+        t.steals_local = t.steals_local + 1
+    elif _fs_socket_idle(t, t.worker_socket[w]):
+        v = _fs_victim(t, w, false)
+        if v >= 0: t.steals_remote = t.steals_remote + 1
+    if v < 0:
+        return FiberPickV1(sched: t, fiber: -1)
+    val id = t.queues[v][0]
+    t = _fs_take_top(t, v)
+    t.fiber_worker[id] = w
+    FiberPickV1(sched: t, fiber: id)
+
+fn fiber_sched_complete(s: FiberSchedV1, w: i64, fiber: i64, step: FiberStepV1) -> FiberSchedV1:
+    """Apply one step result of `fiber`, run on worker w."""
+    var t = s
+    if step.kind == FIBER_STEP_DONE:
+        t.fiber_state[fiber] = FIBER_STATE_DONE
+        t.reserved = t.reserved - t.fiber_est[fiber]
+        return fiber_sched_admit(t)
+    if step.kind == FIBER_STEP_PARK and step.token > 0:
+        t.fiber_state[fiber] = FIBER_STATE_PARKED
+        t.fiber_token[fiber] = step.token
+        return fiber_sched_admit(t)
+    t.queues[w] = t.queues[w].push(fiber)
+    t
+
+fn fiber_sched_wake(s: FiberSchedV1, token: i64) -> FiberSchedV1:
+    """Requeue every fiber parked on `token` onto the worker that parked it."""
+    var t = s
+    for id in 0..t.fiber_state.len():
+        if t.fiber_state[id] == FIBER_STATE_PARKED and t.fiber_token[id] == token:
+            t.fiber_state[id] = FIBER_STATE_READY
+            t.fiber_token[id] = 0
+            val w = t.fiber_worker[id]
+            t.queues[w] = t.queues[w].push(id)
+    t
+
+fn fiber_sched_parked_count(s: FiberSchedV1) -> i64:
+    var n = 0
+    for st in s.fiber_state:
+        if st == FIBER_STATE_PARKED: n = n + 1
+    n
+
+fn fiber_sched_all_done(s: FiberSchedV1) -> bool:
+    for st in s.fiber_state:
+        if st != FIBER_STATE_DONE: return false
+    true
+
+fn fiber_sched_run_round(s: FiberSchedV1, step_fn: fn(i64) -> FiberStepV1) -> FiberSchedV1:
+    """Single-carrier round: every worker in turn picks and steps one fiber."""
+    var t = fiber_sched_admit(s)
+    for w in 0..t.queues.len():
+        val pick = fiber_sched_pick(t, w)
+        t = pick.sched
+        if pick.fiber >= 0:
+            val result = step_fn(pick.fiber)
+            t = fiber_sched_complete(t, w, pick.fiber, result)
+    t
+
+export FIBER_STEP_DONE, FIBER_STEP_YIELD, FIBER_STEP_PARK
+export FIBER_STATE_PENDING, FIBER_STATE_READY, FIBER_STATE_PARKED, FIBER_STATE_DONE
+export FiberStepV1, fiber_step_done, fiber_step_yield, fiber_step_park
+export FiberSchedV1, FiberPickV1, fiber_sched_new, fiber_sched_submit, fiber_sched_prioritize
+export fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake
+export fiber_sched_runnable_count, fiber_sched_parked_count, fiber_sched_all_done, fiber_sched_run_round

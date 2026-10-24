@@ -36,6 +36,7 @@ use compiler.core.parser.{parser_promote_transient_owners, parser_initialization
 use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
 use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
@@ -448,6 +449,11 @@ impl CompilerDriver:
 
     me parse_full_frontend_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        # Step-3 lazy restore on the retained route: an opted-in HIR shard
+        # worker parses the module SKELETON here (surfaces only); HIR re-parses
+        # the full source of each module it claims (driver_hir_pipeline_lowering).
+        val parse_text = driver_surface_parse_text_v1(source_content,
+            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
         # cache-decode scratch. Borrow one per-file scope through preprocessing,
         # parsing and desugaring, then retain exactly the escaped owners.
@@ -457,13 +463,13 @@ impl CompilerDriver:
             self.ctx.options.cli_mode_text == "aot"
         if not aot:
             return self.parse_full_frontend_unscoped_selected_v1(
-                source_content, source_path, source_module_name)
+                parse_text, source_path, source_module_name)
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
         if not _sffi_transient_array_scope_begin():
             panic("transient retained parser scope unavailable for {source_path}")
         val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-            source_content, source_path, source_module_name)
+            parse_text, source_path, source_module_name)
         if not _sffi_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             panic("transient retained parser scope pause failed for {source_path}")
@@ -559,13 +565,17 @@ impl CompilerDriver:
             authored_path: source_authored_path,
             content: source_content,
             module_name: source_module_name)
+        # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
+        # from the module skeleton (driver_hir_worker_surface_v1.spl).
+        val surface_text = driver_surface_parse_text_v1(source_content,
+            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         log_module_surface_stage(source_path, "parse-start")
         val selected_module = if force_source_parse:
             self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         else:
             self.parse_full_frontend_in_borrowed_scope_selected_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         val module = match selected_module:
             case Ok(value): value
             case Err(error):

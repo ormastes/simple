@@ -1,7 +1,7 @@
 # Concrete generic TLDR view acquisition boundary (plan P3).
 #
 #   acquire_symbolic_tldr(section, symbol)        -> the single template entry
-#   acquire_concrete_tldr(table, section, symbol, args, snapshot_pin, profile)
+#   acquire_concrete_tldr(table, section, symbol, args, snapshot_pin, profile, guard_root)
 #                                                 -> immutable ConcreteTldrAstViewV1
 #
 # No locks and no leases. Views are immutable values published set-once into
@@ -33,9 +33,13 @@ use compiler.mono.model.generic_subst_model.{MType, mt_key_type, mt_is_unknown,
     mt_is_closed, mt_depth, mt_unknown, mt_from_key, mt_instantiate_key,
     MI_STATUS_CLOSED, MI_STATUS_OPEN, MI_STATUS_DEPTH}
 use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_admissible_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_identity_ok,
+    HASH_ALGO_SHA256_V1}
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
 use std.common.string_core.{text_to_bytes}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticQueryKeyV1,
     SemanticQueryReadV1, SemanticQueryReadManifestV1, SemanticCoverageV1}
@@ -73,17 +77,25 @@ class GenericTldrViewTableV1:
 
     # Single-flight production: the leader builds and publishes set-once;
     # a request that joins an in-flight key reads the leader's publication.
-    me produce(semantic_key: text, build: ConcreteTldrAstViewV1) -> GenericConcreteAcquireV1:
+    # The leader joins with a start time (redrive clock) and ALWAYS completes
+    # its flight: with the view id on success, with nil on failure, so an
+    # abandoned or failed leader can never strand waiters.
+    me produce(semantic_key: text, build: ConcreteTldrAstViewV1, now_ms: i64) -> GenericConcreteAcquireV1:
         val flight_key = cache_single_flight_key_v1(_FLIGHT_KIND_V1, semantic_key)
         val request_id = "req-{self.next_request}"
         self.next_request = self.next_request + 1
-        val (role, flight) = self.flights.join(flight_key, request_id)
+        val (role, flight) = self.flights.join_at(flight_key, request_id, now_ms)
         if role != SINGLE_FLIGHT_LEADER_V1:
             val published = self.lookup(semantic_key)
             if published.len() == 1:
                 return GenericConcreteAcquireV1(view: published[0], joined: true)
             return GenericConcreteAcquireV1(view: build, joined: false)
         val id = self.ids.id_of(semantic_key)
+        if self.views.contains_key(id) and self.views[id].semantic_key != semantic_key:
+            # Index slot owned by another key: never return a foreign view.
+            self.flights.complete(flight_key, request_id, nil)
+            val _failed = self.flights.future(flight)
+            return GenericConcreteAcquireV1(view: build, joined: false)
         var view = build
         view.view_id = id
         if not self.views.contains_key(id):
@@ -91,6 +103,10 @@ class GenericTldrViewTableV1:
         self.flights.complete(flight_key, request_id, text_to_bytes(id))
         val _drain = self.flights.future(flight)
         GenericConcreteAcquireV1(view: self.views[id], joined: false)
+
+    # Re-drive leaders that joined at least `timeout_ms` ago without completing.
+    me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
+        self.flights.redrive(now_ms, timeout_ms)
 
 pub fn generic_tldr_view_table_new() -> GenericTldrViewTableV1:
     GenericTldrViewTableV1.create()
@@ -108,6 +124,12 @@ pub fn acquire_symbolic_tldr(section: GenericTemplateSectionV1, symbol_id: text)
         return GenericSymbolicAcquireV1(found: false, entry: _empty_entry_v1())
     GenericSymbolicAcquireV1(found: true, entry: section.entries[at])
 
+# A tagged, collision-resistant DigestV1 (registry); anything else is a miss.
+fn _identity_digest_ok_v1(tagged: text) -> bool:
+    match digest_v1_parse(tagged):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
+
 fn _unresolved_v1(entry: GenericTemplateEntryV1, snapshot_pin: text, error: text) -> GenericConcreteAcquireV1:
     GenericConcreteAcquireV1(view: ConcreteTldrAstViewV1(view_id: "", semantic_key: "",
         template_id: "", args_id: "", arg_keys: [], snapshot_pin: snapshot_pin, template: entry,
@@ -119,11 +141,15 @@ pub fn concrete_tldr_field_type(view: ConcreteTldrAstViewV1, index: i64) -> MTyp
 
 pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemplateSectionV1,
         symbol_id: text, args: [MType], snapshot_pin: text,
-        profile_digest: text) -> GenericConcreteAcquireV1:
+        profile_digest: text, guard_root: ActiveGuardRootV1) -> GenericConcreteAcquireV1:
     val sym = acquire_symbolic_tldr(section, symbol_id)
     if not sym.found:
         return _unresolved_v1(sym.entry, snapshot_pin, "unknown-symbol")
     val entry = sym.entry
+    # An incomplete (unevaluable-guard) root, or a template whose guard root is
+    # not a tagged ActiveGuardRoot digest, can never key a cache entry: miss.
+    if not active_guard_root_admissible_v1(guard_root) or not _identity_digest_ok_v1(entry.active_guard_root):
+        return _unresolved_v1(entry, snapshot_pin, "guard-root-inadmissible")
     if args.len() != entry.params.len():
         return _unresolved_v1(entry, snapshot_pin, "arity-mismatch")
     var kinds: [text] = []
@@ -149,7 +175,7 @@ pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemp
     val template_id = generic_template_id_v1(entry)
     val args_id = generic_args_id_v1(kinds, arg_keys)
     val semantic_key = concrete_tldr_key_v1(template_id, args_id,
-        GENERIC_TLDR_CONSTRAINT_ROOT_V1, profile_digest)
+        GENERIC_TLDR_CONSTRAINT_ROOT_V1, profile_digest, guard_root.root_digest)
     val published = table.lookup(semantic_key)
     if published.len() == 1:
         return GenericConcreteAcquireV1(view: published[0], joined: true)
@@ -170,21 +196,29 @@ pub fn acquire_concrete_tldr(table: GenericTldrViewTableV1, section: GenericTemp
     val status = if open: GENERIC_CLOSURE_PARTIAL else: GENERIC_CLOSURE_CONCRETE
     table.produce(semantic_key, ConcreteTldrAstViewV1(view_id: "", semantic_key: semantic_key,
         template_id: template_id, args_id: args_id, arg_keys: arg_keys, snapshot_pin: snapshot_pin, template: entry,
-        overrides: overrides, closure_status: status, error: ""))
+        overrides: overrides, closure_status: status, error: ""), time_now_monotonic_ms())
 
 # Forward read record (P2 schema, SQR1): the concrete view `tldr.concrete`
 # consumed the template `tldr.symbolic` summary. `.rr` maps this kind to the
 # `generic-specialization` family; it is never an input of the view's key.
+# The SQR1 wire carries a bare sha256 digest field; a tagged identity is
+# admitted there only when it is a sha256 DigestV1 ("" otherwise, which the
+# manifest validator rejects - fail closed).
+fn _sqr1_digest_v1(tagged: text) -> text:
+    match digest_v1_parse(tagged):
+        case Some(d): if d.algo_id == HASH_ALGO_SHA256_V1: d.hex else: ""
+        case nil: ""
+
 pub fn concrete_tldr_read_manifest_v1(view: ConcreteTldrAstViewV1,
         profile_digest: text) -> SemanticQueryReadManifestV1:
     val profile = sha256_text(profile_digest)
     val symbol = view.template.symbol_id
     val consumer = SemanticQueryKeyV1(kind: "tldr.concrete", stable_entity_id: symbol,
-        semantic_profile_digest: profile, parameter_digest: view.args_id)
+        semantic_profile_digest: profile, parameter_digest: _sqr1_digest_v1(view.args_id))
     val producer = SemanticQueryKeyV1(kind: "tldr.symbolic", stable_entity_id: symbol,
         semantic_profile_digest: profile, parameter_digest: sha256_text("tldr.symbolic/no-arguments/v1"))
     val read = SemanticQueryReadV1(producer: producer, consumer: consumer,
-        facet: "template-summary", ordinal: 0, consumed_fingerprint: view.template_id,
+        facet: "template-summary", ordinal: 0, consumed_fingerprint: _sqr1_digest_v1(view.template_id),
         witness_digest: generic_template_summary_digest_v1(view.template),
         partition_id: symbol, completeness: SemanticCoverageV1.Complete)
     SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: [read])

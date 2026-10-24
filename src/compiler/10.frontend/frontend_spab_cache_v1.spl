@@ -1,0 +1,64 @@
+# Packed .spab front-end cache (packed_binary_ast_v1.md step 2).
+#
+# Sits beside the private line-blob parse cache (frontend_parse_cache.spl) and
+# shares its key and scope. A HIT maps the blob (mmap on native; a byte read
+# where the runtime has no mapping), validates it fail-closed (§4), admits it
+# against the expected digests, and restores the flat pools from typed tokens
+# read straight out of the sections -- no line blob is built or re-parsed.
+# Every doubt is a MISS; the caller then tries the line cache and finally a
+# real parse.
+#
+# Opt-in (SIMPLE_FRONTEND_SPAB=1) until the whole-closure native gate passes on
+# a stage3 binary built with it; then the default flips and the line cache is
+# retired.
+#
+# Identity (§8): source = (xxh3-128, the cache key the line cache already uses),
+# compiler = (sha256, the front-end cache scope, which already folds the
+# producer identity). module_key = xxh3-128 of the module path.
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_scope,
+    frontend_parse_cache_dir}
+use compiler.frontend.flat_ast_bridge.{build_module_from_packed_view_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_open_v1,
+    flat_packed_close_v1, flat_packed_admit_view_v1, flat_packed_store_v1, module_artifact_path_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.io_runtime.{env_get_opt}
+
+pub fn frontend_spab_enabled_v1() -> bool:
+    (env_get_opt("SIMPLE_FRONTEND_SPAB") ?? "") == "1" and frontend_parse_cache_enabled()
+
+fn _identity(key: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: HASH_ALGO_XXH3_128_V1, hex: key),
+     SpabDigestV1(subject: 2, algo: HASH_ALGO_SHA256_V1, hex: sha256_text(frontend_parse_cache_scope()))]
+
+pub fn frontend_spab_path_v1(key: text) -> text:
+    if key.len() != 32:
+        return ""
+    val ids = _identity(key)
+    module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[1])
+
+pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i64],
+        refs: [SpabImportRefV1]) -> bool:
+    val path = frontend_spab_path_v1(key)
+    if path == "" or blob == "" or trace.len() == 0:
+        return false
+    val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key), xxh3_128_text(file_path))
+    if packed.len() == 0:
+        return false
+    flat_packed_store_v1(path, packed)
+
+pub fn frontend_spab_load_v1(key: text, source: text, file_path: text) -> ParserModule?:
+    val path = frontend_spab_path_v1(key)
+    if path == "":
+        return nil
+    val view = flat_packed_open_v1(path)
+    if not view.valid or flat_packed_admit_view_v1(view, _identity(key)) != "":
+        val _closed = flat_packed_close_v1(view)
+        return nil
+    val built = build_module_from_packed_view_v1(view, source, file_path)
+    val _closed = flat_packed_close_v1(view)
+    built
+
+export frontend_spab_enabled_v1, frontend_spab_path_v1, frontend_spab_store_v1, frontend_spab_load_v1

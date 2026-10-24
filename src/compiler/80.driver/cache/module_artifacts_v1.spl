@@ -11,7 +11,7 @@
 #       the projector validates and renders them into one `summary` section,
 #       and generic / inline bodies -- which a summary never carries -- follow
 #       as `generic` / `inline` sections, then `sif:` and the SIF text. The one
-#       freshness authority is the embedded source-sha256; the companion is
+#       freshness authority is the embedded, algorithm-tagged source digest; the companion is
 #       compiler-written and never importable as source.
 #
 # This is the single producer contract shared by `simple tldr`
@@ -30,10 +30,20 @@
 # Known gaps (named, not filled): facts carry no cross-symbol dependency
 # edges; a declaration whose expansion has no source line of its own is not
 # carried; no HIR consumer reads the companion yet (the per-file scheduler PR).
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_text,
+    digest_v1_equal, HASH_ALGO_SHA256_V1}
+use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_guarded_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_guarded_v1,
+    MacroModuleProjectionV1, MacroDefKeyEntryV1}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.sif.sif.{sif_of_source, sif_validate}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
@@ -43,7 +53,8 @@ use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of
     module_public_macro_facts_v1, module_generic_template_decls_of_module_v1}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
     MacroUseTableV1, macro_definition_table_encode_v1, macro_use_table_encode_v1,
-    macro_reference_schema_v1}
+    macro_reference_schema_v1, MacroUseV1, macro_definition_table_decode_v1,
+    macro_use_status_tag_v1, macro_content_digest_v1}
 use compiler.frontend.cache_artifact.generic_tldr_projector.{project_generic_template_v1}
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     build_generic_template_section_v1, generic_template_section_encode_v1}
@@ -54,7 +65,7 @@ use compiler.frontend.cache_artifact.public_summary_projector.{FrozenPublicFactV
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
-pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 4"
+pub val MODULE_TLDR_COMPANION_HEADER_V1: text = "simple-tldr-companion: 6"
 val MODULE_TLDR_LANG_V1: text = "1"
 
 
@@ -79,20 +90,40 @@ pub fn module_tldr_companion_render_v1(module_id: text, source: text) -> text:
     module_tldr_companion_render_sections_v1(module_id, source,
         module_tldr_sections_of_source_v1(source))
 
+# Producer digest of the source bytes: algorithm-tagged (`sha256:<hex>`), so a
+# reader on a host with another algorithm sees an unknown tag as a miss.
+fn _module_source_digest_text_v1(source: text) -> text:
+    match digest_v1_of_text(HASH_ALGO_SHA256_V1, source):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+# The recorded digest matches `source` only for a known algorithm whose
+# recomputed digest is byte-equal; an unknown or malformed tag is absent.
+fn _module_source_digest_matches_v1(recorded: text, source: text) -> bool:
+    match digest_v1_parse(recorded):
+        case Some(d):
+            match digest_v1_of_text(d.algo_id, source):
+                case Some(actual): digest_v1_equal(d, actual)
+                case nil: false
+        case nil: false
+
 # Producer path: `sections` come from the parsed module (AST-anchored).
 pub fn module_tldr_companion_render_sections_v1(module_id: text, source: text, sections: [text]) -> text:
     MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
-        "source-sha256: " + sha256_text(source) + "\n" +
+        "source-digest: " + _module_source_digest_text_v1(source) + "\n" +
         module_tldr_sections_render_v1(sections) +
         "sif:\n" + sif_of_source(module_id, MODULE_TLDR_LANG_V1, [], source)
 
 # (sections, sif) of a valid companion for `source`; sif is "" when invalid.
 fn _module_tldr_companion_split_v1(content: text, source: text) -> ([text], text):
-    val header = MODULE_TLDR_COMPANION_HEADER_V1 + "\n" +
-        "source-sha256: " + sha256_text(source) + "\n"
-    if not content.starts_with(header):
+    val prefix = MODULE_TLDR_COMPANION_HEADER_V1 + "\nsource-digest: "
+    if not content.starts_with(prefix):
         return ([], "")
-    val rest = content.substring(header.len())
+    val after = content.substring(prefix.len())
+    val line_end = after.index_of("\n")
+    if line_end < 0 or not _module_source_digest_matches_v1(after.substring(0, line_end), source):
+        return ([], "")
+    val rest = after.substring(line_end + 1)
     val (sections, consumed) = module_tldr_sections_parse_v1(rest)
     if consumed < 0:
         return ([], "")
@@ -120,7 +151,7 @@ pub fn module_tldr_companion_fresh_v1(path: text, source: text) -> bool:
     module_tldr_companion_body_v1(file_read(path), source) != ""
 
 # PublicSummaryV1 identity for a locally produced companion. The summary is a
-# VIEW: its only freshness authority is the embedded source-sha256.
+# VIEW: its only freshness authority is the embedded source digest.
 fn _module_summary_input_v1(module_id: text, source_path: text, source: text,
         facts: [FrozenPublicFactV1]) -> PublicSummaryProjectionInputV1:
     val source_digest = sha256_text(source)
@@ -195,12 +226,110 @@ pub fn module_tldr_companion_view_sections_with_macros_v1(module: ParserModule,
             sections.push(entry)
     for entry in module_tldr_macro_sections_v1(def_table, use_table):
         sections.push(entry)
+    # Surface skeleton (codec step 3): a HIR worker parses this instead of the
+    # full source; its canonical surface digest equals the full parse.
+    sections.push("surface|" + module_surface_skeleton_v1(source))
+    sections.push("surface-digest|sha256:" + module_surface_canonical_digest_v1(module))
     (sections, refusal)
+
+
+# `macro-key` section: one line per definition, `<def id>\t<name>\t<MacroDefKey>\t<0|1 uncacheable>`.
+# The def table alone cannot rebuild a MacroDefKey (it folds in the transitive
+# nested-read root), so importers read the producer's keys from here.
+pub fn module_tldr_macro_key_section_v1(p: MacroModuleProjectionV1) -> text:
+    if p.def_keys.len() == 0:
+        return ""
+    var lines: [text] = []
+    for k in p.def_keys:
+        val flag = if p.uncacheable_def_ids.contains(k.def_id): "1" else: "0"
+        lines.push(k.def_id + "\t" + k.macro_name + "\t" + k.key + "\t" + flag)
+    "macro-key|" + lines.join("\n")
+
+# Rebuild an importable projection (definitions + keys only) from a fresh
+# companion's sections. ok=false when a macro section is present but does not
+# decode -- the caller must then treat the import as unknown.
+fn _imported_macro_projection_v1(sections: [text], source_path: text) -> (bool, MacroModuleProjectionV1):
+    val module_id = module_artifact_module_id_v1(source_path)
+    var table = MacroDefinitionTableV1(schema: macro_reference_schema_v1(), module_id: module_id, entries: [])
+    var keys: [MacroDefKeyEntryV1] = []
+    var uncacheable: [text] = []
+    var ok = true
+    for s in sections:
+        if s.starts_with("macro-def|"):
+            val decoded = macro_definition_table_decode_v1(s.substring(10))
+            if decoded.ok: table = decoded.value
+            else: ok = false
+        if s.starts_with("macro-key|"):
+            for line in s.substring(10).split("\n"):
+                val f = line.split("\t")
+                if f.len() != 4:
+                    ok = false
+                    continue
+                keys.push(MacroDefKeyEntryV1(def_id: f[0], macro_name: f[1], key: f[2]))
+                if f[3] == "1": uncacheable.push(f[0])
+    if table.entries.len() != keys.len(): ok = false
+    (ok, MacroModuleProjectionV1(package: "", module: module_id, source_id: source_path,
+        def_table: table, def_keys: keys,
+        use_table: MacroUseTableV1(schema: macro_reference_schema_v1(), module_id: module_id, uses: []),
+        generated_public_names: [], generated_public_surface_digest: "",
+        diagnostics: [], uncacheable_def_ids: uncacheable))
+
+# Macro definitions visible from the imported modules, read from their FRESH
+# TLDR companions (never by reparsing them). complete=false when any import's
+# companion is missing, stale or undecodable: its macros are then unknown.
+pub fn module_tldr_imported_macro_projections_v1(import_source_paths: [text],
+        tldr_root: text) -> ([MacroModuleProjectionV1], bool):
+    var out: [MacroModuleProjectionV1] = []
+    var complete = true
+    for path in import_source_paths:
+        if not file_exists(path):
+            complete = false
+            continue
+        val companion = module_tldr_companion_path_v1(tldr_root, path)
+        if not file_exists(companion):
+            complete = false
+            continue
+        val content = file_read(companion)
+        val src = file_read(path)
+        if module_tldr_companion_body_v1(content, src) == "":
+            complete = false
+            continue
+        val (ok, p) = _imported_macro_projection_v1(module_tldr_companion_sections_v1(content, src), path)
+        if not ok:
+            complete = false
+            continue
+        if p.def_keys.len() > 0: out.push(p)
+    (out, complete)
+
+# With an incomplete import set, a negative lookup is not proof of absence:
+# every unresolved use becomes conservative (never cacheable).
+pub fn macro_projection_mark_imports_incomplete_v1(p: MacroModuleProjectionV1) -> MacroModuleProjectionV1:
+    var uses: [MacroUseV1] = []
+    for u in p.use_table.uses:
+        var v = u
+        if macro_use_status_tag_v1(v.status) == "unresolved": v.coverage = "conservative"
+        uses.push(v)
+    MacroModuleProjectionV1(package: p.package, module: p.module, source_id: p.source_id,
+        def_table: p.def_table, def_keys: p.def_keys,
+        use_table: MacroUseTableV1(schema: p.use_table.schema, module_id: p.use_table.module_id, uses: uses),
+        generated_public_names: p.generated_public_names,
+        generated_public_surface_digest: p.generated_public_surface_digest,
+        diagnostics: p.diagnostics, uncacheable_def_ids: p.uncacheable_def_ids)
+
+# Source paths of this module's imports that resolve to a file.
+fn _module_import_source_paths_v1(parsed: ParserModule, source_path: text) -> [text]:
+    var out: [text] = []
+    for imp in parsed.imports:
+        val path = resolve_module_path(imp.module, source_path)
+        if path != "" and not out.contains(path): out.push(path)
+    out
 
 # Temp file in the destination directory, then rename over the destination.
 pub fn module_artifact_publish_atomic_v1(path: text, content: text) -> bool:
     val slash = path.rfind("/")
     if slash > 0 and not dir_create_all(path.substring(0, slash)):
+        return false
+    if not disk_publish_admitted(if slash > 0: path.substring(0, slash) else: ".", content.len()):
         return false
     val temp = "{path}.{getpid()}.{xxh3_128_text(content)}.tmp"
     if not file_write(temp, content):
@@ -224,8 +353,28 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     # The one parse: fills the full-AST caches as a side effect of the
     # ordinary frontend cache boundary.
     val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
-    val (sections, _refusal) = module_tldr_companion_view_sections_v1(parsed, source_path,
-        source, module_id)
+    # Macro facts are read from the parser pools of THIS parse before anything
+    # else parses. Imported macros resolve against the imports' fresh TLDR
+    # companions (macro-def + macro-key sections); if any import companion is
+    # missing or stale, unresolved uses are kept conservative (never a false
+    # negative cache hit).
+    # Guards are recovered from the ORIGINAL source (the preprocessor blanks
+    # inactive @when branches before the parser runs).
+    val (macro_source, guard_evals) = macro_module_source_from_parse_guarded_v1("", module_id,
+        source_path, source)
+    val (imported_macros, imports_complete) = module_tldr_imported_macro_projections_v1(
+        _module_import_source_paths_v1(parsed, source_path), tldr_root)
+    var macro_projection = project_macro_module_guarded_v1(macro_source, imported_macros,
+        macro_content_digest_v1("macro-profile/host"), guard_evals)
+    if not imports_complete:
+        macro_projection = macro_projection_mark_imports_incomplete_v1(macro_projection)
+    val (view_sections, _refusal) = module_tldr_companion_view_sections_with_macros_v1(parsed,
+        source_path, source, module_id, macro_projection.def_table, macro_projection.use_table,
+        macro_projection.generated_public_names)
+    var sections = view_sections
+    val macro_key_section = module_tldr_macro_key_section_v1(macro_projection)
+    if macro_key_section != "":
+        sections.push(macro_key_section)
     if not module_artifact_publish_atomic_v1(tldr_path,
             module_tldr_companion_render_sections_v1(module_id, source, sections)):
         return "tldr publish failed: {tldr_path}"
@@ -239,3 +388,5 @@ export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_tldr_companion_view_sections_v1
 export module_tldr_macro_sections_v1, module_tldr_companion_view_sections_with_macros_v1
 export module_artifacts_emit_v1
+export module_tldr_macro_key_section_v1, module_tldr_imported_macro_projections_v1
+export macro_projection_mark_imports_incomplete_v1

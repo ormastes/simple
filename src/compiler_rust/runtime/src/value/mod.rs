@@ -452,6 +452,7 @@ pub use sffi::{
     rt_file_write_text_at_cached,
     rt_file_write_text_at_cached_repeat,
     rt_mmap,
+    rt_mmap_create,
     rt_munmap,
     rt_madvise,
     rt_msync,

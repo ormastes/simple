@@ -1665,6 +1665,34 @@ pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) 
     0
 }
 
+/// Writer-side twin of `rt_mmap`: create (or truncate) `path`, set its length
+/// to exactly `size` bytes, and return a read-write shared mapping of the
+/// whole file (0 on any failure). The caller fills the view, `rt_msync` +
+/// `rt_munmap`, then publishes with an atomic rename (temp+rename).
+#[no_mangle]
+pub extern "C" fn rt_mmap_create(path: i64, size: i64) -> i64 {
+    let Some(path_str) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return 0;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path_str);
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.set_len(size as u64).is_err() {
+        return 0;
+    }
+    drop(file);
+    rt_mmap(path, size, 0, 0)
+}
+
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
@@ -2166,6 +2194,55 @@ pub extern "C" fn rt_file_write_bytes_array(path: RuntimeValue, data: RuntimeVal
         return false;
     };
     unsafe { rt_file_write_bytes(path_ptr, path_len as u64, bytes.as_ptr(), bytes.len() as u64) }
+}
+
+/// Bytes available to the caller on the volume holding `path` (Simple text).
+/// Rust twin of runtime_native.c `rt_host_disk_headroom_bytes_v1`; 0 when
+/// unknown (callers treat 0 as "cannot measure", never as "disk full").
+#[no_mangle]
+pub extern "C" fn rt_host_disk_headroom_bytes_v1(path: RuntimeValue) -> i64 {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len <= 0 || path_len >= 4096 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    if text.contains('\0') {
+        return 0;
+    }
+    host_disk_headroom(text)
+}
+
+#[cfg(windows)]
+fn host_disk_headroom(path: &str) -> i64 {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut available: u64 = 0;
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } == 0 {
+        return 0;
+    }
+    i64::try_from(available).unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn host_disk_headroom(path: &str) -> i64 {
+    let Ok(c_path) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return 0;
+    }
+    let available = (stat.f_bavail as u128) * (stat.f_frsize as u128);
+    i64::try_from(available).unwrap_or(i64::MAX)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn host_disk_headroom(_path: &str) -> i64 {
+    0
 }
 
 /// Wrap a host native shared library in a role-2 SMF envelope.

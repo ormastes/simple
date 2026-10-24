@@ -244,34 +244,110 @@ static HEAP_ALLOCATION_REGISTRY: OnceLock<Box<[HeapRegistryShard]>> = OnceLock::
 // ---------------------------------------------------------------------------
 const HEAP_KIND_SLOTS: usize = 32;
 
-static HEAP_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+// Counters are STRIPED: each thread writes only its own cache-line-aligned
+// stripe (relaxed adds on an uncontended line), and readers sum the stripes.
+// One global set of atomics bounced the same lines between every allocating
+// thread (and across sockets on the 2-socket build host). An object freed on
+// another thread decrements that thread's stripe, so a single stripe may go
+// negative; only the sum is meaningful, so stripes hold wrapping u64 deltas.
+const HEAP_COUNTER_STRIPES: usize = 64;
+/// Peak is refreshed (one sum over the stripes + fetch_max) every this many
+/// allocations per thread and on every peak read, so the reported high-water
+/// mark can trail the true instantaneous peak by at most that window.
+const HEAP_PEAK_SAMPLE_EVERY: u32 = 1024;
+
+#[repr(align(128))]
+struct HeapCounterStripe {
+    live_bytes: AtomicU64,
+    total_allocs: AtomicU64,
+    total_frees: AtomicU64,
+    kind_live_count: [AtomicU64; HEAP_KIND_SLOTS],
+    kind_live_bytes: [AtomicU64; HEAP_KIND_SLOTS],
+}
+
+static HEAP_COUNTER_STRIPES_TABLE: [HeapCounterStripe; HEAP_COUNTER_STRIPES] = [const {
+    HeapCounterStripe {
+        live_bytes: AtomicU64::new(0),
+        total_allocs: AtomicU64::new(0),
+        total_frees: AtomicU64::new(0),
+        kind_live_count: [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS],
+        kind_live_bytes: [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS],
+    }
+}; HEAP_COUNTER_STRIPES];
 static HEAP_PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
-static HEAP_TOTAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
-static HEAP_TOTAL_FREES: AtomicU64 = AtomicU64::new(0);
-static HEAP_KIND_LIVE_COUNT: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
-static HEAP_KIND_LIVE_BYTES: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
+static HEAP_NEXT_STRIPE: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static HEAP_STRIPE: Cell<(usize, u32)> = const { Cell::new((usize::MAX, 0)) };
+}
+
+/// This thread's stripe, plus whether this allocation should refresh the peak.
+#[inline]
+fn heap_counter_stripe(count_alloc: bool) -> (&'static HeapCounterStripe, bool) {
+    let (index, sample) = HEAP_STRIPE
+        .try_with(|cell| {
+            let (mut index, mut ticks) = cell.get();
+            if index == usize::MAX {
+                index = HEAP_NEXT_STRIPE.fetch_add(1, Ordering::Relaxed) as usize % HEAP_COUNTER_STRIPES;
+            }
+            let mut sample = false;
+            if count_alloc {
+                ticks += 1;
+                if ticks >= HEAP_PEAK_SAMPLE_EVERY {
+                    ticks = 0;
+                    sample = true;
+                }
+            }
+            cell.set((index, ticks));
+            (index, sample)
+        })
+        // TLS torn down (thread exit): stripe 0, always refresh the peak.
+        .unwrap_or((0, true));
+    (&HEAP_COUNTER_STRIPES_TABLE[index], sample)
+}
+
+#[inline]
+fn heap_counter_sum(read: impl Fn(&HeapCounterStripe) -> &AtomicU64) -> u64 {
+    HEAP_COUNTER_STRIPES_TABLE
+        .iter()
+        .fold(0u64, |acc, stripe| acc.wrapping_add(read(stripe).load(Ordering::Relaxed)))
+}
+
+fn heap_refresh_peak() -> u64 {
+    let live = heap_counter_sum(|stripe| &stripe.live_bytes);
+    // A transiently negative sum (frees counted before their allocs on
+    // another stripe) wraps to a huge u64; it is not a real peak.
+    if (live as i64) >= 0 {
+        HEAP_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+    }
+    live
+}
 
 #[inline]
 fn note_heap_alloc(kind: u8, bytes: u64) {
-    HEAP_TOTAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
-    let live = HEAP_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    HEAP_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
-    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+    let (stripe, sample) = heap_counter_stripe(true);
+    stripe.total_allocs.fetch_add(1, Ordering::Relaxed);
+    stripe.live_bytes.fetch_add(bytes, Ordering::Relaxed);
+    if let Some(slot) = stripe.kind_live_count.get(kind as usize) {
         slot.fetch_add(1, Ordering::Relaxed);
     }
-    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+    if let Some(slot) = stripe.kind_live_bytes.get(kind as usize) {
         slot.fetch_add(bytes, Ordering::Relaxed);
+    }
+    if sample {
+        heap_refresh_peak();
     }
 }
 
 #[inline]
 fn note_heap_free(kind: u8, bytes: u64) {
-    HEAP_TOTAL_FREES.fetch_add(1, Ordering::Relaxed);
-    HEAP_LIVE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
-    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+    let (stripe, _) = heap_counter_stripe(false);
+    stripe.total_frees.fetch_add(1, Ordering::Relaxed);
+    stripe.live_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    if let Some(slot) = stripe.kind_live_count.get(kind as usize) {
         slot.fetch_sub(1, Ordering::Relaxed);
     }
-    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+    if let Some(slot) = stripe.kind_live_bytes.get(kind as usize) {
         slot.fetch_sub(bytes, Ordering::Relaxed);
     }
 }
@@ -458,13 +534,17 @@ pub fn clear_heap_allocation_registry() {
             });
         }
     }
-    HEAP_LIVE_BYTES.store(0, Ordering::Relaxed);
-    HEAP_TOTAL_ALLOCS.store(0, Ordering::Relaxed);
-    HEAP_TOTAL_FREES.store(0, Ordering::Relaxed);
     // Peak intentionally survives a clear: it answers "how big did this
-    // process get", which a bulk reset must not erase.
-    for slot in HEAP_KIND_LIVE_COUNT.iter().chain(HEAP_KIND_LIVE_BYTES.iter()) {
-        slot.store(0, Ordering::Relaxed);
+    // process get", which a bulk reset must not erase. Fold the pre-clear
+    // live total into it first so no sampled window is lost.
+    heap_refresh_peak();
+    for stripe in HEAP_COUNTER_STRIPES_TABLE.iter() {
+        stripe.live_bytes.store(0, Ordering::Relaxed);
+        stripe.total_allocs.store(0, Ordering::Relaxed);
+        stripe.total_frees.store(0, Ordering::Relaxed);
+        for slot in stripe.kind_live_count.iter().chain(stripe.kind_live_bytes.iter()) {
+            slot.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -472,43 +552,46 @@ pub fn clear_heap_allocation_registry() {
 /// buffers — see the accounting comment above).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_bytes() -> i64 {
-    HEAP_LIVE_BYTES.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.live_bytes) as i64
 }
 
 /// High-water mark of `rt_heap_live_bytes` for this process.
 #[no_mangle]
 pub extern "C" fn rt_heap_peak_bytes() -> i64 {
+    heap_refresh_peak();
     HEAP_PEAK_BYTES.load(Ordering::Relaxed) as i64
 }
 
 /// Total registered allocations since process start (monotonic).
 #[no_mangle]
 pub extern "C" fn rt_heap_alloc_count() -> i64 {
-    HEAP_TOTAL_ALLOCS.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.total_allocs) as i64
 }
 
 /// Total unregistered (freed) allocations since process start (monotonic).
 #[no_mangle]
 pub extern "C" fn rt_heap_free_count() -> i64 {
-    HEAP_TOTAL_FREES.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.total_frees) as i64
 }
 
 /// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_count_by_kind(kind: i64) -> i64 {
-    HEAP_KIND_LIVE_COUNT
-        .get(kind as usize)
-        .map(|slot| slot.load(Ordering::Relaxed) as i64)
-        .unwrap_or(0)
+    let kind = kind as usize;
+    if kind >= HEAP_KIND_SLOTS {
+        return 0;
+    }
+    heap_counter_sum(|stripe| &stripe.kind_live_count[kind]) as i64
 }
 
 /// Live header bytes for one `HeapObjectType` tag (0 for out-of-range kinds).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_bytes_by_kind(kind: i64) -> i64 {
-    HEAP_KIND_LIVE_BYTES
-        .get(kind as usize)
-        .map(|slot| slot.load(Ordering::Relaxed) as i64)
-        .unwrap_or(0)
+    let kind = kind as usize;
+    if kind >= HEAP_KIND_SLOTS {
+        return 0;
+    }
+    heap_counter_sum(|stripe| &stripe.kind_live_bytes[kind]) as i64
 }
 
 /// Validate heap object type, returns None if invalid

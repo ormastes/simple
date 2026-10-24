@@ -54,6 +54,7 @@ use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_e
 use compiler.frontend.core.parser_stmts.{parse_trailing_colon_block_arg, try_parse_bare_ident_string_call}
 use compiler.core.ast.{EXPR_CALL, EXPR_METHOD_CALL, expr_get_tag}
 use compiler.core.tokens.{TOK_COLON}
+use compiler.core.ast.{macro_fact_def_push}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
@@ -155,6 +156,121 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     args.push(expr_string_lit(uses_list.join(","), 0))
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== `macro NAME(params) -> (contract): body` declarations =====
+# "macro" is a soft keyword (an identifier elsewhere). The declaration emits no
+# decl: its facts (name, params, raw contract/body source, nested `n!(` names)
+# go to the macro fact pools in _Ast/decl_nodes.spl, which feed the macro
+# reference cache (plan 2026-10-24 §6). Expansion itself is not done here.
+fn current_ident_is_macro_decl() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+# True when the current identifier token is immediately followed by `!(`.
+fn current_ident_is_macro_invocation() -> bool:
+    val end = lex_token_end_get()
+    if end + 1 >= lex_source_len():
+        return false
+    lex_source_char_at(end) == "!" and lex_source_char_at(end + 1) == "("
+
+fn _macro_join_unique(values: [text]) -> text:
+    var out: [text] = []
+    for v in values:
+        if not out.contains(v):
+            out.push(v)
+    out.join(",")
+
+fn parse_macro_decl(visibility: text):
+    val decl_line = par_line_get()
+    parser_advance()  # consume 'macro'
+    if par_kind_get() != TOK_IDENT:
+        parser_error("expected macro name after 'macro'")
+        return
+    val name = par_text_get()
+    parser_advance()
+    var params: [text] = []
+    if par_kind_get() == 140:
+        var depth = 0
+        var expect_name = true
+        while par_kind_get() != 190:
+            val k = par_kind_get()
+            if k == 140 or k == 144 or k == 142:
+                depth = depth + 1
+                if depth == 1:
+                    expect_name = true
+                    parser_advance()
+                    continue
+            elif k == 141 or k == 145 or k == 143:
+                depth = depth - 1
+                if depth == 0:
+                    parser_advance()
+                    break
+            elif k == TOK_COMMA and depth == 1:
+                expect_name = true
+                parser_advance()
+                continue
+            elif k == TOK_IDENT and depth == 1 and expect_name:
+                params.push(par_text_get())
+            elif depth == 1 and par_text_get() == "const" and params.len() > 0:
+                # `n: Int const` -- a compile-time (CTFE) parameter; recorded as
+                # `n=const` so the macro facts carry the declared CTFE effect.
+                params[params.len() - 1] = params[params.len() - 1] + "=const"
+            expect_name = false
+            parser_advance()
+    var contract = ""
+    if par_kind_get() == 167:
+        parser_advance()
+        if par_kind_get() == 140:
+            val start = lex_token_start_get()
+            var depth = 0
+            var end = start
+            while par_kind_get() != 190:
+                val k = par_kind_get()
+                if k == 140: depth = depth + 1
+                if k == 141:
+                    depth = depth - 1
+                    if depth == 0:
+                        end = lex_token_end_get()
+                        parser_advance()
+                        break
+                parser_advance()
+            contract = lex_source_slice(start, end)
+    if par_kind_get() != TOK_COLON:
+        parser_error("expected ':' after macro '{name}' header")
+        return
+    parser_advance()
+    # Body: the indented block (or the rest of the line). Raw source is kept;
+    # nested invocations are the identifiers directly followed by `!(`.
+    var nested: [text] = []
+    val body_start = lex_token_start_get()
+    var body_end = body_start
+    var depth = 0
+    var seen_indent = false
+    while par_kind_get() != 190:
+        val k = par_kind_get()
+        if k == 180 and not seen_indent and depth == 0:
+            parser_advance()
+            if par_kind_get() != 181:
+                break
+            continue
+        if k == 181:
+            depth = depth + 1
+            seen_indent = true
+        elif k == 182:
+            depth = depth - 1
+            if depth <= 0:
+                parser_advance()
+                break
+        elif k == TOK_IDENT and current_ident_is_macro_invocation():
+            nested.push(par_text_get())
+        if k != 180 and k != 181 and k != 182:
+            body_end = lex_token_end_get()
+        parser_advance()
+    val body = if body_end > body_start: lex_source_slice(body_start, body_end) else: ""
+    macro_fact_def_push(name, params.join(","), contract, body, _macro_join_unique(nested),
+        decl_line, visibility)
 
 # ===== WP-A: `resource` declarations + `@sffi(...)` attribute =====
 # doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
@@ -972,6 +1088,10 @@ fn parse_module_body():
         val representation_target = par_kind_get()
         if not [20, 34, 23, 24, 25, 31, 53, 30, 171].contains(representation_target):
             representation_reject_pending_v1()
+        if parsed_visibility != "private" and par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl(parsed_visibility)
+            parser_reset_pending_vhdl_decorators()
+            continue
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
@@ -1204,6 +1324,9 @@ fn parse_module_body():
         elif par_kind_get() == 209:
             val d = parse_bitfield_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl("private")
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
             # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,

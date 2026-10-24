@@ -9,32 +9,110 @@
 # unexpired one on this branch (this run included); a cancelled run that
 # only finished rung 1 still counts. phase-ladder-step.shs then climbs from the
 # highest <platform>-p<N>/PHASE it finds. Needs GH_TOKEN with actions:read; a
-# lookup or download failure only means "nothing to resume", never a failure.
+# Successful empty lookups permit a cold start. Service/download failures do
+# not prove absence: without a usable local handoff they must block that start.
 set -u
 in_dir=${1:?in-dir}
 shift
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY}
 branch=${GITHUB_REF_NAME:?GITHUB_REF_NAME}
 mkdir -p "$in_dir"
+evidence="$in_dir/.resume-evidence"
+mkdir -p "$evidence" || exit 1
+# Shape/discovery only. The ladder's existing compiler qualification owner
+# remains responsible for whether the selected candidate can build and run.
+handoff_shape() {
+  [ -f "$1/PHASE" ] || return 1
+  resume_phase=$(cat "$1/PHASE") || return 1
+  case "$resume_phase" in 1|2|3|4) ;; *) return 1 ;; esac
+  [ "$(basename "$1")" = "$2-p$resume_phase" ] || return 1
+  resume_exe=
+  case "$2" in windows-*) resume_exe=.exe ;; esac
+  [ -f "$1/simple$resume_exe" ] && [ -s "$1/simple$resume_exe" ]
+}
+resume_status=0
 for platform in "$@"; do
+  platform_error=0
+  incomplete_marker="$evidence/$platform.incomplete.sdn"
   for rung in 4 3 2 1; do
     name="ladder-$platform-r$rung"
-    run=$(gh api "repos/$repo/actions/artifacts?name=$name&per_page=30" --jq \
+    if run=$(gh api "repos/$repo/actions/artifacts?name=$name&per_page=30" --jq \
       "[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == \"$branch\")] | sort_by(.created_at) | last | .workflow_run.id // empty" \
-      2>/dev/null) || run=
+      2> "$evidence/$name.lookup.stderr"); then
+      case "$run" in
+        *[!0-9]*)
+          echo "phase-ladder-resume: invalid artifact run ID for $name" >&2
+          platform_error=1
+          continue
+          ;;
+      esac
+    else
+      lookup_status=$?
+      echo "phase-ladder-resume: lookup failed for $name (exit=$lookup_status; evidence=$evidence)" >&2
+      platform_error=1
+      continue
+    fi
     [ -n "$run" ] || continue
     tmp="$in_dir/.resume-$name"
     rm -rf "$tmp"
-    gh run download "$run" -R "$repo" -n "$name" -D "$tmp" >/dev/null 2>&1 || { rm -rf "$tmp"; continue; }
+    if ! gh run download "$run" -R "$repo" -n "$name" -D "$tmp" \
+      > "$evidence/$name.download.stdout" 2> "$evidence/$name.download.stderr"; then
+      echo "phase-ladder-resume: download failed for $name (run=$run; evidence=$evidence)" >&2
+      platform_error=1
+      continue
+    fi
     # Rung numbers are not phases (a resumed run's r1 can hold phase 3), so
     # keep every rung's newest handoff; the step climbs from the highest PHASE.
+    downloaded_handoff=0
+    retain_download=0
     for d in "$tmp/$platform"-p*/; do
-      [ -f "$d/PHASE" ] || continue
+      handoff_shape "$d" "$platform" || continue
+      downloaded_handoff=1
       dest="$in_dir/$(basename "$d")"
-      [ -e "$dest" ] || cp -R "$d" "$dest"
+      if [ -e "$dest" ]; then
+        if ! handoff_shape "$dest" "$platform"; then
+          echo "phase-ladder-resume: existing destination has no usable handoff: $dest" >&2
+          platform_error=1
+          retain_download=1
+          continue
+        fi
+        echo "phase-ladder-resume: retained existing local handoff $dest"
+        continue
+      elif ! cp -R "$d" "$dest"; then
+        echo "phase-ladder-resume: handoff copy failed for $name" >&2
+        platform_error=1
+        continue
+      fi
       echo "phase-ladder-resume: $platform phase $(cat "$d/PHASE") from run $run ($name)"
     done
-    rm -rf "$tmp"
+    if [ "$downloaded_handoff" -eq 0 ]; then
+      echo "phase-ladder-resume: artifact $name has no usable handoff" >&2
+      platform_error=1
+      retain_download=1
+    fi
+    [ "$retain_download" -ne 0 ] || rm -rf "$tmp"
   done
+  local_handoff=0
+  for d in "$in_dir/$platform"-p*/; do
+    if handoff_shape "$d" "$platform"; then local_handoff=1; break; fi
+  done
+  if [ "$platform_error" -ne 0 ]; then
+    # This marker is diagnostic, never admission. A handoff-shaped local file
+    # may still fail actual parent resolution; that must not erase the service
+    # error and turn it into permission to rebuild from a cold seed.
+    if ! { printf 'schema: phase-ladder-incomplete-discovery-v1\nplatform: %s\nadmission: none\n' "$platform" \
+      > "$incomplete_marker.tmp.$$" && mv "$incomplete_marker.tmp.$$" "$incomplete_marker"; }; then
+      echo "phase-ladder-resume: cannot preserve incomplete discovery marker" >&2
+      resume_status=1
+    fi
+    if [ "$local_handoff" -eq 0 ]; then
+      echo "phase-ladder-resume: $platform discovery failed with no local handoff; refusing cold seed fallback" >&2
+      resume_status=1
+    else
+      echo "phase-ladder-resume: $platform discovery incomplete; preserving available local handoff" >&2
+    fi
+  else
+    rm -f "$incomplete_marker" || resume_status=1
+  fi
 done
-exit 0
+exit "$resume_status"

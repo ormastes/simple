@@ -395,6 +395,46 @@ field.
 | `length` | u64 |
 | `checksum` | 8 bytes (the algorithm's first 8 bytes; xxh3_64 by default) |
 
+### 7.3 Writer/reader decisions (agreed between the codec and reader lanes, 2026-10-24)
+
+1. **`encoding` bit layout.** Bits 0-7 element kind (§2.2), bits 8-14 the
+   pool shape (flat-pool trace: 1 `[i64]`, 2 `[bool]`, 3 `[text]`, 4 `[[i64]]`,
+   5 `[[text]]`, 6 `[[[text]]]`, 7-9 scalars), bit 15 **REQUIRED**. An unknown
+   section id with REQUIRED set is a miss; without it, the section is ignored
+   (§4 step 6). The writer sets REQUIRED on every section it emits.
+2. **Section checksums are always filled** (xxh3-64, algo 17) by the writer;
+   readers verify them (corruption only, never identity).
+3. **Body digest (subject 3) range** is `[end of the 0x0000 section,
+   blob_bytes)`: the digest table cannot hash itself, and `0x0000` always sorts
+   first. The writer lays the blob out with a zero placeholder, hashes the
+   range, patches the subject-3 row (the last row of the table) and refreshes
+   the `0x0000` checksum.
+4. **Pool family ranges beyond §2.2:** parser-state pools `0x0480-0x049F`,
+   extend pools `0x04A0-0x04BF`, pending pools `0x04C0-0x04FF`; id = family
+   base + dump ordinal (CLEAR pools keep their ordinal and leave a gap).
+5. **`0x0503` schema text** (the flat-pool codec version) and **`0x0504`
+   cleared-pool rows** `(u32 id, u32 shape)`; a line-restore adapter renders
+   the reader process's own live values for those ids.
+. **`0x0104` reference table (as built):** one 52-byte row per imported name of
+   every top-level `use` (glob `use` = one row, name ""): `module_key[16]`
+   (xxh3-128 of the imported module path), `u32 decl_id` = `0xFFFFFFFF`,
+   `target_content_key[16]` = zero, `u32 name` str_index, `u32 module_path`
+   str_index, `u32 owning decl index`, `u32` 0. Saved UNFILLED; a row with a
+   filled decl id or target key is a miss. `decl_imports` itself stays an
+   ordinary `[[text]]` pool section because it is overloaded (AOP pointcuts,
+   CLI directives, export lists) -- the table is an index over its `use` rows.
+8. **`0x0900` set-once map (as built):** entries `u32 section id, u32 element
+   count, bitset` (padded to 8). v1 marks every `0x0104` row fillable once; the
+   fill lives in a RAM side array, never in the mapped bytes.
+9. **The four "verify before deciding" id pools (verified 2026-10-24):**
+   `named_type_layout_owners`, `generic_param_ids` and
+   `named_generic_instance_ids` are dense per-parse indices into the same file's
+   type pools (minted by `named_type_register` / `generic_param_register`,
+   reset per parse) -- **K**. `custom_primitive_symbol_ids` holds HIR
+   `SymbolId`s bound after the parse (`declaration_lowering.spl`,
+   `custom_primitive_bind_symbol`); it is always the `-1` placeholder at capture
+   -- **CLEAR**, never stored (cleared-pool row in `0x0504`).
+
 ## 8. Hash agility (cross-cutting rule; also recorded in `src_based_tldr_build_v1.md`)
 
 Different servers and caches may use different hash algorithms; **at most

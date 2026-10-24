@@ -266,6 +266,11 @@ bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
 int64_t  rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                             const uint8_t* prefix_ptr, uint64_t prefix_len);
+/* Split ABI: each setter accepts ONE boxed text value; make consumes both
+ * thread-local slots and returns boxed text (empty text on refusal). */
+int64_t  rt_secure_temp_dir_set_parent(int64_t parent_value);
+int64_t  rt_secure_temp_dir_set_prefix(int64_t prefix_value);
+int64_t  rt_secure_temp_dir_make(void);
 /* 1=published, 0=destination exists, -1=operational failure. */
 int64_t  rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
                                    const uint8_t* destination_ptr, uint64_t destination_len);

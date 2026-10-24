@@ -1,5 +1,6 @@
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
+use std.nogc_sync_mut.io_runtime.{cwd}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
 use compiler.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
@@ -87,6 +88,26 @@ fn _sffi_string_builder_len(handle: i64) -> i64:
 fn _sffi_string_builder_push(handle: i64, value: text):
     unsafe(capabilities: [ffi]):
         rt_string_builder_push(handle, value)
+
+# Debug-info path prefix map (live_object_key.sdn gap debug_info_path_prefix,
+# closed): a source path under the build root is emitted RELATIVE to it, so
+# objects built from the same repo-relative source in two workspaces carry the
+# same DIFile and a cross-workspace cache hit cannot embed another
+# workspace's absolute path. Paths outside the root are left as given.
+# Separators are normalized to '/'; the root match ignores ASCII case on a
+# drive-letter path (Windows).
+pub fn debug_info_prefix_map_path(path: text, root: text) -> text:
+    val p = path.replace("\\", "/")
+    var r = root.replace("\\", "/")
+    while r.len() > 1 and r.ends_with("/"):
+        r = r.substring(0, r.len() - 1)
+    if r == "" or p.len() <= r.len() + 1:
+        return p
+    val head = p.substring(0, r.len())
+    val same = if r.len() >= 2 and r.substring(1, 2) == ":": head.to_lower() == r.to_lower() else: head == r
+    if same and p.substring(r.len(), r.len() + 1) == "/":
+        return p.substring(r.len() + 1, p.len())
+    p
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -375,7 +396,7 @@ impl MirTextCodegen for MirToLlvm:
                             break
             if dbg_source_file == "":
                 dbg_source_file = "{module.name}.spl"
-            val (dbg_filename, dbg_directory) = debug_info_split_path(dbg_source_file)
+            val (dbg_filename, dbg_directory) = debug_info_split_path(debug_info_prefix_map_path(dbg_source_file, cwd()))
             self.builder.emit_debug_info_header(dbg_filename, dbg_directory)
 
         # Origin discriminator (see mir_call_ownership.spl): record which
