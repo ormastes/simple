@@ -10,7 +10,8 @@ fn e(branch: text, source: text, version: text, disk: i64, mem: i64, used: i64) 
 
 fn limits(mem: i64, disk: i64, branches: i64, versions: i64) -> CacheRetentionLimitsV1:
     CacheRetentionLimitsV1(memory_max_bytes: mem, storage_max_bytes: disk, max_branches: branches,
-        kept_branches: ["main"], versions_per_source: versions)
+        kept_branches: ["main"], versions_per_source: versions,
+        per_source_max_disk_bytes: 1000000, per_source_max_memory_bytes: 1000000)
 
 describe "cache eviction plan":
     it "keeps the newest N versions per source per branch, all artifact kinds of a version together":
@@ -66,3 +67,16 @@ describe "pinned entries":
         val plan = cache_eviction_plan_v1(entries, limits(40, 100, 4, 1))
         expect(plan.evict.contains(0)).to_equal(false)
         expect(plan.unload.contains(0)).to_equal(false)
+
+describe "per-source byte caps":
+    it "evicts and unloads within one source by its disk and memory caps, newest first":
+        val entries = [e("main", "a.spl", "v1", 40, 30, 1), e("main", "a.spl", "v2", 40, 30, 2),
+            e("main", "a.spl", "v3", 40, 30, 3), e("main", "b.spl", "v1", 40, 30, 1)]
+        val l = CacheRetentionLimitsV1(memory_max_bytes: 1000, storage_max_bytes: 1000, max_branches: 4,
+            kept_branches: ["main"], versions_per_source: 5,
+            per_source_max_disk_bytes: 80, per_source_max_memory_bytes: 30)
+        val plan = cache_eviction_plan_v1(entries, l)
+        expect(plan.evict).to_equal([0])
+        expect(plan.unload).to_equal([1])
+        expect(plan.disk_bytes_after).to_equal(120)
+        expect(plan.memory_bytes_after).to_equal(60)
