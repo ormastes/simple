@@ -1,0 +1,147 @@
+# Cache daemon request loop: a lock-free file queue, like the test daemon's
+# light protocol. A client writes `<queue>/<name>.req` (temp + rename), the
+# daemon loop serves every request with one CacheDaemonHost, writes
+# `<name>.resp` (temp + rename) and deletes the request. One loop owns the
+# host, so no locks.
+#
+# Request / response: "key: value" lines after a version header.
+#   op: join      kind digest id                 -> role flight
+#   op: complete  kind digest id branch source blob_path (empty = failed)
+#                                                -> ok (records ledger usage)
+#   op: poll      flight                          -> status [blob_path]
+#   op: use       branch source digest bytes path -> ok
+#   op: evict                                     -> evicted <paths, comma>
+#
+# Hash agility: every digest is algorithm-tagged `<algo>:<hex>` and the algo
+# namespaces the key; an untagged digest or an unknown algo is refused (a miss
+# for the client), never guessed.
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_list, file_read_bytes, file_write_bytes}
+use std.async.poll.{Poll}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.thread.{thread_sleep_ms}
+use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1}
+use compiler.driver.cache.metadata.cache_limits.{cache_retention_limits_load_v1}
+
+val CACHE_QUEUE_REQUEST_HEADER_V1: text = "simple-cache-daemon-request-v1"
+val CACHE_QUEUE_RESPONSE_HEADER_V1: text = "simple-cache-daemon-response-v1"
+
+pub fn cache_queue_digest_admitted_v1(digest: text) -> bool:
+    val colon = digest.index_of(":")
+    if colon <= 0 or colon + 1 >= digest.len():
+        return false
+    val algo = digest.substring(0, colon)
+    algo == "sha256" or algo == "blake3" or algo == "xxh3-128"
+
+pub fn cache_queue_field_v1(request: text, key: text) -> text:
+    for line in request.split("\n"):
+        if line.starts_with(key + ": "):
+            return line.substring(key.len() + 2)
+    ""
+
+fn _response_v1(fields: [text]) -> text:
+    CACHE_QUEUE_RESPONSE_HEADER_V1 + "\n" + fields.join("\n") + "\n"
+
+fn _error_v1(reason: text) -> text:
+    _response_v1(["status: error", "reason: " + reason])
+
+# Serve one request. `blob_out` is where a poll writes a ready blob.
+pub fn cache_daemon_handle_request_v1(host: CacheDaemonHost, request: text,
+        blob_out: text, now_ms: i64) -> text:
+    if not request.starts_with(CACHE_QUEUE_REQUEST_HEADER_V1 + "\n"):
+        return _error_v1("bad-header")
+    val op = cache_queue_field_v1(request, "op")
+    if op == "join" or op == "complete" or op == "use":
+        if not cache_queue_digest_admitted_v1(cache_queue_field_v1(request, "digest")):
+            return _error_v1("digest-algo-unadmitted")
+    if op == "join":
+        val (role, flight) = host.join_artifact(cache_queue_field_v1(request, "kind"),
+            cache_queue_field_v1(request, "digest"), cache_queue_field_v1(request, "id"), now_ms)
+        if role < 0:
+            return _error_v1("not-admitted")
+        return _response_v1(["status: ok", "role: {role}", "flight: {flight}"])
+    if op == "complete":
+        val blob_path = cache_queue_field_v1(request, "blob_path")
+        val blob: [u8]? = if blob_path != "" and file_exists(blob_path): Some(file_read_bytes(blob_path)) else: nil
+        val done = host.complete_artifact(cache_queue_field_v1(request, "kind"),
+            cache_queue_field_v1(request, "digest"), cache_queue_field_v1(request, "id"), blob, now_ms)
+        if not done:
+            return _error_v1("not-leader")
+        match blob:
+            case Some(bytes):
+                host.note_artifact_use(CacheEntryUseV1(branch: cache_queue_field_v1(request, "branch"),
+                    source: cache_queue_field_v1(request, "source"),
+                    version_key: cache_queue_field_v1(request, "digest"),
+                    disk_bytes: bytes.len(), memory_bytes: 0, last_used_ms: now_ms), blob_path)
+            case nil:
+                pass_do_nothing
+        return _response_v1(["status: ok"])
+    if op == "poll":
+        val flight = cache_queue_field_v1(request, "flight").to_i64() ?? 0
+        match host.poll_artifact(flight).poll():
+            case Poll.Pending:
+                return _response_v1(["status: pending"])
+            case Poll.Ready(blob):
+                match blob:
+                    case Some(bytes):
+                        if not file_write_bytes(blob_out, bytes):
+                            return _error_v1("blob-write-failed")
+                        return _response_v1(["status: ready", "blob_path: " + blob_out])
+                    case nil:
+                        return _response_v1(["status: failed"])
+    if op == "use":
+        host.note_artifact_use(CacheEntryUseV1(branch: cache_queue_field_v1(request, "branch"),
+            source: cache_queue_field_v1(request, "source"),
+            version_key: cache_queue_field_v1(request, "digest"),
+            disk_bytes: cache_queue_field_v1(request, "bytes").to_i64() ?? 0,
+            memory_bytes: 0, last_used_ms: now_ms), cache_queue_field_v1(request, "path"))
+        return _response_v1(["status: ok"])
+    if op == "evict":
+        val removed = host.evict_artifacts(cache_retention_limits_load_v1())
+        for path in removed:
+            if path != "" and file_exists(path):
+                val _deleted = file_delete(path)
+        return _response_v1(["status: ok", "evicted: " + removed.join(",")])
+    _error_v1("unknown-op")
+
+fn _publish_v1(path: text, content: text) -> bool:
+    val temp = "{path}.{getpid()}.tmp"
+    if not file_write(temp, content):
+        val _w = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return false
+    true
+
+# One pass over the queue: serve every `*.req`, publish `*.resp`, delete the
+# request. Returns how many requests were served.
+pub fn cache_daemon_serve_queue_once_v1(host: CacheDaemonHost, queue_dir: text, now_ms: i64) -> i64:
+    var served = 0
+    for name in dir_list(queue_dir):
+        if not name.ends_with(".req"):
+            continue
+        val stem = name.substring(0, name.len() - 4)
+        val request_path = queue_dir + "/" + name
+        val response = cache_daemon_handle_request_v1(host, file_read(request_path),
+            queue_dir + "/" + stem + ".blob", now_ms)
+        if _publish_v1(queue_dir + "/" + stem + ".resp", response):
+            val _consumed = file_delete(request_path)
+            served = served + 1
+    served
+
+# The daemon loop: serve the queue until the lifecycle says the idle window
+# elapsed (cache_daemon_lifecycle should_begin_shutdown). Returns requests served.
+pub fn cache_daemon_run_queue_v1(host: CacheDaemonHost, queue_dir: text, poll_ms: i64) -> i64:
+    var served: i64 = 0
+    while true:
+        val now = time_now_monotonic_ms()
+        served = served + cache_daemon_serve_queue_once_v1(host, queue_dir, now)
+        if host.lifecycle.should_begin_shutdown(time_now_monotonic_ms()):
+            break
+        thread_sleep_ms(poll_ms)
+    served
+
+export cache_queue_digest_admitted_v1, cache_queue_field_v1
+export cache_daemon_handle_request_v1, cache_daemon_serve_queue_once_v1, cache_daemon_run_queue_v1

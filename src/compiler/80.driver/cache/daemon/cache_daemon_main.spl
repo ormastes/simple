@@ -6,6 +6,8 @@ use compiler.driver.cache.daemon.cache_daemon_lifecycle
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
 use std.async.future.{Future}
+use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1, cache_eviction_plan_v1}
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
 use common.cache_host_authority_v1.{CacheRootAuthorityV1}
 use common.cache_daemon_host_authority_v1
 use compiler.driver.cache.daemon.package_daemon_session.{
@@ -50,6 +52,8 @@ class CacheDaemonHost:
     package_admission_open: bool = false
     package_request_sequence: i64 = 0
     artifact_flights: CacheSingleFlightV1 = CacheSingleFlightV1.create()
+    artifact_usage: [CacheEntryUseV1] = []
+    artifact_paths: [text] = []
 
     static fn create(config: DaemonConfig, start_ms: i64) -> CacheDaemonHost:
         CacheDaemonHost(
@@ -153,6 +157,41 @@ class CacheDaemonHost:
 
     me poll_artifact(flight: i64) -> Future<[u8]?>:
         self.artifact_flights.future(flight)
+
+    # Usage ledger for eviction: one row per stored artifact version. The
+    # catalog carries no usage records, so the daemon -- the only writer --
+    # keeps them; eviction plans run over this ledger.
+    me note_artifact_use(entry: CacheEntryUseV1, artifact_path: text):
+        var i = 0
+        while i < self.artifact_usage.len():
+            val row = self.artifact_usage[i]
+            if row.branch == entry.branch and row.source == entry.source and
+                    row.version_key == entry.version_key:
+                self.artifact_usage[i] = entry
+                self.artifact_paths[i] = artifact_path
+                return
+            i = i + 1
+        self.artifact_usage.push(entry)
+        self.artifact_paths.push(artifact_path)
+
+    # Apply the retention plan: drop evicted rows and return their artifact
+    # paths (the caller deletes those files).
+    me evict_artifacts(limits: CacheRetentionLimitsV1) -> [text]:
+        val plan = cache_eviction_plan_v1(self.artifact_usage, limits)
+        var removed: [text] = []
+        var kept_usage: [CacheEntryUseV1] = []
+        var kept_paths: [text] = []
+        var i = 0
+        while i < self.artifact_usage.len():
+            if plan.evict.contains(i):
+                removed.push(self.artifact_paths[i])
+            else:
+                kept_usage.push(self.artifact_usage[i])
+                kept_paths.push(self.artifact_paths[i])
+            i = i + 1
+        self.artifact_usage = kept_usage
+        self.artifact_paths = kept_paths
+        removed
 
     me stop_after_authority_release() -> bool:
         if self.lifecycle.shutdown_state != CACHE_DAEMON_STOPPED:

@@ -1,0 +1,53 @@
+use std.spec
+use std.io_runtime.{env_set}
+use std.service.daemon_base.{daemon_config_new}
+use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use compiler.driver.cache.daemon.cache_daemon_queue_v1.{cache_daemon_handle_request_v1,
+    cache_queue_field_v1, cache_queue_digest_admitted_v1}
+
+fn req(lines: [text]) -> text:
+    "simple-cache-daemon-request-v1\n" + lines.join("\n") + "\n"
+
+fn admitted_host() -> CacheDaemonHost:
+    val host = CacheDaemonHost.create(daemon_config_new("q.pid", "q.sock", 1000), 0)
+    host.package_admission_open = true
+    host
+
+describe "cache daemon request queue":
+    it "admits only algorithm-tagged digests of known algorithms":
+        expect(cache_queue_digest_admitted_v1("sha256:ab")).to_equal(true)
+        expect(cache_queue_digest_admitted_v1("xxh3-128:ab")).to_equal(true)
+        expect(cache_queue_digest_admitted_v1("ab")).to_equal(false)
+        expect(cache_queue_digest_admitted_v1("md5:ab")).to_equal(false)
+        val host = admitted_host()
+        val r = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: ab", "id: a"]), "", 1)
+        expect(cache_queue_field_v1(r, "reason")).to_equal("digest-algo-unadmitted")
+
+    it "coalesces joins and reports a failed production to pollers":
+        val host = admitted_host()
+        val a = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: sha256:d1", "id: a"]), "", 1)
+        val b = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: sha256:d1", "id: b"]), "", 2)
+        expect(cache_queue_field_v1(a, "role")).to_equal("1")
+        expect(cache_queue_field_v1(b, "role")).to_equal("0")
+        val flight = cache_queue_field_v1(a, "flight")
+        val p0 = cache_daemon_handle_request_v1(host, req(["op: poll", "flight: " + flight]), "", 3)
+        expect(cache_queue_field_v1(p0, "status")).to_equal("pending")
+        val c = cache_daemon_handle_request_v1(host, req(["op: complete", "kind: tldr", "digest: sha256:d1", "id: a", "blob_path: "]), "", 4)
+        expect(cache_queue_field_v1(c, "status")).to_equal("ok")
+        val p1 = cache_daemon_handle_request_v1(host, req(["op: poll", "flight: " + flight]), "", 5)
+        expect(cache_queue_field_v1(p1, "status")).to_equal("failed")
+
+    it "records usage and evicts by the retention plan":
+        val _a = env_set("SIMPLE_CACHE_VERSIONS_PER_SOURCE", "1")
+        val host = admitted_host()
+        val _u1 = cache_daemon_handle_request_v1(host, req(["op: use", "branch: main", "source: a.spl", "digest: sha256:v1", "bytes: 10", "path: old.bin"]), "", 1)
+        val _u2 = cache_daemon_handle_request_v1(host, req(["op: use", "branch: main", "source: a.spl", "digest: sha256:v2", "bytes: 10", "path: new.bin"]), "", 2)
+        val e = cache_daemon_handle_request_v1(host, req(["op: evict"]), "", 3)
+        expect(cache_queue_field_v1(e, "evicted")).to_equal("old.bin")
+        expect(host.artifact_usage.len()).to_equal(1)
+        val _b = env_set("SIMPLE_CACHE_VERSIONS_PER_SOURCE", "")
+
+    it "refuses work before daemon admission":
+        val host = CacheDaemonHost.create(daemon_config_new("q.pid", "q.sock", 1000), 0)
+        val r = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: sha256:d", "id: a"]), "", 1)
+        expect(cache_queue_field_v1(r, "reason")).to_equal("not-admitted")
