@@ -1665,6 +1665,34 @@ pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) 
     0
 }
 
+/// Writer-side twin of `rt_mmap`: create (or truncate) `path`, set its length
+/// to exactly `size` bytes, and return a read-write shared mapping of the
+/// whole file (0 on any failure). The caller fills the view, `rt_msync` +
+/// `rt_munmap`, then publishes with an atomic rename (temp+rename).
+#[no_mangle]
+pub extern "C" fn rt_mmap_create(path: i64, size: i64) -> i64 {
+    let Some(path_str) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return 0;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path_str);
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.set_len(size as u64).is_err() {
+        return 0;
+    }
+    drop(file);
+    rt_mmap(path, size, 0, 0)
+}
+
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {

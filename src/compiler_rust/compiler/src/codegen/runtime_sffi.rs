@@ -402,6 +402,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmap", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmap_create", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_munmap", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_call_ptr_0", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_call_ptr_1", &[I64, I64], &[I64]),
