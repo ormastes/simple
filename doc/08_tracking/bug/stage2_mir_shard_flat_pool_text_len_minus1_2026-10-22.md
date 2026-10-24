@@ -698,3 +698,18 @@ pool clearing before each parse/restore in the child, or a scope-lifetime
 contract for cumulative pools. The sanitize/refusal/promotion workarounds
 remain landed (they convert crashes into cache misses and removed three
 crash layers) but cannot repair the module graph the consumer walks.
+
+## Handoff 3 (2026-10-24, lane B / p3-lane): crash-after-store rhythm carries phase-3 past HIR
+
+Live evidence from the phase-3 self-host (`rr1000-boot`, admitted stage2
+e6e0c551, log `phase3-1000b.log`): 33 coordinator SIGBUS lives so far,
+each respawn re-adopts the hir-cache and resumes further along. Verified
+stage frontier reached with zero unrecovered crashes: first-pass HIR
+2934/2934 complete; snapshot parse; surface_build; second-pass HIR;
+source_closure 2033/2033; surface_alias 4333/4333. RSS per life climbs
+~4.5 -> 7-8 GB before each crash; every crash is preceded by at least one
+giant module stored to cache (sealed=1), so progress is strictly
+monotonic. The rhythm costs ~10 min of cache re-adoption per life but no
+module is ever lost. Remaining unknown: whether mono/MIR phases (with
+#4277 transient-scope fixes NOT in this lane's 9a79de08 tree) hold under
+the same pattern; watch for `[mir-shard]` engagement next.
