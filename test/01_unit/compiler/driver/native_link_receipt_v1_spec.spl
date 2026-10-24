@@ -1,6 +1,10 @@
 use std.spec
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_key_v1,
-    native_link_receipt_render_v1, native_link_receipt_output_digest_v1}
+    native_link_receipt_render_v1, native_link_receipt_output_digest_v1,
+    native_shared_receipt_render_v1, native_shared_receipt_read_v1, native_dynlib_replace_by_rename_v1}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 val D1: text = "1111111111111111111111111111111111111111111111111111111111111111"
 val D2: text = "2222222222222222222222222222222222222222222222222222222222222222"
@@ -29,3 +33,22 @@ describe "native link receipt":
         val key = native_link_key_v1([D1], "out/app", "opt=3", [])
         val receipt = native_link_receipt_render_v1(key, D2)
         expect(native_link_receipt_output_digest_v1(receipt.substring(0, receipt.len() - 3), key)).to_equal("")
+
+describe "per-dynlib link receipt":
+    it "records and reads the export digest next to the output digest":
+        val key = native_link_key_v1([D1], "out/lib.dll", "opt=3", [])
+        val receipt = native_shared_receipt_render_v1(key, D2, D1)
+        val (out_digest, exports) = native_shared_receipt_read_v1(receipt, key)
+        expect(out_digest).to_equal(D2)
+        expect(exports).to_equal(D1)
+        val (miss, _e) = native_shared_receipt_read_v1(receipt, native_link_key_v1([D2], "out/lib.dll", "opt=3", []))
+        expect(miss).to_equal("")
+
+    it "replaces an existing dynlib by rename and keeps a failed swap recoverable":
+        val dir = "build/test_tmp/dynlib_receipt"
+        expect(rt_file_write_text(dir + "/lib.dll", "old")).to_equal(true)
+        expect(rt_file_write_text(dir + "/.tmp/lib.dll", "new")).to_equal(true)
+        expect(native_dynlib_replace_by_rename_v1(dir + "/.tmp/lib.dll", dir + "/lib.dll")).to_equal(true)
+        expect(rt_file_read_text(dir + "/lib.dll")).to_equal("new")
+        expect(native_dynlib_replace_by_rename_v1(dir + "/.tmp/missing.dll", dir + "/lib.dll")).to_equal(false)
+        expect(rt_file_read_text(dir + "/lib.dll")).to_equal("new")
