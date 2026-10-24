@@ -183,12 +183,32 @@ jobs:
             build/ladder/evidence
             build/ladder/producer
             build/ladder/cache
+            build/ladder/in/.resume-evidence
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: warn
-      # Upload even when a later step failed: a phase that passed sanity is kept.
-      - uses: actions/upload-artifact@v4
+      # PHASE is written only by the existing successful Hello owner. This
+      # retention gate is shape-only; it cannot qualify a compiler itself.
+      - name: Detect retained proven handoffs
+        id: handoffs
         if: always() && steps.sel.outputs.on == 'true'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          available=false
+          exe=
+          case "$PLATFORM" in windows-*) exe=.exe ;; esac
+          for phase in 1 2 3 4; do
+            dir="build/ladder/out/$PLATFORM-p$phase"
+            if [ -f "$dir/PHASE" ] && [ "$(cat "$dir/PHASE")" = "$phase" ] && [ -s "$dir/simple$exe" ]; then
+              available=true
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+      # Upload only output that contains an actual PHASE handoff; rejected
+      # candidates remain exclusively in the diagnostic artifact above.
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sel.outputs.on == 'true' && steps.handoffs.outputs.available == 'true'
         with:
           name: ladder-${{ matrix.platform }}-r${{ inputs.rung }}
           path: build/ladder/out
@@ -297,11 +317,30 @@ jobs:
             build/ladder/evidence
             build/ladder/producer
             build/ladder/cache
+            build/ladder/in/.resume-evidence
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
+      # PHASE is written only by the existing successful Hello owner. This
+      # retention gate is shape-only; it cannot qualify a compiler itself.
+      - name: Detect retained proven handoffs
+        id: handoffs
         if: always()
+        env:
+          PLATFORM: freebsd-x86_64
+        run: |
+          available=false
+          exe=
+          case "$PLATFORM" in windows-*) exe=.exe ;; esac
+          for phase in 1 2 3 4; do
+            dir="build/ladder/out/$PLATFORM-p$phase"
+            if [ -f "$dir/PHASE" ] && [ "$(cat "$dir/PHASE")" = "$phase" ] && [ -s "$dir/simple$exe" ]; then
+              available=true
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.handoffs.outputs.available == 'true'
         with:
           name: ladder-freebsd-x86_64-r${{ inputs.rung }}
           path: build/ladder/out
