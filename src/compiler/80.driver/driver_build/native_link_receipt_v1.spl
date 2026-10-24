@@ -156,12 +156,30 @@ pub fn native_link_search_dirs_v1(library_paths: [text], crt_dirs: [text]) -> [t
         dirs.push(d)
     dirs
 
+# The C driver the wrapper would invoke: $CC, else clang, else cc, on PATH.
+pub fn native_link_cc_driver_path_v1() -> text:
+    val requested = env_get_opt("CC") ?? ""
+    for name in [requested, "clang", "cc"]:
+        if name == "": continue
+        if is_file(name): return name
+        val path = env_get_opt("PATH") ?? ""
+        for dir in path.split(if path.contains(";"): ";" else: ":"):
+            if dir == "": continue
+            for candidate in [dir + "/" + name, dir + "/" + name + ".exe"]:
+                if is_file(candidate): return candidate
+    ""
+
 fn _toolchain_digests_v1(libraries: [text], library_paths: [text], pie: bool) -> [text]?:
     val linker = find_linker_path()
     if linker.is_err(): return nil
     val linker_digest = _file_digest_v1(linker.unwrap())
     if linker_digest == "": return nil
     var rows: [text] = ["linker=" + linker_digest]
+    # The link may fall back to the C driver wrapper (cc / clang): key that
+    # binary too, by content, or `absent` when none is on PATH.
+    val cc_path = native_link_cc_driver_path_v1()
+    val cc_digest = if cc_path == "": "" else: _file_digest_v1(cc_path)
+    rows.push("cc=" + (if cc_digest == "": "absent" else: cc_digest))
     val crt = find_crt_files(pie, false)
     for crt_path in [crt.crt1, crt.crti, crt.crtn, crt.crtbegin, crt.crtend]:
         if crt_path != "":
