@@ -2483,7 +2483,12 @@ impl MirLowering:
                     # `x.unwrap()` / `x ?? d` on the binding sees an Option
                     # receiver instead of an untyped word.
                     self.remember_local_hir_type(decoded.id, HirType(kind: HirTypeKind.Optional(value_hir_type), span: base.span), 0, 0)
-                elif value_type_from_hir:
+                else:
+                    # bug=enum_payload_type_mismatch_dict_elem_untyped_2026-10-24:
+                    # the declared V is the read's type whichever source fixed
+                    # the MIR decode. Gating this on value_type_from_hir left
+                    # `self.impls[k]` (MIR Dict(K, V) already known) untyped,
+                    # so `xs[i]` on the binding had no element owner.
                     self.remember_local_hir_type(decoded.id, value_hir_type, 0, 0)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
@@ -5549,7 +5554,9 @@ impl MirLowering:
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
             if named_var_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
-                return self.lower_enum_construct_named("Option", "None", [])
+                val none_local = self.lower_enum_construct_named("Option", "None", [])
+                self.option_none_locals[none_local.id] = true
+                return none_local
             # A top-level function named as a VALUE (`var slot: fn() =
             # default_cleanup`, or the RHS of `slot = replacement_cleanup`).
             # Same `Const(Str(name), FuncPtr(..))` shape

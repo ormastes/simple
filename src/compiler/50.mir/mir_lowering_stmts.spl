@@ -293,6 +293,13 @@ fn mir_hir_let_type_present(k: HirStmtKind) -> bool:
         case HirStmtKind.Let(_, type_, _): type_ != nil
         case _: false
 
+# An unannotated Let carries HIR's Infer marker (binding_types.spl), not nil;
+# Error is the unresolved sentinel. Neither is declaration evidence.
+fn mir_let_type_unsettled(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error: true
+        case _: false
+
 fn mir_hir_let_type(k: HirStmtKind, fallback: HirType) -> HirType:
     match k:
         case HirStmtKind.Let(_, type_, _): type_ ?? fallback
@@ -1640,7 +1647,7 @@ impl MirLowering:
                                     # sites box), so `case Some` neither matches
                                     # the bare writers nor survives the boxed
                                     # ones' payload arm-binding copy.
-                                    if let_type.?:
+                                    if let_type.? and not mir_let_type_unsettled(let_type_value):
                                         val declared_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                         self.remember_local_hir_type(local.id, declared_type, 0, 0)
                                     else:
@@ -1962,7 +1969,15 @@ impl MirLowering:
                                     else:
                                         # Nullable, not an Option box -- same migration as
                                         # the `mir_type` read above in this arm.
+                                        # bug=enum_payload_type_mismatch_dict_elem_untyped_2026-10-24:
+                                        # HIR fills an unannotated Let slot with Infer, never
+                                        # nil, so storing it made the recovery below dead and
+                                        # every untyped binding read back as "remembered".
+                                        var let_type_settled = false
                                         if type_ != nil:
+                                            val settled_probe: HirType = type_
+                                            let_type_settled = not mir_let_type_unsettled(settled_probe)
+                                        if let_type_settled:
                                             # Typed rebind, same reason as `mir_type` above.
                                             val ht2: HirType = type_
                                             self.remember_local_hir_type(local.id, ht2, 0, 0)
@@ -3331,12 +3346,14 @@ impl MirLowering:
         var shared_struct = ""
         var struct_known = true
         var all_typed = true
+        var typed_index = -1
+        var saw_empty_array = false
         self.join_optional_record_owners(arm_locals, dest.id)
         self.join_result_err_record_owners(arm_locals, dest.id)
         var arm_i = 0
         while arm_i < arm_locals.len():
             val arm_local: LocalId = arm_locals[arm_i]
-            if self.nil_locals.contains(arm_local.id):
+            if self.nil_locals.contains(arm_local.id) or self.option_none_locals.contains(arm_local.id):
                 self.remember_merged_optional_arm_type(dest, arm_locals)
                 return
             val arm_struct = if self.struct_value_syms.contains(arm_local.id): self.struct_value_syms[arm_local.id] else: ""
@@ -3344,9 +3361,16 @@ impl MirLowering:
                 shared_struct = arm_struct
             elif arm_struct != shared_struct:
                 struct_known = false
-            if val arm_type = self.find_local_hir_type(arm_local.id):
-                if arm_i > 0 and all_typed:
-                    if val first_type = self.find_local_hir_type(arm_locals[0].id):
+            if self.empty_array_lit_locals.contains(arm_local.id) and self.find_local_hir_type(arm_local.id) == nil:
+                # bug=enum_payload_type_mismatch_untyped_match_value_2026-10-24:
+                # a context-free `[]` arm has no element evidence of its own;
+                # it adopts the other arms' type, which must be an array.
+                saw_empty_array = true
+            elif val arm_type = self.find_local_hir_type(arm_local.id):
+                if typed_index < 0:
+                    typed_index = arm_i
+                elif all_typed:
+                    if val first_type = self.find_local_hir_type(arm_locals[typed_index].id):
                         if not hir_types_equal(first_type, arm_type):
                             all_typed = false
             else:
@@ -3354,8 +3378,15 @@ impl MirLowering:
             arm_i = arm_i + 1
         if struct_known and shared_struct != "" and not self.struct_value_syms.contains(dest.id):
             self.struct_value_syms[dest.id] = shared_struct
+        if typed_index < 0:
+            all_typed = false
+        if all_typed and saw_empty_array:
+            if val shared_type = self.find_local_hir_type(arm_locals[typed_index].id):
+                match shared_type.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): ()
+                    case _: all_typed = false
         if all_typed and self.find_local_hir_type(dest.id) == nil:
-            self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
+            self.copy_local_hir_type_metadata(arm_locals[typed_index].id, dest.id)
         elif self.find_local_hir_type(dest.id) == nil:
             self.remember_merged_result_ctor_arm_type(dest, arm_locals)
 
@@ -3446,7 +3477,7 @@ impl MirLowering:
         var arm_i = 0
         while arm_i < arm_locals.len():
             val arm_local: LocalId = arm_locals[arm_i]
-            if not self.nil_locals.contains(arm_local.id):
+            if not self.nil_locals.contains(arm_local.id) and not self.option_none_locals.contains(arm_local.id):
                 if val arm_type = self.find_local_hir_type(arm_local.id):
                     if first_index < 0:
                         first_index = arm_i
