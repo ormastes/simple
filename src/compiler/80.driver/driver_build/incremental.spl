@@ -18,6 +18,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_is_regular_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, digest_v1_new, digest_v1_text, digest_v1_parse}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
@@ -793,6 +794,24 @@ fn incremental_reverse_reference_generation_identity_v1(
 
 # Native hash failures may return a flat nil despite the extern's text type.
 # Check length before byte access: nil has runtime text length -1, not 0.
+# Hash agility for PERSISTED build-cache digests (live_object_key.sdn gap
+# hash_algorithm_tag, closed): every digest written to build_cache.sdn is
+# DigestV1 text `<algorithm>:<hex>` (cache_contract/hash_algorithm_registry_v1)
+# and a row is read back only when it names the algorithm this code computes
+# (sha256). An untagged legacy value, an unknown algorithm or a different one
+# reads back as "" -- a MISS, never a match.
+pub fn incremental_digest_tag_v1(hex: text) -> text:
+    if hex == "": return ""
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+pub fn incremental_digest_untag_v1(tagged: text) -> text:
+    match digest_v1_parse(tagged):
+        case Some(d):
+            if d.algo_id == HASH_ALGO_SHA256_V1: d.hex else: ""
+        case nil: ""
+
 pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
     if digest.len() != 64: return false
     for index in 0..64:
@@ -1135,7 +1154,7 @@ impl BuildCache:
                                     val hash_value: SdnValue = hash_value_raw
                                     val hs = hash_value.as_str()
                                     if val parsed_hash = hs:
-                                        fp_hash = parsed_hash
+                                        fp_hash = incremental_digest_untag_v1(parsed_hash)
                                 val s = fp_obj.get("size")
                                 if val size_value_raw = s:
                                     val size_value: SdnValue = size_value_raw
@@ -1189,7 +1208,7 @@ impl BuildCache:
                                 val di: SdnValue = di_raw
                                 val di_str = di.as_str()
                                 if val di_text = di_str:
-                                    deps_iface = di_text
+                                    deps_iface = incremental_digest_untag_v1(di_text)
 
                             # Absent on legacy rows. Shadow comparison reports
                             # this as `legacy-missing`; it never changes the
@@ -1213,7 +1232,7 @@ impl BuildCache:
                                 val id_value: SdnValue = id_raw
                                 val id_str = id_value.as_str()
                                 if val id_text = id_str:
-                                    interface_digest = id_text
+                                    interface_digest = incremental_digest_untag_v1(id_text)
 
                             val entry = DependencyEntry(
                                 source: source, fingerprint: fp,
@@ -1641,11 +1660,11 @@ pub fn build_cache_persist(cache: BuildCache) -> bool:
         val entry = cache.entries[source]
         val fp = entry.fingerprint
         val source_text = incremental_sdn_escape(entry.source)
-        val hash_text = incremental_sdn_escape(fp.content_hash)
+        val hash_text = incremental_sdn_escape(incremental_digest_tag_v1(fp.content_hash))
         val deps_text = incremental_sdn_text_array(entry.dependencies)
         val outputs_text = incremental_sdn_text_array(entry.outputs)
-        val deps_iface_text = incremental_sdn_escape(entry.deps_iface)
-        val interface_digest_text = incremental_sdn_escape(entry.interface_digest)
+        val deps_iface_text = incremental_sdn_escape(incremental_digest_tag_v1(entry.deps_iface))
+        val interface_digest_text = incremental_sdn_escape(incremental_digest_tag_v1(entry.interface_digest))
         val module_witness_text = incremental_sdn_escape(entry.module_witness)
         val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
         lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", interface_digest: \"" + interface_digest_text + "\", module_witness: \"" + module_witness_text + "\" " + "}")
