@@ -57,6 +57,36 @@ fn _tldr_member_header_v1(line: text) -> bool:
     val t = line.trim()
     val d = _tldr_strip_pub_v1(t)
     d.starts_with("fn ") or d.starts_with("me ") or d.starts_with("static fn ")
+fn _tldr_block_end_v1(lines: [text], start: i64) -> i64:
+    var end = start + 1
+    while end < lines.len() and (lines[end] == "" or lines[end].starts_with(" ") or
+            lines[end].starts_with("\t")):
+        end = end + 1
+    end
+
+# The section block owned by the top-level declaration at 0-based line `index`
+# (leading `@attribute` lines are skipped to reach the declaration). "" when
+# that line is not a top-level declaration.
+pub fn module_tldr_block_at_v1(lines: [text], index: i64, kind: text) -> text:
+    var start = index
+    while start >= 0 and start < lines.len() and lines[start].starts_with("@"):
+        start = start + 1
+    if start < 0 or start >= lines.len():
+        return ""
+    val head = lines[start]
+    if head == "" or head.starts_with(" ") or head.starts_with("\t") or head.starts_with("#"):
+        return ""
+    val end = _tldr_block_end_v1(lines, start)
+    var last = end - 1
+    while last > start and lines[last].trim() == "":
+        last = last - 1
+    var block: [text] = [head]
+    var j = start + 1
+    while j <= last:
+        if kind != "impl" or _tldr_member_header_v1(lines[j]):
+            block.push(lines[j])
+        j = j + 1
+    block.join("\n")
 
 pub fn module_tldr_sections_of_source_v1(source: text) -> [text]:
     """Ordered "<kind>|<block text>" entries extracted from `source`."""
@@ -68,21 +98,8 @@ pub fn module_tldr_sections_of_source_v1(source: text) -> [text]:
         if kind == "":
             i = i + 1
             continue
-        var end = i + 1
-        while end < lines.len() and (lines[end] == "" or lines[end].starts_with(" ") or
-                lines[end].starts_with("\t")):
-            end = end + 1
-        var last = end - 1
-        while last > i and lines[last].trim() == "":
-            last = last - 1
-        var block: [text] = [lines[i]]
-        var j = i + 1
-        while j <= last:
-            if kind != "impl" or _tldr_member_header_v1(lines[j]):
-                block.push(lines[j])
-            j = j + 1
-        out.push(kind + "|" + block.join("\n"))
-        i = end
+        out.push(kind + "|" + module_tldr_block_at_v1(lines, i, kind))
+        i = _tldr_block_end_v1(lines, i)
     out
 
 pub fn module_tldr_sections_render_v1(entries: [text]) -> text:
@@ -98,7 +115,7 @@ pub fn module_tldr_sections_render_v1(entries: [text]) -> text:
 
 fn _tldr_kind_valid_v1(kind: text) -> bool:
     kind == "layout" or kind == "trait" or kind == "type" or kind == "const" or
-        kind == "impl" or kind == "generic"
+        kind == "impl" or kind == "generic" or kind == "inline"
 
 # Parses the section records at the start of `text`. Returns (entries,
 # consumed chars); consumed is -1 when any record is malformed.
@@ -127,5 +144,5 @@ pub fn module_tldr_sections_parse_v1(text: text) -> ([text], i64):
         pos = pos + body_start + count + 1
     (entries, pos)
 
-export module_tldr_section_kind_v1, module_tldr_sections_of_source_v1
+export module_tldr_section_kind_v1, module_tldr_sections_of_source_v1, module_tldr_block_at_v1
 export module_tldr_sections_render_v1, module_tldr_sections_parse_v1
