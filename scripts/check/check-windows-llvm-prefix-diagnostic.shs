@@ -5,7 +5,23 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 detector="$repo_root/scripts/setup/platform-detect.shs"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-windows-llvm-prefix.XXXXXX")
 case "$tmp" in /*/simple-windows-llvm-prefix.*) ;; *) exit 1 ;; esac
-trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+cleanup() {
+    diagnostic_status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$diagnostic_status" -ne 0 ]; then
+        for log in "$tmp"/*.out "$tmp"/*.err; do
+            [ -f "$log" ] || continue
+            printf '\n--- %s ---\n' "${log##*/}" >&2
+            cat "$log" >&2 || :
+        done
+    fi
+    rm -rf -- "$tmp" || :
+    exit "$diagnostic_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 mkdir -p "$tmp/msvc prefix/bin" "$tmp/msvc prefix/lib" "$tmp/gnu/bin" "$tmp/gnu/lib"
 printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/msvc prefix/bin/llvm-config"
 printf '#!/bin/sh\nprintf "23.1.1\\n"\n' > "$tmp/gnu/bin/llvm-config"
@@ -24,6 +40,9 @@ run_detector() (
     ProgramW6432="$tmp/no-program-files"
     MSYS2_ROOT="$tmp/no-msys2"
     LLVM_HOME=""
+    SIMPLE_TARGET_OS=windows
+    LLVM_VERSIONS=23
+    LLVM_PROVIDER_REQUIREMENT=shared
     SIMPLE_WINDOWS_ABI="$1"
     LLVM_SYS_231_PREFIX="$2"
     SIMPLE_HOST_LLVM_ROOT="$3"
