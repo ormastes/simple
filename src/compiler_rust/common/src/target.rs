@@ -874,6 +874,18 @@ impl Target {
                 _ => {} // Fall through to auto-detection
             }
         }
+        // The bootstrap's Windows ABI selector (also read by the Simple-side
+        // runtime compiler / linker) must steer the Rust seed the same way, or
+        // the LLVM triple and the link driver can disagree.
+        if self.os == TargetOS::Windows {
+            if let Ok(abi) = std::env::var("SIMPLE_WINDOWS_ABI") {
+                match abi.to_lowercase().as_str() {
+                    "gnu" | "mingw" => return LinkerFlavor::Gnu,
+                    "msvc" => return LinkerFlavor::Msvc,
+                    _ => {}
+                }
+            }
+        }
         match self.os {
             TargetOS::Windows => {
                 // Detect MinGW environment: if gcc is available, use GNU linker flavor
