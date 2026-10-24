@@ -59,5 +59,24 @@ Tests:
 
 ## Evidence
 
-See the lane report: probe numbers before/after, binary sha256s, and the
-object byte-identity check.
+Stage 2 was not rebuilt. The seed relinked the cached Stage 2 objects
+(`reused=1593`) against a rebuilt `libsimple_native_all.a`. Relinking with
+the original archive reproduces Stage 2 byte for byte (`63262660...`).
+
+Binaries:
+- before: `e7358299...`, the base archive;
+- after, registry fix only: `c9234dec...`;
+- after, all three fixes: `8a48b98c...`.
+
+The probe: 142-module closure, 2 fork workers, 119 objects.
+
+| run | per-child mappings after the fork | child Private_Dirty at codegen start (sum) |
+|---|---|---|
+| before | new private 147,460 kB table; inherited 73,732 kB table privatized | 1110-1120 MB |
+| after | inherited table stays shared (`pd=32 kB`); child overlay 36-74 MB | 916-945 MB |
+
+For the object check, see
+`native_codegen_object_nondeterminism_2026-10-25.md`: every module digest
+from an "after" run either matches a digest seen in some "before" run, or
+belongs to a module whose object already varies between runs of the
+unmodified binary.
