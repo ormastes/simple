@@ -49,7 +49,7 @@ No released binary yet. Bootstrap runs natively inside a riscv64 Linux guest:
 ```bash
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke       # PASS: arch=riscv64 nproc=20
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision   # rustup nightly in guest
-sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0.0
 sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2      # cranelift; no LLVM 23 on riscv64
 ```
 
