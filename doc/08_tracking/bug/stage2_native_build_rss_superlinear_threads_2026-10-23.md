@@ -111,3 +111,33 @@ Evidence (`src/compiler/10.frontend/core/parser.spl` at `a440291a0b8`):
   binary compile over many files with per-file RSS sampling
   (`SIMPLE_NATIVE_FILE_TIMING=1`) and check for a monotonic per-file step.
   Not fixed here because the cause is not proven.
+
+### Static evidence, 2026-10-24 (stage-2 binary not yet available to measure)
+
+- The native C runtime has **no GC and no refcount**
+  (`src/runtime/runtime_native.c:8333`, `:8721`). `rt_transient_heap_promote`
+  (`runtime_native.c:3038`) moves an object out of the transient scope into
+  the persistent heap; nothing ever frees it afterwards. So any global that is
+  promoted and then reassigned per file leaks its previous value permanently.
+- Promote-then-reassign-per-file sites in layers 10-50 (promote site ->
+  per-file reassign):
+  - `parser.spl` `par_errors` / `par_warnings` / `par_struct_names`
+    (promote 161-171 -> reassign 346-348). Cost per file = those arrays plus
+    the struct-name strings they hold; small (bytes to a few KB), not the
+    +80 MB/file of the seed bug.
+  - `representation_declarations_v1.spl` `representation_stack_v1`
+    (reassigned at 43, 56).
+  - `resource_registry.spl` `resource_registry_names` (reassigned at 52).
+  - `frontend_shared_parse_cas_v1.spl` `_shared_parse_authority_rows_v1`
+    (reassigned at 117, 141).
+  - `50.mir/_MirLowering/bootstrap_globals.spl` `_bootstrap_mir_*` arrays
+    (reset at 222; `push` returning a new array at 268 also orphans the old
+    backing each append once promoted).
+- Not fixed: reusing the promoted arrays with `clear()` instead of
+  reassignment is unsafe as written (see the comment at `parser.spl:337-343`:
+  `push` inside a later scope reallocates scope-owned backing that `scope_end`
+  frees). A correct fix needs a runtime primitive that releases a persistent
+  object (or demotes it back into the scope) before the reassignment.
+- Decision measurement: once a stage-2 binary exists, compile ~50 files in
+  one process with per-file RSS sampling; a monotonic per-file step that
+  scales with diagnostics/struct count confirms it.
