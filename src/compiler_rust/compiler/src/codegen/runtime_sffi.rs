@@ -882,6 +882,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // raw-i64 marshalling boundary.
     RuntimeFuncSpec::new("rt_array_bytes_validate", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_bytes_copy_checked", &[I64, I64, I64], &[I64]),
+    // Packed-backing probes consumed by std.nogc_sync_mut.sffi.file_bytes_typed
+    // (typed_byte_basis / copy_typed_packed_bytes). Same seed-gap family as the
+    // two contracts above: without a compiler-owned contract the JIT cannot
+    // emit a direct runtime call, and the hybrid interp splice re-decodes the
+    // packed `[u8]` into a boxed element array the twins reject (-22/-1), so
+    // stdlib byte writes silently no-op under the seed.
+    RuntimeFuncSpec::new("rt_array_bytes_basis_len", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_bytes_basis_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
@@ -2331,6 +2339,20 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_file_close_value", &[I64], &[I64]),       // fd -> 0/1
     RuntimeFuncSpec::new("rt_io_file_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_io_file_delete", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
+    // Descriptor members consumed by std.nogc_sync_mut.io's FileTextSession
+    // read path (session open/read/close/seek/flush/meta). The Rust runtime
+    // exports these (runtime/src/value/sffi/file_io/io_file.rs), but without
+    // compiler-owned contracts AND RUNTIME_SYMBOL_NAMES entries the seed JIT
+    // demotes them to the hybrid interp splice, where the FileTextSession read
+    // silently returns nil and std.io_runtime file text reads come back empty
+    // (the same seed gap family as rt_array_bytes_*; see
+    // doc/08_tracking/bug/seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md).
+    RuntimeFuncSpec::new("rt_io_file_read", &[I64, I64], &[I64]),        // fd, size -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_io_file_read_all", &[I64], &[I64]),         // fd -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_io_file_close", &[I64], &[I8]),             // fd -> bool
+    RuntimeFuncSpec::new("rt_io_file_seek", &[I64, I64, I64], &[I64]),   // fd, offset, whence -> pos
+    RuntimeFuncSpec::new("rt_io_file_flush", &[I64], &[I8]),             // fd -> bool
+    RuntimeFuncSpec::new("rt_io_file_meta_size", &[I64], &[I64]),        // fd -> size
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),          // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),              // fd -> bool
     RuntimeFuncSpec::new("rt_close_fd", &[I64], &[I64]),               // fd -> status

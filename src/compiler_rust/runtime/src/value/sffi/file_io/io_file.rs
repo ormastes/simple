@@ -300,17 +300,32 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
         // Windows twin of the Unix branch: reconstruct the File from the
         // HANDLE the Simple side carries, surface a write-back error, then
         // genuinely close via drop.
+        //
+        // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+        // handles opened without write access, so a read-only session's close
+        // reported failure and FileTextSession reads came back Err even though
+        // every byte was read (measured: "file text close failed" from
+        // std.io_runtime.read_file_text under the seed). A close must surface
+        // real write-back errors, not a refused no-op flush: when sync fails,
+        // probe the handle with a zero-length write — denied on read-only
+        // handles (close is genuinely fine), allowed on writable ones (the
+        // sync failure was real, keep reporting it). C parity: close == 0.
         #[cfg(windows)]
         {
-            let file = File::from_raw_handle(fd as *mut std::ffi::c_void);
-            // FlushFileBuffers fails on read-only file handles, which made
-            // every read-mode close report `false` even though the handle is
-            // valid and is closed by the drop below. Honor the flush result
-            // only when the handle itself proves dead.
+            use std::io::Write as _;
+            let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+            // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+            // handles opened without write access, so a read-only session's
+            // close reported failure and FileTextSession reads came back Err
+            // even though every byte was read. A close must surface real
+            // write-back errors, not a refused no-op flush: when the flush
+            // fails, probe the handle with a zero-length write — denied on
+            // read-only handles (close is genuinely fine), allowed on writable
+            // ones (the flush failure was real, keep reporting it).
             let flushed = file.sync_all().is_ok();
-            let alive = file.metadata().is_ok();
+            let read_only = !flushed && file.write(&[]).is_err();
             drop(file);
-            flushed || alive
+            flushed || read_only
         }
         #[cfg(not(windows))]
         {
