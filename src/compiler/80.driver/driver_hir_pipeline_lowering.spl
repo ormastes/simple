@@ -2234,9 +2234,11 @@ impl CompilerDriver:
                         hir_module.symbols)
                     if layout_scoped:
                         val layout_paused = transient_scope_pause()
-                        val layout_owned = layout_paused and transient_promote(layout_projection)
+                        val layout_owned = layout_paused and transient_promote(layout_projection) and
+                            transient_promote(layout_projection.structs) and
+                            transient_promote(layout_projection.struct_symbols)
                         val layout_ended = transient_scope_end()
-                        if not (layout_paused and layout_owned and layout_ended):
+                        if not layout_paused or not layout_owned or not layout_ended:
                             eprint("[hir-loop-scope] WARNING layout projection promotion failed (paused={layout_paused} owned={layout_owned} ended={layout_ended}); recomputing UNSCOPED: module={name}")
                             layout_projection = value_struct_layout_declarations_v1(
                                 name, hir_module.path, hir_module.structs,
@@ -2277,12 +2279,14 @@ impl CompilerDriver:
                             # lives there (hir_module_has_rt_hal). The blobs
                             # validation entry must NEVER read a field off a decoded
                             # HirModule.
-                            # Both facts are scalars: the dict-key arrays they
-                            # allocate die with the scope, nothing is promoted,
-                            # and the ctx pushes run after scope end.
+                            # has_rt_hal is a scalar: the functions key array it
+                            # allocates dies with the scope, nothing is promoted,
+                            # and the ctx pushes run after scope end. The claim
+                            # count reads the registry's own array handle (no
+                            # scratch), so it stays outside the scope.
+                            val validation_claim_count: i64 = rt_criticality_claim_keys().len()
                             val facts_scoped: bool = driver_hir_loop_aux_scope_begin_v1("rt-facts", name)
                             val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
-                            val validation_claim_count: i64 = rt_criticality_claim_keys().len()
                             if facts_scoped and not transient_scope_end():
                                 eprint("[hir-loop-scope] WARNING rt-facts scope end failed; arena retained: module={name}")
                             self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)

@@ -255,20 +255,24 @@ fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
         return false
     true
 
-fn _hir_pass_scope_close_v1(pass_name: text, name: text, result: HirTypecheckReceiptV1) -> bool:
-    val paused = transient_scope_pause()
-    val owned = paused and transient_promote(result)
-    val ended = transient_scope_end()
-    if paused and owned and ended: return true
+# Promotion stays in the frame that owns the receipt (a struct passed by value
+# could reach a helper as a copy), and the three arrays are promoted too so the
+# children survive even if the struct shell is a by-value no-op promotion.
+# Re-promoting an already-immortal child is a documented no-op success.
+fn _hir_pass_scope_failed_v1(pass_name: text, name: text, paused: bool, owned: bool, ended: bool):
     eprint("[hir-pass-scope] WARNING receipt promotion failed (paused={paused} owned={owned} ended={ended}); re-running {pass_name} UNSCOPED: module={name}")
-    false
 
 fn _any_escape_receipt_scoped_v1(name: text, module: HirModule,
         strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
     if not _hir_pass_scope_open_v1("any_escape", name):
         return collect_module_any_escape_receipt_v1(name, module, strictness)
     val receipt = collect_module_any_escape_receipt_v1(name, module, strictness)
-    if _hir_pass_scope_close_v1("any_escape", name, receipt): return receipt
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("any_escape", name, paused, owned, ended)
     collect_module_any_escape_receipt_v1(name, module, strictness)
 
 fn _enum_contract_receipt_scoped_v1(name: text, module: HirModule,
@@ -276,7 +280,12 @@ fn _enum_contract_receipt_scoped_v1(name: text, module: HirModule,
     if not _hir_pass_scope_open_v1("enum_contract", name):
         return collect_module_enum_contract_receipt_v1(name, module, strictness)
     val receipt = collect_module_enum_contract_receipt_v1(name, module, strictness)
-    if _hir_pass_scope_close_v1("enum_contract", name, receipt): return receipt
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("enum_contract", name, paused, owned, ended)
     collect_module_enum_contract_receipt_v1(name, module, strictness)
 
 fn _representation_receipt_scoped_v1(name: text, module: HirModule,
@@ -284,7 +293,12 @@ fn _representation_receipt_scoped_v1(name: text, module: HirModule,
     if not _hir_pass_scope_open_v1("representation_manifest", name):
         return collect_module_representation_receipt_v1(name, module, strictness)
     val receipt = collect_module_representation_receipt_v1(name, module, strictness)
-    if _hir_pass_scope_close_v1("representation_manifest", name, receipt): return receipt
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("representation_manifest", name, paused, owned, ended)
     collect_module_representation_receipt_v1(name, module, strictness)
 
 # The bind result is written back into the persistent `hir_modules` by the
