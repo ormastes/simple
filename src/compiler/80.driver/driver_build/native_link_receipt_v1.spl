@@ -21,8 +21,8 @@
 #   "0"               receipts off entirely.
 # The AOP formal design (§16.6) relinks on every static change; this receipt
 # skips only when every link input hash is unchanged, which is the case it
-# leaves implicit. Not covered by the key (named): the linker binary itself
-# and system libraries outside the runtime path / explicit library list.
+# leaves implicit. The toolchain part of the key (linker binary, CRT objects,
+# explicit and implicit libraries by content) is described at _toolchain_digests_v1.
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes, is_file, dir_list, env_get_opt}
@@ -30,6 +30,8 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
 use compiler.backend.linker.linker_wrapper.{link_to_shared}
+use compiler.backend.linker.mold.{find_linker_path}
+use compiler.backend.linker.crt_discovery.{find_crt_files}
 use compiler.driver.cache.action_key.{action_key_sort_texts}
 use std.nogc_sync_mut.io_runtime.{dir_create_all, process_run_timeout}
 
@@ -87,6 +89,92 @@ fn _runtime_digests_v1(runtime_path: text) -> [text]:
             out.push(name + "=" + _file_digest_v1(path))
     out
 
+# ---------------------------------------------------------------------------
+# Toolchain part of the link key (live_object_key.sdn gaps
+# linker_binary_version, system_library_content, import_lib_export_sets).
+# A skipped relink is only sound when everything the linker READS is keyed:
+#   - linker identity: content digest of the direct linker binary
+#     (find_linker_path); no resolvable linker => no receipt claim;
+#   - CRT objects (find_crt_files) by content;
+#   - every EXPLICIT library on the link line, resolved through the library
+#     paths, the CRT lib dirs and LIB / LIBRARY_PATH, by content -- an import
+#     library's bytes carry its export set; an unresolvable explicit library
+#     => no receipt claim (fail closed);
+#   - the libraries the linker wrapper adds IMPLICITLY
+#     (LINK_IMPLICIT_LIBRARIES_V1), each as its content digest or `absent`, so
+#     a system library appearing, disappearing or changing changes the key.
+# ---------------------------------------------------------------------------
+val LINK_IMPLICIT_LIBRARIES_V1: [text] = [
+    "c", "m", "pthread", "dl", "gcc", "gcc_s", "c++", "z", "zstd", "execinfo",
+    "xml2", "ncurses", "ffi", "kernel32", "ws2_32", "userenv", "ntdll", "bcrypt",
+    "advapi32", "user32", "dxgi", "d3d11", "msvcrt", "ucrt", "vcruntime",
+    "legacy_stdio_definitions"]
+
+pub fn native_link_library_candidates_v1(name: text) -> [text]:
+    if name.contains("/") or name.contains("\\") or name.ends_with(".lib") or
+            name.ends_with(".a") or name.ends_with(".so") or name.ends_with(".dylib") or
+            name.ends_with(".dll"):
+        return [name]
+    ["lib" + name + ".a", "lib" + name + ".so", "lib" + name + ".dylib",
+     name + ".lib", "lib" + name + ".dll.a", "lib" + name + ".lib"]
+
+fn _resolve_library_v1(name: text, dirs: [text]) -> text:
+    for candidate in native_link_library_candidates_v1(name):
+        if candidate.contains("/") or candidate.contains("\\"):
+            if is_file(candidate): return candidate
+            continue
+        for dir in dirs:
+            if dir == "": continue
+            val path = dir + "/" + candidate
+            if is_file(path): return path
+    ""
+
+# Rows for explicit (fail closed) and implicit (absent recorded) libraries.
+pub fn native_link_library_rows_v1(explicit: [text], implicit: [text], dirs: [text]) -> [text]?:
+    var rows: [text] = []
+    for name in explicit:
+        val path = _resolve_library_v1(name, dirs)
+        if path == "": return nil
+        val digest = _file_digest_v1(path)
+        if digest == "": return nil
+        rows.push("lib:" + name + "=" + digest)
+    for name in implicit:
+        val path = _resolve_library_v1(name, dirs)
+        val digest = if path == "": "" else: _file_digest_v1(path)
+        rows.push("sys:" + name + "=" + (if digest == "": "absent" else: digest))
+    Some(rows)
+
+pub fn native_link_search_dirs_v1(library_paths: [text], crt_dirs: [text]) -> [text]:
+    var dirs: [text] = []
+    for d in library_paths: dirs.push(d)
+    for d in crt_dirs: dirs.push(d)
+    for d in (env_get_opt("LIB") ?? "").split(";"): dirs.push(d)
+    val library_path = env_get_opt("LIBRARY_PATH") ?? ""
+    for d in library_path.split(if library_path.contains(";"): ";" else: ":"): dirs.push(d)
+    for d in ["/usr/lib", "/lib", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu",
+            "/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib/aarch64-linux-gnu"]:
+        dirs.push(d)
+    dirs
+
+fn _toolchain_digests_v1(libraries: [text], library_paths: [text], pie: bool) -> [text]?:
+    val linker = find_linker_path()
+    if linker.is_err(): return nil
+    val linker_digest = _file_digest_v1(linker.unwrap())
+    if linker_digest == "": return nil
+    var rows: [text] = ["linker=" + linker_digest]
+    val crt = find_crt_files(pie, false)
+    for crt_path in [crt.crt1, crt.crti, crt.crtn, crt.crtbegin, crt.crtend]:
+        if crt_path != "":
+            rows.push("crt=" + _file_digest_v1(crt_path))
+    rows.push("dynamic-linker=" + crt.dynamic_linker)
+    match native_link_library_rows_v1(libraries, LINK_IMPLICIT_LIBRARIES_V1,
+            native_link_search_dirs_v1(library_paths, crt.lib_dirs)):
+        case Some(lib_rows):
+            for row in lib_rows: rows.push(row)
+        case nil:
+            return nil
+    Some(rows)
+
 fn _publish_receipt_v1(path: text, content: text) -> bool:
     val temp = "{path}.{getpid()}.tmp"
     if not file_write(temp, content):
@@ -110,8 +198,14 @@ pub fn native_link_with_receipt_v1(objects: [text], output: text,
             # Unknown input: no receipt claim either way.
             return link_llvm_native(objects, output, opts)
         object_digests.push(digest)
+    # Toolchain (linker, CRT, explicit + implicit libraries): unkeyable => no claim.
+    val toolchain = _toolchain_digests_v1(opts.libraries, opts.library_paths, opts.pie)
+    if toolchain == nil:
+        return link_llvm_native(objects, output, opts)
+    var key_inputs = _runtime_digests_v1(opts.runtime_path)
+    for row in toolchain!: key_inputs.push(row)
     val key = native_link_key_v1(object_digests, output, native_link_options_text_v1(opts),
-        _runtime_digests_v1(opts.runtime_path))
+        key_inputs)
     val receipt_path = output + ".link-receipt"
     val recorded = if file_exists(receipt_path):
         native_link_receipt_output_digest_v1(file_read(receipt_path), key)
@@ -219,9 +313,12 @@ pub fn native_shared_link_with_receipt_v1(objects: [text], output: text,
             object_digests = []
             break
         object_digests.push(digest)
-    val keyed = mode != "0" and object_digests.len() == objects.len() and objects.len() > 0
+    val toolchain = _toolchain_digests_v1(config.libraries, config.library_paths, config.pie)
+    var key_inputs = _runtime_digests_v1(config.runtime_path)
+    for row in toolchain ?? []: key_inputs.push(row)
+    val keyed = mode != "0" and object_digests.len() == objects.len() and objects.len() > 0 and toolchain != nil
     val key = if keyed: native_link_key_v1(object_digests, output,
-        native_shared_link_config_text_v1(config), _runtime_digests_v1(config.runtime_path)) else: ""
+        native_shared_link_config_text_v1(config), key_inputs) else: ""
     val receipt_path = output + ".link-receipt"
     val (recorded, recorded_exports) = if keyed and file_exists(receipt_path):
         native_shared_receipt_read_v1(file_read(receipt_path), key)
