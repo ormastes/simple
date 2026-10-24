@@ -11,6 +11,8 @@
 # macro, so adding/removing users cannot change it (plan §6.3).
 
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, HASH_ALGO_SHA256_V1,
+    digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
     SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1, SemanticReadKindV1,
     semantic_read_facet_v1}
@@ -108,8 +110,47 @@ fn _frame_list_v1(values: [text]) -> text:
         out = out + _frame_v1(v)
     out + "]"
 
+# Every macro identity digest (MacroDefKey, MacroExpandKey, absence witness,
+# roots, content digests) is an algorithm-tagged DigestV1 in text form
+# `<algo>:<hex>` (hash_algorithm_registry_v1). Producers write sha256, a
+# collision-resistant algorithm; readers accept any collision-resistant
+# registered algorithm and treat an unknown/absent/non-identity tag as a miss.
+fn _tagged_sha256_v1(hex: text) -> text:
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
 pub fn macro_hash_v1(domain: text, parts: [text]) -> text:
-    sha256_text(_frame_v1(domain) + _frame_list_v1(parts))
+    _tagged_sha256_v1(sha256_text(_frame_v1(domain) + _frame_list_v1(parts)))
+
+# Tagged content digest of raw text (macro body, contract, invocation, args).
+pub fn macro_content_digest_v1(value: text) -> text:
+    _tagged_sha256_v1(sha256_text(value))
+
+# The DigestV1 behind a tagged macro digest, or nil when the algorithm is
+# unknown, the bytes are malformed, or the algorithm is not collision
+# resistant (fast fingerprints never establish macro identity).
+pub fn macro_identity_digest_v1(value: text) -> DigestV1?:
+    match digest_v1_parse(value):
+        case Some(d):
+            if digest_v1_identity_ok(d): return Some(d)
+            nil
+        case nil: nil
+
+fn _identity_ok_v1(value: text) -> bool:
+    match macro_identity_digest_v1(value):
+        case Some(_d): true
+        case nil: false
+
+# SQR1 (semantic_query_read_manifest_v1) fields are bare sha256 hex. A macro
+# digest of any other algorithm cannot be projected and yields "" (invalid
+# manifest => the `.rr` builder fails closed / conservative).
+fn _sqr_hex_v1(value: text) -> text:
+    match macro_identity_digest_v1(value):
+        case Some(d):
+            if d.algo_id == HASH_ALGO_SHA256_V1: return d.hex
+            ""
+        case nil: ""
 
 pub fn macro_def_id_canonical_v1(id: MacroDefIdV1) -> text:
     "macro-def-id/v1|" + _frame_v1(id.package) + _frame_v1(id.module) +
@@ -167,11 +208,7 @@ pub fn macro_use_identity_v1(value: MacroUseV1) -> text:
 # ---------------------------------------------------------------------------
 
 fn _digest_ok_v1(value: text) -> bool:
-    if value.len() != 64: return false
-    for ch in value.chars():
-        val ok = (ch >= "" and ch <= "9") or (ch >= "a" and ch <= "f")
-        if not ok: return false
-    true
+    _identity_ok_v1(value)
 
 fn _sorted_unique_v1(values: [text]) -> bool:
     var i = 1
@@ -258,7 +295,7 @@ fn _cursor_read_v1(cur: _CursorV1) -> text:
             colon = i
             break
         val ch = cur.data.substring(i, i + 1)
-        if ch < "" or ch > "9":
+        if ch < "0" or ch > "9":
             cur.ok = false
             return ""
         i = i + 1
@@ -276,7 +313,7 @@ fn _cursor_count_v1(cur: _CursorV1) -> i64:
     val t = _cursor_read_v1(cur)
     if not cur.ok: return 0
     for ch in t.chars():
-        if ch < "" or ch > "9":
+        if ch < "0" or ch > "9":
             cur.ok = false
             return 0
     if t == "":
@@ -304,7 +341,7 @@ fn _put_list_v1(values: [text]) -> text:
     out
 
 fn _bool_tag_v1(b: bool) -> text:
-    if b: "1" else: ""
+    if b: "1" else: "0"
 
 fn _seal_v1(magic: text, payload: text) -> text:
     magic + "\n" + payload + "\n#" + sha256_text(magic + payload)
@@ -343,7 +380,7 @@ fn _entry_read_v1(cur: _CursorV1) -> MacroDefinitionEntryV1:
     val members = _cursor_list_v1(cur)
     val member_root = _cursor_read_v1(cur)
     val surface = _cursor_read_v1(cur)
-    if pub_tag != "" and pub_tag != "1": cur.ok = false
+    if pub_tag != "0" and pub_tag != "1": cur.ok = false
     MacroDefinitionEntryV1(def_id: id, macro_name: name, generation: gen,
         contract_digest: contract, body_digest: body, hygiene_schema: hygiene,
         declared_effects: effects, dependent_macros: deps, guard_ids: guards,
@@ -456,15 +493,15 @@ pub fn macro_use_table_decode_v1(data: text) -> MacroUseTableDecodeV1:
 
 fn _query_key_v1(kind: text, entity: text, profile: text, parameter: text) -> SemanticQueryKeyV1:
     SemanticQueryKeyV1(kind: kind, stable_entity_id: entity, semantic_profile_digest: profile,
-        parameter_digest: parameter)
+        parameter_digest: _sqr_hex_v1(parameter))
 
 fn _read_v1(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1, facet: text,
         ordinal: i64, fingerprint: text, partition: text,
         coverage: SemanticCoverageV1) -> SemanticQueryReadV1:
     SemanticQueryReadV1(producer: producer, consumer: consumer, facet: facet, ordinal: ordinal,
-        consumed_fingerprint: fingerprint,
-        witness_digest: macro_hash_v1("macro-read-witness/v1", [producer.kind,
-            producer.stable_entity_id, facet, fingerprint]),
+        consumed_fingerprint: _sqr_hex_v1(fingerprint),
+        witness_digest: _sqr_hex_v1(macro_hash_v1("macro-read-witness/v1", [producer.kind,
+            producer.stable_entity_id, facet, fingerprint])),
         partition_id: partition, completeness: coverage)
 
 pub fn macro_use_consumer_key_v1(value: MacroUseV1, semantic_profile_digest: text) -> SemanticQueryKeyV1:
@@ -512,9 +549,10 @@ pub fn macro_effect_admitted_v1(effect: text) -> bool:
 # expansion cache; conservative/unresolved/inactive uses always re-expand.
 pub fn macro_use_cacheable_v1(value: MacroUseV1) -> bool:
     macro_use_status_tag_v1(value.status) == "resolved" and value.coverage == "complete" and
-        value.expand_key != ""
+        _identity_ok_v1(value.expand_key)
 
 # Deterministic hygienic name for a macro-local binder: stable across runs and
 # workers (no counters), distinct per definition and per invocation site.
 pub fn macro_hygienic_name_v1(def_id: text, use_identity: text, local_name: text) -> text:
-    local_name + "__h" + macro_hash_v1("macro-hygiene/v1", [def_id, use_identity, local_name]).substring(0, 12)
+    val tagged = macro_hash_v1("macro-hygiene/v1", [def_id, use_identity, local_name])
+    local_name + "__h" + tagged.substring(tagged.index_of(":") + 1, tagged.index_of(":") + 13)

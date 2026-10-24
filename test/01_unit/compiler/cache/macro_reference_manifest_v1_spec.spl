@@ -11,11 +11,12 @@ use compiler.common.cache_contract.macro_reference_manifest_v1.{
     macro_definition_table_encode_v1, macro_definition_table_decode_v1,
     macro_use_table_encode_v1, macro_use_table_decode_v1,
     macro_definition_table_valid_v1, macro_use_table_valid_v1,
-    macro_use_status_tag_v1, macro_use_forward_read_manifest_v1}
+    macro_use_status_tag_v1, macro_use_forward_read_manifest_v1, macro_content_digest_v1,
+    macro_identity_digest_v1, macro_use_cacheable_v1}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
     semantic_query_read_manifest_valid_v1}
 
-fn d(v: text) -> text: sha256_text(v)
+fn d(v: text) -> text: macro_content_digest_v1(v)
 
 fn def_id(module: text, binder: text) -> MacroDefIdV1:
     MacroDefIdV1(package: "pkg", module: module, namespace: "macro", binder: binder)
@@ -114,12 +115,12 @@ describe "MacroUseTableV1 codec":
 
 describe "forward reads for the .rr v2 projection":
     it "resolved use reads macro.def positively plus name membership":
-        val m = macro_use_forward_read_manifest_v1(use_record("r1"), d("profile"))
+        val m = macro_use_forward_read_manifest_v1(use_record("r1"), sha256_text("profile"))
         expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
         expect(m.consumer.kind).to_equal("macro.expand")
         expect(m.ordered_reads.len()).to_equal(2)
         expect(m.ordered_reads[0].producer.kind).to_equal("macro.def")
-        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(d("defkey"))
+        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(sha256_text("defkey"))
         expect(m.ordered_reads[1].facet).to_equal("membership:macro-name")
 
     it "unresolved use carries an absence read bound to its witness":
@@ -130,8 +131,24 @@ describe "forward reads for the .rr v2 projection":
         missing.has_absence_witness = true
         missing.absence_witness = macro_absence_witness_v1("double", d("cands"))
         missing.status = MacroUseStatusV1.Unresolved
-        val m = macro_use_forward_read_manifest_v1(missing, d("profile"))
+        val m = macro_use_forward_read_manifest_v1(missing, sha256_text("profile"))
         expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
         expect(m.ordered_reads[0].producer.kind).to_equal("macro.resolve")
         expect(m.ordered_reads[0].facet).to_equal("absence:macro-name")
-        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(missing.absence_witness)
+        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(missing.absence_witness.substring(7))
+
+describe "algorithm-tagged macro digests (hash agility)":
+    it "keys are tagged sha256 identity digests":
+        val k = macro_def_key_v1(entry("double", "x + x"), d("nested"))
+        expect(k.starts_with("sha256:")).to_equal(true)
+        expect(macro_identity_digest_v1(k) == nil).to_equal(false)
+
+    it "unknown, malformed or non-identity algorithms are absent (miss)":
+        expect(macro_identity_digest_v1("md5:" + sha256_text("x")) == nil).to_equal(true)
+        expect(macro_identity_digest_v1(sha256_text("x")) == nil).to_equal(true)
+        expect(macro_identity_digest_v1("xxh3-128:0123456789abcdef0123456789abcdef") == nil).to_equal(true)
+        var u = use_record("r1")
+        u.expand_key = "xxh3-128:0123456789abcdef0123456789abcdef"
+        expect(macro_use_cacheable_v1(u)).to_equal(false)
+        val table = MacroUseTableV1(schema: 1, module_id: "pkg/b", uses: [u])
+        expect(macro_use_table_valid_v1(table)).to_equal(false)
