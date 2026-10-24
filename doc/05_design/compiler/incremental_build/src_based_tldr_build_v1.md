@@ -44,7 +44,7 @@ after #4367 #4370 #4372 #4373 #4378 #4379 #4382 landed.
    immutable binary AST, used in place (mmap or equivalent, no replay, no
    rebuild). A replay log — anything that has to be re-executed, re-bridged or
    re-assembled into node structures on every hit — is not a cache. (User rule,
-   2026-10-24; today's flat-pool capture is non-compliant, see §4.) Packing layout, field inventory and clear/convert rules: [`packed_binary_ast_v1.md`](packed_binary_ast_v1.md).
+   2026-10-24; today's flat-pool capture is non-compliant, see §4.) Packing layout, field inventory and clear/convert rules: [`packed_binary_ast_v1.md`](packed_binary_ast_v1.md). Landing review of the 2026-10-24 PRs against these rules, the corrected cache-limits spec and the Linux/portability layer: [`cache_build_review_and_portability_2026-10-24.md`](cache_build_review_and_portability_2026-10-24.md).
 7. **Hash agility.** Different servers/caches may use different hash
    algorithms, at most three at once. Every persisted digest is
    `(algo_id, length, bytes)`, never a bare fixed-width field; a registry
