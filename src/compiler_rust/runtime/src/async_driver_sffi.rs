@@ -634,8 +634,41 @@ fn execute_operation(operation: Operation) -> Completion {
     }
 }
 
+/// Windows file table for the reference driver: driver fds are positive ids
+/// owned here (not CRT descriptors). Positioned I/O uses `seek_read` /
+/// `seek_write` (OVERLAPPED offset), so reads never share a file cursor.
+#[cfg(windows)]
+fn windows_files() -> &'static Mutex<std::collections::HashMap<i64, std::fs::File>> {
+    static FILES: OnceLock<Mutex<std::collections::HashMap<i64, std::fs::File>>> = OnceLock::new();
+    FILES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: &io::Error) -> i64 {
+    match error.kind() {
+        io::ErrorKind::NotFound => -2,
+        io::ErrorKind::PermissionDenied => -13,
+        io::ErrorKind::AlreadyExists => -17,
+        io::ErrorKind::InvalidInput => -22,
+        _ => -5,
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_op(id: i64, fd: i64, f: impl FnOnce(&std::fs::File) -> Completion) -> Completion {
+    let Ok(files) = windows_files().lock() else {
+        return completion(id, -5);
+    };
+    match files.get(&fd) {
+        Some(file) => f(file),
+        None => completion(id, -9),
+    }
+}
+
 #[cfg(windows)]
 fn execute_operation(operation: Operation) -> Completion {
+    use std::os::windows::fs::FileExt;
+    static NEXT_FD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(3);
     match operation {
         Operation::Timeout { id, timeout_ms } => {
             if timeout_ms > 0 {
@@ -643,15 +676,59 @@ fn execute_operation(operation: Operation) -> Completion {
             }
             completion(id, 0)
         }
+        Operation::Open { id, path, flags, .. } => {
+            // POSIX O_ACCMODE / O_CREAT (0o100) / O_TRUNC (0o1000) bits.
+            let access = flags & 3;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(access != 1).write(access != 0);
+            if flags & 0o100 != 0 {
+                options.create(true);
+            }
+            if flags & 0o1000 != 0 {
+                options.truncate(true);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    let fd = NEXT_FD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    match windows_files().lock() {
+                        Ok(mut files) => {
+                            files.insert(fd, file);
+                            completion(id, fd)
+                        }
+                        Err(_) => completion(id, -5),
+                    }
+                }
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }
+        Operation::Read { id, fd, size, offset } => windows_file_op(id, fd, |file| {
+            let mut data = vec![0_u8; size.max(0) as usize];
+            match file.seek_read(&mut data, offset.max(0) as u64) {
+                Ok(n) => {
+                    data.truncate(n);
+                    data_completion(id, n as i64, data)
+                }
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }),
+        Operation::Write { id, fd, data, offset } => windows_file_op(id, fd, |file| {
+            match file.seek_write(&data, offset.max(0) as u64) {
+                Ok(n) => completion(id, n as i64),
+                Err(error) => completion(id, windows_io_error(&error)),
+            }
+        }),
+        Operation::Fsync { id, fd } => windows_file_op(id, fd, |file| match file.sync_all() {
+            Ok(()) => completion(id, 0),
+            Err(error) => completion(id, windows_io_error(&error)),
+        }),
+        Operation::Close { id, fd } => match windows_files().lock() {
+            Ok(mut files) => completion(id, if files.remove(&fd).is_some() { 0 } else { -9 }),
+            Err(_) => completion(id, -5),
+        },
         Operation::Accept { id, .. }
         | Operation::Recv { id, .. }
         | Operation::Send { id, .. }
-        | Operation::Sendfile { id, .. }
-        | Operation::Read { id, .. }
-        | Operation::Write { id, .. }
-        | Operation::Open { id, .. }
-        | Operation::Close { id, .. }
-        | Operation::Fsync { id, .. } => completion(id, NEG_ENOSYS),
+        | Operation::Sendfile { id, .. } => completion(id, NEG_ENOSYS),
     }
 }
 
