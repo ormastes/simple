@@ -1233,6 +1233,7 @@ rebased_push_published_base() {
     _rebased_lines=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" \
         refs/heads/main refs/heads/release_phase3 'refs/heads/release/*' 2>/dev/null) || return 1
     _rebased_best=""
+    _rebased_missing=""
     _rebased_best_count=""
     while read -r _rebased_sha _rebased_ref; do
         case "$_rebased_ref" in
@@ -1245,7 +1246,10 @@ rebased_push_published_base() {
             *) continue ;;
         esac
         case "$_rebased_sha" in ''|*[!0-9a-f]*) continue ;; esac
-        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || continue
+        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || {
+            _rebased_missing="$_rebased_missing ${_rebased_ref#refs/heads/}"
+            continue
+        }
         _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || continue
         [ -n "$_rebased_base" ] || continue
         [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
@@ -1258,7 +1262,10 @@ rebased_push_published_base() {
     done <<REBASED_LINES
 $_rebased_lines
 REBASED_LINES
-    [ -n "$_rebased_best" ] || return 1
+    if [ -z "$_rebased_best" ]; then
+        [ -z "$_rebased_missing" ] || echo "push-must-check: remote has newer$_rebased_missing than this clone has fetched; run git fetch first" >&2
+        return 1
+    fi
     printf '%s\n' "$_rebased_best"
 }
 
@@ -1318,7 +1325,10 @@ new_ref_published_base() {
             _nr_sha=${_nr_line%%[[:space:]]*}
             _nr_seen_ref=${_nr_line#*[[:space:]]}
             [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
-            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || return 1
+            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || {
+                echo "push-must-check: remote has newer ${_nr_merge#refs/heads/} ($_nr_sha) than this clone has fetched; run git fetch first" >&2
+                return 1
+            }
             _nr_base=$(git -C "$ROOT" merge-base --all "$_nr_sha" "$_nr_tip") || return 1
             [ -n "$_nr_base" ] || return 1
             [ "$(printf '%s\n' "$_nr_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
@@ -1643,8 +1653,9 @@ if [ "${1:-}" = --self-test-release-base ]; then
     _st_unfetched=$(printf 'remote-only legacy\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com commit-tree "$_st_tree" -p "$_st_published_merge") || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release_phase3 "$_st_unfetched" || exit 2
     git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null && exit 2
-    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
-    echo 'push-must-check: unavailable published legacy commit refuses: PASS'
+    _st_err=$(new_ref_published_base refs/heads/work/legacy "$_st_own" 2>&1 >/dev/null) && exit 2
+    case "$_st_err" in *"run git fetch first"*) ;; *) exit 2 ;; esac
+    echo 'push-must-check: unavailable published legacy commit refuses and says to fetch: PASS'
 
     git -C "$ROOT" push -q origin :refs/heads/release_phase3 || exit 2
     git -C "$ROOT" update-ref refs/remotes/origin/release_phase3 "$_st_legacy" || exit 2
