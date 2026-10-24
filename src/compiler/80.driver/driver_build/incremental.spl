@@ -17,6 +17,8 @@ use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_is_regular_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, digest_v1_new, digest_v1_text, digest_v1_parse}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
@@ -82,6 +84,7 @@ fn incremental_hash_text(content: text) -> i64:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_src_fingerprint_memo: text = "@@unset@@"
+var _stdlib_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_portable_root_memo_v1: text = ""
 var _frontend_portable_authority_memo_v1: text = ""
 var _frontend_portable_digest_memo_v1: text = ""
@@ -171,9 +174,51 @@ fn native_build_compiler_source_fingerprint() -> text:
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
-            fp = "{digest.substring(0, 16)}n{lines.len()}"
+            fp = "sha256:{digest}n{lines.len()}"
     _compiler_src_fingerprint_memo = fp
     fp
+
+pub fn native_build_spl_tree_fingerprint(root: text) -> text:
+    """Content fingerprint of every *.spl under `root` ("" when root is absent).
+
+    Per-file "path|size|sha256" lines in sorted walk order, digested via a
+    pid-scoped temp file (same method as the compiler-source fingerprint).
+    """
+    if not rt_dir_exists(root):
+        return ""
+    var lines: [text] = []
+    var dirs: [text] = [root]
+    var i = 0
+    while i < dirs.len():
+        val dir = dirs[i]
+        i = i + 1
+        val entries = incremental_sorted_text(dir_list(dir) ?? [])
+        for entry in entries:
+            val full = dir + "/" + entry
+            if rt_dir_exists(full):
+                dirs = dirs.push(full)
+            elif entry.ends_with(".spl"):
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    dir_create_all("build")
+    val tmp = "build/.spl_tree_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            fp = "sha256:{digest}n{lines.len()}"
+    fp
+
+fn native_build_stdlib_source_fingerprint() -> text:
+    """Fingerprint of src/lib/**/*.spl — the stdlib is read as SOURCE on every
+    run and shapes the compiler's own behaviour, so it is a producer input
+    (live_object_key.sdn component producer_stdlib_src; closes known gap
+    stdlib_source). "" outside a repo checkout, like the compiler fingerprint.
+    """
+    if _stdlib_src_fingerprint_memo != "@@unset@@":
+        return _stdlib_src_fingerprint_memo
+    _stdlib_src_fingerprint_memo = native_build_spl_tree_fingerprint("src/lib")
+    _stdlib_src_fingerprint_memo
 
 fn native_build_frontend_source_fingerprint() -> text:
     """Fingerprint only parser/cache sources for front-end cache admission.
@@ -208,7 +253,7 @@ fn native_build_frontend_source_fingerprint() -> text:
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
-            fp = "{digest.substring(0, 16)}n{lines.len()}"
+            fp = "sha256:{digest}n{lines.len()}"
     _frontend_src_fingerprint_memo = fp
     fp
 
@@ -345,7 +390,7 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
     if rt_file_exists(runtime_path) and not rt_dir_exists(runtime_path):
         val direct_hash = rt_file_hash_sha256(runtime_path)
         if direct_hash.len() == 64:
-            return "file-{direct_hash}"
+            return "file-sha256:{direct_hash}"
         return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     if not rt_dir_exists(runtime_path):
         return "missing-{rt_getpid()}-{rt_time_now_unix_micros()}"
@@ -370,7 +415,7 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
         val digest = rt_file_hash_sha256(tmp)
         rt_file_delete(tmp)
         if digest.len() == 64:
-            return "dir-{digest.substring(0, 16)}n{lines.len()}"
+            return "dir-sha256:{digest}n{lines.len()}"
     "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 extern fn rt_simple_abi_version() -> i64
@@ -484,6 +529,10 @@ pub fn native_build_admitted_abi_identity(
     val receipt_digest = sha256_text(receipt_content)
     Ok("policy={policy};version={runtime_version};deferred={runtime_deferred_text};receipt-sha256={receipt_digest}")
 
+pub fn cache_key_frame(value: text) -> text:
+    """Length-prefix one cache-key component value: `<len>:<value>`."""
+    "{value.len()}:{value}"
+
 pub fn native_build_producer_identity(executable_hash: text,
         compiler_source_fingerprint: text, runtime_provider_fingerprint: text,
         runtime_bundle: text, simple_abi_version: i64,
@@ -494,7 +543,10 @@ pub fn native_build_producer_identity(executable_hash: text,
         "deferred"
     else:
         "selected-{simple_abi_version}"
-    "exe={executable_hash};compiler={compiler_source_fingerprint};runtime={runtime_provider_fingerprint};bundle={runtime_bundle};simple-abi-policy={simple_abi_policy};simple-abi={abi_identity};simple-abi-admission={abi_admission_identity}"
+    # Length-framed ("name=<len>:<value>") so a value containing ';' or '='
+    # cannot alias a component boundary (live_object_key.sdn gap
+    # scope_key_unframed, closed).
+    "exe={cache_key_frame("sha256:" + executable_hash)};compiler={cache_key_frame(compiler_source_fingerprint)};runtime={cache_key_frame(runtime_provider_fingerprint)};bundle={cache_key_frame(runtime_bundle)};simple-abi-policy={cache_key_frame(simple_abi_policy)};simple-abi={cache_key_frame(abi_identity)};simple-abi-admission={cache_key_frame(abi_admission_identity)}"
 
 fn native_build_uncacheable_abi_identity(reason: text) -> text:
     val reason_digest = sha256_text(reason).substring(0, 16)
@@ -504,7 +556,11 @@ fn native_build_compiler_identity() -> text:
     val src_fp = native_build_compiler_source_fingerprint()
     val hash = native_build_compiler_executable_hash()
     if hash != "":
-        val compiler_fp = if src_fp == "": "embedded" else: src_fp
+        val lib_fp = native_build_stdlib_source_fingerprint()
+        val compiler_only_fp = if src_fp == "": "embedded" else: src_fp
+        # stdlib is a compiler-behaviour input (src/lib is interpreted as
+        # source every run); "" outside a checkout keeps the identity unchanged.
+        val compiler_fp = if lib_fp == "": compiler_only_fp else: "{compiler_only_fp}+stdlib:{lib_fp}"
         val runtime_path = sosix_env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
         val runtime_bundle = sosix_env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
@@ -566,7 +622,9 @@ fn native_build_cache_scope_key(
     val cpu_text = match target_cpu:
         case Some(cpu): cpu
         case nil: "native"
-    val feature_text = target_features.join(",")
+    var feature_text = ""
+    for feature in target_features:
+        feature_text = feature_text + cache_key_frame(feature)
     val lane = native_build_cache_lane()
     # Built-in providers remain compiler-bound until their admitted receipt is
     # wired by the AOT owner. A dynamic/versioned provider supplies its receipt
@@ -580,14 +638,15 @@ fn native_build_cache_scope_key(
         "compiler-bound-optimizer"
     else:
         "receipt:{optimizer_kernel_receipt_hash}"
-    val serial_scope = "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity};optimizer={optimizer_identity}"
+    # Length-framed like native_build_producer_identity (gap scope_key_unframed).
+    val serial_scope = "lane={cache_key_frame(lane)};backend={cache_key_frame(backend_text)};cpu={cache_key_frame(cpu_text)};features={cache_key_frame(feature_text)};opt={cache_key_frame(optimization.to_text())};compiler={cache_key_frame(compiler_identity)};provider={cache_key_frame(provider_identity)};optimizer={cache_key_frame(optimizer_identity)};guards={cache_key_frame(cfg_guard_context_identity_v1())}"
     # An independent lowering owns its complete canonical-ID map. Keep these
     # object witnesses apart from legacy serial allocation histories, and pin
     # the complete frozen declarations and semantic context. Scheduling and
     # queue coordinates never authorize object reuse.
     if (sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
         val context = sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT") ?? ""
-        return serial_scope + ";mir-selective-object-owner-v1=" + context
+        return serial_scope + ";mir-selective-object-owner-v1=" + cache_key_frame(context)
     serial_scope
 
 fn incremental_mkdir_p(path: text) -> bool:
@@ -735,6 +794,24 @@ fn incremental_reverse_reference_generation_identity_v1(
 
 # Native hash failures may return a flat nil despite the extern's text type.
 # Check length before byte access: nil has runtime text length -1, not 0.
+# Hash agility for PERSISTED build-cache digests (live_object_key.sdn gap
+# hash_algorithm_tag, closed): every digest written to build_cache.sdn is
+# DigestV1 text `<algorithm>:<hex>` (cache_contract/hash_algorithm_registry_v1)
+# and a row is read back only when it names the algorithm this code computes
+# (sha256). An untagged legacy value, an unknown algorithm or a different one
+# reads back as "" -- a MISS, never a match.
+pub fn incremental_digest_tag_v1(hex: text) -> text:
+    if hex == "": return ""
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+pub fn incremental_digest_untag_v1(tagged: text) -> text:
+    match digest_v1_parse(tagged):
+        case Some(d):
+            if d.algo_id == HASH_ALGO_SHA256_V1: d.hex else: ""
+        case nil: ""
+
 pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
     if digest.len() != 64: return false
     for index in 0..64:
@@ -1077,7 +1154,7 @@ impl BuildCache:
                                     val hash_value: SdnValue = hash_value_raw
                                     val hs = hash_value.as_str()
                                     if val parsed_hash = hs:
-                                        fp_hash = parsed_hash
+                                        fp_hash = incremental_digest_untag_v1(parsed_hash)
                                 val s = fp_obj.get("size")
                                 if val size_value_raw = s:
                                     val size_value: SdnValue = size_value_raw
@@ -1131,7 +1208,7 @@ impl BuildCache:
                                 val di: SdnValue = di_raw
                                 val di_str = di.as_str()
                                 if val di_text = di_str:
-                                    deps_iface = di_text
+                                    deps_iface = incremental_digest_untag_v1(di_text)
 
                             # Absent on legacy rows. Shadow comparison reports
                             # this as `legacy-missing`; it never changes the
@@ -1155,7 +1232,7 @@ impl BuildCache:
                                 val id_value: SdnValue = id_raw
                                 val id_str = id_value.as_str()
                                 if val id_text = id_str:
-                                    interface_digest = id_text
+                                    interface_digest = incremental_digest_untag_v1(id_text)
 
                             val entry = DependencyEntry(
                                 source: source, fingerprint: fp,
@@ -1466,6 +1543,35 @@ pub fn dep_iface_gate_valid(recorded: text, dep_paths: [text]) -> bool:
         return recorded == fresh_fold
     false
 
+pub fn dependency_closure_v1(recorded: {text: [text]}, dependencies: [text]) -> [text]?:
+    """Transitive dependency closure over recorded `source -> dependencies`
+    edges, so an interface change reached only through a re-export chain
+    (A imports B, B re-exports C) changes A's deps_iface fold
+    (live_object_key.sdn gap reexport_chain_closure, closed). nil (fail
+    closed) when a reachable dependency has no recorded edges: its own
+    dependencies are unknown. Sorted, de-duplicated."""
+    var seen: [text] = []
+    var queue: [text] = dependencies
+    var i = 0
+    while i < queue.len():
+        val dep = queue[i]
+        i = i + 1
+        if seen.contains(dep):
+            continue
+        seen.push(dep)
+        if not recorded.contains_key(dep):
+            return nil
+        for next in recorded[dep]:
+            if not seen.contains(next):
+                queue.push(next)
+    Some(incremental_sorted_text(seen))
+
+pub fn build_cache_dependency_closure(cache: BuildCache, dependencies: [text]) -> [text]?:
+    var recorded: {text: [text]} = {}
+    for source in cache.entries.keys():
+        recorded[source] = cache.entries[source].dependencies
+    dependency_closure_v1(recorded, dependencies)
+
 pub fn build_cache_open(cache_path: text) -> BuildCache:
     BuildCache.load(cache_path)
 
@@ -1478,7 +1584,8 @@ pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
     were when the artifact was produced. If any dependency is unreadable the
     fold is nil and "" is stored — build_cache_entry_is_valid then fails
     closed on this entry."""
-    val deps_iface = dep_iface_gate_record(dependencies)
+    val closure = build_cache_dependency_closure(cache, dependencies)
+    val deps_iface = if val deps = closure: dep_iface_gate_record(deps) else: ""
     reverse_reference_owner_register_source_alias_v1(source, source)
     for output in outputs:
         reverse_reference_owner_register_source_alias_v1(output, source)
@@ -1535,7 +1642,9 @@ pub fn build_cache_entry_is_valid(cache: BuildCache, source: text) -> bool:
         for out in entry.outputs:
             if not incremental_file_exists(out):
                 return false
-        return dep_iface_gate_valid(entry.deps_iface, entry.dependencies)
+        if val deps = build_cache_dependency_closure(cache, entry.dependencies):
+            return dep_iface_gate_valid(entry.deps_iface, deps)
+        return false
     false
 
 pub fn build_cache_persist(cache: BuildCache) -> bool:
@@ -1551,11 +1660,11 @@ pub fn build_cache_persist(cache: BuildCache) -> bool:
         val entry = cache.entries[source]
         val fp = entry.fingerprint
         val source_text = incremental_sdn_escape(entry.source)
-        val hash_text = incremental_sdn_escape(fp.content_hash)
+        val hash_text = incremental_sdn_escape(incremental_digest_tag_v1(fp.content_hash))
         val deps_text = incremental_sdn_text_array(entry.dependencies)
         val outputs_text = incremental_sdn_text_array(entry.outputs)
-        val deps_iface_text = incremental_sdn_escape(entry.deps_iface)
-        val interface_digest_text = incremental_sdn_escape(entry.interface_digest)
+        val deps_iface_text = incremental_sdn_escape(incremental_digest_tag_v1(entry.deps_iface))
+        val interface_digest_text = incremental_sdn_escape(incremental_digest_tag_v1(entry.interface_digest))
         val module_witness_text = incremental_sdn_escape(entry.module_witness)
         val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
         lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", interface_digest: \"" + interface_digest_text + "\", module_witness: \"" + module_witness_text + "\" " + "}")
@@ -1592,7 +1701,7 @@ export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, b
 export build_cache_record_entry_at, build_cache_entry_is_valid_at
 export incremental_detect_changes_at
 export IncrementalCompileResult, IncrChangeSet, IncrChange, ChangeKind
-export dep_iface_gate_record, dep_iface_gate_valid
+export dep_iface_gate_record, dep_iface_gate_valid, dependency_closure_v1, build_cache_dependency_closure
 export incremental_reverse_reference_fallback_reason_v1
 export incremental_publish_direct_import_export_v1
 export incremental_publish_module_scc_artifact_v1

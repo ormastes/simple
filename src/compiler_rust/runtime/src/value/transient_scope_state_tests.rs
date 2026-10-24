@@ -79,3 +79,25 @@ fn promote_cost_is_proportional_to_reachable_not_scope_size() {
     eprintln!("promote_cost: {} promotions over 200000 tracked in {:?}", kept.len(), elapsed);
     assert!(elapsed < std::time::Duration::from_secs(2), "promotion rescans the scope: {:?}", elapsed);
 }
+
+#[test]
+#[ignore]
+fn zz_heap_registry_scaling_bench() {
+    for threads in [1usize, 8, 40, 80] {
+        let per = 2_000_000 / threads.max(1) * 1;
+        let started = std::time::Instant::now();
+        let handles: Vec<_> = (0..threads).map(|_| std::thread::spawn(move || {
+            let mut keep = Vec::with_capacity(64);
+            for i in 0..per {
+                let a = rt_array_new(1);
+                let _ = rt_array_push(a, RuntimeValue::from_int(i as i64));
+                keep.push(a);
+                if keep.len() == 64 { for a in keep.drain(..) { rt_array_free(a); } }
+            }
+            for a in keep.drain(..) { rt_array_free(a); }
+        })).collect();
+        for h in handles { h.join().unwrap(); }
+        let el = started.elapsed();
+        eprintln!("registry_bench threads={} total_ops=2000000 elapsed={:?} Mops/s={:.2}", threads, el, 2.0 / el.as_secs_f64());
+    }
+}

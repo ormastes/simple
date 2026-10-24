@@ -31,8 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4, selfhost_threads: 2 }
-          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4, selfhost_threads: 2 }
+          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4, selfhost_threads: 1 }
+          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4, selfhost_threads: 1 }
           - { platform: darwin-arm64, os: macos-15, threads: 3, selfhost_threads: 1 }
           - { platform: darwin-x86_64, os: macos-15-intel, threads: 4, selfhost_threads: 2 }
           - { platform: windows-x86_64, os: windows-2025, threads: 4, selfhost_threads: 2 }
@@ -107,6 +107,18 @@ jobs:
           sudo apt-get install -y -qq libsqlite3-dev:riscv64 zlib1g-dev:riscv64 libzstd-dev:riscv64 libncurses-dev:riscv64
       # A first rung with no qualified RC builds phase 1 with the Rust seed,
       # which needs the same tools as release.yml's seed steps.
+      # A pure-Simple compiler building the compiler peaks above the 16 GB
+      # runner after HIR (runs 40091812567, 40098331925: runner shutdown);
+      # darwin-arm64 (7 GB) got through on macOS swap. Give Linux swap too.
+      - name: Swap for pure-Simple builds (linux)
+        if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'linux-')
+        run: |
+          sudo swapoff -a || :
+          sudo fallocate -l 24G /mnt/ladder.swap
+          sudo chmod 600 /mnt/ladder.swap
+          sudo mkswap /mnt/ladder.swap
+          sudo swapon /mnt/ladder.swap
+          free -g
       - name: Build tools (linux-x86_64)
         if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-x86_64'
         run: |
@@ -250,6 +262,15 @@ jobs:
             # The synced checkout is owned by another uid; without this git refuses it
             # ("dubious ownership") and SCV fails with git-event-source-unavailable.
             git config --global --add safe.directory "$(pwd -P)"
+            # 12 GB VM: add swap for the pure-Simple build's post-HIR peak (best
+            # effort; a small VM disk only skips it).
+            if dd if=/dev/zero of=/usr/ladder.swap bs=1m count=12288 2>/dev/null; then
+              chmod 0600 /usr/ladder.swap
+              md=$(mdconfig -a -t vnode -f /usr/ladder.swap) && swapon "/dev/$md" || echo "ladder: swap unavailable"
+            else
+              rm -f /usr/ladder.swap; echo "ladder: no disk for swap"
+            fi
+            swapinfo -h || :
             mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
             # Record the verdict instead of failing the VM run: the action copies
             # build/ files back to the host only when the run succeeds.

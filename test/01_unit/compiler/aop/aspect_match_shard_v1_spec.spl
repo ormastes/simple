@@ -10,7 +10,8 @@ use compiler.common.cache_contract.aspect_match_shard_v1.{
     directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1,
     pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1,
     advice_apply_key_v1, aspect_weave_plan_delta_v1, aspect_advice_mode_cacheable_v1,
-    aspect_match_forward_reads_v1, pointcut_match_shard_compute_v1}
+    aspect_match_forward_reads_v1, pointcut_match_shard_compute_v1,
+    pointcut_match_universe_v1, aop_digest_known_v1, aop_digest_tables_match_v1}
 
 fn jp(file: text, sym: text, attrs: [text], body: text) -> JoinPointFactV1:
     JoinPointFactV1(id: "{file}::{sym}", kind: "forward", symbol: sym, attrs: attrs,
@@ -49,7 +50,8 @@ describe "DirectoryJoinPointFactsV1":
         expect(f.sorted_join_points[2].id).to_equal("a/y.spl::foo_read")
         expect(f.complete).to_equal(true)
         expect(f.facts_key).to_equal(directory_facts_key_v1(dir_a([])))
-        expect(f.facts_key.len()).to_equal(64)
+        expect(f.facts_key.len()).to_equal(71)
+        expect(f.facts_key.starts_with("sha256:")).to_equal(true)
 
 describe "A-01 advice body edit":
     it "reuses the match shard and dirties only matched join points":
@@ -137,8 +139,9 @@ describe "A-03 add/rename function with attr":
 
 describe "A-04 conservative fallback":
     it "rejects unsupported selectors and incomplete inventories as non-cacheable":
-        expect(pointcut_selector_parse_v1("!attr(test)").supported).to_equal(false)
-        expect(pointcut_selector_parse_v1("within(services.*)").supported).to_equal(false)
+        expect(pointcut_selector_parse_v1("call(foo)").supported).to_equal(false)
+        expect(pointcut_selector_parse_v1("attr(x) &").supported).to_equal(false)
+        expect(pointcut_selector_parse_v1("within(a*)").supported).to_equal(false)
         val inc = directory_join_point_facts_v1("a", ["a/x.spl"], [], [], false)
         val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
             pointcut_selector_parse_v1("attr(logged)"), inc)
@@ -159,5 +162,68 @@ describe ".rr schema v2 forward reads":
         expect(rs[0].producer.kind).to_equal("aop.directory_facts")
         expect(rs[0].consumer.kind).to_equal("aop.match")
         expect(rs[0].facet).to_equal("membership:join-points")
-        expect(rs[0].witness_digest).to_equal(f.negative_root)
+        expect("sha256:" + rs[0].witness_digest).to_equal(f.negative_root)
         expect(rs[1].consumer.kind).to_equal("aop.weave")
+
+describe "A-04 selector algebra":
+    it "evaluates ! & | and parentheses over a complete directory":
+        val f = dir_a([])
+        val r1 = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("!attr(logged)"), f)
+        expect(r1.sorted_matching_ids).to_equal(["a/x.spl::bar_close", "a/y.spl::foo_read"])
+        val r2 = pointcut_match_shard_compute_v1(
+            pointcut_selector_parse_v1("execution(foo*) & !attr(logged)"), f)
+        expect(r2.sorted_matching_ids).to_equal(["a/y.spl::foo_read"])
+        val r3 = pointcut_match_shard_compute_v1(
+            pointcut_selector_parse_v1("(bar_close | attr(logged)) & within(a)"), f)
+        expect(r3.sorted_matching_ids).to_equal(["a/x.spl::bar_close", "a/x.spl::foo_open"])
+    it "selector digest is canonical over whitespace and distinguishes operators":
+        val a = pointcut_selector_parse_v1("attr(x)&!foo")
+        val b = pointcut_selector_parse_v1(" attr( x ) & ! foo ")
+        val c = pointcut_selector_parse_v1("attr(x)|!foo")
+        expect(a.selector_digest).to_equal(b.selector_digest)
+        expect(a.selector_digest == c.selector_digest).to_equal(false)
+    it "negation over an incomplete directory is not cacheable":
+        val inc = directory_join_point_facts_v1("a", ["a/x.spl"],
+            [jp("a/x.spl", "foo_open", [], "b1")], [], false)
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("!attr(test)"), inc)
+        expect(r.cacheable).to_equal(false)
+    it "cross-directory within/negation needs a proven complete universe":
+        val sel = pointcut_selector_parse_v1("within(b.*) | !attr(logged)")
+        expect(sel.needs_universe).to_equal(true)
+        val partial = pointcut_match_universe_v1(sel, [dir_a([]), dir_b()], false)
+        expect(partial.complete).to_equal(false)
+        expect(partial.reason).to_equal("universe-incomplete")
+        val full = pointcut_match_universe_v1(sel, [dir_a([]), dir_b()], true)
+        expect(full.complete).to_equal(true)
+        expect(full.sorted_matching_ids).to_equal(
+            ["a/x.spl::bar_close", "a/y.spl::foo_read", "b/z.spl::bar_open"])
+    it "positive-only selectors are complete without a universe proof":
+        val r = pointcut_match_universe_v1(pointcut_selector_parse_v1("attr(logged)"),
+            [dir_a([]), dir_b()], false)
+        expect(r.complete).to_equal(true)
+        expect(r.sorted_matching_ids).to_equal(["a/x.spl::foo_open", "b/z.spl::bar_open"])
+
+describe "hash agility":
+    it "tags every digest with its algorithm and rejects unknown/fast algorithms":
+        val f = dir_a([])
+        expect(aop_digest_known_v1(f.facts_key)).to_equal(true)
+        val hex = f.facts_key.slice(7, f.facts_key.len())
+        expect(aop_digest_known_v1("xxh3-128:" + hex)).to_equal(false)
+        expect(aop_digest_known_v1("md5:" + hex)).to_equal(false)
+        expect(aop_digest_known_v1(hex)).to_equal(false)
+    it "an unknown-algorithm facts key is a miss and never admitted":
+        val f = dir_a([])
+        val forged = DirectoryJoinPointFactsV1(..f, facts_key: "xxh3-128:" + f.facts_key.slice(7, f.facts_key.len()))
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, forged)
+        expect(r1.cacheable).to_equal(false)
+        expect(r1.cache.shards.len()).to_equal(0)
+    it "negotiates over up to three digests; unknown entries are absent":
+        val s = dir_a([]).facts_key
+        val other = dir_b().facts_key
+        val bl = "blake3:" + other.slice(7, other.len())
+        expect(aop_digest_tables_match_v1([s], [bl, s])).to_equal(true)
+        expect(aop_digest_tables_match_v1([s], [other])).to_equal(false)
+        expect(aop_digest_tables_match_v1(["xxh3-128:" + s.slice(7, s.len())], [s])).to_equal(false)
+        expect(aop_digest_tables_match_v1([s, bl, s, s], [s])).to_equal(false)

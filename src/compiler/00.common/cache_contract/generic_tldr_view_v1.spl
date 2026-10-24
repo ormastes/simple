@@ -5,6 +5,7 @@
 # `ConcreteTldrAstViewV1` (generation-pinned, set-once, no lease) keyed by the canonical `ConcreteTldrKey`.
 #
 # Identity: TemplateId / ArgsId / ConcreteTldrKey are domain-separated,
+# algorithm-tagged (DigestV1 text, hash_algorithm_registry_v1),
 # length-framed SHA-256 digests (the persistent canonical hash). XXH3 is used
 # only as an in-memory bucket index by the acquisition table, and every
 # bucket hit is verified against the full canonical key.
@@ -16,6 +17,8 @@
 # binder does not change the template identity (alpha-invariance, T4).
 
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_new, digest_v1_text,
+    HASH_ALGO_SHA256_V1}
 
 pub val GENERIC_TLDR_VIEW_SCHEMA_V1 = "generic-tldr-view/v1"
 pub val GENERIC_TEMPLATE_SECTION_MAGIC_V1 = "generic-template-section/v1"
@@ -48,7 +51,7 @@ pub struct GenericTemplateEntryV1:
     symbol_id: text   # module-qualified nominal identity, e.g. "pkg_a.Pair"
     source_digest: text
     visibility_root: text
-    active_guard_root: text
+    active_guard_root: text   # ActiveGuardRootV1.root_digest (guard_id_v1); part of TemplateId
     language_schema: text
     params: [GenericParamV1]
     fields: [GenericTemplateFieldV1]
@@ -74,6 +77,7 @@ pub struct ConcreteTldrAstViewV1:
     semantic_key: text
     template_id: text
     args_id: text
+    arg_keys: [text]   # positional structural argument keys (mt_key_type)
     snapshot_pin: text
     template: GenericTemplateEntryV1
     overrides: [ConcreteTldrOverrideV1]
@@ -99,6 +103,14 @@ pub fn concrete_tldr_field_type_key(view: ConcreteTldrAstViewV1, index: i64) -> 
 # Canonical keys
 # ----------------------------------------------------------------------------
 
+# TemplateId / ArgsId / ConcreteTldrKey are algorithm-tagged DigestV1 text
+# (`sha256:<hex>`, hash_algorithm_registry_v1). sha256 always yields a
+# well-formed digest, so "" never escapes as an identity.
+fn _tagged_sha256_v1(data: text) -> text:
+    match digest_v1_new(HASH_ALGO_SHA256_V1, sha256_text(data)):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
 fn _frame_v1(value: text) -> text:
     "{value.len()}:" + value
 
@@ -116,7 +128,7 @@ pub fn generic_template_summary_digest_v1(entry: GenericTemplateEntryV1) -> text
     sha256_text(acc)
 
 pub fn generic_template_id_v1(entry: GenericTemplateEntryV1) -> text:
-    sha256_text(_frame_v1("tldr-template/v1") + _frame_v1(entry.symbol_id) +
+    _tagged_sha256_v1(_frame_v1("tldr-template/v1") + _frame_v1(entry.symbol_id) +
         _frame_v1(generic_template_summary_digest_v1(entry)) +
         _frame_v1(entry.visibility_root) + _frame_v1(entry.active_guard_root) +
         _frame_v1(entry.language_schema))
@@ -128,12 +140,16 @@ pub fn generic_args_id_v1(kinds: [text], value_keys: [text]) -> text:
     while i < value_keys.len():
         acc = acc + _frame_v1(kinds[i]) + _frame_v1(value_keys[i])
         i = i + 1
-    sha256_text(acc)
+    _tagged_sha256_v1(acc)
 
+# The semantic-profile part folds the ActiveGuardRoot digest
+# (compiler.common.cache_contract.guard_id_v1); callers must only pass an
+# admissible (complete) root - an inadmissible one is a miss, not a key.
 pub fn concrete_tldr_key_v1(template_id: text, args_id: text, constraint_root: text,
-                            profile_digest: text) -> text:
-    sha256_text(_frame_v1("tldr-concrete/v1") + _frame_v1(template_id) +
-        _frame_v1(args_id) + _frame_v1(constraint_root) + _frame_v1(profile_digest))
+                            profile_digest: text, active_guard_root: text) -> text:
+    _tagged_sha256_v1(_frame_v1("tldr-concrete/v1") + _frame_v1(template_id) +
+        _frame_v1(args_id) + _frame_v1(constraint_root) + _frame_v1(profile_digest) +
+        _frame_v1(active_guard_root))
 
 # ----------------------------------------------------------------------------
 # Indexed section

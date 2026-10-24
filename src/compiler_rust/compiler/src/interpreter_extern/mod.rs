@@ -1588,6 +1588,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
+    insert_simple!("rt_mmap_create", file_io::rt_mmap_create);
+    insert_simple!("rt_munmap", file_io::rt_munmap);
+    insert_simple!("rt_msync", file_io::rt_msync);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
@@ -2429,6 +2432,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_cpu_topology_count", concurrency::rt_cpu_topology_count);
+    insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
+    insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
+    insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
+    insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
+    insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
     insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);

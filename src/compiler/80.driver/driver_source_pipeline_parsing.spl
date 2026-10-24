@@ -36,6 +36,7 @@ use compiler.core.parser.{parser_promote_transient_owners, parser_initialization
 use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
 use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
@@ -75,8 +76,8 @@ use compiler.driver.driver_phase_gates.{
 }
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
-use std.io_runtime.{file_exists, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
 use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
 use compiler.common.structural_contracts.frontend_offload_switch.{
     FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
@@ -197,11 +198,12 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # reaches; whoever claims first parses it, everyone else skips. Work stays
 # balanced to within one module.
 #
-# Claim = a marker file under the queue dir, created inside a single flock'd
-# critical section (rt_file_lock is flock(2) and exists in both the seed and
-# the C runtime; rt_dir_create returns true on EEXIST and rename(2) overwrites,
-# so neither is an atomic claim on its own). The section is a stat and a tiny
-# write, microseconds against a multi-second parse.
+# Claim = a marker file under the queue dir, created with an exclusive create
+# (O_CREAT|O_EXCL / CREATE_NEW): exactly one process can create a given path,
+# so the create IS the claim and no shared lock is needed. (rt_dir_create
+# returns true on EEXIST and rename(2) overwrites, so neither is an atomic
+# claim on its own.) The former flock'd critical section serialized every
+# shard on one lock file for every module.
 #
 # Output is unchanged by construction: a claimed module is parsed by exactly
 # one shard into the same content-keyed cache entry the static split would
@@ -210,8 +212,9 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # a pure function of the path -- WHICH shard parses a module now depends on
 # timing -- but the union still is, and only the union reaches the cache.
 #
-# Lock failure degrades to the static split for that module rather than to
-# "owns nothing" (same fail-closed reasoning as the malformed-spec case).
+# A failed create of a marker that does not exist (queue dir unwritable)
+# degrades to the static split for that module rather than to "owns nothing"
+# (same fail-closed reasoning as the malformed-spec case).
 
 var _driver_parse_shard_queue_memo: text = "@@unset@@"
 var _driver_parse_shard_claimed: i64 = 0
@@ -232,13 +235,9 @@ fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
     val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
     if file_exists(marker):
         return false
-    val fd = file_lock("{queue_dir}/.lock", 30)
-    if fd < 0:
+    val claimed = file_create_exclusive(marker, _driver_parse_shard_spec())
+    if not claimed and not file_exists(marker):
         return _driver_parse_shard_owns_static(path)
-    var claimed = false
-    if not file_exists(marker):
-        claimed = file_write(marker, _driver_parse_shard_spec())
-    val _unlocked = file_unlock(fd)
     if claimed:
         _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
     claimed
@@ -450,6 +449,11 @@ impl CompilerDriver:
 
     me parse_full_frontend_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        # Step-3 lazy restore on the retained route: an opted-in HIR shard
+        # worker parses the module SKELETON here (surfaces only); HIR re-parses
+        # the full source of each module it claims (driver_hir_pipeline_lowering).
+        val parse_text = driver_surface_parse_text_v1(source_content,
+            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
         # cache-decode scratch. Borrow one per-file scope through preprocessing,
         # parsing and desugaring, then retain exactly the escaped owners.
@@ -459,13 +463,13 @@ impl CompilerDriver:
             self.ctx.options.cli_mode_text == "aot"
         if not aot:
             return self.parse_full_frontend_unscoped_selected_v1(
-                source_content, source_path, source_module_name)
+                parse_text, source_path, source_module_name)
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
         if not _sffi_transient_array_scope_begin():
             panic("transient retained parser scope unavailable for {source_path}")
         val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-            source_content, source_path, source_module_name)
+            parse_text, source_path, source_module_name)
         if not _sffi_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             panic("transient retained parser scope pause failed for {source_path}")
@@ -561,13 +565,17 @@ impl CompilerDriver:
             authored_path: source_authored_path,
             content: source_content,
             module_name: source_module_name)
+        # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
+        # from the module skeleton (driver_hir_worker_surface_v1.spl).
+        val surface_text = driver_surface_parse_text_v1(source_content,
+            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         log_module_surface_stage(source_path, "parse-start")
         val selected_module = if force_source_parse:
             self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         else:
             self.parse_full_frontend_in_borrowed_scope_selected_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         val module = match selected_module:
             case Ok(value): value
             case Err(error):

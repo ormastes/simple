@@ -1,0 +1,52 @@
+use std.spec
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, digest_v1_new,
+    digest_v1_parse, digest_v1_text, digest_v1_equal, digest_v1_identity_ok,
+    digest_set_match_v1, digest_v1_encode_bytes, digest_v1_decode_bytes,
+    DIGEST_SET_MATCH_V1, DIGEST_SET_MISMATCH_V1, DIGEST_SET_NO_COMMON_V1,
+    HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1, HASH_ALGO_BLAKE3_V1}
+use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text, digest_v1_set_of_text}
+
+val SHA_ABC: text = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+val X16: text = "0123456789abcdef0123456789abcdef"
+
+fn d(v: text) -> DigestV1:
+    digest_v1_parse(v) ?? DigestV1(algo_id: -1, hex: "")
+
+describe "hash algorithm registry":
+    it "computes tagged digests and round-trips the text form":
+        val sha = digest_v1_of_text(HASH_ALGO_SHA256_V1, "abc") ?? DigestV1(algo_id: -1, hex: "")
+        expect(digest_v1_text(sha)).to_equal("sha256:" + SHA_ABC)
+        expect(digest_v1_equal(d("sha256:" + SHA_ABC), sha)).to_equal(true)
+        val b3 = digest_v1_of_text(HASH_ALGO_BLAKE3_V1, "abc") ?? DigestV1(algo_id: -1, hex: "")
+        # BLAKE3("abc") reference vector
+        expect(digest_v1_text(b3)).to_equal("blake3:6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")
+        expect(digest_v1_set_of_text([HASH_ALGO_SHA256_V1, 3, HASH_ALGO_XXH3_128_V1], "abc").len()).to_equal(2)
+
+    it "treats an unknown algorithm or malformed bytes as absent":
+        expect(digest_v1_parse("md5:" + X16) == nil).to_equal(true)
+        expect(digest_v1_parse("sha256:" + X16) == nil).to_equal(true)
+        expect(digest_v1_parse("sha256:" + SHA_ABC.to_upper()) == nil).to_equal(true)
+        expect(digest_v1_parse(SHA_ABC) == nil).to_equal(true)
+        expect(digest_v1_new(0x7FFF, X16) == nil).to_equal(true)
+
+    it "never matches across algorithms and requires identity class when asked":
+        val fast = d("xxh3-128:" + X16)
+        val strong = d("sha256:" + SHA_ABC)
+        expect(digest_v1_identity_ok(fast)).to_equal(false)
+        expect(digest_v1_identity_ok(strong)).to_equal(true)
+        expect(digest_set_match_v1([fast], [strong], false)).to_equal(DIGEST_SET_NO_COMMON_V1)
+        expect(digest_set_match_v1([fast], [fast], true)).to_equal(DIGEST_SET_NO_COMMON_V1)
+        expect(digest_set_match_v1([fast], [fast], false)).to_equal(DIGEST_SET_MATCH_V1)
+        expect(digest_set_match_v1([fast, strong], [d("xxh3-128:" + X16), d("sha256:" + X16 + X16)], false)).to_equal(DIGEST_SET_MISMATCH_V1)
+
+    it "encodes and decodes the binary (algo, length, bytes) form":
+        val strong = d("sha256:" + SHA_ABC)
+        val bytes = digest_v1_encode_bytes(strong)
+        expect(bytes.len()).to_equal(36)
+        val back = digest_v1_decode_bytes(bytes, 0) ?? DigestV1(algo_id: -1, hex: "")
+        expect(digest_v1_equal(back, strong)).to_equal(true)
+        var unknown = bytes
+        unknown[0] = 0xFFu8
+        unknown[1] = 0x7Fu8
+        expect(digest_v1_decode_bytes(unknown, 0) == nil).to_equal(true)
+        expect(digest_v1_decode_bytes([1u8, 0u8, 32u8, 0u8], 0) == nil).to_equal(true)

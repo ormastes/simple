@@ -138,6 +138,12 @@ if [ "$platform" = linux-riscv64 ]; then
       --compiler "$host_dir/simple" --phase "$next" --sanity
   else
     # First rung: newest proven linux-x86_64 compiler (RC), else the seed.
+    for resume_platform in "$platform" linux-x86_64; do
+      if [ -e "$in_dir/.resume-evidence/$resume_platform.incomplete.sdn" ]; then
+        echo "phase-ladder: $resume_platform discovery incomplete; refusing automatic cold compiler selection" >&2
+        exit 1
+      fi
+    done
     sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --compiler auto --sanity
   fi
   next=$(cat build/cross/linux-riscv64/PHASE)
@@ -159,6 +165,10 @@ fi
 next_threads=$threads
 [ "$have" -gt 0 ] && next_threads=$selfhost_threads
 if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$next_threads"; then
+  if [ -e "$in_dir/.resume-evidence/$platform.incomplete.sdn" ]; then
+    echo "phase-ladder: $platform parent attempt failed after incomplete discovery; refusing cold seed fallback" >&2
+    exit 1
+  fi
   # Nothing to climb from: phase 1 comes from the Rust seed (as release.yml).
   [ "$have" -eq 0 ] || { echo "phase-ladder: phase $((have + 1)) build failed" >&2; exit 1; }
   # An earlier rung's failed seed is not a qualified input. Do not cold-repeat
@@ -188,6 +198,12 @@ if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs
   else
     sha256 -q "$producer_root/simple$exe" > "$producer_root/producer.sha256"
   fi
+  case "$platform:${SIMPLE_WINDOWS_ABI:-gnu}" in
+    windows-*:gnu)
+      sh scripts/bootstrap/lib/retain-ladder-seed-runtime.shs "$(pwd)" \
+        src/compiler_rust/target/bootstrap "$producer_root"
+      ;;
+  esac
   git rev-parse HEAD > "$evidence_root/source-revision.txt"
   git show HEAD:config/bootstrap.sdn > "$evidence_root/bootstrap.sdn"
   mkdir -p build/bootstrap/stage1
@@ -212,7 +228,7 @@ bin=build/bootstrap/stage$next/simple$exe
 # Absolute paths: Windows hello builds fail with "diagnostic staging
 # unavailable" only under harnesses; a relative output parent is that bug's
 # open hypothesis (stage2_sanity_diagnostic_staging_unavailable_2026-09-12).
-probe=$(pwd)/build/ladder-sanity
+probe=$evidence_root/hello
 rm -rf "$probe" && mkdir -p "$probe"
 printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.spl"
 "./$bin" --version
@@ -231,7 +247,87 @@ if ! "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"; then
   echo "phase-ladder: phase $next hello build failed" >&2
   exit 1
 fi
-"$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
+# POSIX sh has no pipefail: piping Hello to grep would hide its native exit
+# status and admit a program which prints the marker before failing. Preserve
+# the run independently and accept only the complete expected line.
+hello_status=0
+hello_output=$probe/stdout
+case $platform in
+  windows-*)
+    # Git Bash truncates some nonzero DWORD exits (256, 512, 0x80000000)
+    # to zero. Launch the native PE directly through the existing Job Object
+    # collector and require its untruncated GetExitCodeProcess receipt too.
+    # Its log honestly combines native stdout and stderr; either stream must
+    # therefore contain only the expected Hello line. Launcher streams remain
+    # separate diagnostics, never mislabeled as native program output.
+    hello_status=125
+    hello_output=$probe/combined-stdout-stderr.log
+    hello_receipt=$probe/native-exit.env
+    hello_helper=$(pwd)/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    hello_python=
+    for hello_python_name in python python3; do
+      if hello_python_candidate=$(command -v "$hello_python_name") &&
+         "$hello_python_candidate" -c 'import ctypes, os, sys; sys.exit(0 if os.name == "nt" and hasattr(ctypes.WinDLL("kernel32"), "GetExitCodeProcess") else 1)' \
+         >> "$probe/python-provider.log" 2>&1; then
+        hello_python=$hello_python_candidate
+        break
+      fi
+    done
+    if [ -n "$hello_python" ] &&
+       [ -f "$hello_helper" ] && [ ! -L "$hello_helper" ] &&
+       hello_helper_sha=$(sha256sum "$hello_helper") &&
+       hello_parent_native=$(cygpath -am "$probe") &&
+       hello_program_native=$(cygpath -am "$probe/hello$exe"); then
+      hello_helper_sha=${hello_helper_sha%% *}
+      hello_collector_status=0
+      "$hello_python" "$hello_helper" --output-parent="$hello_parent_native" \
+        --log-leaf=combined-stdout-stderr.log --receipt-leaf=native-exit.env \
+        --helper-sha256="$hello_helper_sha" --max-bytes=1048576 \
+        --timeout-seconds=60 --term-grace-seconds=5 --root-exit-policy=wait-job \
+        -- "$hello_program_native" > "$probe/collector-launch.stdout" \
+        2> "$probe/collector-launch.stderr" || hello_collector_status=$?
+      printf '%s\n' "$hello_collector_status" > "$probe/collector-exit-status"
+      hello_helper_after=$(sha256sum "$hello_helper")
+      hello_helper_after=${hello_helper_after%% *}
+      if [ "$hello_collector_status" -eq 0 ] && [ -f "$hello_receipt" ] &&
+         [ ! -L "$hello_receipt" ] && [ -f "$hello_output" ] &&
+         [ ! -L "$hello_output" ] &&
+         [ "$hello_helper_after" = "$hello_helper_sha" ] &&
+         awk -F= 'NF < 2 || seen[$1]++ {bad=1} END {exit bad}' "$hello_receipt"; then
+        hello_status=0
+        hello_log_sha=$(sha256sum "$hello_output")
+        hello_log_sha=${hello_log_sha%% *}
+        hello_log_bytes=$(wc -c < "$hello_output" | tr -d '[:space:]')
+        for hello_field in schema=simple-bounded-process-log-v1 status=complete \
+          reason=child-exit raw_status=0 native_exit_status=0 \
+          cleanup_status=not-needed cleanup_wait_code=not-observed cleanup_last_error=not-observed \
+          bound_raw_status=not-observed process_group=windows-job termination=job-terminate \
+          combined_stream=stdout-stderr artifact_limit=none root_exit_policy=wait-job \
+          job_remnants_terminated=no log_leaf=combined-stdout-stderr.log \
+          max_bytes=1048576 timeout_seconds=60 term_grace_seconds=5 \
+          "helper_sha256=$hello_helper_sha" "log_sha256=$hello_log_sha" \
+          "bytes_captured=$hello_log_bytes"; do
+          grep -Fxq "$hello_field" "$hello_receipt" || hello_status=125
+        done
+      fi
+    fi
+    ;;
+  *)
+    "$probe/hello$exe" > "$probe/stdout" 2> "$probe/stderr" || hello_status=$?
+    printf '%s\n' "$hello_status" > "$probe/exit-status"
+    ;;
+esac
+printf 'phase-ladder-%s-ok\n' "$next" > "$probe/expected-lf.stdout"
+printf 'phase-ladder-%s-ok\r\n' "$next" > "$probe/expected-crlf.stdout"
+if [ "$hello_status" -ne 0 ] || {
+  ! cmp -s "$hello_output" "$probe/expected-lf.stdout" &&
+  ! cmp -s "$hello_output" "$probe/expected-crlf.stdout"
+}; then
+  mkdir -p "$out_dir/$platform-rejected-p$next"
+  cp "./$bin" "$out_dir/$platform-rejected-p$next/"
+  echo "phase-ladder: phase $next hello run failed (exit=$hello_status; evidence=$probe)" >&2
+  exit 1
+fi
 emit "$next" "$bin" true
 if [ "$next" -ge "${PHASE_LADDER_ESSENTIALS_FROM:-3}" ]; then
   build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"

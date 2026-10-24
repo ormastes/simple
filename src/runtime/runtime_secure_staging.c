@@ -218,6 +218,8 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
 }
 
+#include "runtime_secure_temp_split_private.h"
+
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len,
                                   const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_SECURE_PATH_MAX], destination[RT_SECURE_PATH_MAX];

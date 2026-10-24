@@ -5,12 +5,13 @@
 # @req M-01 M-02
 
 use std.spec.*
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1, guard_id_v1}
 use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{
     MacroUseStatusV1, macro_definition_table_encode_v1, macro_use_status_tag_v1}
 use compiler.frontend.cache_artifact.macro_reference_projector.{
     MacroSourceDefV1, MacroSourceInvocationV1, MacroModuleSourceV1,
-    MacroModuleProjectionV1, project_macro_module_v1,
+    MacroModuleProjectionV1, project_macro_module_v1, project_macro_module_guarded_v1,
     package_macro_name_index_v1, macro_projection_diff_v1, macro_forward_users_of_v1,
     macro_def_key_of_v1}
 use compiler.driver.cache.module_public_summary_facts_v1.{module_public_macro_facts_v1}
@@ -114,7 +115,7 @@ describe "M-02: add/remove invocation, rename, new macro satisfying missing name
         val a = project_macro_module_v1(module_a("x + x"), [])
         var g = inv("r9", "double")
         g.active = false
-        g.active_guard_id = "when:linux"
+        g.active_guard_id = guard_id_v1("when", "linux").digest
         val b = project_b(a, [g])
         expect(b.use_table.uses.len()).to_equal(1)
         expect(macro_use_status_tag_v1(b.use_table.uses[0].status)).to_equal("inactive")
@@ -159,3 +160,29 @@ describe "semantic-side contract digest input":
         expect(macro_contract_introduced_names(items)).to_equal(["a_fn", "b_fn"])
         val t1 = macro_contract_canonical_text(items)
         expect(t1 == macro_contract_canonical_text([items[1], items[0]])).to_equal(false)
+
+describe "GuardId-driven activation and active guard root":
+    it "guard eval decides activation and the root feeds the expand key":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val linux = guard_id_v1("when", "linux")
+        var g = inv("r1", "double")
+        g.active_guard_id = linux.digest
+        g.active = false
+        val on = project_macro_module_guarded_v1(module_b([g]), [a], "sha256/p",
+            [GuardEvalV1(guard: linux, evaluable: true, active: true)])
+        expect(macro_use_status_tag_v1(on.use_table.uses[0].status)).to_equal("resolved")
+        expect(on.use_table.uses[0].coverage).to_equal("complete")
+        val off = project_macro_module_guarded_v1(module_b([g]), [a], "sha256/p",
+            [GuardEvalV1(guard: linux, evaluable: true, active: false)])
+        expect(macro_use_status_tag_v1(off.use_table.uses[0].status)).to_equal("inactive")
+        val other = project_macro_module_guarded_v1(module_b([inv("r2", "double")]), [a], "sha256/p",
+            [GuardEvalV1(guard: linux, evaluable: true, active: true)])
+        val other2 = project_macro_module_guarded_v1(module_b([inv("r2", "double")]), [a], "sha256/p",
+            [GuardEvalV1(guard: linux, evaluable: true, active: false)])
+        expect(other.use_table.uses[0].expand_key == other2.use_table.uses[0].expand_key).to_equal(false)
+
+    it "an unevaluable guard makes the root inadmissible and every use a miss":
+        val a = project_macro_module_v1(module_a("x + x"), [])
+        val p = project_macro_module_guarded_v1(module_b([inv("r1", "double")]), [a], "sha256/p",
+            [GuardEvalV1(guard: guard_id_v1("cfg", "target_os = \"plan9\""), evaluable: false, active: false)])
+        expect(p.use_table.uses[0].coverage).to_equal("conservative")

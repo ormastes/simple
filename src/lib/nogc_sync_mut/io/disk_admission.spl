@@ -1,0 +1,51 @@
+"""Free-space admission for cache publishes.
+
+A cache publish must be refused BEFORE its temp file is written when the
+volume would drop below the free-space reserve: on a nearly full disk the
+cache otherwise fills it and every later temp write (including the build's
+own outputs) fails after the expensive work is already done
+(cache_build_review_and_portability_2026-10-24 P1, `min_free_ratio` was read
+by gc/admission.spl but no publish path consulted it).
+
+The runtime reports bytes available to the caller, not the volume size, so
+the reserve is absolute: SIMPLE_CACHE_MIN_FREE_BYTES (default 2 GiB).
+A measurement of 0 means "cannot measure" (unsupported host, bad path) and
+admits, so an unmeasurable host keeps today's behaviour.
+"""
+
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+extern fn rt_host_disk_headroom_bytes_v1(path: text) -> i64
+
+val DISK_ADMISSION_DEFAULT_RESERVE_BYTES: i64 = 2 * 1024 * 1024 * 1024
+
+var _disk_admission_reserve_memo: i64 = -1
+var _disk_admission_refusals: i64 = 0
+
+pub fn disk_admission_reserve_bytes() -> i64:
+    if _disk_admission_reserve_memo < 0:
+        val raw = env_get_opt("SIMPLE_CACHE_MIN_FREE_BYTES") ?? ""
+        val configured = if raw == "": nil else: raw.to_i64()
+        _disk_admission_reserve_memo = if configured != nil and configured! >= 0:
+            configured!
+        else:
+            DISK_ADMISSION_DEFAULT_RESERVE_BYTES
+    _disk_admission_reserve_memo
+
+# Pure decision, separated for specs.
+pub fn disk_admission_decide(available: i64, write_bytes: i64, reserve: i64) -> bool:
+    if available <= 0:
+        return true
+    available - write_bytes >= reserve
+
+pub fn disk_publish_admitted(dir: text, write_bytes: i64) -> bool:
+    val available = rt_host_disk_headroom_bytes_v1(dir)
+    val admitted = disk_admission_decide(available, write_bytes, disk_admission_reserve_bytes())
+    if not admitted:
+        if _disk_admission_refusals == 0:
+            print "[cache-admission] publish refused: {available} bytes free under {dir}, reserve {disk_admission_reserve_bytes()} (SIMPLE_CACHE_MIN_FREE_BYTES); cache writes are skipped, the build continues uncached"
+        _disk_admission_refusals = _disk_admission_refusals + 1
+    admitted
+
+pub fn disk_admission_refusals() -> i64:
+    _disk_admission_refusals

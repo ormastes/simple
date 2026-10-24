@@ -1,0 +1,103 @@
+use std.spec
+use std.io_runtime.{file_exists, file_delete, file_read_bytes}
+extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use app.io.env_ops.{env_get, env_set}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped, flat_pools_clear_chunks_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_v1, flat_packed_decode_lines_v1,
+    flat_packed_store_v1, module_artifact_path_v1, SpabDigestV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+
+fn digests(path: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 1, hex: sha256_text(rt_file_read_text(path) ?? "")),
+     SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+
+fn encode(blob: text, trace: [i64], path: text) -> [u8]:
+    flat_packed_encode_v1(blob, trace, digests(path), xxh3_128_text(path))
+extern fn rt_string_data(s: text) -> i64
+extern fn rt_array_data_ptr(bytes: [u8]) -> i64
+
+# Real parses of real files. SIMPLE_PACKED_AST_FILES (comma-separated) widens
+# the sample to a whole closure on a native binary; the default keeps the seed
+# run short.
+fn sample_files() -> [text]:
+    val listed = env_get("SIMPLE_PACKED_AST_FILES") ?? ""
+    if listed != "":
+        return listed.split(",")
+    ["src/compiler/80.driver/driver_parse_shard_hash.spl",
+     "src/lib/common/text_bytes.spl",
+     "src/compiler/10.frontend/core/flat_pool_packed_v1.spl"]
+
+fn capture(path: text) -> (text, [i64], i64):
+    flat_pool_capture_arm()
+    val module = parse_and_build_module_scoped((rt_file_read_text(path) ?? ""), path, false)
+    val blob = flat_pool_capture_take()
+    val _m = module
+    (blob, flat_pool_capture_take_trace(), rt_string_data(blob))
+
+# Every 8-byte aligned word of the blob, as a little-endian i64 (every section
+# starts 64-aligned, so every i64 element is an aligned word).
+fn words(bytes: [u8]) -> [i64]:
+    var out: [i64] = []
+    var at = 0
+    while at + 8 <= bytes.len():
+        var v: i64 = 0
+        var i = 7
+        while i >= 0:
+            var b = bytes[at + i] as i64
+            if i == 7 and b >= 128:
+                b = b - 256
+            v = v * 256 + b
+            i = i - 1
+        out.push(v)
+        at = at + 8
+    out
+
+describe "packed flat-AST blob over real parses":
+    it "encodes, decodes and re-encodes every sampled file byte for byte":
+        for path in sample_files():
+            val (blob, trace, _addr) = capture(path)
+            expect(blob != "").to_equal(true)
+            val packed = encode(blob, trace, path)
+            expect(packed.len() > 0).to_equal(true)
+            val decoded = flat_packed_decode_lines_v1(packed, flat_pools_clear_chunks_v1())
+            expect(decoded).to_equal(blob)
+            expect(encode(decoded, trace, path)).to_equal(packed)
+
+    it "contains no live heap address of the encoding process":
+        for path in sample_files():
+            val (blob, trace, module_addr) = capture(path)
+            val packed = encode(blob, trace, path)
+            var live: [i64] = [module_addr, rt_string_data(path), rt_string_data(blob), rt_array_data_ptr(packed)]
+            for w in words(packed):
+                for a in live:
+                    if a > 65535 or a < -65535:
+                        expect(w == a).to_equal(false)
+
+    it "round-trips across two processes and encodes cmp-equal blobs in both":
+        val exe = cli_kernel_executable_path()
+        expect(exe != "").to_equal(true)
+        dir_create_all("build/packed_ast_spec")
+        val path = sample_files()[0]
+        val (blob, trace, _addr) = capture(path)
+        val packed = encode(blob, trace, path)
+        val ids = digests(path)
+        val pkb = module_artifact_path_v1("build/packed_ast_spec", ids[0], ids[1])
+        val out = pkb + ".lines"
+        if file_exists(out):
+            file_delete(out)
+        expect(flat_packed_store_v1(pkb, packed)).to_equal(true)
+        env_set("SIMPLE_PACKED_CHILD_IN", pkb)
+        env_set("SIMPLE_PACKED_CHILD_OUT", out)
+        env_set("SIMPLE_PACKED_CHILD_SRC", path)
+        env_set("SIMPLE_PACKED_CHILD_SPAB", pkb + ".child")
+        val (_o, _e, code) = process_run_bounded(exe, ["run", "test/fixtures/packed_ast/decode_child.spl"], 600000, 1048576)
+        expect(code).to_equal(0)
+        # The child rendered its own process-local CLEAR pools; everything it
+        # decoded must re-encode to the identical blob.
+        expect(encode(rt_file_read_text(out) ?? "", trace, path)).to_equal(packed)
+        expect(file_read_bytes(pkb + ".child")).to_equal(packed)

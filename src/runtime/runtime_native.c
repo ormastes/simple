@@ -69,6 +69,10 @@ typedef SSIZE_T ssize_t;
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/statvfs.h>
+#define RT_HAVE_STATVFS 1
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -3308,6 +3312,11 @@ int64_t stdin_read_char(void) {
  * build is affected identically. Only the constructor-registration mechanism
  * below differs per compiler.
  */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
 static void rt_win_set_binary_stdio(void) {
     /* Same defect for FILES: every open()/fopen() in this runtime without an
      * explicit _O_BINARY / "b" (rt_file_write_text_at, rt_file_open, the
@@ -3734,6 +3743,18 @@ int64_t rt_host_disk_headroom_bytes_v1(int64_t path_value) {
     if (!GetDiskFreeSpaceExW(wide, &free_for_caller, NULL, NULL)) return 0;
     if (free_for_caller.QuadPart > (uint64_t)INT64_MAX) return 0;
     return (int64_t)free_for_caller.QuadPart;
+#elif defined(RT_HAVE_STATVFS)
+    RtCoreString* path = rt_core_as_string(path_value);
+    if (!path || path->len == 0 || path->len >= 4096) return 0;
+    char narrow[4096];
+    memcpy(narrow, path->data, (size_t)path->len);
+    narrow[path->len] = '\0';
+    if (strlen(narrow) != (size_t)path->len) return 0;
+    struct statvfs stat_buf;
+    if (statvfs(narrow, &stat_buf) != 0) return 0;
+    unsigned __int128 available =
+        (unsigned __int128)stat_buf.f_bavail * (unsigned __int128)stat_buf.f_frsize;
+    return available > (unsigned __int128)INT64_MAX ? INT64_MAX : (int64_t)available;
 #else
     (void)path_value;
     return 0;
@@ -12217,7 +12238,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (end < (uint64_t)offset) return 0;
 #if defined(_WIN32)
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER file_size;
@@ -12264,6 +12285,39 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 #endif
 }
 
+
+/* ---- file_ops.rs: rt_mmap_create ------------------------------------------ */
+/* WRITER-side twin of rt_mmap: create (or truncate) `path`, set its length to
+ * exactly `size` bytes, and return a read-write shared mapping of the whole
+ * file (0 on any failure). The caller fills the view, rt_msync + rt_munmap,
+ * then publishes with an atomic rename (temp+rename). */
+int64_t rt_mmap_create(int64_t path_value, int64_t size) {
+    if (size <= 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER want;
+    want.QuadPart = size;
+    BOOL sized = SetFilePointerEx(file, want, NULL, FILE_BEGIN) && SetEndOfFile(file);
+    CloseHandle(file);
+    if (!sized) return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return 0;
+    int sized = ftruncate(fd, (off_t)size) == 0;
+    close(fd);
+    if (!sized) return 0;
+#endif
+    return rt_mmap(path_value, size, 0, 0);
+}
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
@@ -12803,7 +12857,7 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
          * ungated dump of the fopen failure on the candidate's actual read path. */
@@ -12931,7 +12985,7 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 4;
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) return 4;
@@ -13060,7 +13114,7 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_nil;
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
     size_t cap = 4096;
@@ -14868,7 +14922,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14909,7 +14963,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -15859,7 +15913,7 @@ int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) {
@@ -16165,11 +16219,6 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * and the AOT diagnostic lane stages per worker process; the slot makes the
  * pair safe under any caller). set_parent/make is a single logical
  * operation: make always consumes the slot, success or failure. */
-static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
-static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
-static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
-static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
-
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
@@ -16249,45 +16298,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * generic extern crossing every seed and both pure-Simple backends already
  * emit, so the split API needs no table row at all. See
  * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
-static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
-    int64_t len = rt_string_len(value);
-    if (len <= 0) return 0;
-    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
-}
-
-int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
-    if (!rt_secure_temp_dir_slot_from_value(parent_value,
-                             rt_secure_temp_dir_parent_slot,
-                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
-    rt_secure_temp_dir_parent_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
-    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
-                             rt_secure_temp_dir_prefix_slot,
-                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
-    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
-        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
-        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
-    rt_secure_temp_dir_prefix_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_make(void) {
-    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
-        rt_secure_temp_dir_parent_ready = 0;
-        rt_secure_temp_dir_prefix_ready = 0;
-        return rt_string_new(NULL, 0);
-    }
-    char parent[RT_TEXT_PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
-    rt_secure_temp_dir_parent_ready = 0;
-    rt_secure_temp_dir_prefix_ready = 0;
-    return rt_secure_temp_dir_core(parent,
-        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
-        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
-}
+#include "runtime_secure_temp_split_private.h"
 
 #if defined(_WIN32)
 /* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
@@ -19240,7 +19251,21 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     n = rt_array_len(a);
     buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
-    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    /* rt_array_get returns the RAW byte for byte-packed arrays but a TAGGED
+     * value (n << 3 | TAG_INT) for boxed-element arrays; masking the tagged
+     * word wrote 0x53 as 0x98. Untag boxed ints, refuse non-ints (Rust twin:
+     * byte_array_bytes). */
+    {
+        int packed = rt_array_is_byte_packed(a);
+        for (i = 0; i < n; i++) {
+            int64_t v = rt_array_get(a, i);
+            if (!packed) {
+                if (!rt_core_is_int(v)) { free(buf); return 0; }
+                v = rt_core_as_int(v);
+            }
+            buf[i] = (unsigned char)(v & 0xFF);
+        }
+    }
     {
         char* cpath = rt_core_string_to_cpath(path);
         if (cpath == NULL) { free(buf); return 0; }

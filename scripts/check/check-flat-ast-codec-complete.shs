@@ -75,7 +75,16 @@ CODEC_GLOB_DEFAULT="$CODEC_GLOB_DEFAULT $POOL_FILES_DEFAULT"
 #     paths compare it before/after parsing to decide whether transient parser
 #     owners need promotion. Restoring a cached epoch could hide a real parse
 #     or invent one, invalidating that lifetime decision; it must not rewind.
-EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached|par_initialization_generation_v1)$'
+#   _flat_pool_reset_count (types.spl) -- a MONOTONIC debug counter of
+#     reset_all_pools calls (SIMPLE_POOLDBG). Same class as ast_reset_seq:
+#     process-lifetime, incremented never cleared; restoring would rewind it.
+#   par_lexical_bindings (parser.spl) -- parser-SESSION lexical scope stack
+#     (enter/leave/bind during parsing). Every reader is a parser internal
+#     (parser_stmts, fn_struct_decls, primary_expr) running before the cache
+#     capture; nothing after the parse (bridge, desugar, HIR) reads it, so a
+#     restored module needs no lexical scope state. packed_binary_ast_v1.md
+#     §1.4 classifies the matching sym_/scope_ state CLEAR for the same reason.
+EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached|par_initialization_generation_v1|_flat_pool_reset_count|par_lexical_bindings)$'
 
 # Per-parse state is NOT "every array-typed var in four files" -- that framing
 # produced a FALSE GREEN (151/151) while silently omitting the `extend`/enum
@@ -85,11 +94,12 @@ EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached|par_initialization_generatio
 #
 # So the oracle is the reset functions' bodies. Six sites, not four files:
 #   reset_all_pools, ast_reset, stmt_reset, expr_reset, parser_init_with_path,
+#   decl_metadata_pools_reset + macro_facts_reset (macro fact pools),
 #   parser_reset_extend_enums (+ the pending_* resets it sits beside)
 # plus the three names parse_module_body clears inline at its own top.
 # Names are matched case-INSENSITIVELY: EXTEND_TARGETS is uppercase, and the
 # original lowercase-only regex is exactly why it was missed.
-RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|stmt_reset|expr_reset|parser_init_with_path|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi'
+RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|macro_facts_reset|stmt_reset|expr_reset|parser_init_with_path|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi'
 
 # Cleared inline at the top of parse_module_body rather than in a named reset
 # function, so the body scan below cannot find them generically.

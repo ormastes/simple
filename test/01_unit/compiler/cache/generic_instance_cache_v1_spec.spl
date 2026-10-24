@@ -1,0 +1,144 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Per-instance generic cache keyed by ConcreteTldrKey
+
+One `Pair<i64, f64>` instance is shared by every importer: instance MIR is
+stored once under the algorithm-tagged ConcreteTldrKey and each target's
+object under that key plus the existing `MonoArtifactKey`. The instance
+identity is the existing `MonoSemanticKey`, and it equals the key the legacy
+ConcreteType path builds for the same instantiation.
+
+Interpreter-lane evidence only: no producer stores real instance MIR/objects
+yet, and the native path is UNRUN.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1, active_guard_root_v1, guard_id_v1, GuardEvalV1}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.mono.model.generic_subst_model.*
+use compiler.driver.cache.generic_tldr_view_table_v1.*
+use compiler.driver.cache.generic_instance_cache_v1.*
+use compiler.monomorphize.types.{SpecializationKey, ConcreteType}
+use compiler.monomorphize.mono_key.*
+
+fn pair_section() -> GenericTemplateSectionV1:
+    val d = GenericDeclInputV1(module_path: "pkg_a", name: "Pair", params: ["First", "Second"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [GenericFieldInputV1(name: "first", type_text: "First"),
+            GenericFieldInputV1(name: "second", type_text: "Second")],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest, source_digest: "src:pair")
+    build_generic_template_section_v1([project_generic_template_v1(d).unwrap()])
+
+fn view_of(args: [MType]) -> ConcreteTldrAstViewV1:
+    acquire_concrete_tldr(generic_tldr_view_table_new(), pair_section(), "pkg_a.Pair", args,
+        "snap:1", "profile:default", active_guard_root_empty_v1("profile:default")).view
+
+fn pair_i64_f64() -> ConcreteTldrAstViewV1:
+    view_of([mt_con("i64"), mt_con("f64")])
+
+fn artifact(view: ConcreteTldrAstViewV1, target: text) -> MonoArtifactKey:
+    val sem = generic_instance_semantic_key_v1(view)[0]
+    mono_artifact_key_new(sem, target, 1, 2, "llvm", 0, 0, 0)
+
+describe "generic instance cache: identity":
+    it "derives the existing MonoSemanticKey, equal to the legacy ConcreteType key":
+        val sem = generic_instance_semantic_key_v1(pair_i64_f64())
+        expect(sem.len()).to_equal(1)
+        val legacy = specialization_key_to_mono_key(SpecializationKey(name: "pkg_a.Pair",
+            type_args: [ConcreteType.Int, ConcreteType.Float]))
+        expect(mono_semantic_key_canonical_text(sem[0])).to_equal(mono_semantic_key_canonical_text(legacy))
+
+    it "distinguishes reversed arguments and refuses non-Concrete views":
+        val a = generic_instance_semantic_key_v1(pair_i64_f64())[0]
+        val b = generic_instance_semantic_key_v1(view_of([mt_con("f64"), mt_con("i64")]))[0]
+        expect(mono_semantic_key_equals(a, b)).to_equal(false)
+        expect(generic_instance_semantic_key_v1(view_of([mt_var("U"), mt_con("f64")])).len()).to_equal(0)
+
+    it "tags the instance key with an admitted algorithm":
+        val key = generic_instance_key_v1(pair_i64_f64())
+        expect(key.starts_with("sha256:")).to_equal(true)
+        expect(generic_digest_admitted_v1(key)).to_equal(true)
+        val hex = key.substring(7)
+        expect(generic_digest_admitted_v1("md5:" + hex)).to_equal(false)
+        expect(generic_digest_admitted_v1("xxh3-128:" + hex.substring(0, 32))).to_equal(false)
+        expect(generic_digest_admitted_v1("sha256:XYZ")).to_equal(false)
+
+describe "generic instance cache: shared instance MIR and per-target objects":
+    it "shares one instance MIR across importers":
+        val cache = generic_instance_cache_new()
+        val v = pair_i64_f64()
+        val key = generic_instance_key_v1(v)
+        val sem = generic_instance_semantic_key_v1(v)[0]
+        expect(cache.begin_produce(key, "importer-1", 0)).to_equal(true)
+        expect(cache.begin_produce(key, "importer-2", 0)).to_equal(false)
+        expect(cache.put_mir(key, sem, "importer-1", [1u8, 2u8, 3u8])).to_equal(true)
+        val again = generic_instance_semantic_key_v1(pair_i64_f64())[0]
+        expect(cache.get_mir(key, again).len()).to_equal(1)
+        expect(cache.size()).to_equal(1)
+
+    it "misses on an unknown algorithm tag or a foreign semantic key":
+        val cache = generic_instance_cache_new()
+        val v = pair_i64_f64()
+        val key = generic_instance_key_v1(v)
+        val sem = generic_instance_semantic_key_v1(v)[0]
+        cache.put_mir(key, sem, "r", [7u8])
+        expect(cache.get_mir("md5:" + v.semantic_key.substring(7), sem).len()).to_equal(0)
+        val other = generic_instance_semantic_key_v1(view_of([mt_con("f64"), mt_con("i64")]))[0]
+        expect(cache.get_mir(key, other).len()).to_equal(0)
+
+    it "keeps objects per target and never serves another target":
+        val cache = generic_instance_cache_new()
+        val v = pair_i64_f64()
+        val key = generic_instance_key_v1(v)
+        expect(cache.put_object(key, artifact(v, "x86_64-pc-windows-gnullvm"), [9u8])).to_equal(true)
+        expect(cache.get_object(key, artifact(v, "x86_64-pc-windows-gnullvm")).len()).to_equal(1)
+        expect(cache.get_object(key, artifact(v, "aarch64-unknown-linux-gnu")).len()).to_equal(0)
+
+    it "quarantines a key published twice with different bytes":
+        val cache = generic_instance_cache_new()
+        val v = pair_i64_f64()
+        val key = generic_instance_key_v1(v)
+        val sem = generic_instance_semantic_key_v1(v)[0]
+        expect(cache.put_mir(key, sem, "r", [1u8])).to_equal(true)
+        expect(cache.put_mir(key, sem, "r", [2u8])).to_equal(false)
+        expect(cache.get_mir(key, sem).len()).to_equal(0)
+        expect(cache.quarantines).to_equal(1)
+
+describe "generic instance cache: failing or abandoned leaders never strand waiters":
+    it "completes the flight with nil when the leader's publication fails":
+        val cache = generic_instance_cache_new()
+        val v = pair_i64_f64()
+        val key = generic_instance_key_v1(v)
+        val sem = generic_instance_semantic_key_v1(v)[0]
+        val foreign = generic_instance_semantic_key_v1(view_of([mt_con("f64"), mt_con("i64")]))[0]
+        expect(cache.begin_produce(key, "leader", 0)).to_equal(true)
+        expect(cache.begin_produce(key, "waiter", 0)).to_equal(false)
+        cache.put_mir(key, sem, "seed", [1u8])
+        expect(cache.put_mir(key, foreign, "leader", [1u8])).to_equal(false)
+        expect(cache.inflight_count()).to_equal(0)
+        expect(cache.begin_produce(key, "waiter", 5)).to_equal(true)
+
+    it "completes the flight with nil on abandon_produce":
+        val cache = generic_instance_cache_new()
+        val key = generic_instance_key_v1(pair_i64_f64())
+        expect(cache.begin_produce(key, "leader", 0)).to_equal(true)
+        expect(cache.begin_produce(key, "waiter", 0)).to_equal(false)
+        expect(cache.abandon_produce(key, "leader")).to_equal(true)
+        expect(cache.inflight_count()).to_equal(0)
+        expect(cache.begin_produce(key, "waiter", 1)).to_equal(true)
+
+    it "re-drives a leader that never completes once its start time is old enough":
+        val cache = generic_instance_cache_new()
+        val key = generic_instance_key_v1(pair_i64_f64())
+        expect(cache.begin_produce(key, "dead-leader", 100)).to_equal(true)
+        expect(cache.begin_produce(key, "waiter", 110)).to_equal(false)
+        expect(cache.redrive(150, 1000).len()).to_equal(0)
+        val promoted = cache.redrive(1200, 1000)
+        expect(promoted.len()).to_equal(1)
+        expect(promoted[0].ends_with("waiter")).to_equal(true)

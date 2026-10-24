@@ -33,6 +33,7 @@
 # driver's scope has no way to know what it would be sharing entries with, and
 # guessing is exactly how a stale-parser hit becomes a wrong module.
 
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_to_cap, cache_dir_max_bytes}
 use std.io_runtime.{
@@ -185,7 +186,11 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
-    if not file_write_exact(tmp, frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)):
+    val entry = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)
+    # Free-space admission BEFORE the temp exists (review 2026-10-24 P1).
+    if not disk_publish_admitted(dir, entry.len()):
+        return false
+    if not file_write_exact(tmp, entry):
         frontend_parse_cache_note_store_failure(dir, made)
         return false
     if file_move_cross_device(tmp, final_path):

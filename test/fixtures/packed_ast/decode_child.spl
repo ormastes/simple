@@ -1,0 +1,33 @@
+# Second process of the packed-AST round trip (packed_binary_ast_v1.md §5
+# spec 3): decodes a blob another process wrote, and independently parses +
+# encodes the same source so the parent can compare the two blobs byte for byte.
+use std.io_runtime.{file_read_bytes, file_write, file_write_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped, flat_pools_clear_chunks_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_decode_lines_v1, flat_packed_encode_v1, SpabDigestV1}
+use app.io.env_ops.{env_get}
+extern fn rt_file_read_text(path: text) -> text
+
+fn main() -> i64:
+    val input = env_get("SIMPLE_PACKED_CHILD_IN") ?? ""
+    val output = env_get("SIMPLE_PACKED_CHILD_OUT") ?? ""
+    val source_path = env_get("SIMPLE_PACKED_CHILD_SRC") ?? ""
+    val spab_out = env_get("SIMPLE_PACKED_CHILD_SPAB") ?? ""
+    if input == "" or output == "" or source_path == "" or spab_out == "":
+        return 2
+    val lines = flat_packed_decode_lines_v1(file_read_bytes(input), flat_pools_clear_chunks_v1())
+    if lines == "" or not file_write(output, lines):
+        return 1
+    val source = rt_file_read_text(source_path) ?? ""
+    flat_pool_capture_arm()
+    val _module = parse_and_build_module_scoped(source, source_path, false)
+    val blob = flat_pool_capture_take()
+    val packed = flat_packed_encode_v1(blob, flat_pool_capture_take_trace(),
+        [SpabDigestV1(subject: 1, algo: 1, hex: sha256_text(source)),
+         SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))],
+        xxh3_128_text(source_path))
+    if packed.len() == 0 or not file_write_bytes(spab_out, packed):
+        return 3
+    0

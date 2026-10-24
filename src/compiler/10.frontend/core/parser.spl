@@ -1121,6 +1121,12 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 opt_result = TYPE_OPTION_TEXT
             elif type_name == "bool":
                 opt_result = TYPE_OPTION_BOOL
+            elif parser_fixed_width_int_tag(type_name) >= 0:
+                # `u32?` / `u7?`: keep the fixed-width payload (it used to
+                # collapse to bare TYPE_OPTION = Optional(Any)).
+                val fw_opt_tag = option_generic_type_register(parser_fixed_width_int_tag(type_name))
+                if fw_opt_tag >= 0:
+                    opt_result = fw_opt_tag
             else:
                 # `Drv2?` is the shorthand spelling of `Option<Drv2>`; keep the
                 # class identity via the inner-type registry rather than
@@ -1204,25 +1210,9 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # Represent them with dedicated fixed-width tags so the bit width and
         # signedness survive into the AST bridge -> HIR Int(bits, signed) -> MIR
         # -> backend type mappers (e.g. VHDL unsigned/signed(W-1 downto 0)).
-        if type_name == "u8":
-            return TYPE_U8
-        if type_name == "u16":
-            return TYPE_U16
-        if type_name == "u32":
-            return TYPE_U32
-        if type_name == "u64":
-            return TYPE_U64
-        if type_name == "i8":
-            return TYPE_I8
-        if type_name == "i16":
-            return TYPE_I16
-        if type_name == "i32":
-            return TYPE_I32
-        # Non-standard widths (u7, u3, ...) have no dedicated tag; keep the i64
-        # register lane. Callers needing the exact width re-derive it from the
-        # type name text via primitive_integer_bit_width_from_name.
-        if primitive_integer_bit_width_from_name(type_name) > 0:
-            return TYPE_I64
+        val fixed_width_tag = parser_fixed_width_int_tag(type_name)
+        if fixed_width_tag >= 0:
+            return fixed_width_tag
         # Preserve a written sibling/forward type name through the flat tag.
         # named_type_register is idempotent, so a later local declaration
         # fills this placeholder instead of creating a duplicate type id.
@@ -1584,3 +1574,21 @@ pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
     r.ok
 
 export flat_parser_state_dump, flat_parser_state_restore
+
+# Fixed-width integer annotation -> type tag, or -1 when `type_name` is not
+# an integer width name. Standard widths have dedicated tags. Non-standard
+# widths (u7, i3, ...) used to collapse to TYPE_I64, silently dropping the
+# declared width; they now keep their written name as a named type, which the
+# AST bridge/HIR re-derive with primitive_integer_bit_width_from_name.
+fn parser_fixed_width_int_tag(type_name: text) -> i64:
+    if type_name == "u8": return TYPE_U8
+    if type_name == "u16": return TYPE_U16
+    if type_name == "u32": return TYPE_U32
+    if type_name == "u64": return TYPE_U64
+    if type_name == "i8": return TYPE_I8
+    if type_name == "i16": return TYPE_I16
+    if type_name == "i32": return TYPE_I32
+    if type_name == "i64": return TYPE_I64
+    if primitive_integer_bit_width_from_name(type_name) > 0:
+        return TYPE_NAMED_BASE + named_type_register(type_name, [], [])
+    -1

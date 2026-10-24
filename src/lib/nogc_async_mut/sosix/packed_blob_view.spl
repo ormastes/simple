@@ -1,0 +1,354 @@
+"""Zero-copy read-only view over a `.spab` packed artifact blob mapped from disk.
+
+Layout authority: doc/05_design/compiler/incremental_build/packed_binary_ast_v1.md
+section 7 (final `.spab` layout) and section 8 (hash agility). Little-endian; every
+reference is an offset, index or length -- never a stored address.
+
+Header (64 bytes):
+    0  u64  magic "SPLARTF1"
+    8  u16  format_version        10 u16 min_reader_version
+    12 u16  header_bytes (64)     14 u16 section_entry_bytes (32)
+    16 u32  flags                 20 u32 section_count
+    24 u64  section_table_offset  32 u64 blob_bytes (== mapped file size)
+    40 16B  module_key (local index key, never identity)
+    56 u64  reserved (0)
+Section entry (32 bytes): u32 id, u16 encoding, u16 checksum_algo,
+    u64 offset (multiple of 64), u64 length, 8B checksum.
+Digest table section 0x0000: 8-aligned entries of 16 + length bytes:
+    u16 subject, u16 algo_id, u16 length, u16 reserved, u64 reserved, bytes.
+String pool: 0x0501 offsets u32[n+1] (monotonic, last == bytes length),
+    0x0502 raw UTF-8 bytes.
+
+The file is mapped once (`sosix_file_map`: mmap / MapViewOfFile) and read in
+place by (section, index, field offset); only a string that is requested is
+copied into a `text`. Every header field, section bound and element read is
+checked against the mapped size, so a torn or foreign blob is a refusal
+(caller misses and reparses), never an out-of-bounds load. Pages are first
+touched by the process that reads them (no pre-touch here), so they fault in
+on the consuming worker's NUMA node.
+"""
+
+use std.nogc_sync_mut.io_runtime.{file_size}
+use std.nogc_async_mut.sosix.file_map.{sosix_file_map, sosix_file_unmap}
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_string_new(bytes: i64, len: i64) -> text
+
+pub val SPAB_MAGIC: i64 = 0x31465452414C5053
+pub val SPAB_FORMAT_VERSION: i64 = 1
+pub val SPAB_HEADER_BYTES: i64 = 64
+pub val SPAB_SECTION_ENTRY_BYTES: i64 = 32
+pub val SPAB_SECTION_ALIGN: i64 = 64
+
+pub val SPAB_SECTION_DIGEST_TABLE: i64 = 0x0000
+pub val SPAB_SECTION_STRING_OFFSETS: i64 = 0x0501
+pub val SPAB_SECTION_STRING_BYTES: i64 = 0x0502
+
+pub val SPAB_FLAG_DESUGARED: i64 = 1
+pub val SPAB_FLAG_HAS_TLDR: i64 = 2
+pub val SPAB_FLAG_STRINGS_UTF8_VALIDATED: i64 = 4
+pub val SPAB_FLAG_TARGET_DEPENDENT: i64 = 8
+
+# Digest subjects (section 8.3).
+pub val SPAB_SUBJECT_SOURCE: i64 = 1
+pub val SPAB_SUBJECT_COMPILER: i64 = 2
+pub val SPAB_SUBJECT_BODY: i64 = 3
+pub val SPAB_SUBJECT_TARGET: i64 = 4
+pub val SPAB_SUBJECT_TLDR: i64 = 5
+
+# Hash algorithm registry ids (section 8.2).
+pub val SPAB_ALGO_NONE: i64 = 0
+pub val SPAB_ALGO_SHA256: i64 = 1
+pub val SPAB_ALGO_BLAKE3: i64 = 2
+pub val SPAB_ALGO_SHA3_256: i64 = 3
+pub val SPAB_ALGO_XXH3_128: i64 = 16
+pub val SPAB_ALGO_XXH3_64: i64 = 17
+pub val SPAB_ALGO_CRC32: i64 = 18
+
+pub struct PackedBlobView:
+    addr: i64
+    size: i64
+    format_version: i64
+    flags: i64
+    section_count: i64
+    section_table_offset: i64
+    error: text
+
+pub struct PackedBlobSection:
+    id: i64
+    encoding: i64
+    checksum_algo: i64
+    offset: i64
+    length: i64
+
+pub struct SpabDigest:
+    subject: i64
+    algo_id: i64
+    hex: text
+
+fn _spab_refused(reason: text) -> PackedBlobView:
+    PackedBlobView(addr: 0, size: 0, format_version: 0, flags: 0,
+        section_count: 0, section_table_offset: 0, error: reason)
+
+pub fn packed_blob_view_ok(view: PackedBlobView) -> bool:
+    view.addr != 0 and view.error == ""
+
+# Registry output length; -1 for an unknown algorithm (an unknown digest is
+# ABSENT, never a match -- section 8.1 rule 4).
+pub fn spab_algo_length(algo_id: i64) -> i64:
+    if algo_id == SPAB_ALGO_SHA256 or algo_id == SPAB_ALGO_BLAKE3 or algo_id == SPAB_ALGO_SHA3_256:
+        return 32
+    if algo_id == SPAB_ALGO_XXH3_128:
+        return 16
+    if algo_id == SPAB_ALGO_XXH3_64:
+        return 8
+    if algo_id == SPAB_ALGO_CRC32:
+        return 4
+    -1
+
+# Raw little-endian load of `width` bytes at `off`; -1 when out of the
+# mapping. A load near the end reads the last 8 mapped bytes and shifts, so
+# no load ever touches an unmapped page.
+fn _spab_load(view: PackedBlobView, off: i64, width: i64) -> i64:
+    if off < 0 or width <= 0 or width > 8 or off + width > view.size:
+        return -1
+    val word = if off + 8 <= view.size:
+        rt_ptr_read_i64(view.addr, off)
+    else:
+        if view.size < 8:
+            return -1
+        val tail = rt_ptr_read_i64(view.addr, view.size - 8)
+        tail >> ((off - (view.size - 8)) * 8)
+    if width == 8:
+        return word
+    word & ((1 << (width * 8)) - 1)
+
+pub fn packed_blob_u8(view: PackedBlobView, off: i64) -> i64:
+    _spab_load(view, off, 1)
+
+pub fn packed_blob_u16(view: PackedBlobView, off: i64) -> i64:
+    _spab_load(view, off, 2)
+
+pub fn packed_blob_u32(view: PackedBlobView, off: i64) -> i64:
+    _spab_load(view, off, 4)
+
+pub fn packed_blob_u64(view: PackedBlobView, off: i64) -> i64:
+    _spab_load(view, off, 8)
+
+# Map `path` and run validation steps 1, 3, 4 and the digest-table shape
+# check of packed_binary_ast_v1.md section 4. Identity checks (step 2), body
+# verification (step 5) and index bounds (step 7) are the caller's, through
+# spab_digest / spab_verify_body_sha256 / packed_blob_elem_*.
+pub fn packed_blob_map(path: text) -> PackedBlobView:
+    val size = file_size(path)
+    if size < SPAB_HEADER_BYTES:
+        return _spab_refused("spab too small: {path}")
+    val addr = sosix_file_map(path, size, 0, true)
+    if addr == 0:
+        return _spab_refused("spab map failed: {path}")
+    val probe = PackedBlobView(addr: addr, size: size, format_version: 0, flags: 0,
+        section_count: 0, section_table_offset: 0, error: "")
+    val reason = _spab_validate(probe)
+    if reason != "":
+        val _unmapped = sosix_file_unmap(addr, size)
+        return _spab_refused(reason)
+    PackedBlobView(addr: addr, size: size,
+        format_version: packed_blob_u16(probe, 8),
+        flags: packed_blob_u32(probe, 16),
+        section_count: packed_blob_u32(probe, 20),
+        section_table_offset: packed_blob_u64(probe, 24), error: "")
+
+fn _spab_validate(view: PackedBlobView) -> text:
+    if packed_blob_u64(view, 0) != SPAB_MAGIC:
+        return "spab bad magic"
+    if packed_blob_u16(view, 10) > SPAB_FORMAT_VERSION:
+        return "spab requires a newer reader"
+    if packed_blob_u16(view, 12) != SPAB_HEADER_BYTES or
+            packed_blob_u16(view, 14) != SPAB_SECTION_ENTRY_BYTES:
+        return "spab header/entry size mismatch"
+    if packed_blob_u64(view, 32) != view.size:
+        return "spab size mismatch (torn entry)"
+    val count = packed_blob_u32(view, 20)
+    val table = packed_blob_u64(view, 24)
+    if table < SPAB_HEADER_BYTES or table % 8 != 0 or count < 0 or
+            table > view.size or count * SPAB_SECTION_ENTRY_BYTES > view.size - table:
+        return "spab section table out of bounds"
+    val table_end = table + count * SPAB_SECTION_ENTRY_BYTES
+    var previous_end = table_end
+    var previous_id = -1
+    var has_digest_table = false
+    var i = 0
+    while i < count:
+        val entry = table + i * SPAB_SECTION_ENTRY_BYTES
+        val id = packed_blob_u32(view, entry)
+        val offset = packed_blob_u64(view, entry + 8)
+        val length = packed_blob_u64(view, entry + 16)
+        if id <= previous_id:
+            return "spab section ids not sorted/unique at {i}"
+        if offset % SPAB_SECTION_ALIGN != 0:
+            return "spab section {i} not 64-byte aligned"
+        if offset < previous_end or length < 0 or offset > view.size or length > view.size - offset:
+            return "spab section {i} out of bounds or overlapping"
+        if id == SPAB_SECTION_DIGEST_TABLE:
+            has_digest_table = true
+        previous_id = id
+        previous_end = offset + length
+        i = i + 1
+    if not has_digest_table:
+        return "spab missing digest table section"
+    ""
+
+pub fn packed_blob_unmap(view: PackedBlobView) -> bool:
+    if view.addr == 0:
+        return false
+    sosix_file_unmap(view.addr, view.size)
+
+# Section by id (binary search: ids are validated sorted); length -1 when absent.
+pub fn packed_blob_section(view: PackedBlobView, id: i64) -> PackedBlobSection:
+    var lo = 0
+    var hi = view.section_count - 1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        val entry = view.section_table_offset + mid * SPAB_SECTION_ENTRY_BYTES
+        val mid_id = packed_blob_u32(view, entry)
+        if mid_id == id:
+            return PackedBlobSection(id: id,
+                encoding: packed_blob_u16(view, entry + 4),
+                checksum_algo: packed_blob_u16(view, entry + 6),
+                offset: packed_blob_u64(view, entry + 8),
+                length: packed_blob_u64(view, entry + 16))
+        if mid_id < id:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    PackedBlobSection(id: id, encoding: 0, checksum_algo: 0, offset: 0, length: -1)
+
+pub fn packed_blob_section_present(section: PackedBlobSection) -> bool:
+    section.length >= 0
+
+# Element count of a fixed-stride section; -1 when absent or ragged.
+pub fn packed_blob_section_len(section: PackedBlobSection, elem_size: i64) -> i64:
+    if section.length < 0 or elem_size <= 0 or section.length % elem_size != 0:
+        return -1
+    section.length / elem_size
+
+# Field load from element `index` of a fixed-stride node array; -1 when the
+# element or field is outside the section.
+pub fn packed_blob_elem_u32(view: PackedBlobView, section: PackedBlobSection,
+        elem_size: i64, index: i64, field_off: i64) -> i64:
+    if index < 0 or field_off < 0 or field_off + 4 > elem_size:
+        return -1
+    val rel = index * elem_size + field_off
+    if section.length < 0 or rel + 4 > section.length:
+        return -1
+    packed_blob_u32(view, section.offset + rel)
+
+pub fn packed_blob_elem_u64(view: PackedBlobView, section: PackedBlobSection,
+        elem_size: i64, index: i64, field_off: i64) -> i64:
+    if index < 0 or field_off < 0 or field_off + 8 > elem_size:
+        return -1
+    val rel = index * elem_size + field_off
+    if section.length < 0 or rel + 8 > section.length:
+        return -1
+    packed_blob_u64(view, section.offset + rel)
+
+fn _spab_hex(view: PackedBlobView, off: i64, len: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < len:
+        val b = packed_blob_u8(view, off + i)
+        out = out + digits.substring(b >> 4, (b >> 4) + 1) + digits.substring(b & 15, (b & 15) + 1)
+        i = i + 1
+    out
+
+# All digest-table entries with a KNOWN algorithm, in table order. Entries
+# with an unknown algorithm are absent. nil when the table is malformed.
+pub fn spab_digests(view: PackedBlobView) -> [SpabDigest]?:
+    val table = packed_blob_section(view, SPAB_SECTION_DIGEST_TABLE)
+    if table.length < 0:
+        return nil
+    var out: [SpabDigest] = []
+    var rel = 0
+    while rel < table.length:
+        if rel + 16 > table.length:
+            return nil
+        val at = table.offset + rel
+        val subject = packed_blob_u16(view, at)
+        val algo = packed_blob_u16(view, at + 2)
+        val length = packed_blob_u16(view, at + 4)
+        if rel + 16 + length > table.length:
+            return nil
+        val known_length = spab_algo_length(algo)
+        if known_length >= 0:
+            if known_length != length:
+                return nil
+            out = out.push(SpabDigest(subject: subject, algo_id: algo,
+                hex: _spab_hex(view, at + 16, length)))
+        rel = rel + 16 + length
+        rel = (rel + 7) / 8 * 8
+    Some(out)
+
+# First known digest for `subject` among `accepted` algorithms (in the
+# reader's preference order); "" when there is no common algorithm.
+pub fn spab_digest(view: PackedBlobView, subject: i64, accepted: [i64]) -> text:
+    val found = spab_digests(view)
+    if found == nil:
+        return ""
+    val digests: [SpabDigest] = found!
+    var a = 0
+    while a < accepted.len():
+        val want: i64 = accepted[a]
+        var i = 0
+        while i < digests.len():
+            val d: SpabDigest = digests[i]
+            if d.subject == subject and d.algo_id == want:
+                return d.hex
+            i = i + 1
+        a = a + 1
+    ""
+
+# Verify the body digest (subject 3) with sha256. The body is
+# [end of the digest-table section, blob_bytes): the digest table cannot
+# cover itself, and section 7.1 leaves the exact start as "+...". COORDINATE:
+# the codec writer must hash exactly this range. Copies the body once; use
+# for remote/shared hits that require a collision-resistant check.
+pub fn spab_body_start(view: PackedBlobView) -> i64:
+    val table = packed_blob_section(view, SPAB_SECTION_DIGEST_TABLE)
+    if table.length < 0:
+        return -1
+    table.offset + table.length
+
+pub fn spab_verify_body_sha256(view: PackedBlobView) -> bool:
+    val expected = spab_digest(view, SPAB_SUBJECT_BODY, [SPAB_ALGO_SHA256])
+    val start = spab_body_start(view)
+    if expected == "" or start < 0 or start > view.size:
+        return false
+    val body = rt_string_new(view.addr + start, view.size - start)
+    sha256_text(body) == expected
+
+pub fn packed_blob_string_count(view: PackedBlobView) -> i64:
+    val offsets = packed_blob_section(view, SPAB_SECTION_STRING_OFFSETS)
+    val bytes = packed_blob_section(view, SPAB_SECTION_STRING_BYTES)
+    if offsets.length < 4 or bytes.length < 0 or offsets.length % 4 != 0:
+        return -1
+    val n = offsets.length / 4 - 1
+    if packed_blob_u32(view, offsets.offset + n * 4) != bytes.length:
+        return -1
+    n
+
+# Copy ONE interned string; nil when the index or its byte range is invalid.
+pub fn packed_blob_string(view: PackedBlobView, index: i64) -> text?:
+    val n = packed_blob_string_count(view)
+    if n < 0 or index < 0 or index >= n:
+        return nil
+    val offsets = packed_blob_section(view, SPAB_SECTION_STRING_OFFSETS)
+    val bytes = packed_blob_section(view, SPAB_SECTION_STRING_BYTES)
+    val start = packed_blob_u32(view, offsets.offset + index * 4)
+    val end = packed_blob_u32(view, offsets.offset + index * 4 + 4)
+    if start < 0 or end < start or end > bytes.length:
+        return nil
+    if end == start:
+        return Some("")
+    Some(rt_string_new(view.addr + bytes.offset + start, end - start))

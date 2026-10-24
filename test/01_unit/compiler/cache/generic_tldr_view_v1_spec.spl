@@ -17,6 +17,8 @@ Interpreter-lane evidence only: the native consumer/object path is UNRUN.
 # @tag:generics
 
 use std.spec
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, digest_v1_identity_ok}
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1, active_guard_root_v1, guard_id_v1, GuardEvalV1, ActiveGuardRootV1}
 use compiler.common.cache_contract.generic_tldr_view_v1.*
 use compiler.frontend.cache_artifact.generic_tldr_projector.*
 use compiler.mono.model.generic_subst_model.*
@@ -36,7 +38,7 @@ fn decl(module_path: text, name: text, params: [text], fields: [GenericFieldInpu
         kinds = kinds.push(GENERIC_PARAM_KIND_TYPE)
     GenericDeclInputV1(module_path: module_path, name: name, params: params,
         param_kinds: kinds, fields: fields, visibility_root: "vis:pub",
-        active_guard_root: "guard:none", source_digest: "src:" + module_path + "." + name)
+        active_guard_root: active_guard_root_empty_v1("").root_digest, source_digest: "src:" + module_path + "." + name)
 
 fn pair_decl() -> GenericDeclInputV1:
     decl("pkg_a", "Pair", ["First", "Second"],
@@ -62,7 +64,7 @@ fn f64t() -> MType:
     mt_con("f64")
 
 fn acquire(table: GenericTldrViewTableV1, symbol: text, args: [MType]) -> GenericConcreteAcquireV1:
-    acquire_concrete_tldr(table, std_section(), symbol, args, "snap:1", "profile:default")
+    acquire_concrete_tldr(table, std_section(), symbol, args, "snap:1", "profile:default", active_guard_root_empty_v1("profile:default"))
 
 describe "generic TLDR view: G-01 Pair<i64,f64>":
     it "projects one symbolic template with binder-indexed parameters":
@@ -180,8 +182,8 @@ describe "generic TLDR view: produced by the module TLDR companion":
     it "serves Pair<i64,f64> to two importers as one shared view":
         val section = produced_section()
         val t0 = generic_tldr_view_table_new()
-        val a = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default")
-        val b = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default")
+        val a = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", active_guard_root_empty_v1("profile:default"))
+        val b = acquire_concrete_tldr(t0, section, "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", active_guard_root_empty_v1("profile:default"))
         expect(mt_render(concrete_tldr_field_type(a.view, 0))).to_equal("i64")
         expect(mt_render(concrete_tldr_field_type(a.view, 1))).to_equal("f64")
         expect(b.joined).to_equal(true)
@@ -192,4 +194,45 @@ describe "generic TLDR view: produced by the module TLDR companion":
         val m = concrete_tldr_read_manifest_v1(r.view, "profile:default")
         expect(semantic_query_kind_known_v1(m.consumer.kind)).to_equal(true)
         expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
-        expect(m.ordered_reads[0].consumed_fingerprint).to_equal(r.view.template_id)
+        expect("sha256:" + m.ordered_reads[0].consumed_fingerprint).to_equal(r.view.template_id)
+
+fn guard_root(active: bool, evaluable: bool) -> ActiveGuardRootV1:
+    active_guard_root_v1("profile:default", [GuardEvalV1(guard: guard_id_v1("when", "feature_x"),
+        evaluable: evaluable, active: active)])
+
+describe "generic TLDR view: active guard root (guard_id_v1)":
+    it "keys distinct active guard roots apart and shares an equal one":
+        val t0 = generic_tldr_view_table_new()
+        val on = acquire_concrete_tldr(t0, std_section(), "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", guard_root(true, true))
+        val off = acquire_concrete_tldr(t0, std_section(), "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", guard_root(false, true))
+        val on2 = acquire_concrete_tldr(t0, std_section(), "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", guard_root(true, true))
+        expect(on.view.semantic_key == off.view.semantic_key).to_equal(false)
+        expect(on2.joined).to_equal(true)
+
+    it "misses (Unresolved, unpublished) on an inadmissible guard root":
+        val t0 = generic_tldr_view_table_new()
+        val r = acquire_concrete_tldr(t0, std_section(), "pkg_a.Pair", [i64t(), f64t()], "snap:1", "profile:default", guard_root(true, false))
+        expect(r.view.closure_status).to_equal(GENERIC_CLOSURE_UNRESOLVED)
+        expect(r.view.error).to_equal("guard-root-inadmissible")
+        expect(generic_tldr_view_table_size(t0)).to_equal(0)
+
+    it "puts the template's guard root into TemplateId":
+        val a = project_generic_template_v1(pair_decl()).unwrap()
+        var b = a
+        b.active_guard_root = guard_root(true, true).root_digest
+        expect(generic_template_id_v1(a) == generic_template_id_v1(b)).to_equal(false)
+
+describe "generic TLDR view: algorithm-tagged identities (DigestV1)":
+    it "tags TemplateId, ArgsId and ConcreteTldrKey with a registry algorithm":
+        val r = acquire(generic_tldr_view_table_new(), "pkg_a.Pair", [i64t(), f64t()])
+        for id in [r.view.template_id, r.view.args_id, r.view.semantic_key]:
+            val d = digest_v1_parse(id)
+            expect(d != nil).to_equal(true)
+            expect(digest_v1_identity_ok(d.unwrap())).to_equal(true)
+
+describe "generic TLDR view: single-flight leader always completes":
+    it "leaves no in-flight entry after a published acquisition":
+        val t0 = generic_tldr_view_table_new()
+        acquire(t0, "pkg_a.Pair", [i64t(), f64t()])
+        expect(t0.flights.inflight_count()).to_equal(0)
+        expect(t0.redrive(999999999, 0).len()).to_equal(0)

@@ -310,6 +310,12 @@ my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
 # the summed working set of the job's members, and kill-on-limit terminates the
 # whole job. Native MSWin32 perl has no MSYS path/fork layer and fails closed.
 my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
+# MSYS/Cygwin File::Basename uses POSIX separators, even when native Windows
+# callers supplied __FILE__ with backslashes. Normalize only on Windows:
+# backslashes remain valid literal filename characters on POSIX hosts.
+my $watchdog_source_file = __FILE__;
+$watchdog_source_file =~ s{\\}{/}g if $windows;
+my $watchdog_source_dir = dirname($watchdog_source_file);
 my $freebsd = $^O eq 'freebsd';
 my ($reaper_read, $reaper_write, $reaper_buffer, $reaper_payload) = (undef, undef, '', 0);
 my ($reaper_identity, $reaper_cross_session) = ('', 0);
@@ -473,7 +479,7 @@ sub start_observer {
 
 sub install_observer {
     return unless $^O eq 'darwin';
-    my $source = abs_path(dirname(__FILE__) . '/macos-process-observer.c');
+    my $source = abs_path($watchdog_source_dir . '/macos-process-observer.c');
     open(my $fh, '<', $source) or die "cannot read process observer source";
     $observer_source_sha = hash_handle($fh);
     $observer_path = dirname($session_helper) . '/macos-process-observer';
@@ -627,7 +633,7 @@ sub install_session_helper {
     } else {
         $has_id && $has_exec or die "incomplete inherited session contract";
     }
-    my $source = abs_path(dirname(__FILE__) . '/../bootstrap/bootstrap-session-exec.c');
+    my $source = abs_path($watchdog_source_dir . '/../bootstrap/bootstrap-session-exec.c');
     defined($source) or die "missing session helper source";
     open(my $source_fh, '<', $source) or die "cannot read session helper source";
     $helper_source_sha = hash_handle($source_fh);
@@ -764,7 +770,7 @@ sub install_cached_windows_helper {
     my ($source, $source_fh) = @_;
     my ($compiler, $style, @flags) = windows_compile_flags();
     my $cache = $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE} ||
-        abs_path(dirname(__FILE__) . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
+        abs_path($watchdog_source_dir . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
     $cache =~ m{\A/} or die "session helper cache must be POSIX-absolute";
     # The native Job supervisor starts an MSYS shell for the workload. Preserve
     # this path across the preceding MSYS-to-native launch so an inherited

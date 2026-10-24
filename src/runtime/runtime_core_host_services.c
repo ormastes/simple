@@ -17,6 +17,11 @@
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
+/* Linux: CPU_SET / pthread_setaffinity_np / sched_getcpu (thread pinning,
+ * below) are GNU extensions. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 
 #include "runtime.h"
 
@@ -840,6 +845,174 @@ int64_t rt_cpu_count(void) {
 #endif
 }
 
+
+/* ---- CPU topology + thread pinning (build-runner fiber scheduler) ----------
+ * Platform-neutral surface behind std.nogc_sync_mut.platform.host_io:
+ *   rt_cpu_topology_count()          logical processors across ALL groups
+ *   rt_cpu_topology_field(i, f)      f: 0 group, 1 number in group (Linux/
+ *                                    FreeBSD: OS cpu id), 2 socket/package,
+ *                                    3 NUMA node; -1 when out of range
+ *   rt_thread_pin_current(i)         pin the calling thread to entry i
+ *   rt_thread_current_cpu()          (group << 16) | number of the CPU now
+ *                                    running the caller, -1 if unknown
+ * Windows enumerates every processor group (a host with > 64 logical CPUs
+ * has several; a thread stays in its process's initial group unless it is
+ * assigned explicitly with SetThreadGroupAffinity). macOS has no affinity
+ * API: pinning reports false there. Rust twin: runtime/src/cpu_topology.rs. */
+#define RT_TOPO_MAX 1024
+typedef struct { int32_t group, number, socket, numa; } RtTopoCpu;
+static RtTopoCpu spl_topo_cpus[RT_TOPO_MAX];
+static int32_t spl_topo_n = -1;
+
+#if defined(_WIN32)
+static INIT_ONCE spl_topo_once = INIT_ONCE_STATIC_INIT;
+static int spl_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE number) {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(rel, NULL, &len);
+    if (len == 0) return 0;
+    BYTE* buf = (BYTE*)malloc(len);
+    if (!buf) return 0;
+    int result = 0, index = 0;
+    if (GetLogicalProcessorInformationEx(rel, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) {
+        for (DWORD off = 0; off < len;) {
+            PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX e = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buf + off);
+            if (rel == RelationProcessorPackage) {
+                for (WORD g = 0; g < e->Processor.GroupCount; g++) {
+                    GROUP_AFFINITY* a = &e->Processor.GroupMask[g];
+                    if (a->Group == group && (a->Mask >> number) & 1) result = index;
+                }
+                index++;
+            } else if (rel == RelationNumaNode) {
+                WORD count = e->NumaNode.GroupCount ? e->NumaNode.GroupCount : 1;
+                for (WORD g = 0; g < count; g++) {
+                    GROUP_AFFINITY* a = &e->NumaNode.GroupMasks[g];
+                    if (a->Group == group && (a->Mask >> number) & 1) result = (int)e->NumaNode.NodeNumber;
+                }
+            }
+            off += e->Size;
+        }
+    }
+    free(buf);
+    return result;
+}
+static BOOL CALLBACK spl_topo_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    int32_t n = 0;
+    WORD groups = GetActiveProcessorGroupCount();
+    for (WORD g = 0; g < groups && n < RT_TOPO_MAX; g++) {
+        DWORD count = GetActiveProcessorCount(g);
+        for (DWORD p = 0; p < count && n < RT_TOPO_MAX; p++) {
+            spl_topo_cpus[n].group = g;
+            spl_topo_cpus[n].number = (int32_t)p;
+            spl_topo_cpus[n].socket = spl_topo_find(RelationProcessorPackage, g, (BYTE)p);
+            spl_topo_cpus[n].numa = spl_topo_find(RelationNumaNode, g, (BYTE)p);
+            n++;
+        }
+    }
+    spl_topo_n = n;
+    return TRUE;
+}
+static void spl_topo_ensure(void) { InitOnceExecuteOnce(&spl_topo_once, spl_topo_init, NULL, NULL); }
+#else
+#include <pthread.h>
+#if defined(__linux__)
+#include <sched.h>
+#endif
+#include <dirent.h>
+#include <stdio.h>
+static pthread_once_t spl_topo_once = PTHREAD_ONCE_INIT;
+static int spl_topo_read_int(const char* path, int fallback) {
+    FILE* f = fopen(path, "r");
+    if (!f) return fallback;
+    int v = fallback;
+    if (fscanf(f, "%d", &v) != 1) v = fallback;
+    fclose(f);
+    return v;
+}
+static void spl_topo_init(void) {
+    int32_t n = 0;
+    long conf = sysconf(_SC_NPROCESSORS_CONF);
+    char path[160];
+    for (long cpu = 0; cpu < conf && n < RT_TOPO_MAX; cpu++) {
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/online", cpu);
+        if (cpu > 0 && spl_topo_read_int(path, 1) == 0) continue;
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/topology/physical_package_id", cpu);
+        int socket = spl_topo_read_int(path, 0);
+        int numa = 0;
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld", cpu);
+        DIR* d = opendir(path);
+        if (d) {
+            struct dirent* ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (strncmp(ent->d_name, "node", 4) == 0 && ent->d_name[4] >= '0' && ent->d_name[4] <= '9') {
+                    numa = atoi(ent->d_name + 4);
+                    break;
+                }
+            }
+            closedir(d);
+        }
+        spl_topo_cpus[n].group = 0;
+        spl_topo_cpus[n].number = (int32_t)cpu;
+        spl_topo_cpus[n].socket = socket < 0 ? 0 : socket;
+        spl_topo_cpus[n].numa = numa;
+        n++;
+    }
+    spl_topo_n = n;
+}
+static void spl_topo_ensure(void) { pthread_once(&spl_topo_once, spl_topo_init); }
+#endif
+
+int64_t rt_cpu_topology_count(void) {
+    spl_topo_ensure();
+    return spl_topo_n;
+}
+
+int64_t rt_cpu_topology_field(int64_t index, int64_t field) {
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return -1;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
+    switch (field) {
+        case 0: return c->group;
+        case 1: return c->number;
+        case 2: return c->socket;
+        case 3: return c->numa;
+        default: return -1;
+    }
+}
+
+bool rt_thread_pin_current(int64_t index) {
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return false;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
+#if defined(_WIN32)
+    GROUP_AFFINITY affinity;
+    memset(&affinity, 0, sizeof(affinity));
+    affinity.Group = (WORD)c->group;
+    affinity.Mask = (KAFFINITY)1 << c->number;
+    return SetThreadGroupAffinity(GetCurrentThread(), &affinity, NULL) != 0;
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(c->number, &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
+#else
+    (void)c;
+    return false;
+#endif
+}
+
+int64_t rt_thread_current_cpu(void) {
+#if defined(_WIN32)
+    PROCESSOR_NUMBER pn;
+    GetCurrentProcessorNumberEx(&pn);
+    return ((int64_t)pn.Group << 16) | (int64_t)pn.Number;
+#elif defined(__linux__)
+    int cpu = sched_getcpu();
+    return cpu < 0 ? -1 : (int64_t)cpu;
+#else
+    return -1;
+#endif
+}
 /* OS CSPRNG fill -- same provider shape as rt_random_hex in runtime_native.c
  * (BCryptGenRandom via bcrypt.dll on Windows, /dev/urandom elsewhere).
  * Returns 0 on failure; never degrades to a weak source. */
