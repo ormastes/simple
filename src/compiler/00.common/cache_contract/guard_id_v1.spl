@@ -9,12 +9,13 @@
 # root is never admissible as a cache key input (=> miss / conservative), so a
 # cache can never assume an unevaluable guard is false.
 #
-# Digests are algorithm-tagged `<algo>/<hex>` (hash agility,
-# doc/05_design/compiler/incremental_build/packed_binary_ast_v1.md §8). Local
-# helper until the shared algorithm registry lands.
+# Digests are DigestV1 text `<algo>:<hex>` from the shared registry
+# (cache_contract/hash_algorithm_registry_v1).
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1,
+    digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok}
 
 pub struct GuardIdV1:
     kind: text
@@ -37,7 +38,9 @@ fn _h(domain: text, parts: [text]) -> text:
     var framed = "{domain}\u0000"
     for p in parts:
         framed = framed + "{p.len()}:{p}\u0000"
-    "sha256/" + sha256_u8_hex(text_to_bytes(framed))
+    match digest_v1_new(HASH_ALGO_SHA256_V1, sha256_u8_hex(text_to_bytes(framed))):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
 
 fn _normalize(expr: text) -> text:
     var out = ""
@@ -100,7 +103,10 @@ pub fn active_guard_root_empty_v1(profile_digest: text) -> ActiveGuardRootV1:
 
 # Only a complete root may feed a cache key; anything else is a miss.
 pub fn active_guard_root_admissible_v1(root: ActiveGuardRootV1) -> bool:
-    root.complete and root.root_digest.starts_with("sha256/")
+    if not root.complete: return false
+    match digest_v1_parse(root.root_digest):
+        case Some(d): digest_v1_identity_ok(d)
+        case nil: false
 
 export GuardIdV1, GuardEvalV1, ActiveGuardRootV1
 export guard_kinds_v1, guard_id_v1, active_guard_root_v1, active_guard_root_empty_v1
