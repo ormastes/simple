@@ -79,6 +79,34 @@ quiescent. This failed full attempt is retained; it provides no Phase 3
 qualification. No warm retry, new probe or production change was made for this
 audit. The two-second goal and required negative-oracle gates remain open.
 
+### Latest f825 observation (resource-limited, unqualified)
+
+The f825 invocation recorded inventory 302.6244231 seconds and snapshot
+213.7444553 seconds, **516.3688784 seconds combined**. Checked reads took
+270.5311948 seconds, copy/write 144.3432443 seconds and explicit verification
+63.8113419 seconds; these nested buckets overlap. The retained raw aggregate is
+`C:/dev/simple-phase3-f825-storage-20261025/evidence/scv-cost-handoff-observed.sdn`,
+SHA256 `f5bb703927597ce76027baa10a02bb65ba770f868a0ce979012b76354e933963`.
+This is another cold observation, not a controlled comparison or speed claim.
+
+The issued full source inventory CURRENT generation was 1, digest
+`3806b102976648efcb79576c753758547b6f6bc069e1911550f8be6d0ebaaea3`,
+retained in `C:/dev/simple-phase3-f825-storage-20261025/evidence/issued-CURRENT-at-handoff`.
+That is distinct from the selected compile snapshot inventory:
+revision `scv-revision-v1-dd1f62eeb45e553430b00804ee9227b9368bd67267b2f2a54e6dc263272a0a6d`,
+17,360 rows, inventory digest
+`ad6f04ab428824106aa40b94a001fbada569af625c4b3a7debe83b37da10a7a3`.
+Its receipt is
+`C:/dev/simple-gnu-metadata-scope-producer-source-20261025/build/scv/snapshots/scv-revision-v1-dd1f62eeb45e553430b00804ee9227b9368bd67267b2f2a54e6dc263272a0a6d/SCV_COMPILE_SNAPSHOT`.
+
+The guarded run terminated with outer exit 88, peak 5,882,244 KiB against
+5,859,375 KiB, quiescent. It recorded 353 completed HIR modules and 5,543
+explicit functions, zero MIR/native phase rows and zero cached objects; no
+output executable or build receipt was issued. Terminal evidence:
+`C:/dev/simple-phase3-f825-storage-20261025/evidence/terminal-result.sdn`,
+SHA256 `a601243fcec8a5a474e653c759df4de1d219da1c0b4151f0ee55930a27aa1c91`.
+The two-second goal, full qualification and required negative gates remain open.
+
 ### Small native contracts
 
 The new instrumentation preserves 103 existing function signatures, using

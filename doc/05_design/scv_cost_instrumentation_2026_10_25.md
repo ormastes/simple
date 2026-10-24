@@ -126,6 +126,34 @@ attempt stopped at 5,864,952 KiB against 5,859,375 KiB and became quiescent.
 No warm retry or source/cache change accompanied this audit. Preserve the
 failure and all source-validation oracles; no full Phase 3 qualification follows.
 
+### Latest f825 cold measurement
+
+The f825 aggregate recorded inventory 302.6244231 seconds plus snapshot
+213.7444553 seconds, totaling 516.3688784 seconds. Checked read time was
+270.5311948 seconds, copy/write 144.3432443 seconds and verification
+63.8113419 seconds. These are overlapping buckets, not disjoint costs or a
+controlled comparison with earlier runs. Exact retained aggregate:
+`C:/dev/simple-phase3-f825-storage-20261025/evidence/scv-cost-handoff-observed.sdn`,
+SHA256 `f5bb703927597ce76027baa10a02bb65ba770f868a0ce979012b76354e933963`.
+
+Full source inventory CURRENT generation 1 had digest
+`3806b102976648efcb79576c753758547b6f6bc069e1911550f8be6d0ebaaea3`;
+its retained record is
+`C:/dev/simple-phase3-f825-storage-20261025/evidence/issued-CURRENT-at-handoff`.
+This is distinct from the 17,360-row selected compile snapshot revision
+`scv-revision-v1-dd1f62eeb45e553430b00804ee9227b9368bd67267b2f2a54e6dc263272a0a6d`
+and its inventory digest
+`ad6f04ab428824106aa40b94a001fbada569af625c4b3a7debe83b37da10a7a3`.
+The exact snapshot receipt path is recorded in the companion cold-admission bug.
+
+The run terminated at the resource guard (outer exit 88, peak 5,882,244 KiB,
+cap 5,859,375 KiB, quiescent), after 353 HIR completions / 5,543 explicit
+functions, zero MIR/native phase rows and zero cached objects. Terminal receipt:
+`C:/dev/simple-phase3-f825-storage-20261025/evidence/terminal-result.sdn`,
+SHA256 `a601243fcec8a5a474e653c759df4de1d219da1c0b4151f0ee55930a27aa1c91`.
+No executable/build receipt or full Phase 3 qualification follows. Required
+verification and the two-second goal remain open; no green check was rerun.
+
 ### Retained native evidence
 
 The later full producer is SHA256
