@@ -127,3 +127,41 @@ admission must never deadlock.
 - Per-stage memory coefficients are unmeasured.
 - Stackful backend deferred; revisit only if stage-granular yield proves too
   coarse.
+
+## 8. Module-scoped monomorphization (per-file Mono stage)
+
+Owner: 40.mono / generic-cache lane. The scheduler side is coordinated through the coordinator.
+
+**Problem.** Today every MIR shard worker re-runs monomorphization over the whole program, then lowers only the modules it claims (`80.driver/driver_build/native_mir_shard.spl`, `driver_pipeline_lowering.spl:1385`). A specialization is owned by its *template's* module and is placed into that module's HIR (`monomorphize_integration.spl:593-662`). Other modules reach it through a process-global `SymbolId` (>= `MONO_SYMBOL_BASE`). Neither part works in a per-file pipeline:
+- the owner's fiber may already be `Done` when a requester appears;
+- SymbolIds are not stable across processes or fibers.
+
+**Rule.** A `FileFiber` gains a `Mono` step between `Hir` and `Mir`:
+
+```
+... → Hir → Mono(plan) → [AwaitInstances] → Mir → Obj → Publish → Done
+```
+
+1. **Inputs.** The module's own HIR, plus imported generic templates read as *concrete TLDR views* (`acquire_concrete_tldr`, #4389). Template bodies come from the `.tldr` generic-body sections. Only `Concrete` views are codegen input; `Partial` and `Unresolved` are rejected.
+2. **Identity.** An instance is identified by its `ConcreteTldrKey` (`DigestV1`) and the existing `MonoSemanticKey`. Its symbol is a deterministic link name, `__spl_inst$<sha256(MonoSemanticKey canonical text)>`, with no truncation. It is never a SymbolId.
+3. **Requester produces** (`mono_module_plan_v1`, `80.driver/cache/mono_module_scope_v1.spl`). For each instance its own code requests, the module looks it up in the instance cache (#4403):
+   - **already published:** `reuse` it (reference only);
+   - **wins the single-flight:** `produce` it (instantiate locally, then publish instance MIR and object);
+   - **otherwise:** `await` it (the fiber parks `Pending` on the flight).
+
+   A leader always completes its flight, with nil on failure, and stale leaders are re-driven (#4441).
+4. **Linking.** Every requester's object calls the instance by link name. The instance is emitted as a linkonce/COMDAT definition. The result is therefore correct under any fiber interleaving: equal keys produce equal bytes, and divergence is quarantined by the cache. Single-flight only saves work; correctness does not depend on it.
+5. **Cache and invalidation.** The cache keeps target-neutral instance MIR per `ConcreteTldrKey` and an object per `MonoArtifactKey`. A template change changes its `TemplateId`, and so every dependent key: old instances are simply not hit again. The `.rr` family `generic-specialization` maps a template change to its requesters.
+
+**Status (2026-10-24).**
+- Landed: the planner and its seed spec.
+- Not yet done:
+  - `MonomorphizationPass` running over one module and emitting requests instead of placing bodies into the template's owner. The existing `ArchiveRequests` mode (`MonoSpecializationRequestV1`) is the starting point.
+  - MIR lowering of link-name references.
+  - COMDAT emission.
+
+These need a binary that can run HIR lowering; the Rust seed fails with `rt_enum_id` there. They are UNRUN.
+
+**Open (for the scheduler):**
+- How `AwaitInstances` parks on the instance cache's single-flight future.
+- Whether a fiber whose `await` flight completes with nil re-plans (becoming the producer) inside the same `Mono` step.
