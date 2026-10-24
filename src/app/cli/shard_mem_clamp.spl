@@ -82,8 +82,20 @@ pub fn shard_mem_available_kb_from_field(field: text) -> i64:
 # default. The host key is a machine-wide hint shared by every phase, so it may
 # only make a phase MORE conservative: a value below the phase default (e.g.
 # below the measured HIR RSS behind the 3 GB HIR default) is ignored, with a
-# warning, rather than silently loosening the clamp. HIR may supply its parent
-# peak as an additional default floor; a valid phase override still wins.
+# warning, rather than silently loosening the clamp.
+#
+# The parent peak is deliberately NOT a budget floor by default. When it was
+# one (61bb554b161), a large tree priced every HIR worker at the supervisor's
+# own front-end high-water mark (~8.16 GiB on the phase-3 tree); host headroom
+# then could not fit even one floored estimate and admission collapsed to
+# exactly one worker, which re-ran the entire front-end replay (load_sources
+# through surface_freeze and hir) as its baseline -- double the retained
+# parent footprint -- and was SIGBUS-killed near 7-8 GB RSS (41 deaths,
+# 2026-10-24 phase-3 lane). With the floor dropped, fanout is sized from the
+# measured per-worker default (or a deliberate override) and RSS splits across
+# queue-claiming workers; the tree reserve in shard_threads_parent_cap_for
+# still protects the supervisor. SIMPLE_HIR_SHARD_PARENT_FLOOR=1 restores the
+# old floor explicitly. A valid phase override still wins over everything.
 pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i64 = 0) -> i64:
     val raw = env_get(var_name) ?? ""
     if raw != "":
@@ -95,7 +107,9 @@ pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i
     if host_kb > 0 and chosen != host_kb:
         val host_mib = host_kb / 1024
         print "[shard] ignoring worker_mem_mib={host_mib} MiB below the {var_name} default {default_kb} kB; set {var_name} to lower it deliberately"
-    shard_host_budget_floor_kb(parent_peak_kb, chosen)
+    if parent_peak_kb > 0 and (env_get("SIMPLE_HIR_SHARD_PARENT_FLOOR") ?? "") == "1":
+        return shard_host_budget_floor_kb(parent_peak_kb, chosen)
+    chosen
 
 # worker_mem_mib in kB; 0 (use the default) when absent, invalid or so large
 # that the KiB value would overflow i64.
