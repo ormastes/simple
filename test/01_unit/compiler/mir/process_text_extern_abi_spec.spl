@@ -16,6 +16,7 @@
 # commit message for that).
 
 use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -81,6 +82,7 @@ describe "process-run extern text ABI (pure-Simple MIR twin of process_c_runtime
             "fn probe(cmd: text, args: [text]) -> i64:\n    val (o, e, s) = rt_process_run_bounded(cmd, args, 300000, 16777216)\n    s\n"
         val output = lower_to_llvm(source, "process_bounded_abi_fixture.spl")
         assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
         val line = call_line(output, "rt_process_run_bounded_tuple(")
         assert_true(line != "", "expected the LLVM tuple facade call")
         assert_equal(5, top_level_arg_count(line, "rt_process_run_bounded_tuple("), "cmd must cross as (ptr, len): " + line)
@@ -93,6 +95,7 @@ describe "process-run extern text ABI (pure-Simple MIR twin of process_c_runtime
             "fn probe(cmd: text, args: [text]) -> i64:\n    val (o, e, s) = rt_process_run(cmd, args)\n    s\n"
         val output = lower_to_llvm(source, "process_run_abi_fixture.spl")
         assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
         val line = call_line(output, "rt_process_run_tuple(")
         assert_true(line != "", "expected the LLVM tuple facade call")
         assert_equal(3, top_level_arg_count(line, "rt_process_run_tuple("), "cmd must cross as (ptr, len): " + line)
@@ -101,12 +104,18 @@ describe "process-run extern text ABI (pure-Simple MIR twin of process_c_runtime
         val source = "extern fn rt_process_run(cmd: text) -> i64\n\nfn probe(cmd: text) -> i64:\n    rt_process_run(cmd)\n"
         val output = lower_to_llvm(source, "process_run_one_arg_fixture.spl")
         assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
         assert_equal(0, count_calls(output, "rt_string_len("), "semantic-arity guard must keep the one-arg import unsplit")
+        assert_equal(0, count_calls(output, "rt_process_run_tuple("), "a one-word call must not be renamed onto the (ptr, len, args) facade")
+        val line = call_line(output, "@rt_process_run(")
+        assert_true(line != "", "expected the one-arg import to keep its own callee")
+        assert_equal(1, top_level_arg_count(line, "@rt_process_run("), "one word: " + line)
 
     it "hands rt_stderr_write the tagged text value, not a bridged char*":
         val source = "extern fn rt_stderr_write(s: text)\n\nfn probe(msg: text):\n    rt_stderr_write(msg)\n"
         val output = lower_to_llvm(source, "stderr_write_abi_fixture.spl")
         assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
         val line = call_line(output, "rt_stderr_write(")
         assert_true(line != "", "expected a call to rt_stderr_write")
         assert_equal(1, top_level_arg_count(line, "rt_stderr_write("), "one tagged word: " + line)

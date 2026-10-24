@@ -1899,7 +1899,28 @@ pub unsafe extern "C" fn rt_process_run_bounded_bytes_tuple(
     timeout_ms: i64,
     max_output_bytes: i64,
 ) -> *mut i64 {
-    let tuple = rt_process_run_bounded_bytes(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes);
+    process_result_block(rt_process_run_bounded_bytes(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
+}
+
+/// Raw 3-word block (stdout, stderr, untagged status) for
+/// `rt_process_run_bounded` (C twin: `rt_process_run_bounded_tuple`).
+///
+/// # Safety
+/// Same contract as [`rt_process_run_bounded`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+    max_output_bytes: i64,
+) -> *mut i64 {
+    process_result_block(rt_process_run_bounded(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
+}
+
+/// Repack a (stdout, stderr, status) result tuple: slots 0/1 keep their
+/// runtime values, slot 2 is untagged (C twin: `rt_process_result_to_tuple`).
+fn process_result_block(tuple: RuntimeValue) -> *mut i64 {
     raw_result_block(&[
         rt_tuple_get(tuple, 0).to_raw() as i64,
         rt_tuple_get(tuple, 1).to_raw() as i64,
