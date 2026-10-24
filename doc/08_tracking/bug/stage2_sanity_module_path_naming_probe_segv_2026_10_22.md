@@ -1,9 +1,15 @@
 # Stage-2 sanity: stage2_module_path_naming probe SIGSEGVs the worker (2026-10-22)
 
-Status: OPEN — blocks the full stage2 sanity battery; p2_add (the compile/run
-admission probe) PASSES. Phase 3 + phase-2 validation proceed provisionally
-from the hello-world gate per the parallel collection policy (descendants
-unadmitted until this closes).
+Status: RESOLVED 2026-10-24 — Stage 2 is ADMITTED on release/1.0.0
+(`docs(bug): Stage 2 is ADMITTED…` b56c3e203ff, PR #4260): both admission
+receipts published for admitted candidate
+206bfd58409c78ca3015d45276c7333ee0909a47452995cbc653126deb9da3af
+(stage3-planner-admission.receipt + managed-stage4-planner-admission-v2.env).
+The mandatory test matrix gates 3/4. Historical body below records the
+SIGSEGV investigation (HIR codec encoder nil-scalar asymmetry #4255, the
+generated fold walker #4237 / 0e2d7ab2997, the codec optional payload bind
+51671a18d8a, the env-restore Some-box unwrap 5bfd06216a3, reverse-reference
+phase-owner promotion 9a79de084e9/3159810d701/a33fd8a2fb5).
 
 ## Symptom
 
@@ -689,3 +695,15 @@ Fix: explicit `if val present = previous:` unwrap in `native_build_cache_restore
 `optional_array_payload_narrowing_native_2026_10_21` (the same narrowing gap, applying to `text?`
 as well as arrays). Other `if x == nil: return` followed by using `x` as `T` sites are likely
 exposed the same way; they have not been audited.
+
+
+## Update 2026-10-24 (later): CLOSED — Stage 2 admitted
+
+The chain above converged: after #4237 (fold walker), 51671a18d8a (codec
+optional payload bind), 5bfd06216a3 (env-restore explicit unwrap), and the
+reverse-reference owner-promotion fixes (9a79de084e9, 3159810d701,
+a33fd8a2fb5), the stage-2 admission lane reached sanity + struct receiver +
+publish and emitted both admission receipts (PR #4260, b56c3e203ff,
+admitted candidate 206bfd58409c). The mandatory test matrix gates 3/4 at
+admission time. Residual `if x == nil: return` then-use-as-`T` sites noted
+above remain un-audited; file a new bug if one surfaces in another route.
