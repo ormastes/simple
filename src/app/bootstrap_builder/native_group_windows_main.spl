@@ -8,7 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_
 use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
 use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1, _windows_process_wide_v1}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, rt_host_commit_headroom_bytes_v1, rt_host_disk_headroom_bytes_v1}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64, volatile_write_u32}
 
 @unsafe(reason: "Win64 current volume free-space snapshot", capabilities: [ffi, raw_ptr])
@@ -21,6 +21,11 @@ extern fn K32GetPerformanceInfo(info: i64, size: u32) -> i32
 
 @unsafe(reason: "reads and releases a bounded Win64 system commit snapshot", capabilities: [ffi, raw_ptr])
 fn native_group_windows_commit_headroom_v1() -> Result<i64, text>:
+    # Interpreter-first: registered runtime-C snapshot resolves under the
+    # bootstrap seed's pure interpreter, where the raw kernel32 heap externs
+    # below have no implementation (seed_interp_windows_memory_probe_2026_10_24).
+    val commit_quick = rt_host_commit_headroom_bytes_v1()
+    if commit_quick > 0: return Ok(commit_quick)
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for commit check")
     val info = HeapAlloc(heap, 8u32, 104u64)
@@ -42,6 +47,11 @@ fn native_group_windows_commit_headroom_v1() -> Result<i64, text>:
 pub fn native_group_windows_capacity_v1(path: text) -> Result<NativeGroupedCapacitySampleV1, text>:
     val memory = windows_available_memory_headroom_v1()?
     val commit = native_group_windows_commit_headroom_v1()?
+    # Interpreter-first disk snapshot (same rationale as the memory/commit
+    # probes): registered runtime-C, resolves under the seed's pure interpreter.
+    val disk_quick = rt_host_disk_headroom_bytes_v1(path)
+    if disk_quick > 0:
+        return Ok(NativeGroupedCapacitySampleV1(memory, disk_quick, commit, true))
     val heap = GetProcessHeap()
     if heap == 0: return Err("Windows process heap unavailable for disk check")
     val wide = _windows_process_wide_v1(heap, path)
