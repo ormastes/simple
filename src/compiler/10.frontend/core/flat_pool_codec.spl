@@ -469,6 +469,37 @@ pub fn flat_pool_capture_sanitize_disarm_v1():
 pub fn flat_pool_capture_poisoned_v1() -> bool:
     _flat_pool_capture_poisoned
 
+# Text-handle validation without serialization. A parse-cache HIT used to run
+# a full capture encode (every i64 formatted and appended into a discarded
+# buffer, ~13% of warm parse samples) only to learn whether any TEXT handle
+# dangles. Only text appends can poison a capture, so validation mode checks
+# each text handle and skips every non-text encoder. Same poisoned flag and
+# same refusal semantics as the sanitize capture.
+var _flat_pool_validate_only: bool = false
+
+pub fn flat_pool_validate_texts_arm_v1():
+    _flat_pool_validate_only = true
+    _flat_pool_sanitize_capture = true
+    _flat_pool_capture_poisoned = false
+
+pub fn flat_pool_validate_texts_disarm_v1():
+    _flat_pool_validate_only = false
+    _flat_pool_sanitize_capture = false
+
+var _flat_pool_pooldbg_memo: i64 = -1
+fn flat_pool_pooldbg() -> bool:
+    if _flat_pool_pooldbg_memo < 0:
+        _flat_pool_pooldbg_memo = if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1": 1 else: 0
+    _flat_pool_pooldbg_memo == 1
+
+fn flat_pool_validate_text(value: text, item: i64):
+    val length =
+        unsafe(capabilities: [ffi]):
+            rt_string_len(value)
+    if length < 0 and not _flat_pool_capture_poisoned:
+        _flat_pool_capture_poisoned = true
+        print("[flat-pool] capture refused: invalid text handle site=text.value item={item} input_length={length}; cache store skipped")
+
 fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
     val appended =
         unsafe(capabilities: [ffi]):
@@ -516,6 +547,8 @@ fn flat_pool_builder_finish(handle: i64) -> text:
     result
 
 fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
+    if _flat_pool_validate_only:
+        return
     flat_pool_builder_push(handle, "{pool.len()}\n", 0, -1)
     var item = 0
     for v in pool:
@@ -523,15 +556,21 @@ fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
         item = item + 1
 
 fn flat_pool_enc_text_into(handle: i64, pool: [text]):
+    if _flat_pool_validate_only:
+        var vitem = 0
+        for v in pool:
+            flat_pool_validate_text(v, vitem)
+            vitem = vitem + 1
+        return
     flat_pool_builder_push(handle, "{pool.len()}\n", 2, -1)
-    if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1" and pool.len() > 1:
+    if flat_pool_pooldbg() and pool.len() > 1:
         val item1_len = unsafe(capabilities: [ffi]):
             rt_string_len(pool[1])
         if item1_len >= 0:
             print("[pooldbg] enc_pool_head n={pool.len()} item1='{pool[1]}'")
     var item = 0
     for v in pool:
-        if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1":
+        if flat_pool_pooldbg():
             val probe_len = unsafe(capabilities: [ffi]):
                 rt_string_len(v)
             print("[pooldbg] enc_text item={item} len={probe_len}")
@@ -547,11 +586,15 @@ fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
         flat_pool_enc_text_into(handle, inner)
 
 pub fn flat_pool_enc_i64(pool: [i64]) -> text:
+    if _flat_pool_validate_only:
+        return ""
     val handle = flat_pool_builder_new()
     flat_pool_enc_i64_into(handle, pool)
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
+    if _flat_pool_validate_only:
+        return ""
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 6, -1)
     var item = 0
@@ -566,6 +609,8 @@ pub fn flat_pool_enc_text(pool: [text]) -> text:
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
+    if _flat_pool_validate_only:
+        return ""
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 8, -1)
     for inner in pool:
