@@ -24,6 +24,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand}
 use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
 # Borrow Check Result
@@ -867,6 +868,32 @@ fn check_mir_function(func: MirBody) -> BorrowCheckResult:
     var checker = BorrowChecker.create()
     checker.check_function(func)
 
+# Resolve a function-relative MIR point to its instruction span, using the
+# exact numbering of analyze_mir_borrows (every instruction, then the block
+# terminator, in body block order). Terminators carry no span: fall back to
+# the function span so the diagnostic still names a real source line.
+fn nll_error_with_source_v1(err: NLLError, body: MirBody, function_name: text, function_span: Span) -> NLLError:
+    var located = err
+    located.function_name = function_name
+    var line = function_span.line
+    var col = function_span.col
+    if err.has_primary_span:
+        var cursor = 0
+        var found = false
+        for block in body.blocks:
+            for inst in block.instructions:
+                if not found and cursor == err.primary_span:
+                    found = true
+                    if val inst_span = inst.span:
+                        if inst_span.line > 0:
+                            line = inst_span.line
+                            col = inst_span.col
+                cursor = cursor + 1
+            cursor = cursor + 1
+    located.source_line = line
+    located.source_col = col
+    located
+
 fn check_mir_module(module: MirModule) -> [NLLError]:
     """Check all functions in a MIR module."""
     var checker = BorrowChecker.create()
@@ -879,7 +906,7 @@ fn check_mir_module(module: MirModule) -> [NLLError]:
         match checker.check_function(body, entry_block.id):
             case Errors(errors):
                 for err in errors:
-                    all_errors = all_errors.push(err)
+                    all_errors = all_errors.push(nll_error_with_source_v1(err, body, mir_fn.name, mir_fn.span))
             case _:
                 pass
 
