@@ -26,6 +26,9 @@ use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFac
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_block_at_v1}
 use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_decl_line_v1}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1, GenericFieldInputV1}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GENERIC_PARAM_KIND_TYPE}
+use std.common.crypto.sha256.{sha256_text}
 
 fn _fact_v1(kind: FrontendPublicFactKindV1, symbol: text, bytes: text) -> FrozenPublicFactV1:
     FrozenPublicFactV1(fact_kind: kind, stable_symbol_id: symbol, canonical_bytes: bytes,
@@ -114,5 +117,72 @@ pub fn module_public_macro_facts_v1(def_table: MacroDefinitionTableV1,
             "macro-gen:" + module_id + "." + name, "macro-generated " + name))
     facts
 
+# Generic template declarations (plan P3): every generic struct/class becomes
+# one GenericDeclInputV1 for the template-section projector. Binder names and
+# field names come from the parsed module; each field's type text is the
+# source spelling after `<name>:` inside the declaration block (the parser's
+# Type has no canonical renderer yet). Every parameter is a TYPE parameter
+# (ParserTypeParam carries no kind); there is no GuardId yet, so the guard
+# root is a fixed "unguarded" token.
+fn _field_type_text_v1(block_lines: [text], field: text) -> text:
+    val prefix = field + ":"
+    for line in block_lines:
+        val t = line.trim()
+        if line.starts_with(" ") and t.starts_with(prefix):
+            var ty = t.substring(prefix.len()).trim()
+            val hash = ty.index_of("#")
+            if hash >= 0:
+                ty = ty.substring(0, hash).trim()
+            val eq = ty.index_of("=")
+            if eq >= 0:
+                ty = ty.substring(0, eq).trim()
+            return ty
+    ""
+
+fn _generic_decl_v1(module_id: text, name: text, block: text, type_params: [text],
+        field_names: [text], is_public: bool) -> GenericDeclInputV1:
+    val block_lines = block.split("\n")
+    var kinds: [text] = []
+    for _p in type_params:
+        kinds.push(GENERIC_PARAM_KIND_TYPE)
+    var fields: [GenericFieldInputV1] = []
+    for field in field_names:
+        fields.push(GenericFieldInputV1(name: field, type_text: _field_type_text_v1(block_lines, field)))
+    GenericDeclInputV1(module_path: module_id, name: name, params: type_params,
+        param_kinds: kinds, fields: fields,
+        visibility_root: if is_public: "visibility:pub" else: "visibility:module",
+        active_guard_root: "guard:unguarded/v1", source_digest: sha256_text(block))
+
+pub fn module_generic_template_decls_of_module_v1(module: ParserModule, source: text,
+        module_id: text) -> [GenericDeclInputV1]:
+    val lines = source.replace("\r\n", "\n").split("\n")
+    var out: [GenericDeclInputV1] = []
+    for name in module.structs.keys():
+        val s = module.structs[name]
+        if s.type_params.len() == 0:
+            continue
+        var params: [text] = []
+        for p in s.type_params:
+            params.push(p.name)
+        var field_names: [text] = []
+        for fd in s.fields:
+            field_names.push(fd.name)
+        val block = module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(s.span.line, lines, ["struct"], name) - 1, "layout")
+        out.push(_generic_decl_v1(module_id, name, block, params, field_names, s.is_public))
+    for name in module.classes.keys():
+        val c = module.classes[name]
+        if c.type_params.len() == 0:
+            continue
+        var params: [text] = []
+        for p in c.type_params:
+            params.push(p.name)
+        var field_names: [text] = []
+        for fd in c.fields:
+            field_names.push(fd.name)
+        val block = module_tldr_block_at_v1(lines, module_tldr_decl_line_v1(c.span.line, lines, ["class"], name) - 1, "layout")
+        out.push(_generic_decl_v1(module_id, name, block, params, field_names, c.is_public))
+    out
+
 export module_public_extern_signature_v1, module_public_facts_of_module_v1
+export module_generic_template_decls_of_module_v1
 export module_public_macro_facts_v1

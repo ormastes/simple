@@ -40,10 +40,13 @@ use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_sourc
     module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
 use compiler.driver.cache.module_tldr_ast_sections_v1.{module_tldr_sections_of_module_v1}
 use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of_module_v1,
-    module_public_macro_facts_v1}
+    module_public_macro_facts_v1, module_generic_template_decls_of_module_v1}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
     MacroUseTableV1, macro_definition_table_encode_v1, macro_use_table_encode_v1,
     macro_reference_schema_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.{project_generic_template_v1}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
+    build_generic_template_section_v1, generic_template_section_encode_v1}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_artifact.public_summary_projector.{FrozenPublicFactV1,
@@ -132,7 +135,9 @@ fn _module_summary_input_v1(module_id: text, source_path: text, source: text,
         grammar_digest: sha256_text("simple.flat-pool|" + FLAT_POOL_CODEC_VERSION),
         facts: facts)
 
-# "summary|<rendered PublicSummaryV1>" plus the generic/inline body sections.
+# "summary|<rendered PublicSummaryV1>", "generic-template|<indexed template
+# section>" when the module declares generic structs/classes, plus the
+# generic/inline body sections.
 # A projection refusal yields no summary section (named in the result).
 pub fn module_tldr_companion_view_sections_v1(module: ParserModule, source_path: text,
         source: text, module_id: text) -> ([text], text):
@@ -174,6 +179,17 @@ pub fn module_tldr_companion_view_sections_with_macros_v1(module: ParserModule,
             sections.push("summary|" + render_public_summary_tldr_v1(summary))
         case Err(reason):
             refusal = reason
+    var templates: [GenericTemplateEntryV1] = []
+    for decl in module_generic_template_decls_of_module_v1(module, source, module_id):
+        match project_generic_template_v1(decl):
+            case Ok(entry):
+                templates.push(entry)
+            case Err(reason):
+                if refusal == "":
+                    refusal = "generic template " + decl.name + ": " + reason
+    if templates.len() > 0:
+        sections.push("generic-template|" +
+            generic_template_section_encode_v1(build_generic_template_section_v1(templates)))
     for entry in module_tldr_sections_of_module_v1(module, source):
         if entry.starts_with("generic|") or entry.starts_with("inline|"):
             sections.push(entry)
