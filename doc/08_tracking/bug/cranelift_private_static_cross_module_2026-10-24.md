@@ -1,20 +1,25 @@
-# Cranelift AOT rejects cross-module read of a private module static (accessors)
+# Cranelift AOT rejects cross-module read of private expr_tag static
 
-Symptom: Phase-3 native-build fails unit `compiler.frontend.core._AstExpr.accessors` with
-`backend session AOT result rejected: <enum@...>` (enum payload lost by to_text(); fixed in
-simple-boot-p2shard 5a5513e2ca0 via `backend_session_authority_error_text_v2`).
+Symptom: Phase-3 native-build fails unit `compiler.frontend.core._AstExpr.accessors`:
+`[cranelift] imported non-public module static '...expr_tag' requires visibility-preserving accessor support`
+(`cranelift_codegen_adapter.spl` declare_module_statics).
 
-Real cause (build.log, stdout just before the error):
-`[cranelift] imported non-public module static 'compiler_frontend_core__AstExpr_nodes__expr_tag' requires visibility-preserving accessor support`
-Emitted at src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:387 (declare_module_statics).
-accessors.spl:136 and :184 read `expr_tag.len()` directly (an earlier workaround that avoids a
-cross-module i64 return), but `var expr_tag` in nodes.spl:89 is private. See
-cranelift_aot_accessor_visibility_2026-10-11.md: only Public statics get an address accessor.
+## Language rule decision
+`doc/07_guide/quick_reference/syntax_quick_reference.md` (Visibility): private = same file only.
+Reading a private static from accessors.spl (a different file) is therefore ILLEGAL; the
+backend rejection is correct, not a backend gap. Implementing hidden/private accessors is
+also blocked on AOT define-function linkage (cranelift_aot_accessor_visibility_2026-10-11.md).
 
-Second, separate failure in the same build: unit `lib.common.math.math` fails with
-`unsupported module static 'lib_common_math_math__MATH_PI' (non-scalar type or non-const init)`
-(adapter:382; `pub val MATH_PI: f64` -- f64 static init not supported). Not addressed here.
+## Fix (permanent, source side)
+The ten pools (`expr_tag/span/i_val/f_val/s_val/left/right/extra/args/stmts`) are
+`export`ed by `core/__init__.spl:269` and read by accessors, collection_desugar,
+placeholder_lambda, primary_expr, module_state. They are public API, so they are now
+declared `pub var` in `_AstExpr/nodes.spl`. Internal-only pools stay private (0 outside readers).
+This is the real declaration, not a workaround: no `@workaround` tag; the interim
+`pub var expr_tag` commit 8ab7cd693d8 (simple-boot-adhoc) is superseded and extended to siblings,
+which would have failed identically once reached.
 
-Workaround: `pub var expr_tag` in nodes.spl (tagged `@workaround`). Real fix: the backend should
-support visibility-preserving accessors for non-public statics (blocked on AOT define-function
-linkage, per the 2026-10-11 doc). Unverified: no rebuild was run.
+## Verification
+Spec: test/01_unit/compiler/ast_expr_pool_visibility_spec.spl (source-shape; NOT executed).
+Not verified: native-build with this change (no Stage 2 rebuild allowed).
+Separate, unaddressed: `MATH_PI` f64 static unsupported (adapter:382).
