@@ -157,7 +157,21 @@ probe=build/ladder-sanity
 rm -rf "$probe" && mkdir -p "$probe"
 printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.spl"
 "./$bin" --version
-"./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"
+if ! "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"; then
+  # A crashing compiler leaves no core on hosted runners: replay under lldb
+  # (macOS) or gdb for a backtrace, then fail.
+  if command -v lldb >/dev/null 2>&1; then
+    lldb --batch -o run -o "bt 40" -o "register read" -- "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe" || :
+  elif command -v gdb >/dev/null 2>&1; then
+    gdb -q -batch -ex run -ex "bt 40" --args "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe" || :
+  fi
+  # Keep the rejected compiler for offline analysis; no PHASE file, so no
+  # later rung climbs from it.
+  mkdir -p "$out_dir/$platform-rejected-p$next"
+  cp "./$bin" "$out_dir/$platform-rejected-p$next/"
+  echo "phase-ladder: phase $next hello build failed" >&2
+  exit 1
+fi
 "$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
 emit "$next" "$bin" true
 if [ "$next" -ge "${PHASE_LADDER_ESSENTIALS_FROM:-3}" ]; then
