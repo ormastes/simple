@@ -95,3 +95,32 @@ describe "packed .spab hit path":
         expect(flat_packed_admit_view_v1(view, ids(source + " "))).to_equal("digest mismatch for subject 1 (xxh3-128)")
         val _closed = flat_packed_close_v1(view)
         expect(flat_packed_open_v1("build/spab_hit_spec/absent.spab").reason).to_equal("absent")
+
+    it "leaves the same pools as a fresh parse of the same source":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val fresh = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val after_fresh = packed_snapshot(source)
+        val packed = flat_packed_encode_v1(blob, trace, ids(source), xxh3_128_text(SAMPLE))
+        dir_create_all("build/spab_hit_spec")
+        val path = "build/spab_hit_spec/fresh_eq.spab"
+        expect(flat_packed_store_v1(path, packed)).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(flat_packed_admit_view_v1(view, ids(source))).to_equal("")
+        val restored = build_module_from_packed_view_v1(view, source, SAMPLE)
+        val _closed = flat_packed_close_v1(view)
+        expect(restored != nil).to_equal(true)
+        expect(section_difference(after_fresh, packed_snapshot(source))).to_equal("")
+        val m = restored.unwrap()
+        expect(m.imports.len()).to_equal(fresh.imports.len())
+        expect(sorted_names(m.functions.keys())).to_equal(sorted_names(fresh.functions.keys()))
+
+    it "misses when no expected digest uses a hash algorithm the blob carries":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val view = flat_packed_open_v1("build/spab_hit_spec/sample.spab")
+        val unknown = [SpabDigestV1(subject: 1, algo: 99, hex: xxh3_128_text(source)),
+                       SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+        expect(flat_packed_admit_view_v1(view, unknown)).to_equal("no-common-digest-algorithm for subject 1")
+        val _closed = flat_packed_close_v1(view)
