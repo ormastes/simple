@@ -3328,6 +3328,13 @@ impl MirLowering:
                     case Literal(literal):
                         match literal.kind:
                             case NilLit:
+                                # HIR proved the slot Optional from the subject's own
+                                # concrete generic arguments (`Ok(nil)` over
+                                # `Result<T?, E>`, expression_components.spl).
+                                if sub_pat.has_type_:
+                                    match sub_pat.type_.kind:
+                                        case HirTypeKind.Optional(_): nil_optional_slot = true
+                                        case _: ()
                                 # A raw payload word cannot distinguish None from
                                 # nonoptional scalar 3. Require this exact declared
                                 # owner key to be known nongeneric before its slot
@@ -3947,6 +3954,64 @@ impl MirLowering:
                 ))
                 own_i = own_i + 1
             arms = owned_arms
+        # match_variant_pattern_shadowed_by_struct_name_2026-10-24: HIR
+        # reinterprets a bare `case Expr(e):` as a positional STRUCT pattern
+        # whenever a struct named `Expr` is visible and the enum's variants were
+        # not pre-registered (glob import). In an enum match that struct name is
+        # really a variant of the subject's enum: re-express it as the enum
+        # pattern (positional sub-patterns are already lowered in declared slot
+        # order). Only when the owner is proven: the subject's own enum, or --
+        # with the subject type unknown -- the sole enum declaring the name and
+        # a sibling Enum arm in this match.
+        var has_enum_sibling = false
+        var sib_i = 0
+        while sib_i < arms.len():
+            match arms[sib_i].pattern.kind:
+                case Enum(_, _, _): has_enum_sibling = true
+                case _: ()
+            sib_i = sib_i + 1
+        if has_enum_sibling or scrut_enum_lookup != "":
+            var variant_arms: [HirMatchArm] = []
+            var var_i = 0
+            while var_i < arms.len():
+                val va: HirMatchArm = arms[var_i]
+                var va_pat = va.pattern
+                match va.pattern.kind:
+                    case Struct(sv_type, sv_fields):
+                        var sv_name = ""
+                        match sv_type.kind:
+                            case Named(sv_sym, _):
+                                sv_name = self.symbols.symbol_name_scalar_raw(sv_sym.id)
+                            case _: ()
+                        var sv_owner = ""
+                        if sv_name != "":
+                            if scrut_enum_lookup != "" and self.enum_variant_discriminant(scrut_enum_lookup, sv_name) >= 0:
+                                sv_owner = scrut_enum_lookup
+                            elif scrut_enum_lookup == "":
+                                val sv_owners = self.variant_owner_keys(sv_name)
+                                if sv_owners.len() == 1:
+                                    sv_owner = sv_owners[0]
+                        if sv_owner != "":
+                            var sv_subs: [HirPattern] = []
+                            for sv_field in sv_fields:
+                                val sv_pair: (text, HirPattern) = sv_field
+                                sv_subs = sv_subs.push(sv_pair.1)
+                            val sv_payload: HirPatternPayload? = if sv_subs.len() > 0: Some(HirPatternPayload.Tuple(sv_subs)) else: nil
+                            va_pat = HirPattern(
+                                kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: va.pattern.span), sv_name, sv_payload),
+                                type_: nil,
+                                span: va.pattern.span
+                            )
+                    case _: ()
+                variant_arms = variant_arms.push(HirMatchArm(
+                    pattern: va_pat,
+                    has_guard: va.has_guard,
+                    guard: va.guard,
+                    body: va.body,
+                    span: va.span
+                ))
+                var_i = var_i + 1
+            arms = variant_arms
         var ai = 0
         while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
@@ -5423,16 +5488,29 @@ impl MirLowering:
         val pr = b_ok.emit_call(pf, [mir_operand_copy(res_local)], MirType.i64())
         self.builder = b_ok
         if val pl = pr:
-            val payload_local = match self.enum_match_expr_type(base):
-                case Some(base_type):
-                    match base_type.kind:
-                        case HirTypeKind.Result(ok_type, _):
-                            match ok_type.kind:
-                                case HirTypeKind.Tuple(_): self.decode_result_tuple_payload(pl, ok_type)
-                                case _: self.decode_declared_enum_payload_slot(pl, ok_type)
-                        case _: pl
-                case _: pl
-            return payload_local
+            if val static_base = self.enum_match_expr_type(base):
+                val base_type: HirType = static_base
+                match base_type.kind:
+                    case HirTypeKind.Result(ok_type, _):
+                        match ok_type.kind:
+                            case HirTypeKind.Tuple(_): return self.decode_result_tuple_payload(pl, ok_type)
+                            case _: return self.decode_declared_enum_payload_slot(pl, ok_type)
+                    case _: return pl
+            # bug=enum_payload_type_mismatch_unresolved_try_2026-10-24:
+            # `self.m()?` where `m` lives in another module's `impl` has no
+            # static base type (enum_match_expr_type cannot find the method),
+            # but the call lowered just above recorded its declared Result on
+            # res_local (remember_call_hir_return). Without this the Ok
+            # payload stayed an untyped word and `E.V(x)` rejected it.
+            if val lowered_base = self.find_local_hir_type(res_local.id):
+                val lowered_type: HirType = lowered_base
+                match lowered_type.kind:
+                    case HirTypeKind.Result(lowered_ok, _):
+                        match lowered_ok.kind:
+                            case HirTypeKind.Tuple(_): return self.decode_result_tuple_payload(pl, lowered_ok)
+                            case _: return self.decode_declared_enum_payload_slot(pl, lowered_ok)
+                    case _: ()
+            return pl
         res_local
 
     me box_tuple_payload(values: [HirExpr], construct_key: text) -> LocalId:
@@ -5864,6 +5942,11 @@ impl MirLowering:
                         kind: HirTypeKind.Named(enum_symbol_id, []),
                         span: enum_span
                     ), 2, 0)
+            else:
+                # Untyped `Ok(..)` / `Err(..)`: no Result HIR type is known
+                # here. Record the constructor so a merge can adopt the type
+                # of its typed arms (mir_unresolved_method_inferred_receiver_2026-10-24).
+                self.untyped_result_ctor_locals[tagged.id] = true
             return tagged
         payload_local
 

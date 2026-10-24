@@ -1,0 +1,39 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Mono: generic call whose argument is a field of an `opt.unwrap()` local
+
+`val batch = G.unwrap()` has no annotation, and mono's `infer_expr_type` used
+to answer nil for the builtin `Optional.unwrap()` method call. The local then
+had no env type, so `batch.facts` (a field chain) could not be typed and
+`promote<T>(batch.facts)` failed with E-MONO-032/033. Bug record:
+doc/08_tracking/bug/mono_generic_field_access_arg_unspecialized_2026-10-23.md
+
+Authored source-bound regression; not executed in the authoring lane.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+describe "mono field-access argument of an unwrap local":
+    it "specializes promote<T>(batch.facts) when batch = G.unwrap()":
+        # @req REQ-SSPEC-COMPILER
+        step("field of an unannotated unwrap() local infers T")
+        val src = "class Batch:\n    facts: [text]\n    names: [i64]\n\nvar _g: Batch? = nil\n\nfn promote<T>(value: T) -> bool:\n    true\n\nfn seal() -> bool:\n    val batch = _g.unwrap()\n    val a = promote(batch.facts)\n    val b = promote(batch.names)\n    a and b\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_unwrap_field.spl", "mono_unwrap_field", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_unwrap_field.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)

@@ -2483,7 +2483,12 @@ impl MirLowering:
                     # `x.unwrap()` / `x ?? d` on the binding sees an Option
                     # receiver instead of an untyped word.
                     self.remember_local_hir_type(decoded.id, HirType(kind: HirTypeKind.Optional(value_hir_type), span: base.span), 0, 0)
-                elif value_type_from_hir:
+                else:
+                    # bug=enum_payload_type_mismatch_dict_elem_untyped_2026-10-24:
+                    # the declared V is the read's type whichever source fixed
+                    # the MIR decode. Gating this on value_type_from_hir left
+                    # `self.impls[k]` (MIR Dict(K, V) already known) untyped,
+                    # so `xs[i]` on the binding had no element owner.
                     self.remember_local_hir_type(decoded.id, value_hir_type, 0, 0)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
@@ -5549,7 +5554,9 @@ impl MirLowering:
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
             if named_var_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
-                return self.lower_enum_construct_named("Option", "None", [])
+                val none_local = self.lower_enum_construct_named("Option", "None", [])
+                self.option_none_locals[none_local.id] = true
+                return none_local
             # A top-level function named as a VALUE (`var slot: fn() =
             # default_cleanup`, or the RHS of `slot = replacement_cleanup`).
             # Same `Const(Str(name), FuncPtr(..))` shape
@@ -6305,6 +6312,16 @@ impl MirLowering:
                     match exists_payload_type.kind:
                         case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case HirTypeKind.Str:
+                            # bug=enum_payload_type_mismatch_optional_text_2026-10-24:
+                            # the raw word is not a text value (the payload
+                            # needs rt_interp_cstr), so keep `text?` until the
+                            # present edge decodes it (decode_present_collection).
+                            # Without this the if-val binder had no type and
+                            # `E.V(binder)` into a `text` slot was rejected.
+                            self.exists_collection_locals[result_local.id] = true
+                            val optional_text = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
+                            self.remember_local_hir_type(result_local.id, optional_text, 0, 0)
                         case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                             # ExistsCheck still yields payload-or-nil. Keep an
                             # Optional type until the authored present edge;
@@ -7171,6 +7188,17 @@ impl MirLowering:
                     if match_subject_owner != "" and
                             self.enum_variant_discriminant(match_subject_owner, bname) >= 0 and
                             self.enum_variant_is_unit(match_subject_owner, bname):
+                        selected_owner = match_subject_owner
+                        selected_type = match_subject_type
+                    # match_unqualified_imported_enum_variant_default_arms_2026-10-24:
+                    # a bare Capitalized arm naming a PAYLOAD variant of the
+                    # subject's known enum (`case Clocked:` over a
+                    # VhdlProcessKind) is that variant's payload-ignoring test,
+                    # not a catch-all capture; as a Binding the second such arm
+                    # tripped the B5b multiple-default check.
+                    if selected_owner == "" and match_subject_owner != "" and bname != "" and
+                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(bname[0:1]) and
+                            self.enum_variant_discriminant(match_subject_owner, bname) >= 0:
                         selected_owner = match_subject_owner
                         selected_type = match_subject_type
                     if selected_owner == "" and bname != "":

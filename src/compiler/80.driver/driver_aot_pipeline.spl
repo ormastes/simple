@@ -35,6 +35,7 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
@@ -160,7 +161,7 @@ impl CompilerDriver:
                 return self.go_to_end_finish_v1(0, [])
             return CompileResult.CodegenError(msg)
         log_phase("aot:lower_to_mir:done")
-        # @workaround bug=mir_phase_rss_retention_2026_10_24 reason=flat HIR store (second copy of every module row) outlived the only readers, MIR lowering
+        # The flat HIR store is scoped to MIR lowering: its only readers are done here.
         bootstrap_hir_modules_reset()
         log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
             self.ctx.mir_modules.len(), "lower_to_mir", 4, 6, 0, 0, "running")
@@ -534,10 +535,6 @@ impl CompilerDriver:
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
 
-    me mir_shard_drop_cold_receipts_v1():
-        # workaround(mir-shard-cold-receipts): see native_mir_shard_eligible_v1.
-        self.ctx.cold_hir_typed_receipts = []
-
     fn native_mir_shard_eligible_v1() -> bool:
         """Shards publish per-module objects only; lanes whose final step needs
         more than object paths (cold-HIR object persistence, collection
@@ -547,16 +544,9 @@ impl CompilerDriver:
             driver_mir_selective_explicit_native_eligible_v1(self)
         else:
             self.native_staged_codegen_eligible_v1()
-        # workaround(mir-shard-cold-receipts): the bootstrap CLI always captures cold-HIR
-        # typed receipts (package-index markers are never published), which made every
-        # shard worker/link child refuse. Receipts only feed cold object persistence,
-        # which the shard worker/link child drops (see mir_shard_drop_cold_receipts_v1).
-        # Bug: doc/08_tracking/bug/mir_shard_worker_refuses_cold_receipts_2026-10-24.md
-        val shard_child = native_mir_shard_queue_v1() != "" or native_mir_shard_link_ledger_v1() != ""
-        val receipts_clear = shard_child or self.ctx.cold_hir_typed_receipts.len() == 0
         val no_budget = self.ctx.options.collection_memory_budget_bytes < 0
         val not_clean = (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
-        val eligible = lane_ok and receipts_clear and no_budget and not_clean
+        val eligible = lane_ok and no_budget and not_clean
         if not eligible:
             val lane_reason = if selective: "selective-explicit-native"
                 else: self.native_staged_codegen_eligible_reason_v1()
@@ -581,7 +571,9 @@ impl CompilerDriver:
             val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
             val _completed = hir_shard_recovery_complete(queue, owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
-        self.mir_shard_drop_cold_receipts_v1()
+        # Cold-HIR receipts stay: the worker records capsule identities for the
+        # modules it claims and publishes them in the ledger; only the link child
+        # persists (driver_cold_hir_persist is skipped while shard_queue is set).
         var shard_state = NativeStagedCodegenStateV1.begin(0)
         shard_state.active = true
         shard_state.shard_queue = queue
@@ -653,8 +645,9 @@ impl CompilerDriver:
                 val module_passed = (outcome_label == "OK" and has_object) or (outcome_label == "" and not has_object)
                 val functions = if module_functions.contains_key(name): module_functions[name] else: 0
                 val statics = if module_statics.contains_key(name): module_statics[name] else: 0
+                val capsule_identity = if self.ctx.cold_hir_native_capsule_identities.has(name): self.ctx.cold_hir_native_capsule_identities[name] else: ""
                 if module_passed and native_mir_shard_publish_pass_v1(queue, name, object_path,
-                        functions, statics):
+                        functions, statics, capsule_identity):
                     passed = passed + 1
         val sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
         val completed = hir_shard_recovery_complete(queue, owner)
@@ -696,7 +689,6 @@ impl CompilerDriver:
         and run the ordinary compile_to_native verdict + link over them."""
         if not self.native_mir_shard_eligible_v1():
             return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
-        self.mir_shard_drop_cold_receipts_v1()
         val admitted = if driver_mir_selective_enabled_v1():
             driver_mir_selective_admit_link_v1(self, native_mir_shard_link_ledger_v1())
         else:
@@ -716,6 +708,20 @@ impl CompilerDriver:
             outcome_unit = outcome_unit + 1
             link_state.module_outcomes.record(BuildUnitOutcome.ok(outcome_unit, object_module, 0, 0))
         link_state.module_unit_id = outcome_unit
+        # Replay the workers' verified objects into the cold-HIR receipt maps so the
+        # ordinary persistence step publishes the package index for sharded builds.
+        var replay_index = 0
+        for replay_module in inputs.object_modules:
+            val replay_reason = driver_cold_hir_record_verified_object_v1(
+                self.ctx, replay_module, inputs.object_files[replay_index],
+                inputs.capsule_identities[replay_index])
+            if replay_reason != "":
+                return CompileResult.CodegenError(replay_reason)
+            replay_index = replay_index + 1
+        for objectless_module in inputs.objectless_modules:
+            val objectless_reason = driver_cold_hir_record_objectless_v1(self.ctx, objectless_module)
+            if objectless_reason != "":
+                return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
         print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)

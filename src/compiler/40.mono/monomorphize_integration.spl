@@ -2132,13 +2132,16 @@ impl MonomorphizationPass:
                 if ctor != nil:
                     return ctor
                 self.callee_return_type(ce)
-            case HirExprKind.MethodCall(receiver, method, _, _):
+            case HirExprKind.MethodCall(receiver, method, margs, _):
                 # A method of a generic impl on a known instance returns its
                 # declared type under the receiver's arguments. Every other
-                # method (builtins, traits) stays unanswered.
+                # method (builtins, traits) stays unanswered, except the
+                # builtin `opt.unwrap()`, which yields the payload type.
                 val mrecv: HirExpr = receiver
                 val mname = self.generic_method_lookup(mrecv, method)
                 if mname == "":
+                    if method == "unwrap" and margs.len() == 0:
+                        return self.optional_payload_type(self.infer_expr_type(mrecv))
                     return nil
                 val mtemplate = self.template_signature_v1(mname)
                 val (mrt, _mmod) = self.receiver_instance_type(mrecv)
@@ -4670,9 +4673,13 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
 # the 3-tuple. Reset on every entry; single-threaded per lane.
 var mono_report_modules_owner: Dict<text, HirModule> = {}
 
-# @workaround bug=mir_phase_rss_retention_2026_10_24 reason=global kept a second reference to every post-mono HirModule after the driver took the dict
-fn mono_report_modules_owner_release():
+# The global is a one-shot transport, never a retained owner: the consumer takes
+# the dict and the global is cleared in the same step, so no second reference to
+# the post-mono modules outlives the driver's own.
+fn mono_report_modules_take() -> Dict<text, HirModule>:
+    val taken = mono_report_modules_owner
     mono_report_modules_owner = {}
+    taken
 
 fn run_monomorphization_with_report(modules: Dict<text, HirModule>) -> (MonoStats, [text], [text]):
     """As `run_monomorphization_with_diagnostics`, plus the diagnostics whose

@@ -11,7 +11,6 @@
 # - Region inference: Compute minimal regions for borrows
 # - Error reporting: Generate helpful borrow errors
 
-use std.io_runtime.{env_get_nullable}
 use compiler.borrow.borrow_check.lifetime.*
 use compiler.borrow.borrow_check.nll_short_calls.*
 use compiler.borrow.borrow_check.borrow_graph.*
@@ -257,6 +256,11 @@ struct NLLError:
     # # DESUGARED: help: text
     has_help: bool
     help: text
+    # Source location resolved by check_mir_module: `primary_span` is a
+    # function-relative MIR point, not a line. 0 = unresolved.
+    function_name: text = ""
+    source_line: i64 = 0
+    source_col: i64 = 0
 
 
 pub fn nllerror_format_related(err: NLLError) -> text:
@@ -346,33 +350,100 @@ fn nll_live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
     for alias in aliases:
         var keep = true
         match loan_alias_place(alias).base:
-            case PlaceBase.Local(local): keep = live.contains(local)
+            case PlaceBase.Local(local): keep = nll_sorted_contains(live, local)
             case _: ()
         if keep: kept = kept.push(alias)
     kept
 
-# workaround(borrow-work-budget): the loan solver budget is a fixed 1,000,000
-# because liveness/CFG sets use O(n^2) array `contains`; big modules exhaust it.
-# SIMPLE_BORROW_WORK_BUDGET overrides it (unset/malformed -> 1000000).
-# Real fix: Dict-based sets. See doc/08_tracking/bug/borrow_loan_work_budget_exhausted_2026-10-24.md
+# Loan liveness sets are sorted, duplicate-free [i64] arrays: membership is a
+# binary search and union/difference/equality are linear merges, so a point
+# transfer costs O(|uses| + |defs| + |live|) instead of O(|live|^2).
+# Free functions for the same argument-transport reason as nll_live_aliases.
+fn nll_sorted_contains(xs: [i64], value: i64) -> bool:
+    var lo = 0
+    var hi = xs.len()
+    while lo < hi:
+        val mid = (lo + hi) / 2
+        if xs[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo >= xs.len(): return false
+    xs[lo] == value
+
+fn nll_sorted_union(a: [i64], b: [i64]) -> [i64]:
+    if b.len() == 0: return a
+    if a.len() == 0: return b
+    var result: [i64] = []
+    var i = 0
+    var j = 0
+    while i < a.len() and j < b.len():
+        val x = a[i]
+        val y = b[j]
+        if x < y:
+            result = result.push(x)
+            i = i + 1
+        elif y < x:
+            result = result.push(y)
+            j = j + 1
+        else:
+            result = result.push(x)
+            i = i + 1
+            j = j + 1
+    while i < a.len():
+        result = result.push(a[i])
+        i = i + 1
+    while j < b.len():
+        result = result.push(b[j])
+        j = j + 1
+    result
+
+fn nll_sorted_minus(a: [i64], b: [i64]) -> [i64]:
+    if a.len() == 0 or b.len() == 0: return a
+    var result: [i64] = []
+    var i = 0
+    var j = 0
+    while i < a.len():
+        val x = a[i]
+        var scanning = true
+        while scanning:
+            if j >= b.len():
+                scanning = false
+            elif b[j] < x:
+                j = j + 1
+            else:
+                scanning = false
+        var absent = true
+        if j < b.len():
+            if b[j] == x: absent = false
+        if absent: result = result.push(x)
+        i = i + 1
+    result
+
+fn nll_sorted_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+# Unsorted, possibly duplicated locals -> sorted set (per-point use/def
+# lists hold a handful of locals, so insertion into a merge is cheap).
+fn nll_sorted_set(values: [i64]) -> [i64]:
+    var result: [i64] = []
+    for value in values:
+        if not nll_sorted_contains(result, value): result = nll_sorted_union(result, [value])
+    result
+
+# Fail-closed work budget for the loan solver, in real work units:
+# liveness charges 1 + |live-in| per block transfer of the worklist fixed
+# point; the loan CFG walk charges 1 + |aliases| per point transfer. Both
+# liveness pass is monotone over finite sets, so it only fires on a solver
+# defect or a pathological function, never on ordinary large functions.
+# See doc/08_tracking/bug/borrow_loan_work_budget_exhausted_2026-10-24.md
 fn nll_loan_work_budget() -> i64:
-    val raw = env_get_nullable("SIMPLE_BORROW_WORK_BUDGET") ?? ""
-    if raw == "" or raw.len() > 12:
-        return 1000000
-    val digits = "0123456789"
-    var value = 0
-    var index = 0
-    while index < raw.len():
-        val ch = raw.substring(index, index + 1)
-        var digit = -1
-        var probe = 0
-        while probe < 10:
-            if digits.substring(probe, probe + 1) == ch: digit = probe
-            probe = probe + 1
-        if digit < 0: return 1000000
-        value = value * 10 + digit
-        index = index + 1
-    if value <= 0: 1000000 else: value
+    1000000
 
 class NLLChecker:
     """Non-Lexical Lifetimes borrow checker.
@@ -723,9 +794,12 @@ class NLLChecker:
     me solve_loans(points: Dict<i64, [i64]>):
         # Backward point liveness over actual successors, with use-before-def
         # preserved when both occur at one instruction. Fail closed on budget.
+        # Sets are sorted [i64] (see nll_sorted_*). Each block is summarized
+        # once as live_in = gen U (live_out - kill); a postorder worklist then
+        # requeues a block's predecessors only when its live_in changed, and a
+        # single backward walk per block materializes the per-point sets.
         var before: Dict<i64, [i64]> = {}
         var after: Dict<i64, [i64]> = {}
-        var changed = true
         var work = 0
         val work_budget = nll_loan_work_budget()
         val reachable = self.cfg.reverse_postorder()
@@ -741,38 +815,73 @@ class NLLChecker:
                 if not mapped:
                     self.loan_failure(point, "loan event has no CFG point")
                     return
-        while changed:
-            changed = false
-            for block_id in reachable:
-                val block = self.cfg.blocks[block_id]
-                var live: [i64] = []
-                for successor in block.successors:
-                    val first = points[successor][0]
-                    val next: [i64] = before[first] ?? []
-                    for local in next:
-                        if not live.contains(local): live = live.push(local)
+        var point_uses: Dict<i64, [i64]> = {}
+        var point_defs: Dict<i64, [i64]> = {}
+        var block_gen: Dict<i64, [i64]> = {}
+        var block_kill: Dict<i64, [i64]> = {}
+        var predecessors: Dict<i64, [i64]> = {}
+        for block_id in reachable:
+            val block_points = points[block_id]
+            var gen_set: [i64] = []
+            var kill_set: [i64] = []
+            var index = block_points.len()
+            while index > 0:
+                index = index - 1
+                val point = block_points[index]
+                val uses = nll_sorted_set(self.point_uses[point] ?? [])
+                val defs = nll_sorted_set(self.point_defs[point] ?? [])
+                point_uses[point] = uses
+                point_defs[point] = defs
+                gen_set = nll_sorted_union(uses, nll_sorted_minus(gen_set, defs))
+                kill_set = nll_sorted_union(kill_set, defs)
+            block_gen[block_id] = gen_set
+            block_kill[block_id] = kill_set
+            for successor in self.cfg.blocks[block_id].successors:
+                var preds: [i64] = predecessors[successor] ?? []
+                predecessors[successor] = preds.push(block_id)
+        var live_in: Dict<i64, [i64]> = {}
+        var live_out: Dict<i64, [i64]> = {}
+        var queued: Dict<i64, bool> = {}
+        var queue: [i64] = []
+        var order = reachable.len()
+        while order > 0:
+            order = order - 1
+            queue = queue.push(reachable[order])
+            queued[reachable[order]] = true
+        var live_cursor = 0
+        while live_cursor < queue.len():
+            val block_id = queue[live_cursor]
+            live_cursor = live_cursor + 1
+            queued[block_id] = false
+            var live: [i64] = []
+            for successor in self.cfg.blocks[block_id].successors:
+                live = nll_sorted_union(live, live_in[successor] ?? [])
+            live_out[block_id] = live
+            val entry_live = nll_sorted_union(block_gen[block_id], nll_sorted_minus(live, block_kill[block_id]))
+            work = work + 1 + entry_live.len()
+            if work > work_budget:
                 val block_points = points[block_id]
-                var index = block_points.len()
-                while index > 0:
-                    index = index - 1
-                    val point = block_points[index]
-                    after[point] = live
-                    val uses: [i64] = self.point_uses[point] ?? []
-                    val defs: [i64] = self.point_defs[point] ?? []
-                    var previous: [i64] = []
-                    for local in uses: previous = previous.push(local)
-                    for local in live:
-                        if not defs.contains(local) and not previous.contains(local): previous = previous.push(local)
-                    val old: [i64] = before[point] ?? []
-                    if old.len() != previous.len(): changed = true
-                    for local in previous:
-                        if not old.contains(local): changed = true
-                    before[point] = previous
-                    live = previous
-                    work = work + 1 + live.len()
-                    if work > work_budget:
-                        self.loan_failure(point, "loan liveness work budget exhausted")
-                        return
+                self.loan_failure(block_points[block_points.len() - 1], "loan liveness work budget exhausted")
+                return
+            val old: [i64] = live_in[block_id] ?? []
+            if not nll_sorted_equal(old, entry_live):
+                live_in[block_id] = entry_live
+                for pred in predecessors[block_id] ?? []:
+                    if not (queued[pred] ?? false):
+                        queued[pred] = true
+                        queue = queue.push(pred)
+        for block_id in reachable:
+            var live: [i64] = live_out[block_id] ?? []
+            val block_points = points[block_id]
+            var index = block_points.len()
+            while index > 0:
+                index = index - 1
+                val point = block_points[index]
+                after[point] = live
+                live = nll_sorted_union(point_uses[point], nll_sorted_minus(live, point_defs[point]))
+                before[point] = live
+        # The loan CFG walk is charged against its own budget.
+        work = 0
         var incoming: Dict<i64, [LoanAlias]> = {}
         incoming[self.cfg.entry] = loan_alias_union([], self.initial_loans)
         var pending: [i64] = [self.cfg.entry]
