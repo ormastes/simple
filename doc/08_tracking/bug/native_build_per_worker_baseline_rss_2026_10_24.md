@@ -38,8 +38,8 @@ Per-phase at 472: parse 1.9, HIR loop 3.4, validate 1.0, enum contract 1.3, cold
 ## Culprits
 1. **Mono full root walk** — `40.mono/monomorphize_integration.spl:500-526` (`process_modules` step 2) rebuilds
    EVERY non-template function body (`roots_rewritten=4179/4179` at 204, `9187/9187` at 472) through
-   `rewrite_function` (:1043). The old bodies and the rebuild garbage are never freed. The existing,
-   spec-pinned root discovery (`SIMPLE_MONO_ROOT_DISCOVERY=1`, `mono_root_is_relevant_v1`) rewrites only
+   `rewrite_function` (:1043). The old bodies and the rebuild garbage are never freed. The existing (spec written, never executed),
+   root discovery (`SIMPLE_MONO_ROOT_DISCOVERY=1`, `mono_root_is_relevant_v1`) rewrites only
    2 / 53 roots. Measured with the CURRENT producer: plateau 3151 -> 2807 MB at 204 (-344 MB, -1.7 MB/module),
    10507 -> 8701 MB at 472 (-1.8 GB, -3.8 MB/module); mono roots_ms 12767 -> 2654. Go-to-end verdicts
    identical (same failing modules, same diagnostics); `.o` files are not byte-deterministic even A/A
