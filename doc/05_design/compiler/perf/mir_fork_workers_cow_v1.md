@@ -23,13 +23,30 @@ fork has to happen inside a worker that has reached mono.
    force `count=1, parallel=1`: spawn exactly ONE ordinary shard worker
    (`--mir-shard=0/1`, owner `0/1@0`), the *root*. K roots would each fork N
    children and each hold a full post-mono heap.
-2. **Fork point**: `aot_compile_mir_shard_v1`
-   (`src/compiler/80.driver/driver_aot_pipeline.spl`, right after the
-   `queue`/eligibility checks, before `NativeStagedCodegenStateV1.begin`).
-   Mono is complete (`driver_orchestration.spl` phase 4 -> phase 5 ->
-   `aot_compile`), nothing in this process is shard-specific yet: the shard
-   spec is first read inside `lower_to_mir` (`driver_pipeline_lowering.spl`
-   claim-cap/inventory block). Resident cohorts and selective MIR never fork.
+2. **Fork point** (moved 2026-10-24, see "Fork point history"): inside
+   `lower_to_mir_with_target_context`
+   (`src/compiler/80.driver/driver_pipeline_lowering.spl`, the
+   `native_mir_fork_at_claim_loop_v1()` call right before
+   `while direct_pos < mir_source_indices.len()`). Everything before it is
+   identical for every shard and now runs ONCE, in the root: warm logical
+   names (`driver_warm_mir_logical_names_v1`), the MIR feed, the MIR
+   lowerer construction, the bootstrap/enum/composite inventory prescans
+   (`register_module_enum_inventory_v1`,
+   `register_module_composite_inventory_v1`), the staged schedule, the
+   ledger inventory and exclusion publication (`hir_shard_recovery_inventory`,
+   `hir_shard_recovery_excluded`) and the LPT walk order. Children never
+   republish the inventory or rerun the setup. `aot_compile_mir_shard_v1`
+   only *arms* the fork (`native_mir_fork_arm_v1`, gated on
+   `SIMPLE_MIR_FORK_WORKERS`, no resident cohort, not selective); an unarmed
+   `lower_to_mir` (explicit targets, every other caller) never forks. The
+   claim cap computed before the fork comes from the root's `0/1` spec, so a
+   child recomputes it from its own `i/N` spec right after the fork. The
+   shard owner is read in `aot_compile_mir_shard_v1` only after
+   `lower_to_mir` returns, so the seal and `.done` are the child's. If the
+   fork point is never reached (an early return such as the bootstrap
+   shortcut, or a setup failure), the arm is cleared after lowering, a
+   `[mir-fork] fork point not reached` line is printed and the process stays
+   the ordinary `0/1` worker. Resident cohorts and selective MIR never fork.
 3. **Children** (`driver_build/native_mir_fork_v1.spl`): child i sets
    `SIMPLE_MIR_SHARD=i/N` and `SIMPLE_MIR_SHARD_OWNER=0/1@0+fork<i>/<N>`
    in-process, clears `SIMPLE_MIR_FORK_WORKERS` (no recursion), and continues
@@ -43,7 +60,8 @@ fork has to happen inside a worker that has reached mono.
    reaped child's unterminated claims are sealed under that child's owner
    (`CRASH` on signal death, else `FAILED`; legal because it is reaped).
 5. **Re-fork of a dead share** (`native_mir_fork_reforkable_v1`): a share is
-   re-forked from the root's untouched post-mono heap when its child stopped
+   re-forked from the root's untouched post-setup heap (the same claim-loop
+   point; the round loop lives inside `native_mir_fork_shards_v1`) when its child stopped
    *unfinished* (no `.done`: signal/OOM death, env-install failure, or a
    refused fork), at least one inventory row is still unclaimed (the
    `hir_shard_recovery_can_replace` rule: no relaunch when everything is
@@ -69,8 +87,11 @@ fork has to happen inside a worker that has reached mono.
    every `+fork` child's), so that root is an unfinished owner with
    progress and the existing replacement path applies (a new root
    generation `0/1@<g+1>` re-runs the front end and forks again). If no child
-   could be forked in round 0 the root claims nothing and exits 1 done,
-   which the coordinator treats as `fallback`.
+   could be forked in round 0 the root first withdraws the inventory it
+   published (`hir_shard_recovery_withdraw_inventory_v1`; no row is claimed
+   yet), then claims nothing and exits 1 done, which the coordinator treats
+   as `fallback`. Without the withdrawal the coordinator's inventory close
+   would seal every row BLOCKED and read `fail`.
 7. **Identity**: `SIMPLE_MIR_FORK_WORKERS` is excluded from the module object
    environment identity (it only chooses which process emits a module) and
    refused in admitted-epoch compiles, beside the other shard selectors.
@@ -98,7 +119,9 @@ and (b) shared pages it dirties. There is no refcounting or collector, so
 reads do not dirty pages. Writers to check first: `ctx.mir_modules` and
 other ctx dict growth, lazy canonical-ID / interning registries,
 `freeze_storage_registry_for_schedule`, any in-place HIR annotation during
-lowering, and mimalloc frees of pre-fork blocks. Expected private size per
+lowering, and mimalloc frees of pre-fork blocks. Superseded by "What a child
+still writes" below (the estimate there accounts for the moved fork point);
+the original estimate at the old fork point was: private size per
 child: roughly 2-5 GB at N=16, so 16 children total about 27 + 16 x (2-5) =
 60-110 GB, inside a 121 GB host. Measure with `Private_Dirty`/`Pss` from
 `/proc/<pid>/smaps_rollup`, not RSS, because RSS counts the shared pages in
@@ -143,6 +166,47 @@ every child. A cgroup charges a shared page once.
 - If the coordinator kills the root (deadline), children die by
   `PR_SET_PDEATHSIG` asynchronously and nothing seals their claims; the
   inventory close fails closed (`-1`), as before.
-- Every child still repeats the `lower_to_mir` setup before the per-module
-  loop (CPU only). A later fork point inside `lower_to_mir`, after the
-  shared setup, would also share that work.
+- The moved fork point has not run either. If the `lower_to_mir` setup ever
+  leaves a thread alive, `rt_fork_shared_heap_v1` returns -2, nothing forks
+  and the root declines (coordinator fallback); the checklist row above was
+  established for the old point and is only re-argued, not re-measured, for
+  the setup now in front of the fork.
+
+## Fork point history
+
+Run-19 (Phase 3, producer p2shard-13 from `5cf2df542b7`,
+`SIMPLE_MIR_FORK_WORKERS=20`) forked `20/20` at the old point (top of
+`aot_compile_mir_shard_v1`) and the 110 GB cgroup was OOM-killed before any
+child finished one module. At that point `lower_to_mir`'s setup had not run,
+so all 20 children each re-ran it: warm names, the feed, the lowerer, the
+enum/composite inventory prescans over every HIR module, the schedule and
+inventory publication. That setup writes into large structures (dict growth,
+registries, the lowerer's tables), and each write copies the touched pages
+privately in every child: an estimated ~5 GB of private memory per child before its
+first module (hypothesis; a run-20 watcher sampled 3.4-5.1 GB `Private_Dirty` per
+process, not yet attributed to the post-fork phase),
+x20 plus the root's ~30 GB, well past 110 GB. The fork now sits after that
+setup, so the setup's pages are written once in the root and only read
+(shared) by the children.
+
+## What a child still writes (CoW proportional to its own share)
+
+From the claim loop on, a child's writes into inherited structures are:
+`native_staged_codegen.shard_claimed_names` and the staged batch state,
+`direct_lowering.symbols` (reassigned per module), `direct_lowering.errors`
+/ `mir_advisories` / `devirtualized_calls`, whatever
+`lower_module_transient_scoped` adds to the lowerer's registries and
+interning tables for the modules it lowers, `ctx.mir_modules[name]` inserts
+(released again per staged batch by `evict_mir_module`), the codegen
+`module_outcomes` / `module_objects`, and `freeze_storage_registry_for_schedule`
+after the loop. Each touches pages roughly in proportion to the modules the
+child lowers (~1/N of the schedule), plus the hash-table pages a dict
+insert dirties.
+
+Expected private memory per child after the move (estimate, not measured):
+its own MIR, post-chain and LLVM working set for ~1/N of the schedule plus
+the proportional dirtying above, about 1-3 GB at N=10-20, instead of the
+~5 GB setup copy it carried before lowering anything. At N=20 that is about
+30 + 20 x (1-3) = 50-90 GB. Measure with `Private_Dirty` from
+`/proc/<pid>/smaps_rollup`; the first sample after the fork should now be
+near zero instead of ~5 GB.
