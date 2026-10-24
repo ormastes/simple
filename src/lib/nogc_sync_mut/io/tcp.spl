@@ -1,5 +1,4 @@
 use std.common.encoding.external_text.{utf8_format}
-use std.common.text_bytes.{text_byte_buffer}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_from_internal, io_external_bytes, io_internal_text, io_text_error_message, io_legacy_utf8}
 
 # Sync TCP I/O
@@ -34,9 +33,10 @@ use std.nogc_sync_mut.sosix.network.{
     sosix_tcp_write
 }
 fn tcp_packed_window(data: [u8], start: i64, end: i64) -> Result<[u8], IoError>:
-    var result = match text_byte_buffer(end - start):
-        case Ok(bytes): bytes
-        case Err(_): return Err(IoError(kind: IoErrorKind.Other, message: "TCP send window allocation failed", source: nil))
+    # Plain element array: the hosted interpreter marshals generic [u8]
+    # arrays across rt_io_tcp_write, while runtime-packed byte buffers
+    # (rt_byte_array_new carriers) are not admitted by that boundary.
+    var result: [u8] = []
     for index in start..end:
         val byte = data[index]
         val value = byte as i64
@@ -415,13 +415,16 @@ class TcpStream with Read, Write, Close:
         Ok(())
 
     pub fn write_text(s: text) -> Result<(), IoError>:
-        val external = match io_external_from_internal(s, utf8_format()):
-            case Ok(value): value
-            case Err(error): return Err(tcp_text_io_error(error))
-        val bytes = match io_external_bytes(external):
-            case Ok(value): value
-            case Err(error): return Err(tcp_text_io_error(error))
-        self.write_all(bytes)
+        # Text goes through the registered rt_io_tcp_write_text boundary; the
+        # hosted interpreter does not admit packed/runtime byte arrays through
+        # rt_io_tcp_write's byte marshalling.
+        if not self.open:
+            return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
+        val written = unsafe(capabilities: [ffi]):
+            sosix_tcp_write_text(self.fd, s)
+        if written < 0:
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text failed", source: nil))
+        Ok(())
 
     pub fn write_text_status(s: text) -> bool:
         match self.write_text(s):

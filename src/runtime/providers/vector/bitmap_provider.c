@@ -1,7 +1,13 @@
 /* Compile baseline-only: optional instructions live in separate kernel TU. */
 #include "bitmap_kernel_private.h"
 #include "provider_identity.h"
+/* getauxval lives behind this header and is only used by the __aarch64__ /
+ * __riscv branches below; PE/mingw targets have no sys/auxv.h. */
+#if defined(__has_include)
+#if __has_include(<sys/auxv.h>)
 #include <sys/auxv.h>
+#endif
+#endif
 #include <string.h>
 #include <stdatomic.h>
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
