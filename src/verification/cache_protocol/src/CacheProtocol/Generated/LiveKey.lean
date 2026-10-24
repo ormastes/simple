@@ -52,6 +52,7 @@ inductive Field where
   | entry_module_witness
   | producer_stdlib_src
   | ctfe_env_inputs
+  | scope_guard_context
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -92,6 +93,7 @@ def Field.name : Field → String
   | .entry_module_witness => "entry_module_witness"
   | .producer_stdlib_src => "producer_stdlib_src"
   | .ctfe_env_inputs => "ctfe_env_inputs"
+  | .scope_guard_context => "scope_guard_context"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -132,8 +134,9 @@ def Field.kind : Field → String
   | .entry_module_witness => "scalar"
   | .producer_stdlib_src => "scalar"
   | .ctfe_env_inputs => "set"
+  | .scope_guard_context => "scalar"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
@@ -142,7 +145,6 @@ theorem mem_allFields (f : Field) : f ∈ allFields := by
 inductive Gap where
   | cross_module_impl_set
   | inline_const_body
-  | guard_id
   | linker_binary_version
   | system_library_content
   | import_lib_export_sets
@@ -153,7 +155,7 @@ inductive Gap where
   | resolution_new_probe
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .guard_id, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
+def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .debug_info_path_prefix, .advice_body_weave_root, .hash_algorithm_tag, .reexport_chain_closure, .resolution_new_probe]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -359,6 +361,11 @@ theorem ctfe_env_inputs_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .ctfe_env_inputs ≠ k2 .ctfe_env_inputs) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .ctfe_env_inputs)
 
+-- pos 38 (scalar) bound to src/compiler/10.frontend/core/cfg_platform.spl#cfg_guard_context_identity_v1
+theorem scope_guard_context_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .scope_guard_context ≠ k2 .scope_guard_context) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .scope_guard_context)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
@@ -372,11 +379,6 @@ theorem cross_module_impl_set_gap_invisible :
 /-- Known gap: the live key does not see `inline_const_body`. -/
 theorem inline_const_body_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .inline_const_body ≠ j.gap .inline_const_body :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `guard_id`. -/
-theorem guard_id_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .guard_id ≠ j.gap .guard_id :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 /-- Known gap: the live key does not see `linker_binary_version`. -/

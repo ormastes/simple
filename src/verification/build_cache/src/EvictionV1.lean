@@ -12,12 +12,12 @@
   (read_after_evict_same_or_miss), a miss never fabricates content, pinned
   entries survive any admissible plan (pinned_survive), and a root-closed plan
   leaves no dangling reference (root_closed_no_dangling).
-  Stated gap, proved as a counterexample (plan_can_split_referrer): the planner
-  is per entry and does not consult GC roots / reference edges, so it can evict
-  a referent while keeping its referrer (e.g. an object kept / its TLDR evicted
-  by the LRU byte step). Semantics stay neutral only because every reader treats
-  a missing referent as a miss and rebuilds — that reader obligation is the
-  assumption, not a theorem about the planner.
+  plan_can_split_referrer (proved): a per-entry plan that ignores reference
+  edges can keep a referrer and evict its referent. The landed planner was
+  made reference-aware by 8f2c6dd7f1e ("never evict an entry a kept entry
+  references"), i.e. it now aims at RootClosed, the premise of
+  root_closed_no_dangling; the bounded twin checks pins and byte accounting
+  but not yet reference closure.
   No sorry, no axioms.
 -/
 namespace EvictionV1
