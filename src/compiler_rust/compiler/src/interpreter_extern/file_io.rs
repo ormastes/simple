@@ -1918,6 +1918,50 @@ pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_mmap_create(path, size) -> addr`: create/truncate `path` to exactly
+/// `size` bytes and map it read-write, via the linked runtime twin
+/// (`simple_runtime::value::rt_mmap_create`). 0 on any failure.
+pub fn rt_mmap_create(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let size = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::UInt { value, .. }) => *value as i64,
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_mmap_create() expects (path: text, size: i64), got size arg {:?}",
+                other
+            )))
+        }
+    };
+    let path_rv = simple_runtime::value::rt_string_new(path.as_ptr(), path.len() as u64);
+    let addr = simple_runtime::value::rt_mmap_create(path_rv.to_raw() as i64, size);
+    Ok(Value::Int(addr))
+}
+
+fn mapping_extent(args: &[Value], symbol: &str) -> Result<(i64, i64), CompileError> {
+    let int_at = |idx: usize| match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        other => Err(CompileError::semantic(format!(
+            "{symbol}() expects (addr: i64, size: i64), got {:?}",
+            other
+        ))),
+    };
+    Ok((int_at(0)?, int_at(1)?))
+}
+
+/// `rt_munmap(addr, size) -> bool`: release a view from `rt_mmap` / `rt_mmap_create`.
+pub fn rt_munmap(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_munmap")?;
+    Ok(Value::Bool(simple_runtime::value::rt_munmap(addr, size)))
+}
+
+/// `rt_msync(addr, size) -> bool`: flush a writable view to its file.
+pub fn rt_msync(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, size) = mapping_extent(args, "rt_msync")?;
+    Ok(Value::Bool(simple_runtime::value::rt_msync(addr, size)))
+}
+
 /// Move file (works across filesystems)
 pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;

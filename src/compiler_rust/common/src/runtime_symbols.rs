@@ -1184,6 +1184,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_extract_smf_dynlib",
     "rt_file_move",
     "rt_mmap",
+    "rt_mmap_create",
     "rt_munmap",
     "rt_madvise",
     "rt_msync",

@@ -143,6 +143,7 @@ const RT_KEEP: &[&str] = &[
     "rt_file_write_text_at_cached_repeat",
     "rt_file_write_bytes_at",
     "rt_mmap",
+    "rt_mmap_create",
     "rt_mmap_raw",
     "rt_munmap",
     "rt_munmap_raw",
