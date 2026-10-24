@@ -1,0 +1,93 @@
+# Shared, set-once TLDR table with lazy cross-module handles.
+#
+# A TLDR acts like a forward declaration / include: publishing or reading one
+# TLDR never reads the TLDRs it mentions (no transitive cascade). A reference
+# into another module is a TldrHandleV1 -- an uninitialised async pointer
+# (module content key + declaration name, with in-memory short ids from the
+# global id scope). Dereferencing a handle whose module is not loaded returns
+# a pending Future and queues ONE fill request for that module; the scheduler
+# drains the queue (take_fill_requests), produces the TLDR through the reader
+# chain (CacheReader -> daemon single-flight -> FileReader) and publishes it
+# here. From then on every importer's deref resolves to the same stored text.
+#
+# Set-once: an entry, once published, is immutable. Republishing identical
+# text is accepted (racing producers of one source write the same bytes);
+# different text for the same content key is refused. One table instance per
+# build (and one per daemon); entries are never copied per importer.
+#
+# Lock-free: the table is owned by one scheduler/daemon loop; there is no
+# shared mutation across threads.
+use std.async.future.{Future}
+use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+
+struct TldrHandleV1:
+    module_key: text
+    decl: text
+    module_id: text
+    decl_id: text
+
+class TldrTableV1:
+    entries: Dict<text, text>
+    requested: Dict<text, bool>
+    fill_queue: [text]
+    ids: IdScopeV1
+
+    static fn create() -> TldrTableV1:
+        TldrTableV1(entries: {}, requested: {}, fill_queue: [], ids: id_scope_global_v1())
+
+    # Uninitialised pointer to `decl` in the module with `module_key`.
+    me handle(module_key: text, decl: text) -> TldrHandleV1:
+        TldrHandleV1(module_key: module_key, decl: decl,
+            module_id: self.ids.id_of_key(module_key),
+            decl_id: self.ids.id_of(module_key + "#" + decl))
+
+    fn is_loaded(module_key: text) -> bool:
+        self.entries.contains_key(module_key)
+
+    # Set-once publication. True when stored or identical to what is stored.
+    me publish(module_key: text, tldr: text) -> bool:
+        if module_key == "" or tldr == "":
+            return false
+        if self.entries.contains_key(module_key):
+            return self.entries[module_key] == tldr
+        self.entries[module_key] = tldr
+        if self.requested.contains_key(module_key):
+            self.requested.remove(module_key)
+        true
+
+    # Dereference: the module's TLDR text, or pending plus one queued fill.
+    me deref(h: TldrHandleV1) -> Future<text?>:
+        if self.entries.contains_key(h.module_key):
+            return Future.from_value(Some(self.entries[h.module_key]))
+        if not self.requested.contains_key(h.module_key):
+            self.requested[h.module_key] = true
+            self.fill_queue.push(h.module_key)
+        Future.pending()
+
+    # Modules whose fill was requested since the last call, each once.
+    me take_fill_requests() -> [text]:
+        val out = self.fill_queue
+        self.fill_queue = []
+        out
+
+    fn loaded_count() -> i64:
+        self.entries.len()
+
+# Fill one requested module through the SourceReader contract (the reader
+# chain decides cache vs. file vs. in-process parse). "" on success.
+pub fn tldr_table_fill_v1<R: SourceReader>(table: TldrTableV1, reader: R,
+        module_key: text, source_path: text) -> text:
+    var tldr = reader.read_tldr(source_path)
+    if tldr == "":
+        val error = reader.update_tldr(source_path)
+        if error != "":
+            return error
+        tldr = reader.read_tldr(source_path)
+    if tldr == "":
+        return "tldr unavailable: {source_path}"
+    if not table.publish(module_key, tldr):
+        return "tldr conflicts with the published entry: {module_key}"
+    ""
+
+export TldrHandleV1, TldrTableV1, tldr_table_fill_v1
