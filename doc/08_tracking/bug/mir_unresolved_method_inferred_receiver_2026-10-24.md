@@ -51,3 +51,16 @@ Not verified: no compile was run (memory budget reserved for run-11). Sites with
 | plugins/backend_cuda/cuda_type_mapper.spl:282 | `fields.len()` where `ty.kind` match binder; file imports only `MirType`, not `MirTypeKind`/`MirFieldDef` | NOT fixed |
 | plugins/backend_llvm_lib/llvm_lib_translate_expr.spl:652/653 | `args.len()` on `val args: [MirOperand] = raw_args` (declared!) | NOT fixed: real MIR gap (array-typed local from i64 handle) |
 | 70.backend/linker/link.spl, mold `parse_i` | unwrap with no line; parse_i64 site typed | link.spl unwrap not located |
+
+## Run-12 batch (type_infer / driver / hwir)
+| site | cause | action |
+|---|---|---|
+| 30.types/type_infer/inference_expr.spl SetLit | REAL bug: `HirTypeKind.Named("Set", ..)` passes text for `symbol: SymbolId` | new `set_type_symbol()` (looks up "Set" in `symbol_names`, else SymbolId(-1)); fix |
+| inference_expr.spl, inference_effects.spl, inference_expr_ops.spl:140 | unwrap on pattern-bound optionals / `x.field.unwrap()` / index result | typed `T?` locals (workaround; exact failing line not in log, all candidates covered) |
+| 80.driver/driver_aot_native_output.spl, driver_pipeline_lowering.spl | `go_to_end_finish_v1` / `native_staged_codegen_flush_v1` live in the `CompilerDriver` impl of driver_aot_pipeline.spl, which these modules did not import (siblings use `use compiler.driver.driver_aot_pipeline.*`) | added the glob import (fix; may add import cycle pipeline_lowering -> aot_pipeline -> driver_pipeline -> pipeline_lowering, unverified) |
+| driver_aot_native_output.spl unwraps | body/bytes/persisted/phase2 manifest/decoded_key.key | typed locals (workaround) |
+| 20.hir/archive/interface_action_archive.spl:328 | `Result[(), E]` bracket generic on `.result` -> is_err unresolved at driver_source_pipeline_loading:625 | `Result<(), E>` (fix, unverified) |
+| 10.frontend/frontend_shared_parse_cas_v1.spl:161 | get_or still unresolved on typed Dict local | contains_key + index (workaround) |
+| 50.mir/hwir/mir_to_hwir.spl | chained `strict_mir_*().unwrap().field` | typed `MirLocal?`/`LocalId?`/`HwirStrictLowerResult?` locals (workaround) |
+| 50.mir/_MirLoweringExpr/expr_dispatch.spl:5134 | `.len()` on `_sffi_tuple_get<[HirIfArm]>` result | `[HirIfArm]?` local + `?? []` (workaround) |
+Unverified: no compile run.

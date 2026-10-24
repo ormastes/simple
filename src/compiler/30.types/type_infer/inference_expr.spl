@@ -168,8 +168,10 @@ impl HmInferContext:
                                     val negated = negate_facts(narrowing_facts)
                                     self._add_immutable_facts(negated)
 
-                                    val else_result = self.infer_block(else_.unwrap())
-                                    val else_terminates = definitely_terminates(else_.unwrap())
+                                    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                                    val else_opt: HirBlock? = else_
+                                    val else_result = self.infer_block(else_opt.unwrap())
+                                    val else_terminates = definitely_terminates(else_opt.unwrap())
                                     self.narrowing.pop_scope()
 
                                     # Early return promotion
@@ -227,7 +229,9 @@ impl HmInferContext:
                         false_facts = false_facts.push(fact)
                     arm_idx = arm_idx + 1
                 if else_.?:
-                    val else_block = else_.unwrap()
+                    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                    val else_opt: HirBlock? = else_
+                    val else_block = else_opt.unwrap()
                     self.narrowing.push_scope()
                     self._add_immutable_facts(false_facts)
                     val else_result = self.infer_block(else_block)
@@ -256,8 +260,10 @@ impl HmInferContext:
                             match self.infer_pattern(typed_arm.pattern, scrut_ty):
                                 case Err(e): return Err(e)
                                 case _: pass
-                            if typed_arm.guard.?:
-                                match self.infer_expr(typed_arm.guard.unwrap(), InferMode.Synthesize):
+                            # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                            val guard_opt: HirExpr? = typed_arm.guard
+                            if guard_opt.?:
+                                match self.infer_expr(guard_opt.unwrap(), InferMode.Synthesize):
                                     case Ok(guard_ty):
                                         val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
                                         match self.unify(guard_ty, bool_ty):
@@ -401,6 +407,15 @@ impl HmInferContext:
                     "<type #{sym.id}>"
             case _: "{ty.kind}"
 
+    fn set_type_symbol() -> SymbolId:
+        # HirTypeKind.Named carries a SymbolId, not a name. Resolve the declared
+        # "Set" type symbol by name; -1 (the HIR "unresolved" sentinel) otherwise.
+        var found = SymbolId(id: -1)
+        for (raw_id, name) in self.symbol_names:
+            if name == "Set":
+                found = SymbolId(id: raw_id)
+        found
+
     fn nil_compare_kind_word(ty: HirType) -> text:
         match ty.kind:
             case Named(sym, _):
@@ -525,8 +540,10 @@ impl HmInferContext:
         match expr.kind:
             # Literals
             case IntLit(_, suffix):
-                val bits = if suffix.?:
-                    match suffix.unwrap():
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                val suffix_opt: text? = suffix
+                val bits = if suffix_opt.?:
+                    match suffix_opt.unwrap():
                         case "i8": 8
                         case "i16": 16
                         case "i32": 32
@@ -537,22 +554,26 @@ impl HmInferContext:
                         case _: 64
                 else: 64
                 var signed = true
-                if suffix.?:
-                    if suffix.unwrap().starts_with("u"):
+                if suffix_opt.?:
+                    if suffix_opt.unwrap().starts_with("u"):
                         signed = false
                 Ok(HirType(kind: HirTypeKind.Int(bits, signed), span: span))
 
             case FloatLit(_, suffix):
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                val suffix_opt: text? = suffix
                 var bits = 64
-                if suffix.?:
-                    if suffix.unwrap() == "f32":
+                if suffix_opt.?:
+                    if suffix_opt.unwrap() == "f32":
                         bits = 32
                 Ok(HirType(kind: HirTypeKind.Float(bits), span: span))
 
             case FloatLexeme(_, suffix):
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                val suffix_opt: text? = suffix
                 var bits = 64
-                if suffix.?:
-                    if suffix.unwrap() == "f32":
+                if suffix_opt.?:
+                    if suffix_opt.unwrap() == "f32":
                         bits = 32
                 Ok(HirType(kind: HirTypeKind.Float(bits), span: span))
 
@@ -656,7 +677,7 @@ impl HmInferContext:
                 if elements.is_empty():
                     # Empty set: create fresh type variable for element type
                     val elem_ty = self.fresh_var(span)
-                    Ok(HirType(kind: HirTypeKind.Named("Set", [elem_ty]), span: span))
+                    Ok(HirType(kind: HirTypeKind.Named(self.set_type_symbol(), [elem_ty]), span: span))
                 else:
                     # Non-empty: infer from first element, check rest match
                     match self.synthesize_expr(elements[0]):
@@ -668,7 +689,7 @@ impl HmInferContext:
                                     case Err(e): return Err(e)
                                 i = i + 1
                             Ok(HirType(
-                                kind: HirTypeKind.Named("Set", [self.resolve(elem_ty)]),
+                                kind: HirTypeKind.Named(self.set_type_symbol(), [self.resolve(elem_ty)]),
                                 span: span
                             ))
                         case Err(e): Err(e)
@@ -809,10 +830,12 @@ impl HmInferContext:
                                     val negated = negate_facts(narrowing_facts)
                                     self._add_immutable_facts(negated)
 
-                                    val else_result = self.infer_block(else_.unwrap())
+                                    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                                    val else_opt: HirBlock? = else_
+                                    val else_result = self.infer_block(else_opt.unwrap())
 
                                     # Check if else-branch definitely terminates
-                                    val else_terminates = definitely_terminates(else_.unwrap())
+                                    val else_terminates = definitely_terminates(else_opt.unwrap())
 
                                     self.narrowing.pop_scope()
 
@@ -884,7 +907,9 @@ impl HmInferContext:
                         false_facts = false_facts.push(fact)
                     arm_idx = arm_idx + 1
                 if else_.?:
-                    val else_block = else_.unwrap()
+                    # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                    val else_opt: HirBlock? = else_
+                    val else_block = else_opt.unwrap()
                     self.narrowing.push_scope()
                     self._add_immutable_facts(false_facts)
                     val else_result = self.infer_block(else_block)
@@ -950,8 +975,10 @@ impl HmInferContext:
                             match self.infer_pattern(arm.pattern, scrut_ty):
                                 case Err(e): return Err(e)
                                 case _: pass
-                            if arm.guard.?:
-                                match self.synthesize_expr(arm.guard.unwrap()):
+                            # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                            val guard_opt: HirExpr? = arm.guard
+                            if guard_opt.?:
+                                match self.synthesize_expr(guard_opt.unwrap()):
                                     case Ok(guard_ty):
                                         val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
                                         match self.unify(guard_ty, bool_ty):
@@ -969,12 +996,15 @@ impl HmInferContext:
 
             # Range expressions
             case Range(start, end, _, _):
-                if start.?:
-                    match self.synthesize_expr(start.unwrap()):
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                val start_opt: HirExpr? = start
+                val end_opt: HirExpr? = end
+                if start_opt.?:
+                    match self.synthesize_expr(start_opt.unwrap()):
                         case Err(e): return Err(e)
                         case _: pass
-                if end.?:
-                    match self.synthesize_expr(end.unwrap()):
+                if end_opt.?:
+                    match self.synthesize_expr(end_opt.unwrap()):
                         case Err(e): return Err(e)
                         case _: pass
                 val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
