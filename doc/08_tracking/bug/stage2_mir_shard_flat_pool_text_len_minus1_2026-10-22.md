@@ -1066,7 +1066,6 @@ crash address follows allocation state, not a fixed bad access). HIR
 progress is monotonic regardless (1877+/2934 after 4 crashes) because the
 hir-cache stores each completed module before the next crash.
 
-
 ## Restoration 2026-10-24 (lane D): rebase-dropped evidence restored
 
 The release-branch rebase onto release-phase3 dropped three lane-D addenda
@@ -1136,3 +1135,15 @@ parallel agent's uncommitted restructure, and the stage3 authority guard
 clean tree incl. submodules (gitlink-dirty abort). All lane-D lanes therefore
 run in isolated clean worktrees off the pushed work branches; the shared
 checkout is left untouched for the parallel agent.
+## Lane B convergence update 2026-10-24 (afternoon): crash-after-store rhythm
+
+Eleven SIGBUS restarts in, the lane's behavior stabilized into a productive
+rhythm: each coordinator life completes one giant module and stores it to the
+hir-cache BEFORE crashing -- so completed giants never re-process.
+engine2d.backend, engine2d.framebuffer, and engine2d.virtio_gpu all completed
+this way; HIR reached 2377+/2934 (81%) with monotonic progress. The SIGBUS
+still fires at ~6-7 GB RSS shortly after each giant's store, consistent with
+the accumulating-corruption model: the fault follows total allocation volume,
+not a specific module. Net: the wrapper-restart + hir-cache design converts
+the admitted candidate's heap-corruption crashes from blocking to
+slowdown-only. Cure remains the owner lane's runtime reclaim work.
