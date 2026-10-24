@@ -30,6 +30,87 @@ pub fn shard_mem_available_kb() -> i64:
         case Ok(bytes): bytes / 1024
         case Err(_): 0
 @else:
+@when(os="macos"):
+# Darwin has no /proc/meminfo and no MemAvailable analogue. `vm_stat` reports
+# page counts (suffixed with '.') and the page size only inside its header
+# line. Headroom is free + inactive pages: inactive is the reclaimable cache
+# pool (file-backed pages purgeable under pressure), while active/wired/
+# speculative/compressed are not real headroom. Same subprocess mechanism as
+# the Linux probe below (see the NOTE there): `process_run_timeout`, never
+# `file_read`, which fatally recursed in the run20-class seed.
+pub fn shard_mem_available_kb() -> i64:
+    val (out, _err, code) = process_run_timeout("vm_stat", [], 2000)
+    if code != 0:
+        return 0
+    shard_macos_available_kb_from_vm_stat(out)
+
+# Page count on one "Pages <kind>: <n>." vm_stat line; -1 when the prefix
+# does not match or the count is not plain digits (a garbage count makes the
+# whole probe "unknown", same as a missing line -- never a silent 0-pages).
+fn shard_macos_page_count_from_line(line: text, prefix: text) -> i64:
+    if not line.starts_with(prefix):
+        return -1
+    var field = line.substring(prefix.len()).trim()
+    if field.ends_with("."):
+        field = field.substring(0, field.len() - 1)
+    if field == "":
+        return -1
+    var i = 0
+    while i < field.len():
+        val b = field.byte_at(i)
+        if b < 48 or b > 57:
+            return -1
+        i = i + 1
+    shard_mem_available_kb_from_field(field)
+
+# Pure vm_stat parser, split out so the unit spec can pin it without a host
+# probe: free + inactive pages times the header page size, in kB. 0 when the
+# page size or either count is missing/unparseable -- unknown memory permits
+# only the sequential path, same contract as the Linux probe.
+pub fn shard_macos_available_kb_from_vm_stat(output: text) -> i64:
+    var page_size: i64 = 0
+    var free_pages: i64 = 0
+    var inactive_pages: i64 = 0
+    var saw_free = false
+    var saw_inactive = false
+    for raw_line in output.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.contains("page size of"):
+            # "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+            val start = line.index_of("page size of") + "page size of".len()
+            val rest = line.substring(start).trim()
+            var digits = ""
+            var i = 0
+            while i < rest.len():
+                val b = rest.byte_at(i)
+                if b >= 48 and b <= 57:
+                    digits = digits + rest.substring(i, i + 1)
+                else:
+                    break
+                i = i + 1
+            page_size = shard_mem_available_kb_from_field(digits)
+            continue
+        val free_count = shard_macos_page_count_from_line(line, "Pages free:")
+        if free_count >= 0:
+            free_pages = free_count
+            saw_free = true
+            continue
+        val inactive_count = shard_macos_page_count_from_line(line, "Pages inactive:")
+        if inactive_count >= 0:
+            inactive_pages = inactive_count
+            saw_inactive = true
+    if page_size <= 0 or not saw_free or not saw_inactive:
+        return 0
+    val pages = free_pages + inactive_pages
+    if pages <= 0:
+        return 0
+    # bytes = pages * page_size, kB = bytes / 1024; guard i64 overflow first.
+    if pages > 9223372036854775807 / page_size:
+        return 0
+    (pages * page_size) / 1024
+@else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
 # permits only the existing sequential path, never CPU-count fanout.
 # NOTE: deliberately NOT std.io_runtime.file_read. In the run20-class seed
@@ -45,6 +126,7 @@ pub fn shard_mem_available_kb() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+@end
 @end
 
 # Split out so a spec can feed a fixture without a /proc dependency.

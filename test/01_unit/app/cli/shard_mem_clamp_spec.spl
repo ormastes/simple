@@ -2,6 +2,7 @@ use std.spec
 use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb, shard_cgroup_v2_path_from_proc, shard_cgroup_memory_max_paths, shard_cgroup_memory_max_kb_from_fields, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for, shard_threads_mem_cap}
 use app.io.env_ops.{env_get, env_set}
 use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
+use app.cli.shard_mem_clamp.{shard_macos_available_kb_from_vm_stat}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
 # Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
@@ -18,9 +19,32 @@ use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
 # doc/09_report/build_parallelism_memory_audit_2026-08-23.md
 describe "shard memory clamp":
 
-    it "reads real host memory headroom on Windows and Linux":
+    it "reads real host memory headroom on Windows, Linux and macOS":
         val kb = shard_mem_available_kb()
         expect(kb > 0).to_be_true()
+
+    it "parses macOS vm_stat output into free plus inactive kB":
+        # Real 24 GB Apple-silicon shape: 16 KiB pages, trailing-dot counts.
+        val sample = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+            + "Pages free:                        515653.\n"
+            + "Pages active:                     1420421.\n"
+            + "Pages inactive:                    376841.\n"
+            + "Pages speculative:                  91087.\n"
+            + "Pages wired down:                  350120.\n"
+        # (515653 + 376841) pages * 16384 B / 1024 = pages * 16 = 14279904 kB
+        expect(shard_macos_available_kb_from_vm_stat(sample)).to_equal(14279904)
+        # 4 KiB pages (Intel mac) parse the same way.
+        val intel = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+            + "Pages free:                       1000000.\n"
+            + "Pages inactive:                    500000.\n"
+        expect(shard_macos_available_kb_from_vm_stat(intel)).to_equal(6000000)
+
+    it "returns unknown for malformed macOS vm_stat output":
+        expect(shard_macos_available_kb_from_vm_stat("")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("Pages free: 100.\nPages inactive: 100.\n")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("Mach Virtual Memory Statistics: (page size of bytes)\nPages free: 100.\nPages inactive: 100.\n")).to_equal(0)
+        expect(shard_macos_available_kb_from_vm_stat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: junk.\nPages inactive: 100.\n")).to_equal(0)
 
     it "returns unknown for missing junk negative or overflowing memory fields":
         expect(shard_mem_available_kb_from_field("")).to_equal(0)

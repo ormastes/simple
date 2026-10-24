@@ -83,3 +83,20 @@ first/largest driver modules) still needs a profile.
 The fixed RSS is the post-mono resident set while `driver_warm_mir_logical_names_v1`
 walks 0..next_symbol_id (2^50 after mono). See
 `mir_warm_names_dense_symbol_walk_hang_2026_10_24.md`.
+
+## Addendum 2026-10-24 (session 3): macOS shard fanout probe fixed
+
+Addendum (session 2) item 2's macOS degeneration is closed at the root:
+`shard_mem_available_kb` in `src/app/cli/shard_mem_clamp.spl` had no Darwin
+branch (its only non-Windows probe reads /proc/meminfo), so every macOS run
+reported "unknown memory" and the clamp forced the sequential path regardless
+of --threads. It now parses `vm_stat` (page size from the header line, free +
+inactive pages as the reclaimable-headroom analogue) via the same
+`process_run_timeout` mechanism as the Linux probe. Unknown/unparseable output
+still falls back to sequential. With `--threads N` the MIR shard fanout is now
+memory-clamped N on macOS instead of degenerating to 1; per-worker sizing is
+still the operator knob (`SIMPLE_MIR_SHARD_WORKER_KB`, default 16 GB, against
+60% of measured headroom — on a 24 GB loaded host a ~4-6 GB worker budget is
+the realistic range; see `native_build_shard_threads` in
+`src/app/cli/native_build_main.spl`). Pure parser pinned by
+`test/01_unit/app/cli/shard_mem_clamp_spec.spl`.
