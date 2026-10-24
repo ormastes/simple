@@ -119,8 +119,33 @@ pub fn cache_daemon_handle_request_v1(host: CacheDaemonHost, request: text,
         if not cache_queue_digest_admitted_v1(cache_queue_field_v1(request, "digest")):
             return _error_v1("digest-algo-unadmitted")
     if op == "join":
-        val (role, flight) = host.join_artifact(cache_queue_field_v1(request, "kind"),
-            cache_queue_field_v1(request, "digest"), cache_queue_field_v1(request, "id"), now_ms)
+        val kind = cache_queue_field_v1(request, "kind")
+        val digest = cache_queue_field_v1(request, "digest")
+        val request_id = cache_queue_field_v1(request, "id")
+        val branch = cache_queue_field_v1(request, "branch")
+        var role: i64 = -1
+        var flight: i64 = 0
+        if branch != "":
+            # Admit-before-plan: a join that names its budget row (branch,
+            # source, estimated bytes) is admitted against every cache budget
+            # before the leader is scheduled; a rejection schedules no work.
+            val candidate = CacheEntryUseV1(branch: branch,
+                source: cache_queue_field_v1(request, "source"), version_key: digest,
+                disk_bytes: cache_queue_field_v1(request, "bytes").to_i64() ?? 0,
+                memory_bytes: cache_queue_field_v1(request, "memory_bytes").to_i64() ?? 0,
+                last_used_ms: now_ms, references: _references_v1(request))
+            val (r, f, admission) = host.join_artifact_admitted(kind, digest, request_id, now_ms,
+                candidate, cache_queue_field_v1(request, "path"), cache_retention_limits_load_v1())
+            for path in admission.evicted_paths:
+                _evict_file_v1(path)
+            if r < 0 and not admission.admitted:
+                return _error_v1("over-budget")
+            role = r
+            flight = f
+        else:
+            val (r, f) = host.join_artifact(kind, digest, request_id, now_ms)
+            role = r
+            flight = f
         if role < 0:
             return _error_v1("not-admitted")
         if role == 0:
