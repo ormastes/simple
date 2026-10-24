@@ -464,6 +464,14 @@ fn compile_c_runtime_sources() {
         c_sources.push("vendor/liburing/src/setup.c");
         c_sources.push("vendor/liburing/src/syscall.c");
     }
+    // Windows: the same C layer contributes the IOCP provider (OVERLAPPED
+    // ReadFile/WriteFile + GetQueuedCompletionStatusEx), so reads issued by
+    // scheduler fibers really overlap with compute. Rust stays the rt_driver_*
+    // owner; the software driver remains the explicit "reference" provider.
+    if target_os == "windows" {
+        c_sources.push("platform/async_driver.c");
+        c_sources.push("platform/async_windows.c");
+    }
 
     let mut build = cc::Build::new();
     build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
@@ -474,6 +482,11 @@ fn compile_c_runtime_sources() {
         build.define("SPL_HAS_IO_URING", None);
         build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
         build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
+    if target_os == "windows" {
+        build.include(runtime_c_dir.join("platform"));
+        // Rust owns the rt_driver_* flat ABI; C contributes only the vtable.
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
     }
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     // See the runtime_audio.c comment above: this crate doesn't compile
@@ -628,6 +641,9 @@ fn compile_c_runtime_sources() {
         // hosted_win32.c real mode: CreateWindowExW + CreateDIBSection + BitBlt.
         println!("cargo:rustc-link-lib=dylib=user32");
         println!("cargo:rustc-link-lib=dylib=gdi32");
+        // platform/async_windows.c: AcceptEx/ConnectEx/WSARecv (IOCP provider).
+        println!("cargo:rustc-link-lib=dylib=ws2_32");
+        println!("cargo:rustc-link-lib=dylib=mswsock");
     }
     // openpty / forkpty live in libutil on Linux and most BSDs.
     // On macOS they are part of libc itself; on Windows the functions don't exist.
