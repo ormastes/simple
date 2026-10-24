@@ -39,7 +39,9 @@ use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
 use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_v1}
-use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1,
+    MacroModuleProjectionV1, MacroDefKeyEntryV1}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.sif.sif.{sif_of_source, sif_validate}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
@@ -49,7 +51,8 @@ use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of
     module_public_macro_facts_v1, module_generic_template_decls_of_module_v1}
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
     MacroUseTableV1, macro_definition_table_encode_v1, macro_use_table_encode_v1,
-    macro_reference_schema_v1}
+    macro_reference_schema_v1, MacroUseV1, macro_definition_table_decode_v1,
+    macro_use_status_tag_v1}
 use compiler.frontend.cache_artifact.generic_tldr_projector.{project_generic_template_v1}
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     build_generic_template_section_v1, generic_template_section_encode_v1}
@@ -223,6 +226,98 @@ pub fn module_tldr_companion_view_sections_with_macros_v1(module: ParserModule,
         sections.push(entry)
     (sections, refusal)
 
+
+# `macro-key` section: one line per definition, `<def id>\t<name>\t<MacroDefKey>\t<0|1 uncacheable>`.
+# The def table alone cannot rebuild a MacroDefKey (it folds in the transitive
+# nested-read root), so importers read the producer's keys from here.
+pub fn module_tldr_macro_key_section_v1(p: MacroModuleProjectionV1) -> text:
+    if p.def_keys.len() == 0:
+        return ""
+    var lines: [text] = []
+    for k in p.def_keys:
+        val flag = if p.uncacheable_def_ids.contains(k.def_id): "1" else: "0"
+        lines.push(k.def_id + "\t" + k.macro_name + "\t" + k.key + "\t" + flag)
+    "macro-key|" + lines.join("\n")
+
+# Rebuild an importable projection (definitions + keys only) from a fresh
+# companion's sections. ok=false when a macro section is present but does not
+# decode -- the caller must then treat the import as unknown.
+fn _imported_macro_projection_v1(sections: [text], source_path: text) -> (bool, MacroModuleProjectionV1):
+    val module_id = module_artifact_module_id_v1(source_path)
+    var table = MacroDefinitionTableV1(schema: macro_reference_schema_v1(), module_id: module_id, entries: [])
+    var keys: [MacroDefKeyEntryV1] = []
+    var uncacheable: [text] = []
+    var ok = true
+    for s in sections:
+        if s.starts_with("macro-def|"):
+            val decoded = macro_definition_table_decode_v1(s.substring(10))
+            if decoded.ok: table = decoded.value
+            else: ok = false
+        if s.starts_with("macro-key|"):
+            for line in s.substring(10).split("\n"):
+                val f = line.split("\t")
+                if f.len() != 4:
+                    ok = false
+                    continue
+                keys.push(MacroDefKeyEntryV1(def_id: f[0], macro_name: f[1], key: f[2]))
+                if f[3] == "1": uncacheable.push(f[0])
+    if table.entries.len() != keys.len(): ok = false
+    (ok, MacroModuleProjectionV1(package: "", module: module_id, source_id: source_path,
+        def_table: table, def_keys: keys,
+        use_table: MacroUseTableV1(schema: macro_reference_schema_v1(), module_id: module_id, uses: []),
+        generated_public_names: [], generated_public_surface_digest: "",
+        diagnostics: [], uncacheable_def_ids: uncacheable))
+
+# Macro definitions visible from the imported modules, read from their FRESH
+# TLDR companions (never by reparsing them). complete=false when any import's
+# companion is missing, stale or undecodable: its macros are then unknown.
+pub fn module_tldr_imported_macro_projections_v1(import_source_paths: [text],
+        tldr_root: text) -> ([MacroModuleProjectionV1], bool):
+    var out: [MacroModuleProjectionV1] = []
+    var complete = true
+    for path in import_source_paths:
+        if not file_exists(path):
+            complete = false
+            continue
+        val companion = module_tldr_companion_path_v1(tldr_root, path)
+        if not file_exists(companion):
+            complete = false
+            continue
+        val content = file_read(companion)
+        val src = file_read(path)
+        if module_tldr_companion_body_v1(content, src) == "":
+            complete = false
+            continue
+        val (ok, p) = _imported_macro_projection_v1(module_tldr_companion_sections_v1(content, src), path)
+        if not ok:
+            complete = false
+            continue
+        if p.def_keys.len() > 0: out.push(p)
+    (out, complete)
+
+# With an incomplete import set, a negative lookup is not proof of absence:
+# every unresolved use becomes conservative (never cacheable).
+pub fn macro_projection_mark_imports_incomplete_v1(p: MacroModuleProjectionV1) -> MacroModuleProjectionV1:
+    var uses: [MacroUseV1] = []
+    for u in p.use_table.uses:
+        var v = u
+        if macro_use_status_tag_v1(v.status) == "unresolved": v.coverage = "conservative"
+        uses.push(v)
+    MacroModuleProjectionV1(package: p.package, module: p.module, source_id: p.source_id,
+        def_table: p.def_table, def_keys: p.def_keys,
+        use_table: MacroUseTableV1(schema: p.use_table.schema, module_id: p.use_table.module_id, uses: uses),
+        generated_public_names: p.generated_public_names,
+        generated_public_surface_digest: p.generated_public_surface_digest,
+        diagnostics: p.diagnostics, uncacheable_def_ids: p.uncacheable_def_ids)
+
+# Source paths of this module's imports that resolve to a file.
+fn _module_import_source_paths_v1(parsed: ParserModule, source_path: text) -> [text]:
+    var out: [text] = []
+    for imp in parsed.imports:
+        val path = resolve_module_path(imp.module, source_path)
+        if path != "" and not out.contains(path): out.push(path)
+    out
+
 # Temp file in the destination directory, then rename over the destination.
 pub fn module_artifact_publish_atomic_v1(path: text, content: text) -> bool:
     val slash = path.rfind("/")
@@ -253,14 +348,23 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     # ordinary frontend cache boundary.
     val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
     # Macro facts are read from the parser pools of THIS parse before anything
-    # else parses. Cross-module macro resolution needs the package index, which
-    # is not available at this single-module entry: an imported macro resolves
-    # as unresolved with an absence witness here, never as a false hit.
-    val macro_projection = project_macro_module_v1(
-        macro_module_source_from_parse_v1("", module_id, source_path), [])
-    val (sections, _refusal) = module_tldr_companion_view_sections_with_macros_v1(parsed,
+    # else parses. Imported macros resolve against the imports' fresh TLDR
+    # companions (macro-def + macro-key sections); if any import companion is
+    # missing or stale, unresolved uses are kept conservative (never a false
+    # negative cache hit).
+    val macro_source = macro_module_source_from_parse_v1("", module_id, source_path)
+    val (imported_macros, imports_complete) = module_tldr_imported_macro_projections_v1(
+        _module_import_source_paths_v1(parsed, source_path), tldr_root)
+    var macro_projection = project_macro_module_v1(macro_source, imported_macros)
+    if not imports_complete:
+        macro_projection = macro_projection_mark_imports_incomplete_v1(macro_projection)
+    val (view_sections, _refusal) = module_tldr_companion_view_sections_with_macros_v1(parsed,
         source_path, source, module_id, macro_projection.def_table, macro_projection.use_table,
         macro_projection.generated_public_names)
+    var sections = view_sections
+    val macro_key_section = module_tldr_macro_key_section_v1(macro_projection)
+    if macro_key_section != "":
+        sections.push(macro_key_section)
     if not module_artifact_publish_atomic_v1(tldr_path,
             module_tldr_companion_render_sections_v1(module_id, source, sections)):
         return "tldr publish failed: {tldr_path}"
@@ -274,3 +378,5 @@ export module_tldr_companion_fresh_v1, module_artifact_publish_atomic_v1
 export module_tldr_companion_view_sections_v1
 export module_tldr_macro_sections_v1, module_tldr_companion_view_sections_with_macros_v1
 export module_artifacts_emit_v1
+export module_tldr_macro_key_section_v1, module_tldr_imported_macro_projections_v1
+export macro_projection_mark_imports_incomplete_v1
