@@ -138,6 +138,12 @@ if [ "$platform" = linux-riscv64 ]; then
       --compiler "$host_dir/simple" --phase "$next" --sanity
   else
     # First rung: newest proven linux-x86_64 compiler (RC), else the seed.
+    for resume_platform in "$platform" linux-x86_64; do
+      if [ -e "$in_dir/.resume-evidence/$resume_platform.incomplete.sdn" ]; then
+        echo "phase-ladder: $resume_platform discovery incomplete; refusing automatic cold compiler selection" >&2
+        exit 1
+      fi
+    done
     sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --compiler auto --sanity
   fi
   next=$(cat build/cross/linux-riscv64/PHASE)
@@ -159,6 +165,10 @@ fi
 next_threads=$threads
 [ "$have" -gt 0 ] && next_threads=$selfhost_threads
 if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$next_threads"; then
+  if [ -e "$in_dir/.resume-evidence/$platform.incomplete.sdn" ]; then
+    echo "phase-ladder: $platform parent attempt failed after incomplete discovery; refusing cold seed fallback" >&2
+    exit 1
+  fi
   # Nothing to climb from: phase 1 comes from the Rust seed (as release.yml).
   [ "$have" -eq 0 ] || { echo "phase-ladder: phase $((have + 1)) build failed" >&2; exit 1; }
   # An earlier rung's failed seed is not a qualified input. Do not cold-repeat
