@@ -1107,3 +1107,16 @@ Attempted the live catch this session; established:
   @rip-24 disassembly shows the pool-array read that produced it; the handle's
   value (a tagged pointer) identifies the pool array element address for a
   hardware watchpoint (`ba w8 <addr>`) on the next run.
+
+## Addendum 2026-10-24 (lane D, live-catch mechanics): parent/worker share the exe - attach to the second process
+
+Live attempts refined the procedure: the delegated worker is the SAME
+simple.exe.rejected binary as the parent (SIMPLE_FRONTEND_DELEGATE=$CAND), so
+a path filter catches the parent first. The worker is distinguishable only as
+the SECOND/newest matching process in the first ~2 s (worker lifetime, bash
+polling marginally too slow - use a tight 0.2 s poll and require >= 2 matches
+before attaching to the newest). cdb attach pauses the worker; set
+`sxe -c ".echo HIT; r; u @rip-16 L8; q" av` BEFORE g so the AV capture fires.
+The worker PID was successfully caught (28432) - the remaining gap is purely
+attach-latency vs the ~2 s worker lifetime; an interactive session or a
+pre-positioned debugger (IFEO on the specific rejected path) closes it.
