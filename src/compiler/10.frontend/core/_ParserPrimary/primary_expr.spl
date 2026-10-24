@@ -44,6 +44,7 @@ use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
+use compiler.core.ast.{macro_fact_use_push}
 # D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
 # every element is a bare identifier, which needs the arena tag directly.
 use compiler.core.ast_expr.{EXPR_IDENT, expr_tag}
@@ -553,7 +554,15 @@ fn parse_primary_expr() -> i64:
         val id_end = lex_token_end_get()
         val id_line = par_line_get()
         val id_col = par_col_get()
+        # `name!(args)` macro invocation: record the fact (raw args source) and
+        # drop the `!` so the ordinary postfix call parser takes `(args)`.
+        val id_is_macro_call = lex_source_char_at(id_end) == "!" and
+            id_end + 1 < lex_source_len() and lex_source_char_at(id_end + 1) == "("
+        val id_macro_args = if id_is_macro_call: _macro_call_args_source(id_end + 1) else: ""
         parser_advance()
+        if id_is_macro_call and par_kind_get() == 57:
+            macro_fact_use_push(id_name, id_macro_args, id_line, id_col)
+            parser_advance()
         if custom_block_adjacent:
             if par_kind_get() != TOK_LBRACE:
                 parser_error("expected { after custom block kind")
@@ -1198,3 +1207,28 @@ fn parse_primary_expr() -> i64:
 # ===== Asm Match/Assert Parsing =====
 
 export parse_primary_expr
+
+# Raw source between the parens of a `name!(...)` call, starting at the `(`
+# offset. String literals are skipped so a `)` inside one does not close.
+fn _macro_call_args_source(open_pos: i64) -> text:
+    val n = lex_source_len()
+    var depth = 0
+    var pos = open_pos
+    var quote = ""
+    while pos < n:
+        val ch = lex_source_char_at(pos)
+        if quote != "":
+            if ch == "\\":
+                pos = pos + 2
+                continue
+            if ch == quote: quote = ""
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(" or ch == "[" or ch == "{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return lex_source_slice(open_pos + 1, pos)
+        pos = pos + 1
+    ""

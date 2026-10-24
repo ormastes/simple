@@ -38,6 +38,8 @@ use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.sif.sif.{sif_of_source, sif_validate}
 use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_of_source_v1,
@@ -250,8 +252,15 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     # The one parse: fills the full-AST caches as a side effect of the
     # ordinary frontend cache boundary.
     val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
-    val (sections, _refusal) = module_tldr_companion_view_sections_v1(parsed, source_path,
-        source, module_id)
+    # Macro facts are read from the parser pools of THIS parse before anything
+    # else parses. Cross-module macro resolution needs the package index, which
+    # is not available at this single-module entry: an imported macro resolves
+    # as unresolved with an absence witness here, never as a false hit.
+    val macro_projection = project_macro_module_v1(
+        macro_module_source_from_parse_v1("", module_id, source_path), [])
+    val (sections, _refusal) = module_tldr_companion_view_sections_with_macros_v1(parsed,
+        source_path, source, module_id, macro_projection.def_table, macro_projection.use_table,
+        macro_projection.generated_public_names)
     if not module_artifact_publish_atomic_v1(tldr_path,
             module_tldr_companion_render_sections_v1(module_id, source, sections)):
         return "tldr publish failed: {tldr_path}"
