@@ -56,6 +56,12 @@ use compiler.common.cache_contract.hash_algorithm_registry_v1.{hash_algorithm_by
     HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_64_V1}
 use compiler.common.cache_contract.hash_algorithm_compute_v1.{hash_algorithm_name_v1,
     hash_algorithm_computable_v1, hash_algorithm_digest_v1}
+use std.nogc_async_mut.sosix.packed_blob_view.{PackedBlobView, packed_blob_map, packed_blob_unmap,
+    packed_blob_view_ok, packed_blob_u8, packed_blob_u16, packed_blob_u32, packed_blob_u64}
+use std.nogc_sync_mut.io_runtime.{file_exists}
+
+extern fn rt_string_new(bytes: i64, len: i64) -> text
+extern fn rt_is_interpreter_runtime() -> bool
 
 pub val SPAB_MAGIC_V1: text = "SPLARTF1"
 pub val SPAB_FORMAT_VERSION_V1: i64 = 1
@@ -597,6 +603,49 @@ pub fn flat_packed_encode_v1(lines_blob: text, trace: [i64], digests: [SpabDiges
         return []
     out
 
+# ---- byte source: mmap view (native) or an in-memory copy ----------------------
+#
+# The reader runs over either a mapping (std.nogc_async_mut.sosix.packed_blob_view,
+# #4436: map once, bounds-checked loads, nothing copied but requested strings)
+# or a byte array (seed interpreter, which has no mmap, and freshly encoded
+# blobs). Every load is bounds-checked by the validator before use.
+
+pub struct SpabSourceV1:
+    mapped: bool
+    view: PackedBlobView
+    bytes: [u8]
+    size: i64
+
+fn _bytes_src(bytes: [u8]) -> SpabSourceV1:
+    SpabSourceV1(mapped: false, view: PackedBlobView(addr: 0, size: 0, format_version: 0, flags: 0,
+        section_count: 0, section_table_offset: 0, error: "unmapped"),
+        bytes: bytes, size: bytes.len())
+
+fn _le(src: SpabSourceV1, at: i64, width: i64) -> i64:
+    if not src.mapped:
+        return _get_le(src.bytes, at, width)
+    if width == 1: return packed_blob_u8(src.view, at)
+    if width == 2: return packed_blob_u16(src.view, at)
+    if width == 4: return packed_blob_u32(src.view, at)
+    packed_blob_u64(src.view, at)
+
+fn _sl(src: SpabSourceV1, at: i64, len: i64) -> [u8]:
+    if not src.mapped:
+        return _slice(src.bytes, at, len)
+    var part: [u8] = []
+    var i = 0
+    while i < len:
+        part.push(packed_blob_u8(src.view, at + i) as u8)
+        i = i + 1
+    part
+
+fn _txt(src: SpabSourceV1, at: i64, len: i64) -> text:
+    if len <= 0:
+        return ""
+    if src.mapped:
+        return rt_string_new(src.view.addr + at, len)
+    bytes_to_text(_slice(src.bytes, at, len))
+
 # ---- reader -------------------------------------------------------------------
 
 pub struct SpabSectionV1:
@@ -609,7 +658,7 @@ pub struct SpabViewV1:
     """Validated index view; `reason` names why an invalid blob is a miss."""
     valid: bool
     reason: text
-    bytes: [u8]
+    src: SpabSourceV1
     flags: i64
     module_key_hex: text
     sections: [SpabSectionV1]
@@ -625,9 +674,9 @@ pub struct SpabViewV1:
     me string_at(index: i64) -> text:
         val offs = self.section(SPAB_SECTION_STRING_OFFSETS)
         val data = self.section(SPAB_SECTION_STRING_BYTES)
-        val start = _get_le(self.bytes, offs.offset + index * 4, 4)
-        val end = _get_le(self.bytes, offs.offset + index * 4 + 4, 4)
-        bytes_to_text(_slice(self.bytes, data.offset + start, end - start))
+        val start = _le(self.src, offs.offset + index * 4, 4)
+        val end = _le(self.src, offs.offset + index * 4 + 4, 4)
+        _txt(self.src, data.offset + start, end - start)
 
     me digest(subject: i64, algo: i64) -> text:
         for d in self.digests:
@@ -635,27 +684,27 @@ pub struct SpabViewV1:
                 return d.hex
         ""
 
-fn _miss(bytes: [u8], reason: text) -> SpabViewV1:
-    SpabViewV1(valid: false, reason: reason, bytes: bytes, flags: 0, module_key_hex: "",
+fn _miss(src: SpabSourceV1, reason: text) -> SpabViewV1:
+    SpabViewV1(valid: false, reason: reason, src: src, flags: 0, module_key_hex: "",
         sections: [], digests: [], string_count: 0)
 
-fn _read_digests(bytes: [u8], s: SpabSectionV1) -> [SpabDigestV1]?:
+fn _read_digests(src: SpabSourceV1, s: SpabSectionV1) -> [SpabDigestV1]?:
     var out: [SpabDigestV1] = []
     var at = s.offset
     val end = s.offset + s.length
     while at < end:
         if at + 16 > end:
             return nil
-        val subject = _get_le(bytes, at, 2)
-        val algo = _get_le(bytes, at + 2, 2)
-        val len = _get_le(bytes, at + 4, 2)
+        val subject = _le(src, at, 2)
+        val algo = _le(src, at + 2, 2)
+        val len = _le(src, at + 4, 2)
         if at + 16 + len > end:
             return nil
         # Unknown algorithm or a wrong length: that digest is absent, never a match.
         if val a = hash_algorithm_by_id_v1(algo):
             if a.output_bytes == len:
                 out.push(SpabDigestV1(subject: subject, algo: algo,
-                    hex: _bytes_hex(_slice(bytes, at + 16, len))))
+                    hex: _bytes_hex(_sl(src, at + 16, len))))
         at = at + 16 + len
         while (at - s.offset) % 8 != 0:
             at = at + 1
@@ -667,7 +716,7 @@ fn _known_section(id: i64) -> bool:
         (id >= SPAB_SECTION_I64_CHILDREN and id <= SPAB_SECTION_PAIR_CHILDREN)
 
 fn _index_bounds_reason(view: SpabViewV1) -> text:
-    val b = view.bytes
+    val b = view.src
     val n = view.string_count
     val strc = view.section(SPAB_SECTION_STR_CHILDREN)
     val i64c = view.section(SPAB_SECTION_I64_CHILDREN)
@@ -678,129 +727,151 @@ fn _index_bounds_reason(view: SpabViewV1) -> text:
         if kind == KIND_STR and (_is_pool_section(s.id) or s.id == SPAB_SECTION_STR_CHILDREN):
             var j = 0
             while j < s.length / 4:
-                if _get_le(b, s.offset + j * 4, 4) >= n:
+                if _le(b, s.offset + j * 4, 4) >= n:
                     return "section {s.id} string index out of range"
                 j = j + 1
         if kind == KIND_PAIR and _is_pool_section(s.id):
             val target = if shape == 4: i64c.length / 8 elif shape == 5: strc.length / 4 else: pairc.length / 8
             var j = 0
             while j < s.length / 8:
-                if _get_le(b, s.offset + j * 8, 4) + _get_le(b, s.offset + j * 8 + 4, 4) > target:
+                if _le(b, s.offset + j * 8, 4) + _le(b, s.offset + j * 8 + 4, 4) > target:
                     return "section {s.id} child range out of bounds"
                 j = j + 1
     var j = 0
     while j < pairc.length / 8:
-        if _get_le(b, pairc.offset + j * 8, 4) + _get_le(b, pairc.offset + j * 8 + 4, 4) > strc.length / 4:
+        if _le(b, pairc.offset + j * 8, 4) + _le(b, pairc.offset + j * 8 + 4, 4) > strc.length / 4:
             return "pair children out of bounds"
         j = j + 1
     ""
 
-pub fn flat_packed_view_v1(bytes: [u8]) -> SpabViewV1:
+pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
     """Validate (§4); every doubt is a miss with a reason, never a crash."""
-    if bytes.len() < SPAB_HEADER_BYTES:
-        return _miss(bytes, "truncated header")
-    if bytes_to_text(_slice(bytes, 0, 8)) != SPAB_MAGIC_V1:
-        return _miss(bytes, "bad magic")
-    if _get_le(bytes, 10, 2) > SPAB_FORMAT_VERSION_V1:
-        return _miss(bytes, "reader too old")
-    if _get_le(bytes, 12, 2) != SPAB_HEADER_BYTES or _get_le(bytes, 14, 2) != SPAB_ENTRY_BYTES:
-        return _miss(bytes, "header geometry")
-    if _get_le(bytes, 32, 8) != bytes.len():
-        return _miss(bytes, "blob length mismatch")
-    val count = _get_le(bytes, 20, 4)
-    val table = _get_le(bytes, 24, 8)
-    if table != SPAB_HEADER_BYTES or count < 1 or table + count * SPAB_ENTRY_BYTES > bytes.len():
-        return _miss(bytes, "section table out of bounds")
+    if src.size < SPAB_HEADER_BYTES:
+        return _miss(src, "truncated header")
+    if _txt(src, 0, 8) != SPAB_MAGIC_V1:
+        return _miss(src, "bad magic")
+    if _le(src, 10, 2) > SPAB_FORMAT_VERSION_V1:
+        return _miss(src, "reader too old")
+    if _le(src, 12, 2) != SPAB_HEADER_BYTES or _le(src, 14, 2) != SPAB_ENTRY_BYTES:
+        return _miss(src, "header geometry")
+    if _le(src, 32, 8) != src.size:
+        return _miss(src, "blob length mismatch")
+    val count = _le(src, 20, 4)
+    val table = _le(src, 24, 8)
+    if table != SPAB_HEADER_BYTES or count < 1 or table + count * SPAB_ENTRY_BYTES > src.size:
+        return _miss(src, "section table out of bounds")
     var sections: [SpabSectionV1] = []
     var last_id = -1
     var last_end = table + count * SPAB_ENTRY_BYTES
     var k = 0
     while k < count:
         val e = table + k * SPAB_ENTRY_BYTES
-        val id = _get_le(bytes, e, 4)
-        val encoding = _get_le(bytes, e + 4, 2)
-        val algo = _get_le(bytes, e + 6, 2)
-        val at = _get_le(bytes, e + 8, 8)
-        val len = _get_le(bytes, e + 16, 8)
+        val id = _le(src, e, 4)
+        val encoding = _le(src, e + 4, 2)
+        val algo = _le(src, e + 6, 2)
+        val at = _le(src, e + 8, 8)
+        val len = _le(src, e + 16, 8)
         if id <= last_id:
-            return _miss(bytes, "sections not sorted by id")
-        if at % SPAB_ALIGN != 0 or at < last_end or len < 0 or at + len > bytes.len():
-            return _miss(bytes, "section {id} misaligned, overlapping or out of bounds")
+            return _miss(src, "sections not sorted by id")
+        if at % SPAB_ALIGN != 0 or at < last_end or len < 0 or at + len > src.size:
+            return _miss(src, "section {id} misaligned, overlapping or out of bounds")
         val width = _kind_width(encoding % 256)
         if width > 0 and len % width != 0:
-            return _miss(bytes, "section {id} length not a multiple of its element width")
+            return _miss(src, "section {id} length not a multiple of its element width")
         val required = encoding >= SPAB_ENCODING_REQUIRED
         if not _known_section(id) and required:
-            return _miss(bytes, "unknown required section {id}")
+            return _miss(src, "unknown required section {id}")
         if not hash_algorithm_computable_v1(algo):
-            return _miss(bytes, "section {id} checksum algorithm unavailable")
-        val sum = hash_algorithm_digest_v1(algo, _slice(bytes, at, len))
+            return _miss(src, "section {id} checksum algorithm unavailable")
+        val sum = hash_algorithm_digest_v1(algo, _sl(src, at, len))
         var i = 0
         while i < 8 and i < sum.len():
-            if bytes[e + 24 + i] != sum[i]:
-                return _miss(bytes, "section {id} checksum mismatch")
+            if _le(src, e + 24 + i, 1) != (sum[i] as i64):
+                return _miss(src, "section {id} checksum mismatch")
             i = i + 1
         sections.push(SpabSectionV1(id: id, encoding: encoding, offset: at, length: len))
         last_id = id
         last_end = at + len
         k = k + 1
-    var view = SpabViewV1(valid: false, reason: "", bytes: bytes, flags: _get_le(bytes, 16, 4),
-        module_key_hex: _bytes_hex(_slice(bytes, 40, 16)), sections: sections, digests: [],
+    var view = SpabViewV1(valid: false, reason: "", src: src, flags: _le(src, 16, 4),
+        module_key_hex: _bytes_hex(_sl(src, 40, 16)), sections: sections, digests: [],
         string_count: 0)
     val dig = view.section(SPAB_SECTION_DIGESTS)
     if dig.length < 0:
-        return _miss(bytes, "missing digest table")
-    if val rows = _read_digests(bytes, dig):
+        return _miss(src, "missing digest table")
+    if val rows = _read_digests(src, dig):
         view.digests = rows
     else:
-        return _miss(bytes, "malformed digest table")
+        return _miss(src, "malformed digest table")
     # Body digest over [end of the 0x0000 section, blob end): every present
     # computable entry must verify; at least one must.
     val body_start = dig.offset + dig.length
-    val body = _slice(bytes, body_start, bytes.len() - body_start)
+    val body = _sl(src, body_start, src.size - body_start)
     var body_checked = 0
     for d in view.digests:
         if d.subject == SPAB_SUBJECT_BODY and hash_algorithm_computable_v1(d.algo):
             if _bytes_hex(hash_algorithm_digest_v1(d.algo, body)) != d.hex:
-                return _miss(bytes, "body digest mismatch ({hash_algorithm_name_v1(d.algo)})")
+                return _miss(src, "body digest mismatch ({hash_algorithm_name_v1(d.algo)})")
             body_checked = body_checked + 1
     if body_checked == 0:
-        return _miss(bytes, "no-common-digest-algorithm for body")
+        return _miss(src, "no-common-digest-algorithm for body")
     for subject in [SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER]:
         var known = 0
         for d in view.digests:
             if d.subject == subject:
                 known = known + 1
         if known == 0:
-            return _miss(bytes, "no known digest for subject {subject}")
+            return _miss(src, "no known digest for subject {subject}")
     val offs = view.section(SPAB_SECTION_STRING_OFFSETS)
     val data = view.section(SPAB_SECTION_STRING_BYTES)
     if offs.length < 4 or data.length < 0:
-        return _miss(bytes, "missing string pool")
+        return _miss(src, "missing string pool")
     val n = offs.length / 4 - 1
     var prev = 0
     var i = 0
     while i <= n:
-        val o = _get_le(bytes, offs.offset + i * 4, 4)
+        val o = _le(src, offs.offset + i * 4, 4)
         if o < prev or o > data.length:
-            return _miss(bytes, "string offsets not monotonic")
+            return _miss(src, "string offsets not monotonic")
         prev = o
         i = i + 1
     if prev != data.length:
-        return _miss(bytes, "string pool length mismatch")
+        return _miss(src, "string pool length mismatch")
     view.string_count = n
     val bounds = _index_bounds_reason(view)
     if bounds != "":
-        return _miss(bytes, bounds)
+        return _miss(src, bounds)
     view.valid = true
     view
+
+pub fn flat_packed_view_v1(bytes: [u8]) -> SpabViewV1:
+    """Validated view over an in-memory blob."""
+    flat_packed_view_src_v1(_bytes_src(bytes))
+
+pub fn flat_packed_open_v1(path: text) -> SpabViewV1:
+    """Map `path` (native) or read it (no mmap), then validate; a miss carries a reason."""
+    if not file_exists(path):
+        return _miss(_bytes_src([]), "absent")
+    # The interpreter runtime has no host mapping; it reads the bytes instead.
+    if not rt_is_interpreter_runtime():
+        val mapped = packed_blob_map(path)
+        if packed_blob_view_ok(mapped):
+            return flat_packed_view_src_v1(SpabSourceV1(mapped: true, view: mapped, bytes: [], size: mapped.size))
+    flat_packed_view_v1(file_read_bytes(path))
+
+pub fn flat_packed_close_v1(view: SpabViewV1) -> bool:
+    if view.src.mapped:
+        return packed_blob_unmap(view.src.view)
+    true
 
 # Hit admission: the blob must be valid AND carry a matching digest for every
 # expectation in at least one shared algorithm; any present known digest of an
 # expected (subject, algo) that differs is a miss (never "pick the one that matches").
 pub fn flat_packed_admit_v1(bytes: [u8], expected: [SpabDigestV1]) -> text:
     """"" when admitted, else the miss reason."""
-    val view = flat_packed_view_v1(bytes)
+    flat_packed_admit_view_v1(flat_packed_view_v1(bytes), expected)
+
+pub fn flat_packed_admit_view_v1(view: SpabViewV1, expected: [SpabDigestV1]) -> text:
     if not view.valid:
         return view.reason
     for subject in [SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER]:
@@ -833,20 +904,20 @@ class _Render:
         self.int(cnt)
         var q = 0
         while q < cnt:
-            self.str(_get_le(self.view.bytes, sec.offset + (off + q) * 4, 4))
+            self.str(_le(self.view.src, sec.offset + (off + q) * 4, 4))
             q = q + 1
 
     me pool(s: SpabSectionV1):
-        val b = self.view.bytes
+        val b = self.view.src
         val shape = (s.encoding / 256) % 128
         if shape == 7:
-            self.int(_get_le(b, s.offset, 8))
+            self.int(_le(b, s.offset, 8))
             return
         if shape == 8:
-            self.int(_get_le(b, s.offset, 1))
+            self.int(_le(b, s.offset, 1))
             return
         if shape == 9:
-            self.str(_get_le(b, s.offset, 4))
+            self.str(_le(b, s.offset, 4))
             return
         val width = _kind_width(s.encoding % 256)
         val n = s.length / width
@@ -855,31 +926,31 @@ class _Render:
         while i < n:
             val at = s.offset + i * width
             if shape == 1:
-                self.int(_get_le(b, at, 8))
+                self.int(_le(b, at, 8))
             elif shape == 2:
-                self.int(_get_le(b, at, 1))
+                self.int(_le(b, at, 1))
             elif shape == 3:
-                self.str(_get_le(b, at, 4))
+                self.str(_le(b, at, 4))
             elif shape == 4:
-                val off = _get_le(b, at, 4)
-                val cnt = _get_le(b, at + 4, 4)
+                val off = _le(b, at, 4)
+                val cnt = _le(b, at + 4, 4)
                 val sec = self.view.section(SPAB_SECTION_I64_CHILDREN)
                 self.int(cnt)
                 var q = 0
                 while q < cnt:
-                    self.int(_get_le(b, sec.offset + (off + q) * 8, 8))
+                    self.int(_le(b, sec.offset + (off + q) * 8, 8))
                     q = q + 1
             elif shape == 5:
-                self.str_children(_get_le(b, at, 4), _get_le(b, at + 4, 4))
+                self.str_children(_le(b, at, 4), _le(b, at + 4, 4))
             else:
-                val off = _get_le(b, at, 4)
-                val cnt = _get_le(b, at + 4, 4)
+                val off = _le(b, at, 4)
+                val cnt = _le(b, at + 4, 4)
                 val sec = self.view.section(SPAB_SECTION_PAIR_CHILDREN)
                 self.int(cnt)
                 var q = 0
                 while q < cnt:
                     val pair = sec.offset + (off + q) * 8
-                    self.str_children(_get_le(b, pair, 4), _get_le(b, pair + 4, 4))
+                    self.str_children(_le(b, pair, 4), _le(b, pair + 4, 4))
                     q = q + 1
             i = i + 1
 
@@ -892,16 +963,17 @@ pub fn flat_packed_decode_lines_v1(bytes: [u8], live_cleared: [text]) -> text:
     val view = flat_packed_view_v1(bytes)
     if not view.valid:
         return ""
+    val src = view.src
     val cleared = view.section(SPAB_SECTION_CLEARED)
     val cleared_count = if cleared.length < 0: 0 else: cleared.length / 8
     if cleared_count != live_cleared.len():
         return ""
     val schema = view.section(SPAB_SECTION_SCHEMA)
-    var r = _Render(view: view, parts: [bytes_to_text(_slice(bytes, schema.offset, schema.length)) + "\n"])
+    var r = _Render(view: view, parts: [_txt(src, schema.offset, schema.length) + "\n"])
     var next_clear = 0
     for s in view.sections:
         if _is_pool_section(s.id):
-            while next_clear < cleared_count and _get_le(bytes, cleared.offset + next_clear * 8, 4) < s.id:
+            while next_clear < cleared_count and _le(src, cleared.offset + next_clear * 8, 4) < s.id:
                 r.parts.push(live_cleared[next_clear])
                 next_clear = next_clear + 1
             r.pool(s)
@@ -909,6 +981,128 @@ pub fn flat_packed_decode_lines_v1(bytes: [u8], live_cleared: [text]) -> text:
         r.parts.push(live_cleared[next_clear])
         next_clear = next_clear + 1
     r.parts.join("")
+
+# ---- token stream (step 2 hit path) -------------------------------------------
+#
+# The packed hit path feeds FlatPoolReader.from_tokens: integers come straight
+# from the INTS/child sections and texts straight from the string pool, so no
+# line blob is built, split or re-parsed. Texts are escaped (identity for plain
+# text) because the existing pool decoders unescape every text token.
+
+pub struct SpabTokensV1:
+    ok: bool
+    reason: text
+    kinds: [i64]
+    ints: [i64]
+    texts: [text]
+
+class _Tokens:
+    var view: SpabViewV1
+    var kinds: [i64]
+    var ints: [i64]
+    var texts: [text]
+    var ok: bool
+
+    me int(v: i64):
+        self.kinds.push(0)
+        self.ints.push(v)
+
+    me str(index: i64):
+        self.kinds.push(1)
+        self.texts.push(flat_pool_escape(self.view.string_at(index)))
+
+    me str_children(off: i64, cnt: i64):
+        val sec = self.view.section(SPAB_SECTION_STR_CHILDREN)
+        self.int(cnt)
+        var q = 0
+        while q < cnt:
+            self.str(_le(self.view.src, sec.offset + (off + q) * 4, 4))
+            q = q + 1
+
+    me pool(s: SpabSectionV1):
+        val b = self.view.src
+        val shape = (s.encoding / 256) % 128
+        if shape == 7:
+            self.int(_le(b, s.offset, 8))
+            return
+        if shape == 8:
+            self.int(_le(b, s.offset, 1))
+            return
+        if shape == 9:
+            self.str(_le(b, s.offset, 4))
+            return
+        val width = _kind_width(s.encoding % 256)
+        val n = s.length / width
+        self.int(n)
+        var i = 0
+        while i < n:
+            val at = s.offset + i * width
+            if shape == 1:
+                self.int(_le(b, at, 8))
+            elif shape == 2:
+                self.int(_le(b, at, 1))
+            elif shape == 3:
+                self.str(_le(b, at, 4))
+            elif shape == 4:
+                val off = _le(b, at, 4)
+                val cnt = _le(b, at + 4, 4)
+                val sec = self.view.section(SPAB_SECTION_I64_CHILDREN)
+                self.int(cnt)
+                var q = 0
+                while q < cnt:
+                    self.int(_le(b, sec.offset + (off + q) * 8, 8))
+                    q = q + 1
+            elif shape == 5:
+                self.str_children(_le(b, at, 4), _le(b, at + 4, 4))
+            else:
+                val off = _le(b, at, 4)
+                val cnt = _le(b, at + 4, 4)
+                val sec = self.view.section(SPAB_SECTION_PAIR_CHILDREN)
+                self.int(cnt)
+                var q = 0
+                while q < cnt:
+                    val pair = sec.offset + (off + q) * 8
+                    self.str_children(_le(b, pair, 4), _le(b, pair + 4, 4))
+                    q = q + 1
+            i = i + 1
+
+    # A CLEAR pool is an integer pool by construction (process-local slots);
+    # its live line chunk becomes integer tokens. Anything else refuses.
+    me cleared(shape: i64, chunk: text):
+        if shape != 1 and shape != 2 and shape != 7 and shape != 8:
+            self.ok = false
+            return
+        for line in chunk.split("\n"):
+            if line != "":
+                val v = flat_pool_parse_i64(line)
+                if line != "{v}":
+                    self.ok = false
+                self.int(v)
+
+pub fn flat_packed_tokens_v1(view: SpabViewV1, live_cleared: [text]) -> SpabTokensV1:
+    """Typed token stream of a VALID view (schema text first), for FlatPoolReader.from_tokens."""
+    if not view.valid:
+        return SpabTokensV1(ok: false, reason: view.reason, kinds: [], ints: [], texts: [])
+    val src = view.src
+    val cleared = view.section(SPAB_SECTION_CLEARED)
+    val cleared_count = if cleared.length < 0: 0 else: cleared.length / 8
+    if cleared_count != live_cleared.len():
+        return SpabTokensV1(ok: false, reason: "cleared pool count mismatch", kinds: [], ints: [], texts: [])
+    val schema = view.section(SPAB_SECTION_SCHEMA)
+    var t = _Tokens(view: view, kinds: [1], ints: [], texts: [_txt(src, schema.offset, schema.length)], ok: true)
+    var next_clear = 0
+    for s in view.sections:
+        if _is_pool_section(s.id):
+            while next_clear < cleared_count and _le(src, cleared.offset + next_clear * 8, 4) < s.id:
+                t.cleared(_le(src, cleared.offset + next_clear * 8 + 4, 4), live_cleared[next_clear])
+                next_clear = next_clear + 1
+            t.pool(s)
+    while next_clear < cleared_count:
+        t.cleared(_le(src, cleared.offset + next_clear * 8 + 4, 4), live_cleared[next_clear])
+        next_clear = next_clear + 1
+    if not t.ok:
+        return SpabTokensV1(ok: false, reason: "cleared pool is not an integer pool", kinds: [], ints: [], texts: [])
+    SpabTokensV1(ok: true, reason: "", kinds: t.kinds, ints: t.ints, texts: t.texts)
 
 # ---- path + publication ---------------------------------------------------------
 
@@ -948,4 +1142,6 @@ export SPAB_SECTION_SCHEMA, SPAB_SECTION_I64_CHILDREN, SPAB_SECTION_STR_CHILDREN
 export SPAB_SECTION_PAIR_CHILDREN, SPAB_SECTION_CLEARED, SPAB_ENCODING_REQUIRED
 export SpabDigestV1, SpabSectionV1, SpabViewV1
 export flat_packed_encode_v1, flat_packed_view_v1, flat_packed_admit_v1, flat_packed_decode_lines_v1
+export SpabSourceV1, SpabTokensV1, flat_packed_view_src_v1, flat_packed_open_v1, flat_packed_close_v1
+export flat_packed_admit_view_v1, flat_packed_tokens_v1
 export module_artifact_path_v1, flat_packed_store_v1
