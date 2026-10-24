@@ -55,6 +55,11 @@ int64_t rt_fork_shared_heap_v1(void) {
     return -3; /* EXPERIMENTAL MIR fork workers: no fork on Windows */
 }
 
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    (void)child_pid;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -700,5 +705,25 @@ int64_t rt_fork_shared_heap_v1(void) {
     return -3;
 }
 #endif
+
+/* Blocking reap of a rt_fork_shared_heap_v1 child. rt_process_wait cannot be
+ * used: the Rust runtime lane's rt_process_wait only knows pids in its
+ * SPAWNED_CHILDREN registry and answers -1 at once for any other pid without
+ * calling waitpid, so a forked child was "reaped" while still running and then
+ * SIGKILLed by PR_SET_PDEATHSIG when the root exited (run-18, 2026-10-24).
+ *   >=0 exit status   -(128+signo) killed by a signal   -1 waitpid failed
+ * Bug: doc/08_tracking/bug/mir_fork_wait_returns_before_children_2026-10-24.md */
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    if (child_pid <= 0) return -1; /* waitpid(-1) would reap any child */
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid((pid_t)child_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) return -1;
+    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
+    return -1;
+}
 
 #endif /* _WIN32 / POSIX */

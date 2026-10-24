@@ -427,6 +427,22 @@ progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
+# Per-module stream-to-object defaults for the Stage 3 and Stage 4
+# native-builds (doc/05_design/compiler/perf/per_module_stream_to_object_v1.md):
+# MIR is lowered, verified, borrow-checked and emitted in batches of
+# SIMPLE_NATIVE_STAGED_CODEGEN_BATCH modules whose MIR is released afterwards,
+# and go-to-end emits every producible object into the native cache, writes
+# <output>.go-to-end.sdn and fails the stage (never a partial link).
+#   SIMPLE_BOOTSTRAP_STREAM_OBJECTS=0   whole-program MIR (no staged batches)
+#   SIMPLE_BOOTSTRAP_STREAM_BATCH=<n>   modules per batch (default 32)
+#   SIMPLE_BOOTSTRAP_GO_TO_END=0        stop at the first failing phase
+# These are shell knobs only: the compiler sees the SIMPLE_NATIVE_* values,
+# both of which cache/native_build_environment_identity.spl excludes from the
+# object identity, so toggling them never changes a cache scope.
+bootstrap_stream_batch="${SIMPLE_BOOTSTRAP_STREAM_BATCH:-32}"
+[ "${SIMPLE_BOOTSTRAP_STREAM_OBJECTS:-1}" != 0 ] || bootstrap_stream_batch=0
+bootstrap_go_to_end=1
+[ "${SIMPLE_BOOTSTRAP_GO_TO_END:-1}" != 0 ] || bootstrap_go_to_end=0
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
 # Typed reason used to auto-produce the Stage-3 planner receipt at the end of a
@@ -2698,6 +2714,13 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP_STAGE4=1 \
     SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
+    SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
+    SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
+    SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-stage4}" \
+    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
+    SIMPLE_HIR_CACHE=1 \
+    SIMPLE_HIR_CACHE_DIR="${native_cache_dir}/hir" \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
@@ -4244,6 +4267,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=0" \
+      "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=${bootstrap_stream_batch}" \
+      "SIMPLE_NATIVE_GO_TO_END=${bootstrap_go_to_end}" \
+      "SIMPLE_CACHE_SCOPE=stage3" \
       "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
       "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
       "SIMPLE_FRONTEND_CACHE=1" \
@@ -5339,6 +5365,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_K1_COMPOSITION_SHA256_BEFORE="${k1_composition_sha256_before}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+    SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
+    SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
+    SIMPLE_CACHE_SCOPE=stage3 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=1 \
