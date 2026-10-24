@@ -54,6 +54,9 @@ inductive Field where
   | ctfe_env_inputs
   | scope_guard_context
   | entry_deps_closure
+  | prelower_interface_lines
+  | prelower_copyable_full_source
+  | prelower_build_module_set
   deriving DecidableEq, Repr
 
 def Field.name : Field → String
@@ -96,6 +99,9 @@ def Field.name : Field → String
   | .ctfe_env_inputs => "ctfe_env_inputs"
   | .scope_guard_context => "scope_guard_context"
   | .entry_deps_closure => "entry_deps_closure"
+  | .prelower_interface_lines => "prelower_interface_lines"
+  | .prelower_copyable_full_source => "prelower_copyable_full_source"
+  | .prelower_build_module_set => "prelower_build_module_set"
 
 /-- scalar | ordered (order kept) | set (encoder sorts first). -/
 def Field.kind : Field → String
@@ -138,25 +144,25 @@ def Field.kind : Field → String
   | .ctfe_env_inputs => "set"
   | .scope_guard_context => "scalar"
   | .entry_deps_closure => "ordered"
+  | .prelower_interface_lines => "ordered"
+  | .prelower_copyable_full_source => "scalar"
+  | .prelower_build_module_set => "ordered"
 
-def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure]
+def allFields : List Field := [.producer_exe, .producer_compiler_src, .producer_runtime, .producer_bundle, .producer_abi_policy, .producer_abi, .producer_abi_admission, .scope_lane, .scope_backend, .scope_cpu, .scope_features, .scope_opt, .scope_provider, .scope_optimizer, .scope_mir_selective_context, .opts_backend, .opts_opt_level, .opts_release, .opts_debug_info, .opts_gc_off, .opts_profile, .opts_families, .opts_representation_context, .opts_collection_policy, .opts_collection_budget, .opts_collection_target, .opts_native_libraries, .opts_native_library_paths, .opts_native_linker_flags, .env_semantic_fields, .entry_source_content, .entry_dependencies, .entry_deps_iface, .entry_interface_digest, .entry_module_witness, .producer_stdlib_src, .ctfe_env_inputs, .scope_guard_context, .entry_deps_closure, .prelower_interface_lines, .prelower_copyable_full_source, .prelower_build_module_set]
 
 theorem mem_allFields (f : Field) : f ∈ allFields := by
   cases f <;> simp [allFields]
 
 /-- Inputs that can change an object but are not in the live key. -/
 inductive Gap where
-  | cross_module_impl_set
-  | inline_const_body
   | linker_binary_version
   | system_library_content
   | import_lib_export_sets
   | advice_body_weave_root
   | hash_algorithm_tag
-  | resolution_new_probe
   deriving DecidableEq, Repr
 
-def allGaps : List Gap := [.cross_module_impl_set, .inline_const_body, .linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root, .hash_algorithm_tag, .resolution_new_probe]
+def allGaps : List Gap := [.linker_binary_version, .system_library_content, .import_lib_export_sets, .advice_body_weave_root, .hash_algorithm_tag]
 
 theorem mem_allGaps (g : Gap) : g ∈ allGaps := by
   cases g <;> simp [allGaps]
@@ -372,20 +378,25 @@ theorem entry_deps_closure_live_change_visible (k1 k2 : LiveKey)
     (h : k1 .entry_deps_closure ≠ k2 .entry_deps_closure) : enc k1 ≠ enc k2 :=
   fun e => h (congrFun (enc_inj e) .entry_deps_closure)
 
+-- pos 40 (ordered) bound to src/compiler/80.driver/cache/native_prelower_object_key.spl#native_prelower_interface_parts_v1
+theorem prelower_interface_lines_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .prelower_interface_lines ≠ k2 .prelower_interface_lines) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .prelower_interface_lines)
+
+-- pos 41 (scalar) bound to src/compiler/80.driver/cache/native_prelower_object_key.spl#native_prelower_source_body_opaque_v1
+theorem prelower_copyable_full_source_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .prelower_copyable_full_source ≠ k2 .prelower_copyable_full_source) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .prelower_copyable_full_source)
+
+-- pos 42 (ordered) bound to src/compiler/80.driver/cache/native_prelower_object_key.spl#native_prelower_object_key_v1
+theorem prelower_build_module_set_live_change_visible (k1 k2 : LiveKey)
+    (h : k1 .prelower_build_module_set ≠ k2 .prelower_build_module_set) : enc k1 ≠ enc k2 :=
+  fun e => h (congrFun (enc_inj e) .prelower_build_module_set)
+
 /-- Everything a build may read: the live key plus the gap inputs. -/
 structure Inputs where
   live : LiveKey
   gap  : Gap → Val
-
-/-- Known gap: the live key does not see `cross_module_impl_set`. -/
-theorem cross_module_impl_set_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .cross_module_impl_set ≠ j.gap .cross_module_impl_set :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `inline_const_body`. -/
-theorem inline_const_body_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .inline_const_body ≠ j.gap .inline_const_body :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 /-- Known gap: the live key does not see `linker_binary_version`. -/
 theorem linker_binary_version_gap_invisible :
@@ -410,11 +421,6 @@ theorem advice_body_weave_root_gap_invisible :
 /-- Known gap: the live key does not see `hash_algorithm_tag`. -/
 theorem hash_algorithm_tag_gap_invisible :
     ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .hash_algorithm_tag ≠ j.gap .hash_algorithm_tag :=
-  ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
-
-/-- Known gap: the live key does not see `resolution_new_probe`. -/
-theorem resolution_new_probe_gap_invisible :
-    ∃ i j : Inputs, enc i.live = enc j.live ∧ i.gap .resolution_new_probe ≠ j.gap .resolution_new_probe :=
   ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun _ => [], fun _ => ["changed"]⟩, rfl, by simp⟩
 
 end CacheProtocol.Live
