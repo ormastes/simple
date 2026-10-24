@@ -342,6 +342,21 @@ pub var decl_param_mut_text: [text] = []
 # trailing default reached codegen with fewer args than params: the callee then
 # read an UNINITIALIZED register/stack slot for the missing parameter.
 var decl_param_default_text: [text] = []
+# Macro facts (plan 2026-10-24 §6, P5): one row per `macro NAME(...)` module
+# declaration and per `name!(...)` invocation outside macro bodies. Flat
+# [text]/[i64] rows (lists comma-joined) so the cache codec never round-trips
+# nested arrays. Consumed by cache_artifact/macro_source_from_parse_v1.spl.
+var macro_def_name: [text] = []
+var macro_def_params: [text] = []     # comma-joined parameter names
+var macro_def_contract: [text] = []   # raw `-> ( ... )` contract source
+var macro_def_body: [text] = []       # raw indented body source
+var macro_def_nested: [text] = []     # comma-joined `n!(` names in the body
+var macro_def_line: [i64] = []
+var macro_def_visibility: [text] = []
+var macro_use_name: [text] = []
+var macro_use_args: [text] = []       # raw source between the call parens
+var macro_use_line: [i64] = []
+var macro_use_col: [i64] = []
 var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
@@ -365,6 +380,72 @@ pub fn decl_metadata_pools_reset():
     decl_pipeline_ii.clear()
     decl_memory_banks.clear()
     decl_param_default_text.clear()
+    macro_facts_reset()
+
+pub fn macro_facts_reset():
+    if macro_def_name == nil:
+        macro_def_name = []
+    if macro_def_params == nil:
+        macro_def_params = []
+    if macro_def_contract == nil:
+        macro_def_contract = []
+    if macro_def_body == nil:
+        macro_def_body = []
+    if macro_def_nested == nil:
+        macro_def_nested = []
+    if macro_def_line == nil:
+        macro_def_line = []
+    if macro_def_visibility == nil:
+        macro_def_visibility = []
+    if macro_use_name == nil:
+        macro_use_name = []
+    if macro_use_args == nil:
+        macro_use_args = []
+    if macro_use_line == nil:
+        macro_use_line = []
+    if macro_use_col == nil:
+        macro_use_col = []
+    macro_def_name.clear()
+    macro_def_params.clear()
+    macro_def_contract.clear()
+    macro_def_body.clear()
+    macro_def_nested.clear()
+    macro_def_line.clear()
+    macro_def_visibility.clear()
+    macro_use_name.clear()
+    macro_use_args.clear()
+    macro_use_line.clear()
+    macro_use_col.clear()
+
+pub fn macro_fact_def_push(name: text, params: text, contract: text, body: text,
+        nested: text, line: i64, visibility: text):
+    macro_def_name.push(name)
+    macro_def_params.push(params)
+    macro_def_contract.push(contract)
+    macro_def_body.push(body)
+    macro_def_nested.push(nested)
+    macro_def_line.push(line)
+    macro_def_visibility.push(visibility)
+
+pub fn macro_fact_use_push(name: text, args: text, line: i64, col: i64):
+    macro_use_name.push(name)
+    macro_use_args.push(args)
+    macro_use_line.push(line)
+    macro_use_col.push(col)
+
+pub fn macro_fact_def_count() -> i64: macro_def_name.len()
+pub fn macro_fact_def_name_at(i: i64) -> text: macro_def_name[i]
+pub fn macro_fact_def_params_at(i: i64) -> text: macro_def_params[i]
+pub fn macro_fact_def_contract_at(i: i64) -> text: macro_def_contract[i]
+pub fn macro_fact_def_body_at(i: i64) -> text: macro_def_body[i]
+pub fn macro_fact_def_nested_at(i: i64) -> text: macro_def_nested[i]
+pub fn macro_fact_def_line_at(i: i64) -> i64: macro_def_line[i]
+pub fn macro_fact_def_visibility_at(i: i64) -> text: macro_def_visibility[i]
+pub fn macro_fact_use_count() -> i64: macro_use_name.len()
+pub fn macro_fact_use_name_at(i: i64) -> text: macro_use_name[i]
+pub fn macro_fact_use_args_at(i: i64) -> text: macro_use_args[i]
+pub fn macro_fact_use_line_at(i: i64) -> i64: macro_use_line[i]
+pub fn macro_fact_use_col_at(i: i64) -> i64: macro_use_col[i]
 
 fn decl_count() -> i64:
     ast_decl_count_get()
@@ -1644,11 +1725,13 @@ pub fn decl_pools_promote_transient_owners() -> bool:
 
 # --- flat-AST pool codec: flat_decl ------------------------------
 #
-# Dump/restore for this file's 55 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's pools: the original 55 in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
 # neighbour's data. Sorting by name keeps the two sides in step without
-# anyone having to maintain a hand-written order.
+# anyone having to maintain a hand-written order. The macro fact pools
+# (macro_def_* / macro_use_*) are appended AFTER the sorted block instead, so
+# the positions of every earlier pool (and packed section) stay stable.
 #
 # Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
 # which derives the pool list from this file and fails when one is not both
@@ -1739,6 +1822,19 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(module_decl_slots))
     parts = parts.push(flat_pool_enc_i64(module_decls))
     parts = parts.push(flat_pool_enc_text(module_path_slot))
+    # Macro fact pools: appended at the END of this family (packed section
+    # order follows dump order, so existing pool positions stay stable).
+    parts = parts.push(flat_pool_enc_text(macro_def_name))
+    parts = parts.push(flat_pool_enc_text(macro_def_params))
+    parts = parts.push(flat_pool_enc_text(macro_def_contract))
+    parts = parts.push(flat_pool_enc_text(macro_def_body))
+    parts = parts.push(flat_pool_enc_text(macro_def_nested))
+    parts = parts.push(flat_pool_enc_i64(macro_def_line))
+    parts = parts.push(flat_pool_enc_text(macro_def_visibility))
+    parts = parts.push(flat_pool_enc_text(macro_use_name))
+    parts = parts.push(flat_pool_enc_text(macro_use_args))
+    parts = parts.push(flat_pool_enc_i64(macro_use_line))
+    parts = parts.push(flat_pool_enc_i64(macro_use_col))
     parts.join("")
 
 # Returns false when the blob ran short or was malformed; the caller must
@@ -1804,6 +1900,17 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     module_decl_slots = flat_pool_dec_i64(r)
     module_decls = flat_pool_dec_i64_into(module_decls, r)
     module_path_slot = flat_pool_dec_text_into(module_path_slot, r)
+    macro_def_name = flat_pool_dec_text_into(macro_def_name, r)
+    macro_def_params = flat_pool_dec_text_into(macro_def_params, r)
+    macro_def_contract = flat_pool_dec_text_into(macro_def_contract, r)
+    macro_def_body = flat_pool_dec_text_into(macro_def_body, r)
+    macro_def_nested = flat_pool_dec_text_into(macro_def_nested, r)
+    macro_def_line = flat_pool_dec_i64_into(macro_def_line, r)
+    macro_def_visibility = flat_pool_dec_text_into(macro_def_visibility, r)
+    macro_use_name = flat_pool_dec_text_into(macro_use_name, r)
+    macro_use_args = flat_pool_dec_text_into(macro_use_args, r)
+    macro_use_line = flat_pool_dec_i64_into(macro_use_line, r)
+    macro_use_col = flat_pool_dec_i64_into(macro_use_col, r)
     r.ok
 
 # Live line chunks of this family's CLEAR pools, in dump order, for the
@@ -1875,5 +1982,20 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_is_value_type.len() != count: return false
     if decl_param_mut_text.len() != count: return false
     if decl_param_default_text.len() != count: return false
+    val macro_defs = macro_def_name.len()
+    if macro_def_params.len() != macro_defs or macro_def_contract.len() != macro_defs or
+            macro_def_body.len() != macro_defs or macro_def_nested.len() != macro_defs or
+            macro_def_line.len() != macro_defs or macro_def_visibility.len() != macro_defs:
+        return false
+    val macro_uses = macro_use_name.len()
+    if macro_use_args.len() != macro_uses or macro_use_line.len() != macro_uses or
+            macro_use_col.len() != macro_uses:
+        return false
     true
 export decl_pools_promote_transient_owners
+export macro_facts_reset, macro_fact_def_push, macro_fact_use_push
+export macro_fact_def_count, macro_fact_def_name_at, macro_fact_def_params_at
+export macro_fact_def_contract_at, macro_fact_def_body_at, macro_fact_def_nested_at
+export macro_fact_def_line_at, macro_fact_def_visibility_at
+export macro_fact_use_count, macro_fact_use_name_at, macro_fact_use_args_at
+export macro_fact_use_line_at, macro_fact_use_col_at

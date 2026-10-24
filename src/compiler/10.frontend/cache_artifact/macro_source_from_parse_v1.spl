@@ -1,0 +1,88 @@
+# Real-parse input for the macro reference projector (plan 2026-10-24 §6, P5).
+#
+# The core parser records `macro NAME(...)` declarations and `name!(...)`
+# invocations in the macro fact pools (_Ast/decl_nodes.spl); this adapter turns
+# the CURRENT module's pools into a MacroModuleSourceV1. Call it right after
+# the module's parse (or cache restore): the pools are per-parse state and the
+# next parse resets them.
+#
+# The region id and stable invocation id are `<name>#<ordinal among same-name
+# invocations>`, so an unrelated edit elsewhere in the file keeps them (line/col
+# stay in the pools for navigation only). Named gaps: guards and CTFE effects
+# are not parsed from macro sources yet (active, no effects).
+
+use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl}
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroSourceDefV1,
+    MacroSourceInvocationV1, MacroModuleSourceV1}
+use compiler.frontend.core._Ast.decl_nodes.{macro_fact_def_count, macro_fact_def_name_at,
+    macro_fact_def_params_at, macro_fact_def_contract_at, macro_fact_def_body_at,
+    macro_fact_def_nested_at, macro_fact_use_count, macro_fact_use_name_at,
+    macro_fact_use_args_at}
+
+fn _split_csv(value: text) -> [text]:
+    if value == "": return []
+    var out: [text] = []
+    for part in value.split(","):
+        val p = part.trim()
+        if p != "": out.push(p)
+    out
+
+fn _intro_kinds() -> [text]:
+    ["fn", "class", "type", "field", "var", "const"]
+
+# `intro LABEL: <target>.<kind> "PATTERN"...` entries of a raw contract. The
+# introduced public name is the first string literal after `intro`; its kind is
+# the last `.<kind>` word before that literal.
+pub fn macro_contract_intros_v1(contract: text) -> [MacroIntroDecl]:
+    var out: [MacroIntroDecl] = []
+    var rest = contract
+    var at = rest.find("intro ")
+    while at >= 0:
+        rest = rest.substring(at + 6, rest.len())
+        val q = rest.find("\"")
+        if q < 0: break
+        val head = rest.substring(0, q)
+        val tail = rest.substring(q + 1, rest.len())
+        val q2 = tail.find("\"")
+        if q2 < 0: break
+        var kind = "fn"
+        for k in _intro_kinds():
+            if head.find("." + k) >= 0: kind = k
+        out.push(MacroIntroDecl(kind: kind, name_pattern: tail.substring(0, q2), type_pattern: nil))
+        rest = tail.substring(q2 + 1, tail.len())
+        at = rest.find("intro ")
+    out
+
+pub fn macro_module_source_from_parse_v1(package: text, module: text,
+        source_id: text) -> MacroModuleSourceV1:
+    var defs: [MacroSourceDefV1] = []
+    var i = 0
+    while i < macro_fact_def_count():
+        val contract = macro_fact_def_contract_at(i)
+        val def = MacroDef(name: macro_fact_def_name_at(i), params: _split_csv(macro_fact_def_params_at(i)),
+            contract_intros: macro_contract_intros_v1(contract), contract_injects: [])
+        defs.push(MacroSourceDefV1(def: def, namespace: "macro",
+            body_text: contract + "\n" + macro_fact_def_body_at(i),
+            nested_macro_names: _split_csv(macro_fact_def_nested_at(i)),
+            declared_effects: [], guard_ids: [], is_public: true))
+        i = i + 1
+    var invs: [MacroSourceInvocationV1] = []
+    var seen: [text] = []
+    var j = 0
+    while j < macro_fact_use_count():
+        val name = macro_fact_use_name_at(j)
+        var ordinal = 0
+        for s in seen:
+            if s == name: ordinal = ordinal + 1
+        seen.push(name)
+        val region = "{name}#{ordinal}"
+        val args = macro_fact_use_args_at(j)
+        invs.push(MacroSourceInvocationV1(region_id: region,
+            stable_invocation_id: region, requested_name: name,
+            invocation_text: name + "!(" + args + ")", args_text: args,
+            hygiene_scope_id: region, active_guard_id: "", active: true))
+        j = j + 1
+    MacroModuleSourceV1(package: package, module: module, source_id: source_id,
+        defs: defs, invocations: invs)
+
+export macro_contract_intros_v1, macro_module_source_from_parse_v1
