@@ -38,8 +38,8 @@ use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
-use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_v1}
-use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_v1,
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_guarded_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{project_macro_module_guarded_v1,
     MacroModuleProjectionV1, MacroDefKeyEntryV1}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -52,7 +52,7 @@ use compiler.driver.cache.module_public_summary_facts_v1.{module_public_facts_of
 use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefinitionTableV1,
     MacroUseTableV1, macro_definition_table_encode_v1, macro_use_table_encode_v1,
     macro_reference_schema_v1, MacroUseV1, macro_definition_table_decode_v1,
-    macro_use_status_tag_v1}
+    macro_use_status_tag_v1, macro_content_digest_v1}
 use compiler.frontend.cache_artifact.generic_tldr_projector.{project_generic_template_v1}
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     build_generic_template_section_v1, generic_template_section_encode_v1}
@@ -352,10 +352,14 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     # companions (macro-def + macro-key sections); if any import companion is
     # missing or stale, unresolved uses are kept conservative (never a false
     # negative cache hit).
-    val macro_source = macro_module_source_from_parse_v1("", module_id, source_path)
+    # Guards are recovered from the ORIGINAL source (the preprocessor blanks
+    # inactive @when branches before the parser runs).
+    val (macro_source, guard_evals) = macro_module_source_from_parse_guarded_v1("", module_id,
+        source_path, source)
     val (imported_macros, imports_complete) = module_tldr_imported_macro_projections_v1(
         _module_import_source_paths_v1(parsed, source_path), tldr_root)
-    var macro_projection = project_macro_module_v1(macro_source, imported_macros)
+    var macro_projection = project_macro_module_guarded_v1(macro_source, imported_macros,
+        macro_content_digest_v1("macro-profile/host"), guard_evals)
     if not imports_complete:
         macro_projection = macro_projection_mark_imports_incomplete_v1(macro_projection)
     val (view_sections, _refusal) = module_tldr_companion_view_sections_with_macros_v1(parsed,
