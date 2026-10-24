@@ -861,12 +861,12 @@ int64_t rt_cpu_count(void) {
  * API: pinning reports false there. Rust twin: runtime/src/cpu_topology.rs. */
 #define RT_TOPO_MAX 1024
 typedef struct { int32_t group, number, socket, numa; } RtTopoCpu;
-static RtTopoCpu rt_topo_cpus[RT_TOPO_MAX];
-static int32_t rt_topo_n = -1;
+static RtTopoCpu spl_topo_cpus[RT_TOPO_MAX];
+static int32_t spl_topo_n = -1;
 
 #if defined(_WIN32)
-static INIT_ONCE rt_topo_once = INIT_ONCE_STATIC_INIT;
-static int rt_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE number) {
+static INIT_ONCE spl_topo_once = INIT_ONCE_STATIC_INIT;
+static int spl_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE number) {
     DWORD len = 0;
     GetLogicalProcessorInformationEx(rel, NULL, &len);
     if (len == 0) return 0;
@@ -895,24 +895,24 @@ static int rt_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE num
     free(buf);
     return result;
 }
-static BOOL CALLBACK rt_topo_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+static BOOL CALLBACK spl_topo_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
     (void)once; (void)param; (void)ctx;
     int32_t n = 0;
     WORD groups = GetActiveProcessorGroupCount();
     for (WORD g = 0; g < groups && n < RT_TOPO_MAX; g++) {
         DWORD count = GetActiveProcessorCount(g);
         for (DWORD p = 0; p < count && n < RT_TOPO_MAX; p++) {
-            rt_topo_cpus[n].group = g;
-            rt_topo_cpus[n].number = (int32_t)p;
-            rt_topo_cpus[n].socket = rt_topo_find(RelationProcessorPackage, g, (BYTE)p);
-            rt_topo_cpus[n].numa = rt_topo_find(RelationNumaNode, g, (BYTE)p);
+            spl_topo_cpus[n].group = g;
+            spl_topo_cpus[n].number = (int32_t)p;
+            spl_topo_cpus[n].socket = spl_topo_find(RelationProcessorPackage, g, (BYTE)p);
+            spl_topo_cpus[n].numa = spl_topo_find(RelationNumaNode, g, (BYTE)p);
             n++;
         }
     }
-    rt_topo_n = n;
+    spl_topo_n = n;
     return TRUE;
 }
-static void rt_topo_ensure(void) { InitOnceExecuteOnce(&rt_topo_once, rt_topo_init, NULL, NULL); }
+static void spl_topo_ensure(void) { InitOnceExecuteOnce(&spl_topo_once, spl_topo_init, NULL, NULL); }
 #else
 #include <pthread.h>
 #if defined(__linux__)
@@ -920,8 +920,8 @@ static void rt_topo_ensure(void) { InitOnceExecuteOnce(&rt_topo_once, rt_topo_in
 #endif
 #include <dirent.h>
 #include <stdio.h>
-static pthread_once_t rt_topo_once = PTHREAD_ONCE_INIT;
-static int rt_topo_read_int(const char* path, int fallback) {
+static pthread_once_t spl_topo_once = PTHREAD_ONCE_INIT;
+static int spl_topo_read_int(const char* path, int fallback) {
     FILE* f = fopen(path, "r");
     if (!f) return fallback;
     int v = fallback;
@@ -929,15 +929,15 @@ static int rt_topo_read_int(const char* path, int fallback) {
     fclose(f);
     return v;
 }
-static void rt_topo_init(void) {
+static void spl_topo_init(void) {
     int32_t n = 0;
     long conf = sysconf(_SC_NPROCESSORS_CONF);
     char path[160];
     for (long cpu = 0; cpu < conf && n < RT_TOPO_MAX; cpu++) {
         snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/online", cpu);
-        if (cpu > 0 && rt_topo_read_int(path, 1) == 0) continue;
+        if (cpu > 0 && spl_topo_read_int(path, 1) == 0) continue;
         snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld/topology/physical_package_id", cpu);
-        int socket = rt_topo_read_int(path, 0);
+        int socket = spl_topo_read_int(path, 0);
         int numa = 0;
         snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%ld", cpu);
         DIR* d = opendir(path);
@@ -951,26 +951,26 @@ static void rt_topo_init(void) {
             }
             closedir(d);
         }
-        rt_topo_cpus[n].group = 0;
-        rt_topo_cpus[n].number = (int32_t)cpu;
-        rt_topo_cpus[n].socket = socket < 0 ? 0 : socket;
-        rt_topo_cpus[n].numa = numa;
+        spl_topo_cpus[n].group = 0;
+        spl_topo_cpus[n].number = (int32_t)cpu;
+        spl_topo_cpus[n].socket = socket < 0 ? 0 : socket;
+        spl_topo_cpus[n].numa = numa;
         n++;
     }
-    rt_topo_n = n;
+    spl_topo_n = n;
 }
-static void rt_topo_ensure(void) { pthread_once(&rt_topo_once, rt_topo_init); }
+static void spl_topo_ensure(void) { pthread_once(&spl_topo_once, spl_topo_init); }
 #endif
 
 int64_t rt_cpu_topology_count(void) {
-    rt_topo_ensure();
-    return rt_topo_n;
+    spl_topo_ensure();
+    return spl_topo_n;
 }
 
 int64_t rt_cpu_topology_field(int64_t index, int64_t field) {
-    rt_topo_ensure();
-    if (index < 0 || index >= rt_topo_n) return -1;
-    const RtTopoCpu* c = &rt_topo_cpus[index];
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return -1;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
     switch (field) {
         case 0: return c->group;
         case 1: return c->number;
@@ -981,9 +981,9 @@ int64_t rt_cpu_topology_field(int64_t index, int64_t field) {
 }
 
 bool rt_thread_pin_current(int64_t index) {
-    rt_topo_ensure();
-    if (index < 0 || index >= rt_topo_n) return false;
-    const RtTopoCpu* c = &rt_topo_cpus[index];
+    spl_topo_ensure();
+    if (index < 0 || index >= spl_topo_n) return false;
+    const RtTopoCpu* c = &spl_topo_cpus[index];
 #if defined(_WIN32)
     GROUP_AFFINITY affinity;
     memset(&affinity, 0, sizeof(affinity));
