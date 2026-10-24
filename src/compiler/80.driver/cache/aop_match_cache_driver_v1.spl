@@ -17,9 +17,8 @@
 # cache is a persistent value, and the single-flight table hands waiters the
 # leader's result instead of producing again.
 #
-# Known limit: HirFunction carries no general attribute list, so HIR-derived
-# facts have empty `attrs`; `attr(...)` selectors therefore match nothing on
-# this path today (the registry's forward claims use exact-name selectors).
+# Function attributes come from frontend/join_point_attr_registry (recorded
+# during HIR lowering, keyed by the lowering filename == HirModule.path).
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
@@ -28,6 +27,7 @@ use compiler.semantics.aspect_validation.{aspect_module_identity_index}
 use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1,
     aspect_forward_weave_claims_v1, weave_forward_advice_claim_in_module_v1}
 use compiler.semantics.join_point_model.{forward_join_points}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_names_of}
 use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
     DirectoryJoinPointFactsV1, PointcutMatchCacheV1, PointcutMatchShardV1,
     directory_join_point_facts_v1, pointcut_selector_parse_v1, pointcut_match_key_v1,
@@ -52,6 +52,10 @@ fn _dir_of(path: text) -> text:
     if i == nil: return ""
     path.slice(0, i!)
 
+fn module_key_path(module_key: text, module: HirModule) -> text:
+    if module.path != "": return module.path
+    module_key
+
 fn _module_file(module_key: text, module: HirModule) -> text:
     if module.path != "": return module.path.replace("\\", "/")
     module_key
@@ -75,7 +79,9 @@ pub fn aop_directory_facts_from_hir_v1(modules: Dict<text, HirModule>) -> [Direc
         var points = points_of[dir]
         for jp in forward_join_points_for_module_v1(module, 1):
             points.push(JoinPointFactV1(id: "{module_key}::{jp.source_symbol}", kind: jp.kind,
-                symbol: jp.source_symbol, attrs: [], owner_file: file, base_body_digest: ""))
+                symbol: jp.source_symbol,
+                attrs: join_point_attr_names_of(module_key_path(module_key, module), jp.source_symbol),
+                owner_file: file, base_body_digest: ""))
         points_of[dir] = points
     var out: [DirectoryJoinPointFactsV1] = []
     for dir in files_of.keys():
