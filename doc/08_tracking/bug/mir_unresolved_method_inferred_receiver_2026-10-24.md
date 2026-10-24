@@ -41,3 +41,13 @@ Not verified: no compile was run (memory budget reserved for run-11). Sites with
 
 ## NOT fixable by a source workaround
 - 70.backend/linker/smf_getter.spl:337/340/371/372: `file_read` (std.nogc_sync_mut.io.file_ops:168) returns `text`, yet the code calls `.is_err()/.is_ok()/.unwrap()` on it. Genuine type error, not inference; fixing changes behavior (error path) and needs an owner decision (use a Result-returning read).
+
+## Third batch
+| site | cause | action |
+|---|---|---|
+| 70.backend/linker/lazy_instantiator.spl:188 | `self.do_instantiate` but the fn is the free `lazyinstantiator_do_instantiate(self, ..)` | call the free fn (fixed) |
+| 70.backend/backend/native/isel_x86_64.spl:1110, 10.frontend/core/aop_debug_log.spl:114 | `.max()` on a parenthesized arithmetic expr | `if` expression with typed local (fixed) |
+| 70.backend/bitfield.spl:193/218 (+269/284) | `HirType.to_text()` - no such method on HirType found | NOT fixed: needs a real text conversion fn |
+| plugins/backend_cuda/cuda_type_mapper.spl:282 | `fields.len()` where `ty.kind` match binder; file imports only `MirType`, not `MirTypeKind`/`MirFieldDef` | NOT fixed |
+| plugins/backend_llvm_lib/llvm_lib_translate_expr.spl:652/653 | `args.len()` on `val args: [MirOperand] = raw_args` (declared!) | NOT fixed: real MIR gap (array-typed local from i64 handle) |
+| 70.backend/linker/link.spl, mold `parse_i` | unwrap with no line; parse_i64 site typed | link.spl unwrap not located |
