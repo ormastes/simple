@@ -1,0 +1,124 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_incremental_v1.spl 0%
+"""
+# File-worker incremental rebuild (P-E): planner + object cache
+
+**Category:** Compiler / driver
+
+## Purpose and Audience
+
+The file-worker pool claims only modules the incremental planner recompiles
+(changed source, changed imported TLDR interface, pointcut-affected) and
+reuses the cached object for every other module; when no object hash changed
+and the cached output exists the link is skipped.
+
+## Expected Outcome
+
+No change -> 0 rebuilt and link reused; one leaf body change -> 1 rebuilt;
+an interface change -> the changed module and its importers rebuilt.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalObjectV1, incremental_link_decision_v1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
+    file_worker_inc_select_v1, file_worker_inc_receipt_line_v1,
+    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1}
+use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1,
+    file_worker_reuse_encode_v1, file_worker_reuse_find_v1}
+
+# a.spl imports b.spl; b.spl imports c.spl (leaf); d.spl stands alone.
+fn row(path: text, imports: [text]) -> FileWorkerIncRowV1:
+    FileWorkerIncRowV1(path: path, source_digest: "s-" + path, iface_digest: "i-" + path,
+        imports_known: true, imports: imports, object_digest: "o-" + path,
+        cached_object: "/cache/" + path + ".o", functions: 1, statics: 0, capsule: "")
+
+fn prev_rows() -> [FileWorkerIncRowV1]:
+    [row("a.spl", ["b.spl"]), row("b.spl", ["c.spl"]), row("c.spl", []), row("d.spl", [])]
+
+fn digests(prefix: text) -> Dict<text, text>:
+    var d: Dict<text, text> = {}
+    for p in ["a.spl", "b.spl", "c.spl", "d.spl"]:
+        d[p] = prefix + p
+    d
+
+fn objects(changed: [text]) -> [IncrementalObjectV1]:
+    var out: [IncrementalObjectV1] = []
+    for p in ["a.spl", "b.spl", "c.spl", "d.spl"]:
+        val now = if changed.contains(p): "o2-" + p else: "o-" + p
+        out = out.push(IncrementalObjectV1(path: p, old_object_digest: "o-" + p, new_object_digest: now))
+    out
+
+describe "file-worker incremental selection":
+    it "no change: 0 rebuilt, every object reused, link reused":
+        val sel = file_worker_inc_select_v1(prev_rows(), digests("s-"), digests("i-"), [])
+        assert_equal(sel.rebuild.len(), 0)
+        assert_equal(sel.reuse.len(), 4)
+        val link = incremental_link_decision_v1(objects([]), true)
+        assert_false(link.relink)
+        assert_true(link.place_cached)
+        assert_equal(file_worker_inc_receipt_line_v1(4, 0, link.relink),
+            "[file-workers] 4 reused / 0 rebuilt / link=reused")
+
+    it "one leaf body change: exactly 1 rebuilt":
+        var src = digests("s-")
+        src["c.spl"] = "s2-c.spl"
+        val sel = file_worker_inc_select_v1(prev_rows(), src, digests("i-"), [])
+        assert_equal(sel.rebuild, ["c.spl"])
+        assert_equal(sel.reuse.len(), 3)
+        val link = incremental_link_decision_v1(objects(["c.spl"]), true)
+        assert_true(link.relink)
+        assert_equal(file_worker_inc_receipt_line_v1(3, 1, link.relink),
+            "[file-workers] 3 reused / 1 rebuilt / link=relinked")
+
+    it "interface change: the module and its importers rebuilt":
+        var src = digests("s-")
+        src["c.spl"] = "s2-c.spl"
+        var iface = digests("i-")
+        iface["c.spl"] = "i2-c.spl"
+        val sel = file_worker_inc_select_v1(prev_rows(), src, iface, [])
+        assert_equal(sel.rebuild, ["b.spl", "c.spl"])
+        assert_false(sel.rebuild.contains("d.spl"))
+        assert_equal(sel.reuse.len(), 2)
+
+    it "unknown imports or a missing source fail closed to rebuild":
+        var rows = prev_rows()
+        rows[3] = FileWorkerIncRowV1(path: "d.spl", source_digest: "s-d.spl", iface_digest: "i-d.spl",
+            imports_known: false, imports: [], object_digest: "o-d.spl", cached_object: "", functions: 0,
+            statics: 0, capsule: "")
+        var src = digests("s-")
+        src["a.spl"] = ""
+        val sel = file_worker_inc_select_v1(rows, src, digests("i-"), [])
+        assert_equal(sel.rebuild, ["a.spl", "d.spl"])
+
+    it "a missing cached output relinks even with unchanged objects":
+        val link = incremental_link_decision_v1(objects([]), false)
+        assert_true(link.relink)
+        assert_false(link.place_cached)
+
+describe "file-worker incremental records":
+    it "round-trips the manifest":
+        val encoded = file_worker_inc_manifest_encode_v1(prev_rows(), "out-digest")
+        val (rows, out) = file_worker_inc_manifest_parse_v1(encoded)
+        assert_equal(out, "out-digest")
+        assert_equal(rows.len(), 4)
+        assert_equal(rows[0].imports, ["b.spl"])
+        assert_true(rows[2].imports_known)
+        assert_equal(rows[2].imports.len(), 0)
+        assert_equal(rows[1].cached_object, "/cache/b.spl.o")
+
+    it "refuses a foreign manifest":
+        val (rows, out) = file_worker_inc_manifest_parse_v1("other-v9\nx\n")
+        assert_equal(rows.len(), 0)
+        assert_equal(out, "")
+
+    it "finds a reuse row by module path":
+        val content = file_worker_reuse_encode_v1([FileWorkerReuseRowV1(path: "c.spl",
+            cached_object: "/cache/c.o", functions: 3, statics: 1, capsule: "cap")])
+        if val r = file_worker_reuse_find_v1(content, "c.spl"):
+            assert_equal(r.cached_object, "/cache/c.o")
+            assert_equal(r.functions, 3)
+            assert_equal(r.statics, 1)
+        else:
+            assert_true(false)
+        assert_true(file_worker_reuse_find_v1(content, "a.spl").is_none())
