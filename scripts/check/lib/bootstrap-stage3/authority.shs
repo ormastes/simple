@@ -1291,19 +1291,44 @@ bootstrap_stage3_target_c_compiler() {
 }
 
 bootstrap_stage3_windows_gnu_tool_path() {
-    bootstrap_stage3_gnu_tool_selected=$(command -v "$1" 2>/dev/null) || return 1
+    bootstrap_stage3_gnu_tool_request=$1
+    # The bootstrap exports CC/LD in native drive-letter spelling
+    # (`C:/.../bin/clang.exe`) because Cargo and the native compiler consume
+    # it; `command -v` echoes that verbatim and the canonical-path helper only
+    # accepts POSIX `/...` input, so the admitted llvm-mingw clang was rejected
+    # ("Windows GNU phase requires CC to be llvm-mingw clang"). Normalize the
+    # spelling first, then bind the physical `.exe` when the extensionless
+    # alias was recorded.
+    case "$bootstrap_stage3_gnu_tool_request" in
+        [A-Za-z]:[\/]*)
+            bootstrap_stage3_gnu_tool_request=$(cygpath -u "$bootstrap_stage3_gnu_tool_request" \
+                2>/dev/null) || return 1 ;;
+    esac
+    bootstrap_stage3_gnu_tool_selected=$(command -v "$bootstrap_stage3_gnu_tool_request" \
+        2>/dev/null) || return 1
+    case "$bootstrap_stage3_gnu_tool_selected" in
+        *.exe) ;;
+        *) [ -f "$bootstrap_stage3_gnu_tool_selected.exe" ] &&
+            bootstrap_stage3_gnu_tool_selected=$bootstrap_stage3_gnu_tool_selected.exe ;;
+    esac
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_canonical_file \
         "$bootstrap_stage3_gnu_tool_selected") || return 1
     [ -x "$bootstrap_stage3_gnu_tool_path" ] || return 1
     printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
+# llvm-mingw identity is the driver's default target, not its file name: a
+# stock LLVM clang.exe (Target: x86_64-pc-windows-msvc) must not satisfy the
+# GNU lane just because ambient PATH found it first.
 bootstrap_stage3_windows_gnu_clang_path() {
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
     case "${bootstrap_stage3_gnu_tool_path##*/}" in
-        clang|clang.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        clang|clang.exe) ;;
         *) return 1 ;;
     esac
+    "$bootstrap_stage3_gnu_tool_path" --version 2>/dev/null |
+        grep -Eq '^Target: [A-Za-z0-9_]+-w64-(windows-gnu|mingw32)' || return 1
+    printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
 bootstrap_stage3_windows_gnu_llvm_ar_path() {
