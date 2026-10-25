@@ -16,10 +16,12 @@ use std.nogc_sync_mut.io.file_ops.{
     file_read_regular_no_follow_bounded
 }
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
-use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_cost_v1}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_git_event_cost_v1}
 use app.compiler_entrypoint.inventory_aliases.{compiler_inventory_aliases_v1}
 use app.compiler_entrypoint.inventory_families.{compiler_inventory_scope_valid_v1,
     compiler_inventory_family_v1, compiler_inventory_path_selected_v1}
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 
 struct CompilerInventoryRefreshV1:
     valid: bool
@@ -171,6 +173,12 @@ fn compiler_inventory_git_head_v1(root: text) -> text:
 fn compiler_inventory_event_push_v1(
     events: [CompileSourceEventV1], root: text, operation: text, path: text
 ) -> [CompileSourceEventV1]?:
+    compiler_inventory_event_push_cost_v1(events, root, operation, path, nil)
+
+fn compiler_inventory_event_push_cost_v1(
+    events: [CompileSourceEventV1], root: text, operation: text, path: text,
+    cost: ScvCompileCostV1?
+) -> [CompileSourceEventV1]?:
     # Preserve literal leading/trailing spaces in a Git path. Git quotes
     # control-character names even with core.quotePath=false; that encoding
     # cannot be treated as the canonical source identity, so refuse the batch.
@@ -189,12 +197,19 @@ fn compiler_inventory_event_push_v1(
         return Some(events)
     if compiler_inventory_family_v1(normalized) == "": return nil
     if operation == "delete":
-        return Some(events.push(compile_source_inventory_git_event_v1(
-            "delete", normalized, "")))
+        val started = scv_cost_now_v1(cost)
+        val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
+        if cost != nil: cost!.record_event(scv_cost_elapsed_v1(cost, started))
+        return Some(events.push(deleted))
     val absolute = root + "/" + normalized
-    if not file_exists(absolute):
-        return Some(events.push(compile_source_inventory_git_event_v1(
-            "delete", normalized, "")))
+    val exists_started = scv_cost_now_v1(cost)
+    val exists = file_exists(absolute)
+    if cost != nil: cost!.record_exists(scv_cost_elapsed_v1(cost, exists_started))
+    if not exists:
+        val started = scv_cost_now_v1(cost)
+        val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
+        if cost != nil: cost!.record_event(scv_cost_elapsed_v1(cost, started))
+        return Some(events.push(deleted))
     # Reducing straight to an event here (digests + byte_count only) rather
     # than collecting a change record that keeps `content` alive is the
     # point: the outer array below no longer has to retain every listed
@@ -203,13 +218,19 @@ fn compiler_inventory_event_push_v1(
     # on a ~1.6 GB checkout (measured 21 GB RSS / 342 CPU-s before this
     # change — see
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
-    val event = compiler_inventory_file_event_v1(operation, normalized, absolute)
+    val event = compiler_inventory_file_event_cost_v1(operation, normalized, absolute, cost)
     if event == nil:
         return nil
     Some(events.push(event!))
 
 fn compiler_inventory_parse_name_status_v1(
     root: text, output: text, events: [CompileSourceEventV1]
+) -> [CompileSourceEventV1]?:
+    compiler_inventory_parse_name_status_cost_v1(root, output, events, nil)
+
+fn compiler_inventory_parse_name_status_cost_v1(
+    root: text, output: text, events: [CompileSourceEventV1],
+    cost: ScvCompileCostV1?
 ) -> [CompileSourceEventV1]?:
     var result = events
     for line in output.split("\n"):
@@ -229,7 +250,7 @@ fn compiler_inventory_parse_name_status_v1(
         if path.contains("\t") or path.contains("\r"):
             return nil
         val operation = if status.starts_with("D"): "delete" else: "modify"
-        val next = compiler_inventory_event_push_v1(result, root, operation, path)
+        val next = compiler_inventory_event_push_cost_v1(result, root, operation, path, cost)
         if next == nil:
             return nil
         result = next!
@@ -293,6 +314,12 @@ fn compiler_inventory_parse_porcelain_v1(
     root: text, output: text, events: [CompileSourceEventV1],
     source_roots: [text]
 ) -> CompilerInventoryGitEventsV1?:
+    compiler_inventory_parse_porcelain_cost_v1(root, output, events, source_roots, nil)
+
+fn compiler_inventory_parse_porcelain_cost_v1(
+    root: text, output: text, events: [CompileSourceEventV1],
+    source_roots: [text], cost: ScvCompileCostV1?
+) -> CompilerInventoryGitEventsV1?:
     # Porcelain v1 with --no-renames emits tracked changes and individual
     # untracked files in one Git snapshot. Reject any status/path we cannot
     # interpret before advancing the cursor.
@@ -321,8 +348,8 @@ fn compiler_inventory_parse_porcelain_v1(
                     tree_status != "T" and tree_status != "U"):
             return nil
         val operation = if status.contains("D"): "delete" else: "modify"
-        val next = compiler_inventory_event_push_v1(
-            changed, root, operation, path)
+        val next = compiler_inventory_event_push_cost_v1(
+            changed, root, operation, path, cost)
         if next == nil:
             return nil
         changed = next!
@@ -332,8 +359,8 @@ fn compiler_inventory_parse_porcelain_v1(
     if not digests.valid:
         return nil
     for path in untracked_paths:
-        val next = compiler_inventory_event_push_v1(
-            changed, root, "create", path)
+        val next = compiler_inventory_event_push_cost_v1(
+            changed, root, "create", path, cost)
         if next == nil:
             return nil
         changed = next!
@@ -349,6 +376,14 @@ fn _compiler_inventory_git_events_traced_v1(
     root: text, previous_head: text, head: text,
     source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?
+) -> CompilerInventoryGitEventsV1?:
+    _compiler_inventory_git_events_traced_cost_v1(root, previous_head, head, source_roots, cold_init, trace, nil)
+
+fn _compiler_inventory_git_events_traced_cost_v1(
+    root: text, previous_head: text, head: text,
+    source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?,
+    cost: ScvCompileCostV1?
 ) -> CompilerInventoryGitEventsV1?:
     for scope in source_roots:
         if not compiler_inventory_scope_valid_v1(scope): return nil
@@ -379,8 +414,8 @@ fn _compiler_inventory_git_events_traced_v1(
             val path = line[2:]
             if tag == "?":
                 untracked_paths = untracked_paths.push(path)
-            val next = compiler_inventory_event_push_v1(
-                events, root, "create", path)
+            val next = compiler_inventory_event_push_cost_v1(
+                events, root, "create", path, cost)
             if next == nil:
                 return nil
             events = next!
@@ -403,7 +438,7 @@ fn _compiler_inventory_git_events_traced_v1(
                 "examples/10_tooling"], trace, 2)
         if committed == nil:
             return nil
-        val next = compiler_inventory_parse_name_status_v1(root, committed!, events)
+        val next = compiler_inventory_parse_name_status_cost_v1(root, committed!, events, cost)
         if next == nil:
             return nil
         events = next!
@@ -415,8 +450,8 @@ fn _compiler_inventory_git_events_traced_v1(
             "--untracked-files=all", "--no-renames", "--"] + source_roots, trace, 3)
     if working == nil:
         return nil
-    compiler_inventory_parse_porcelain_v1(
-        root, working!, events, source_roots)
+    compiler_inventory_parse_porcelain_cost_v1(
+        root, working!, events, source_roots, cost)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -651,6 +686,13 @@ fn _compiler_inventory_refresh_locked_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryRefreshV1:
+    _compiler_inventory_refresh_locked_cost_v1(root, cache_root, source_roots, cold_init, trace, nil)
+
+fn _compiler_inventory_refresh_locked_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?,
+    cost: ScvCompileCostV1?
+) -> CompilerInventoryRefreshV1:
     # A cold refresh replaces the inventory, so source_roots must cover the
     # full intended inventory scope. The CLI admission owner supplies the
     # union of src and test before calling this function.
@@ -690,9 +732,9 @@ fn _compiler_inventory_refresh_locked_v1(
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val direct = match _compiler_inventory_git_events_traced_v1(
+    val direct = match _compiler_inventory_git_events_traced_cost_v1(
             root, if cursor.valid: cursor.git_head else: head, head,
-            source_roots, cold_init, trace):
+            source_roots, cold_init, trace, cost):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
     val aliases = compiler_inventory_aliases_v1(root, source_roots)
@@ -900,6 +942,13 @@ fn _compiler_inventory_refresh_owned_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryRefreshV1:
+    _compiler_inventory_refresh_owned_cost_v1(root, cache_root, source_roots, cold_init, trace, nil)
+
+fn _compiler_inventory_refresh_owned_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    trace: CompilerInventoryTraceV1?,
+    cost: ScvCompileCostV1?
+) -> CompilerInventoryRefreshV1:
     # Inventory publication and event-cursor publication form one compiler
     # refresh. Keep both reads and writes under the same refresh lock.
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
@@ -910,22 +959,32 @@ fn _compiler_inventory_refresh_owned_v1(
     val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
     if refresh_lock < 0:
         return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
-    if trace != nil: trace!.lock_released = false
-    val result = _compiler_inventory_refresh_locked_v1(
-        root, cache_root, source_roots, cold_init, trace)
+    if trace != nil:
+        trace!.lock_released = false
+    if cost != nil: cost!.lock_released = false
+    val result = _compiler_inventory_refresh_locked_cost_v1(
+        root, cache_root, source_roots, cold_init, trace, cost)
     if not file_unlock(refresh_lock):
         return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
-    if trace != nil: trace!.lock_released = true
+    if trace != nil:
+        trace!.lock_released = true
+    if cost != nil: cost!.lock_released = true
     result
 
 # Explicit token seam is diagnostic-only. Tokens never enter an admission key.
 fn compiler_inventory_refresh_traced_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool, token: text
 ) -> CompilerInventoryRefreshV1:
+    compiler_inventory_refresh_traced_cost_v1(root, cache_root, source_roots, cold_init, token, nil)
+
+fn compiler_inventory_refresh_traced_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool, token: text,
+    cost: ScvCompileCostV1?
+) -> CompilerInventoryRefreshV1:
     val trace = inventory_trace_create_v1(token)
     if trace != nil: trace!.begin(root, source_roots, cold_init)
-    val result = _compiler_inventory_refresh_owned_v1(
-        root, cache_root, source_roots, cold_init, trace)
+    val result = _compiler_inventory_refresh_owned_cost_v1(
+        root, cache_root, source_roots, cold_init, trace, cost)
     if trace != nil:
         if trace!.lock_released:
             trace!.finish(result.valid, result.reason, result.inventory_digest, result.inventory_generation)
@@ -937,10 +996,17 @@ fn compiler_inventory_refresh_traced_v1(
 fn compiler_inventory_refresh_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
 ) -> CompilerInventoryRefreshV1:
-    compiler_inventory_refresh_traced_v1(root, cache_root, source_roots, cold_init,
-        env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? "")
+    compiler_inventory_refresh_cost_v1(root, cache_root, source_roots, cold_init, nil)
+
+fn compiler_inventory_refresh_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool,
+    cost: ScvCompileCostV1?
+) -> CompilerInventoryRefreshV1:
+    compiler_inventory_refresh_traced_cost_v1(root, cache_root, source_roots, cold_init,
+        env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? "", cost)
 
 export compiler_inventory_refresh_traced_v1
+export compiler_inventory_refresh_traced_cost_v1
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
 export compiler_inventory_parse_name_status_v1

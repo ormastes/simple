@@ -1,7 +1,9 @@
 # Pure compile-inventory records, canonicalization, and event reduction.
-# I/O and publication remain in compile_source_inventory.spl.
+# Filesystem I/O and publication remain in compile_source_inventory.spl.
+# Optional monotonic diagnostics never participate in a semantic identity.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 use std.common.text_whitespace.{split_whitespace}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
@@ -175,8 +177,20 @@ fn compile_source_inventory_whole_text_rows_v1(canonical: text, prefixes: [text]
 # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md
 # for what IS still interpreted-only in this file (the comment/whitespace
 # canonicalization below) and the measurement this note is based on.
+fn compile_source_inventory_cost_hash_v1(content: text, cost: ScvCompileCostV1?) -> text:
+    val started = scv_cost_now_v1(cost)
+    val digest = sha256_text(content)
+    if cost != nil: cost!.record_hash(scv_cost_elapsed_v1(cost, started))
+    digest
+
 fn compile_source_inventory_event_from_content_v1(
     source: text, operation: text, source_identity: text, content: text
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_cost_v1(source, operation, source_identity, content, nil)
+
+fn compile_source_inventory_event_from_content_cost_v1(
+    source: text, operation: text, source_identity: text, content: text,
+    cost: ScvCompileCostV1?
 ) -> CompileSourceEventV1:
     if operation == "delete":
         return CompileSourceEventV1(
@@ -214,24 +228,24 @@ fn compile_source_inventory_event_from_content_v1(
         exports = export_rows.join("\n")
         initializers = initializer_rows.join("\n")
         providers = provider_rows.join("\n")
-    val content_digest = sha256_text(content)
+    val content_digest = compile_source_inventory_cost_hash_v1(content, cost)
     val semantic_digest = if canonical == content:
         content_digest
     else:
-        sha256_text(canonical)
+        compile_source_inventory_cost_hash_v1(canonical, cost)
     # Empty and whole-source facets frequently coincide. Reuse only a digest
     # computed for byte-identical text in this event; no cross-source cache or
     # membership/publication authority is introduced.
     val export_digest = if exports == canonical:
         semantic_digest
     else:
-        sha256_text(exports)
+        compile_source_inventory_cost_hash_v1(exports, cost)
     val initializer_digest = if initializers == canonical:
         semantic_digest
     elif initializers == exports:
         export_digest
     else:
-        sha256_text(initializers)
+        compile_source_inventory_cost_hash_v1(initializers, cost)
     val provider_digest = if providers == canonical:
         semantic_digest
     elif providers == exports:
@@ -239,7 +253,7 @@ fn compile_source_inventory_event_from_content_v1(
     elif providers == initializers:
         initializer_digest
     else:
-        sha256_text(providers)
+        compile_source_inventory_cost_hash_v1(providers, cost)
     CompileSourceEventV1(
         source, operation, source_identity, content_digest, semantic_digest,
         export_digest, initializer_digest, provider_digest, content.len())
@@ -247,8 +261,14 @@ fn compile_source_inventory_event_from_content_v1(
 fn compile_source_inventory_git_event_v1(
     operation: text, source_identity: text, content: text
 ) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_v1(
-        "git", operation, source_identity, content)
+    compile_source_inventory_git_event_cost_v1(operation, source_identity, content, nil)
+
+fn compile_source_inventory_git_event_cost_v1(
+    operation: text, source_identity: text, content: text,
+    cost: ScvCompileCostV1?
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_cost_v1(
+        "git", operation, source_identity, content, cost)
 
 fn compile_source_inventory_filesystem_event_v1(
     operation: text, source_identity: text, content: text
@@ -568,7 +588,9 @@ export compile_source_inventory_whole_text_eligible_v1
 export compile_source_inventory_whole_text_canonical_v1
 export compile_source_inventory_whole_text_rows_v1
 export compile_source_inventory_event_from_content_v1
+export compile_source_inventory_event_from_content_cost_v1
 export compile_source_inventory_git_event_v1
+export compile_source_inventory_git_event_cost_v1
 export compile_source_inventory_filesystem_event_v1
 export compile_source_inventory_event_path_v1
 export compile_source_inventory_text_valid_v1

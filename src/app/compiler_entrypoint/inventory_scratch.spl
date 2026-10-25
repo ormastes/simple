@@ -5,15 +5,25 @@
 # which made cold SCV inventory init impossible on every Rust-lane binary
 # since 966bc0159ed. Read through the Rust-backed checked text reader instead.
 use std.nogc_sync_mut.sffi.fs.{file_read_text_at_checked}
-use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_cost_v1}
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
 
 fn compiler_inventory_file_event_v1(
     operation: text, identity: text, absolute: text
 ) -> CompileSourceEventV1?:
+    compiler_inventory_file_event_cost_v1(operation, identity, absolute, nil)
+
+fn compiler_inventory_file_event_cost_v1(
+    operation: text, identity: text, absolute: text, cost: ScvCompileCostV1?
+) -> CompileSourceEventV1?:
     if not transient_array_scope_begin_v1():
         return nil
+    val read_started = scv_cost_now_v1(cost)
     val content: text? = file_read_text_at_checked(absolute, 0, 1073741824)
+    if cost != nil:
+        cost!.record_read(scv_cost_elapsed_v1(cost, read_started),
+            if content == nil: 0 else: content!.len())
     if content == nil:
         transient_array_scope_end_v1()
         return nil
@@ -24,8 +34,10 @@ fn compiler_inventory_file_event_v1(
     # first NUL and admission refused it as snapshot-index-drift. `??`
     # keeps the length-carrying string; nil was already refused above.
     val content_text: text = content ?? ""
-    val event = compile_source_inventory_git_event_v1(
-        operation, identity, content_text)
+    val event_started = scv_cost_now_v1(cost)
+    val event = compile_source_inventory_git_event_cost_v1(
+        operation, identity, content_text, cost)
+    if cost != nil: cost!.record_event(scv_cost_elapsed_v1(cost, event_started))
     if not transient_array_scope_pause_v1():
         transient_array_scope_end_v1()
         return nil
@@ -36,3 +48,4 @@ fn compiler_inventory_file_event_v1(
     Some(event)
 
 export compiler_inventory_file_event_v1
+export compiler_inventory_file_event_cost_v1
