@@ -23,6 +23,10 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_new,
+    service_revision_publish, service_revision_writable, service_revision_reset, service_attachment_identities, service_revision_rollback_allowed}
+use os.apps.smux.client_attachment_service.{ClientAttachmentUpdate, client_attachment_index,
+    client_attach_leased, client_resize_leased, client_reap_expired, client_attach_unmanaged}
 use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
     pane_poll_state,
     pane_spawn_state,
@@ -49,24 +53,26 @@ use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new,
     smux_lease_admit, smux_lease_heartbeat, smux_lease_check, smux_lease_expiry_candidates,
     smux_lease_expire, smux_lease_remove, smux_lease_token_matches,
     smux_lease_forget_client, smux_lease_forget_session}
-use std.sosix.entropy.{sosix_random_hex}
 use std.sosix.time.{sosix_time_now_monotonic_ms}
 use os.apps.smux.client_notifications.{smux_notifications_clear_recipient, smux_notifications_clear_all}
 use os.apps.smux.mux_rects.{MuxRect, mux_layout_known}
 use os.apps.smux.window_layout_service.{
-    window_layout_name, window_layout_rects, arrange_window_state as _arrange_window,
-    split_window_state, resize_pane_state, focus_window_state, toggle_zoom_state,
+    window_layout_name, window_layout_rects, window_content_rects, arrange_window_state as _arrange_window,
+    split_window_sized_state, resize_pane_state, focus_window_state, toggle_zoom_state,
     WindowGeometryUpdate
 }
+use std.common.contracts.mux.execution_v1.{MuxSplitSizeV1, MuxBorderV1, MuxBorderStatusV1}
+use os.apps.smux.pane_presentation.{pane_is_hidden}
+use os.apps.smux.pane_presentation_service.{set_pane_title_state, set_pane_border_state,
+    set_pane_border_status_state, hide_pane_state, show_pane_state, rebalance_window_state}
 use std.sosix.time.{sosix_time_now_unix_micros as time_now_unix_micros}
 
-# =========================================================================
 # Global service state
-# =========================================================================
 
 const SMUX_CAPACITY: int = 8
 
 var _svc: ServiceState = ServiceState.empty()
+var _revisions: ServiceRevisionState = service_revision_new()
 var _client_leases: ClientLeaseState = ClientLeaseState(owner_nonce: "",
     next_generation: 1, last_now_ms: 0, leases: [])
 var _split_checkpoints: [SplitCheckpoint] = []
@@ -74,17 +80,38 @@ var _closing_sessions: [text] = []
 var _closing_windows: [text] = []
 var _closing_panes: [PaneClosePending] = []
 
+# Every publication compares the immediate prior authoritative snapshot. Output
+# and input progress do not advance configuration; legacy mutations do.
+fn _publish(next: ServiceState) -> ServiceState:
+    _revisions = service_revision_publish(_revisions, _svc, next, _closing_sessions, _closing_windows, _closing_panes,
+        _client_leases.owner_nonce, service_attachment_identities(_client_leases))
+    return next
+
+pub fn smux_configuration_writable() -> bool:
+    return service_revision_writable(_revisions)
+
+pub fn smux_configuration_revision() -> ServiceRevisionState:
+    return _revisions
+
+# Internal server projection only: never serialize native handles from this value.
+pub fn smux_owner_snapshot() -> ServiceState:
+    return _svc
+
+fn _clear_attachment_notices(update: ClientAttachmentUpdate):
+    for item in update.cleared:
+        smux_notifications_clear_recipient(item.session_id, item.client_id)
+
 # Incomplete compensation leaves native geometry unknown. Keep every handle
 # and admit only the existing checked window/session teardown paths.
 fn _geometry_quarantine(window_id: text, outcome: WindowGeometryUpdate):
     if outcome.uncertain and not _closing_windows.contains(window_id):
         _closing_windows.push(window_id)
+        val _observed = _publish(_svc)
 
-# =========================================================================
 # Test support
-# =========================================================================
 
 pub fn smux_reset_for_test():
+    _revisions = service_revision_reset(_revisions)
     smux_notifications_clear_all()
     # Empty incarnation triggers fresh secure entropy on the next admission.
     _client_leases = ClientLeaseState(owner_nonce: "", next_generation: 1, last_now_ms: 0, leases: [])
@@ -97,11 +124,9 @@ pub fn smux_reset_for_test():
     while i < _svc.pane_count:
         _release_child(_svc.get_pane(i))
         i = i + 1
-    _svc = ServiceState.empty()
+    _svc = _publish(ServiceState.empty())
 
-# =========================================================================
 # Pure helpers
-# =========================================================================
 
 fn id_text(n: int) -> text:
     return "id" + n.to_text()
@@ -138,7 +163,7 @@ fn _window_idx(st: ServiceState, session_id: text, window_id: text) -> int:
 
 pub fn smux_poll_output() -> int:
     val updated = pane_poll_state(_svc, _closing_sessions, pane_close_poll_windows(_closing_panes, _closing_windows))
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 fn _closed_record() -> PaneRecord:
@@ -152,11 +177,10 @@ fn _closed_record() -> PaneRecord:
         rows: 0
     ))
 
-# =========================================================================
 # Session management
-# =========================================================================
 
 pub fn smux_admission_available() -> bool:
+    if not smux_configuration_writable(): return false
     return (_svc.session_count < SMUX_CAPACITY and
         _svc.window_count < SMUX_CAPACITY and
         _svc.pane_count < SMUX_CAPACITY)
@@ -175,7 +199,7 @@ pub fn smux_create_session(name: text) -> MuxSession:
     st = st.add_window(MuxWindow.create(wid, sid, "main").with_active(true))
     st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 2), wid, sid)).with_focus(true))
 
-    _svc = _with_startup(st).with_next_id(n + 3)
+    _svc = _publish(_with_startup(st).with_next_id(n + 3))
     return session
 
 pub fn smux_list_sessions() -> [MuxSession]:
@@ -193,6 +217,7 @@ pub fn smux_session_closing(session_id: text) -> bool:
     return false
 
 pub fn smux_rename_session(session_id: text, name: text) -> Result<MuxSession, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_session_closing(session_id):
         return Err("session is closing: " + session_id)
     val renamed = rename_session_state(_svc, session_id, name)
@@ -200,7 +225,7 @@ pub fn smux_rename_session(session_id: text, name: text) -> Result<MuxSession, t
         return Err(renamed.unwrap_err())
     val st = renamed.unwrap()
     val session = st.get_session(st.find_session_idx(session_id))
-    _svc = st
+    _svc = _publish(st)
     return Ok(session)
 
 # A false native close is retained for retry, including quarantine completion.
@@ -216,7 +241,7 @@ pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
     val st = close_owned_children(_svc, session_id)
     val removed = remove_session_state(st, session_id)
     if removed.is_err():
-        _svc = st
+        _svc = _publish(st)
         return Err("partial session cleanup pending or failed; retry kill: " + session_id)
     var i = 0
     while i < st.client_count:
@@ -241,53 +266,21 @@ pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
             windows.push(closing)
     _closing_windows = windows
     _client_leases = smux_lease_forget_session(_client_leases, session_id)
-    _svc = removed.unwrap()
+    _svc = _publish(removed.unwrap())
     return Ok(true)
 
-fn _leased_canvas_valid(cols: int, rows: int) -> bool:
-    return cols > 0 and cols <= 512 and rows > 0 and rows <= 256 and cols * rows <= 60000
-
-fn _lease_owner_ready(state: ClientLeaseState) -> Result<ClientLeaseState, text>:
-    if state.owner_nonce != "": return Ok(state)
-    # Match the crypto owner's explicit nil guard: a nullable-pattern bind is
-    # not a reliable fail-closed boundary on the affected native compilers.
-    val raw = sosix_random_hex(16)
-    if raw == nil: return Err("client lease secure entropy unavailable")
-    val nonce: text = raw ?? ""
-    return smux_leases_new(nonce)
-
 pub fn smux_attach_leased(session_id: text, client_id: text, cols: int, rows: int) -> Result<text, text>:
-    if smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0:
-        return Err("client lease session unavailable")
-    if client_id == "" or not _leased_canvas_valid(cols, rows):
-        return Err("client lease target or dimensions invalid")
-    val existing = _svc.find_client_idx(client_id)
-    if existing < 0 and _svc.client_count >= 4:
-        return Err("client attachment capacity reached")
-    val owner = _lease_owner_ready(_client_leases)
-    if owner.is_err(): return Err(owner.unwrap_err())
-    val admission = smux_lease_admit(owner.unwrap(), session_id, client_id, sosix_time_now_monotonic_ms())
-    if admission.is_err(): return Err(admission.unwrap_err())
-    val admitted = admission.unwrap()
-    var st = _svc
-    if existing >= 0:
-        val previous = st.get_client(existing)
-        # Re-admission changes identity even when the visible client ID is reused.
-        smux_notifications_clear_recipient(previous.session_id, client_id)
-        st = st.remove_client(existing)
-    val attachment = MuxClientAttachment.create(client_id, session_id, cols, rows)
-    _client_leases = admitted.state
-    _svc = st.add_client(attachment)
-    return Ok(admitted.lease.token)
-
-fn _leased_attachment_index(st: ServiceState, session_id: text, client_id: text) -> int:
-    val idx = st.find_client_idx(client_id)
-    if idx < 0: return -1
-    if st.get_client(idx).session_id != session_id: return -1
-    return idx
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
+    val changed = client_attach_leased(_svc, _client_leases, smux_session_closing(session_id), session_id, client_id, cols, rows, sosix_time_now_monotonic_ms())
+    if changed.is_err(): return Err(changed.unwrap_err())
+    val update = changed.unwrap()
+    _clear_attachment_notices(update)
+    _client_leases = update.leases
+    _svc = _publish(update.state)
+    return Ok(update.token)
 
 pub fn smux_client_heartbeat(session_id: text, client_id: text, token: text) -> Result<bool, text>:
-    if smux_session_closing(session_id) or _leased_attachment_index(_svc, session_id, client_id) < 0:
+    if smux_session_closing(session_id) or client_attachment_index(_svc, session_id, client_id) < 0:
         return Err("client lease attachment unavailable")
     val renewed = smux_lease_heartbeat(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
     if renewed.is_err(): return Err(renewed.unwrap_err())
@@ -295,79 +288,51 @@ pub fn smux_client_heartbeat(session_id: text, client_id: text, token: text) -> 
     return Ok(true)
 
 pub fn smux_client_check_lease(session_id: text, client_id: text, token: text) -> Result<bool, text>:
-    if smux_session_closing(session_id) or _leased_attachment_index(_svc, session_id, client_id) < 0:
+    if smux_session_closing(session_id) or client_attachment_index(_svc, session_id, client_id) < 0:
         return Err("client lease attachment unavailable")
     return smux_lease_check(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
 
 pub fn smux_client_resize_leased(session_id: text, client_id: text, token: text, cols: int, rows: int) -> Result<bool, text>:
-    if smux_session_closing(session_id) or not _leased_canvas_valid(cols, rows):
-        return Err("client lease session or dimensions invalid")
-    val idx = _leased_attachment_index(_svc, session_id, client_id)
-    if idx < 0: return Err("client lease attachment unavailable")
-    val renewed = smux_lease_heartbeat(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
-    if renewed.is_err(): return Err(renewed.unwrap_err())
-    val st = _svc.remove_client(idx).add_client(MuxClientAttachment.create(client_id, session_id, cols, rows))
-    _client_leases = renewed.unwrap()
-    _svc = st
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
+    val changed = client_resize_leased(_svc, _client_leases, smux_session_closing(session_id), session_id, client_id, token, cols, rows, sosix_time_now_monotonic_ms())
+    if changed.is_err(): return Err(changed.unwrap_err())
+    val update = changed.unwrap()
+    _client_leases = update.leases
+    _svc = _publish(update.state)
     return Ok(true)
 
 pub fn smux_detach_leased(session_id: text, client_id: text, token: text) -> Result<bool, text>:
-    val idx = _leased_attachment_index(_svc, session_id, client_id)
+    val idx = client_attachment_index(_svc, session_id, client_id)
     if idx < 0 or not smux_lease_token_matches(_client_leases, session_id, client_id, token):
         return Err("client lease identity mismatch")
     val leases = smux_lease_remove(_client_leases, session_id, client_id, token)
     val st = _svc.remove_client(idx)
     smux_notifications_clear_recipient(session_id, client_id)
     _client_leases = leases
-    _svc = st
+    _svc = _publish(st)
     return Ok(true)
 
 # Periodic server housekeeping, also usable before admission. Expiry removes
 # only the exact leased attachment and its notices; pane/process owners survive.
 # A clock failure refuses expiry without dropping any attachment or child.
 pub fn smux_reap_expired_clients() -> Result<int, text>:
-    val now_ms = sosix_time_now_monotonic_ms()
-    val candidates = smux_lease_expiry_candidates(_client_leases, now_ms)
-    if candidates.is_err(): return Err(candidates.unwrap_err())
-    var st = _svc
-    var leases = _client_leases
-    var removed_count = 0
-    for candidate in candidates.unwrap():
-        val expired = smux_lease_expire(leases, candidate.session_id, candidate.client_id, candidate.token, now_ms)
-        if expired.is_ok():
-            val idx = _leased_attachment_index(st, candidate.session_id, candidate.client_id)
-            if idx >= 0:
-                st = st.remove_client(idx)
-                smux_notifications_clear_recipient(candidate.session_id, candidate.client_id)
-                removed_count = removed_count + 1
-            leases = expired.unwrap()
-    _client_leases = leases
-    _svc = st
-    return Ok(removed_count)
+    val changed = client_reap_expired(_svc, _client_leases, sosix_time_now_monotonic_ms())
+    if changed.is_err(): return Err(changed.unwrap_err())
+    val update = changed.unwrap()
+    _clear_attachment_notices(update)
+    _client_leases = update.leases
+    _svc = _publish(update.state)
+    return Ok(update.removed)
 
 pub fn smux_attach(session_id: text, client_id: text, cols: int, rows: int) -> MuxClientAttachment:
-    # Compatibility API: persistent unmanaged attachment. A tokenless request
-    # cannot downgrade or resize a leased interactive attachment.
-    # Refused attachments must not look successful or consume a client slot.
-    val refused = MuxClientAttachment(client_id: client_id, session_id: session_id,
-        attached: false, cols: cols, rows: rows)
-    if smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0 or client_id == "" or cols <= 0 or rows <= 0:
-        return refused
-    for lease in _client_leases.leases:
-        if lease.client_id == client_id:
-            return refused
-    val existing = _svc.find_client_idx(client_id)
-    if existing < 0 and _svc.client_count >= 4:
-        return refused
-    val att = MuxClientAttachment.create(client_id, session_id, cols, rows)
-    var st = _svc
-    if existing >= 0:
-        val prior = st.get_client(existing)
-        if prior.session_id != session_id:
-            smux_notifications_clear_recipient(prior.session_id, client_id)
-        st = st.remove_client(existing)
-    _svc = st.add_client(att)
-    return att
+    val refused = MuxClientAttachment(client_id: client_id, session_id: session_id, attached: false, cols: cols, rows: rows)
+    if not smux_configuration_writable(): return refused
+    val changed = client_attach_unmanaged(_svc, _client_leases, smux_session_closing(session_id), session_id, client_id, cols, rows)
+    if changed.is_err(): return refused
+    val update = changed.unwrap()
+    _clear_attachment_notices(update)
+    _svc = _publish(update.state)
+    return MuxClientAttachment.create(client_id, session_id, cols, rows)
 
 pub fn smux_detach(client_id: text) -> bool:
     val idx = _svc.find_client_idx(client_id)
@@ -375,7 +340,7 @@ pub fn smux_detach(client_id: text) -> bool:
         return false
     smux_notifications_clear_recipient(_svc.get_client(idx).session_id, client_id)
     _client_leases = smux_lease_forget_client(_client_leases, client_id)
-    _svc = _svc.remove_client(idx)
+    _svc = _publish(_svc.remove_client(idx))
     return true
 
 pub fn smux_list_clients() -> [MuxClientAttachment]:
@@ -390,12 +355,10 @@ pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
         return false
     smux_notifications_clear_recipient(session_id, client_id)
     _client_leases = smux_lease_forget_client(_client_leases, client_id)
-    _svc = _svc.remove_client(idx)
+    _svc = _publish(_svc.remove_client(idx))
     return true
 
-# =========================================================================
 # Window management
-# =========================================================================
 
 pub fn smux_window_closing(session_id: text, window_id: text) -> bool:
     if smux_session_closing(session_id): return true
@@ -420,7 +383,7 @@ pub fn smux_kill_window(session_id: text, window_id: text) -> Result<bool, text>
     val st = close_owned_children(_svc, session_id, window_id)
     val removed = remove_window_state(st, session_id, window_id)
     if removed.is_err():
-        _svc = st
+        _svc = _publish(st)
         return Err("partial window cleanup pending or failed; retry kill-window: " + window_id)
     var checkpoints: [SplitCheckpoint] = []
     for saved in _split_checkpoints:
@@ -430,10 +393,11 @@ pub fn smux_kill_window(session_id: text, window_id: text) -> Result<bool, text>
         if closing != window_id: pending.push(closing)
     _split_checkpoints = checkpoints
     _closing_windows = pending
-    _svc = removed.unwrap()
+    _svc = _publish(removed.unwrap())
     return Ok(true)
 
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
+    if not smux_configuration_writable(): return MuxWindow.create("", session_id, name)
     if (smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0 or
             _svc.window_count >= SMUX_CAPACITY or _svc.pane_count >= SMUX_CAPACITY):
         return MuxWindow.create("", session_id, name)
@@ -442,7 +406,7 @@ pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
     val window = MuxWindow.create(wid, session_id, name)
     var st = _svc.add_window(window)
     st = st.add_pane(PaneRecord.create(MuxPane.create(id_text(n + 1), wid, session_id)).with_focus(true))
-    _svc = st.with_next_id(n + 2)
+    _svc = _publish(st.with_next_id(n + 2))
     return window
 
 pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
@@ -456,6 +420,7 @@ pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
     return result
 
 pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
+    if not smux_configuration_writable(): return false
     if smux_window_closing(session_id, window_id): return false
     if _window_idx(_svc, session_id, window_id) < 0:
         return false
@@ -466,7 +431,7 @@ pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
         if w.session_id == session_id:
             st = st.replace_window(i, w.with_active(w.id == window_id))
         i = i + 1
-    _svc = st
+    _svc = _publish(st)
     return true
 
 pub fn smux_active_window(session_id: text) -> Result<MuxWindow, text>:
@@ -475,9 +440,7 @@ pub fn smux_active_window(session_id: text) -> Result<MuxWindow, text>:
             return Ok(w)
     return Err("no active window in session: " + session_id)
 
-# =========================================================================
 # Pane management
-# =========================================================================
 
 pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     var result: [MuxPane] = []
@@ -491,10 +454,14 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     return result
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
+    return smux_split_pane_sized(session_id, window_id, pane_id, direction, MuxSplitSizeV1.Equal)
+
+pub fn smux_split_pane_sized(session_id: text, window_id: text, pane_id: text, direction: text, size: MuxSplitSizeV1) -> Result<MuxPane, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val before = _svc
     val added_id = id_text(before.next_id)
-    val result = split_window_state(before, added_id, session_id, window_id, pane_id, direction)
+    val result = split_window_sized_state(before, added_id, session_id, window_id, pane_id, direction, size)
     _geometry_quarantine(window_id, result)
     if result.is_err(): return Err(result.unwrap_err())
     val committed = result.unwrap()
@@ -506,13 +473,14 @@ pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, directi
     checkpoints.push(checkpoint)
     val new_pane = committed.get_pane(committed.find_pane_idx(added_id)).pane
     _split_checkpoints = checkpoints
-    _svc = committed
+    _svc = _publish(committed)
     return Ok(new_pane)
 
 # Only the most recent split in this window can be rolled back. The opaque
 # service-owned checkpoint compares IDs, child handles and complete geometry;
 # callers cannot supply replacement state or resurrect a removed child.
 pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: text) -> Result<bool, text>:
+    # Checked compensation may consume the reserved cleanup tick; no new split.
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     var match_index = -1
     var i = 0
@@ -523,6 +491,8 @@ pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: tex
         i = i + 1
     if match_index < 0:
         return Err("split rollback checkpoint missing")
+    if not service_revision_rollback_allowed(_revisions, match_index >= 0, smux_window_closing(session_id, window_id)):
+        return Err("split rollback authority unavailable")
     val restored = split_checkpoint_restore(_svc, _split_checkpoints[match_index])
     _geometry_quarantine(window_id, restored)
     if restored.is_err():
@@ -534,7 +504,7 @@ pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: tex
             remaining.push(_split_checkpoints[i])
         i = i + 1
     _split_checkpoints = remaining
-    _svc = restored.unwrap()
+    _svc = _publish(restored.unwrap())
     return Ok(true)
 
 # False preserves the native handle and freezes this window for close retry.
@@ -552,15 +522,16 @@ pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool
             if saved.before.id != window_id: kept.push(saved)
         _split_checkpoints = kept
     _closing_panes = updated.pending
-    _svc = updated.state
+    _svc = _publish(updated.state)
     return updated.closed
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
+    if not smux_configuration_writable(): return false
     if smux_window_closing(session_id, window_id): return false
     val updated = focus_window_state(_svc, session_id, window_id, pane_id)
     _geometry_quarantine(window_id, updated)
     if updated.is_err(): return false
-    _svc = updated.state
+    _svc = _publish(updated.state)
     return true
 
 pub fn smux_zoomed_pane(session_id: text, window_id: text) -> text:
@@ -571,12 +542,13 @@ pub fn smux_zoomed_pane(session_id: text, window_id: text) -> text:
 # A valid target toggles the entire window. Empty success means restored (or
 # an unchanged single-pane window), never an unsupported default implementation.
 pub fn smux_toggle_zoom(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val updated = toggle_zoom_state(_svc, session_id, window_id, pane_id)
     _geometry_quarantine(window_id, updated)
     if updated.is_err(): return Err(updated.error)
     val zoom = updated.state.get_window(updated.state.find_window_idx(window_id)).zoom_pane
-    _svc = updated.state
+    _svc = _publish(updated.state)
     return Ok(zoom)
 
 pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, text>:
@@ -591,110 +563,110 @@ pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, t
 # Native provider resizing precedes the corresponding VT/service commit.
 # Piped/no-child panes permit grid-only changes; owned PTYs require resizing.
 pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val result = resize_pane_state(_svc, session_id, window_id, pane_id, cols, rows)
     _geometry_quarantine(window_id, result)
     if result.is_err(): return Err(result.unwrap_err())
     val updated = result.unwrap()
     val pane = updated.get_pane(updated.find_pane_idx(pane_id)).pane
-    _svc = updated
+    _svc = _publish(updated)
     return Ok(pane)
 
-# =========================================================================
 # Child processes
-# =========================================================================
 
 # Attaches a piped child (no controlling terminal). Returns its pid.
 pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> Result<i64, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_spawn_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, cmd, args)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # Attaches a child on a real pseudo-terminal sized to the pane geometry.
 # `command_line` is handed to the platform launcher as one line (a shell path
 # on POSIX, a CreateProcess command line on Windows). Returns its pid.
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_spawn_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command_line)
-    if updated.commit: _svc = updated.state
+    if updated.cleanup_pending:
+        _closing_panes.push(PaneClosePending(session_id: session_id, window_id: window_id, pane_id: pane_id))
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 pub fn smux_pane_is_pty(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
     val updated = pane_is_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 pub fn smux_pane_alive(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
     val updated = pane_alive_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # Ends the PTY child but keeps the pane (and its captured output).
 pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> bool:
     val updated = pane_close_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
-# =========================================================================
 # Input / Output
-# =========================================================================
 
 # Accepts raw input into the pane's bounded owner queue and offers one byte
 # prefix to its provider. A pane without a child refuses input. Delivery may
 # remain pending after acceptance; smux_input_status reports progress/errors.
 pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> Result<text, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_send_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, text_input)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 pub fn smux_input_status(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
     val updated = pane_input_status_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # Types `command` and submits it: Enter is `\r` on a terminal (what a key
 # press sends) and `\n` on a pipe.
 pub fn smux_send_command(session_id: text, window_id: text, pane_id: text, command: text) -> Result<text, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_command_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<MuxCapture, text>:
     val updated = pane_capture_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, history_lines)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # Like smux_capture, but each row keeps its styling as ANSI SGR runs
 # (`ESC[0;<params>m` where attributes change, `ESC[0m` at a styled row's end).
 pub fn smux_capture_styled(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<text, text>:
     val updated = pane_capture_styled_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, history_lines)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # True when the pane's child has bracketed paste (?2004) enabled. Drains first:
 # the mode is set by what the child printed.
 pub fn smux_pane_bracketed_paste(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
     val updated = pane_bracketed_paste_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # Pastes `body` into the pane: wrapped in ESC[200~ ... ESC[201~ when the child
 # enabled bracketed paste, so it is taken as one paste (newlines included)
 # rather than typed keys; sent as-is otherwise. Does not submit.
 pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: text) -> Result<text, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_paste_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, body)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
-# =========================================================================
 # Backend contract
-# =========================================================================
 
 pub fn smux_backend_contract_name() -> text:
     return "smux-native"
 
-# =========================================================================
 # Deferred feature gate
-# =========================================================================
 
 pub fn smux_is_deferred_feature(feature: text) -> bool:
     # Hosted interactive copy navigation/line selection is implemented.
@@ -709,9 +681,7 @@ pub fn smux_is_deferred_feature(feature: text) -> bool:
         return true
     return false
 
-# =========================================================================
 # Observability
-# =========================================================================
 
 pub fn smux_metrics() -> SmuxMetrics:
     return _svc.metrics
@@ -720,7 +690,7 @@ pub fn smux_metrics() -> SmuxMetrics:
 # remain empty cells; reconstructing columns from a flattened text loses them.
 pub fn smux_capture_cells(session_id: text, window_id: text, pane_id: text) -> Result<[[text]], text>:
     val updated = pane_capture_cells_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # A directional split, pane removal or explicit pane resize replaces the named
@@ -731,7 +701,7 @@ pub fn smux_window_layout(session_id: text, window_id: text) -> Result<text, tex
 # Rectangles use production pane IDs and persisted named or manual geometry.
 # This never captures child output.
 pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
-    return window_layout_rects(_svc, session_id, window_id)
+    return window_content_rects(_svc, session_id, window_id)
 
 # Commit metadata and pane grids once after complete validation. Child handles,
 # process IDs, focus and output owners are retained by PaneRecord.resize.
@@ -739,6 +709,7 @@ pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
 # rollback before any service metadata is committed. Owned PTYs refuse missing
 # resize support. Actual child geometry still requires runtime evidence.
 pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<[MuxRect], text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     if not mux_layout_known(name):
         return Err("invalid layout: " + name)
@@ -748,12 +719,13 @@ pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: i
         return Err(planned.unwrap_err())
     val changed = planned.unwrap()
     val rects = window_layout_rects(changed, session_id, window_id)
-    _svc = changed
+    _svc = _publish(changed)
     return Ok(rects)
 
 # Reflow the existing plan, including manual nested splits. Never select an
 # unrelated named layout because a window has manual geometry.
 pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: int) -> Result<[MuxRect], text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val planned = _arrange_window(_svc, session_id, window_id, "", cols, rows)
     _geometry_quarantine(window_id, planned)
@@ -761,18 +733,55 @@ pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: i
         return Err(planned.unwrap_err())
     val changed = planned.unwrap()
     val rects = window_layout_rects(changed, session_id, window_id)
-    _svc = changed
+    _svc = _publish(changed)
     return Ok(rects)
 
 # Capture retained terminal history plus the visible frame in one snapshot.
 # Limit validation and full pane ownership precede any drain or state change.
 pub fn smux_capture_history(session_id: text, window_id: text, pane_id: text, max_lines: int) -> Result<MuxCapture, text>:
     val updated = pane_capture_history_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, max_lines)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
 
 # One bounded drain per pane and one authoritative commit for a complete frame.
 pub fn smux_capture_frame(session_id: text, window_id: text, cursor_pane: text = "") -> Result<text, text>:
     val updated = pane_capture_frame_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, cursor_pane)
-    if updated.commit: _svc = updated.state
+    if updated.commit: _svc = _publish(updated.state)
     return updated.result
+
+# Presentation helpers own native compensation; API owns the one publication.
+fn _presentation_open(session: text, window: text) -> bool:
+    return smux_configuration_writable() and not smux_window_closing(session, window)
+
+fn _publish_geometry(window: text, update: WindowGeometryUpdate) -> Result<bool, text>:
+    _geometry_quarantine(window, update)
+    if update.is_err(): return Err(update.error)
+    _svc = _publish(update.state)
+    return Ok(true)
+
+pub fn smux_pane_hidden(session: text, window: text, pane: text) -> bool:
+    return pane_is_hidden(_svc, session, window, pane)
+
+pub fn smux_set_pane_title(session: text, window: text, pane: text, title: text) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, set_pane_title_state(_svc, session, window, pane, title))
+
+pub fn smux_set_pane_border(session: text, window: text, pane: text, border: MuxBorderV1) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, set_pane_border_state(_svc, session, window, pane, border))
+
+pub fn smux_set_pane_border_status(session: text, window: text, pane: text, status: MuxBorderStatusV1) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, set_pane_border_status_state(_svc, session, window, pane, status))
+
+pub fn smux_hide_pane(session: text, window: text, pane: text) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, hide_pane_state(_svc, session, window, pane))
+
+pub fn smux_show_pane(session: text, window: text, pane: text) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, show_pane_state(_svc, session, window, pane))
+
+pub fn smux_rebalance_window(session: text, window: text) -> Result<bool, text>:
+    if not _presentation_open(session, window): return Err("window mutation authority unavailable")
+    return _publish_geometry(window, rebalance_window_state(_svc, session, window))

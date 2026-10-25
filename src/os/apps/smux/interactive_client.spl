@@ -37,6 +37,15 @@ class TerminalClient:
     copy_input: ClientCopyInput
     copy_deadline: i64
 
+# Only exact owner visibility refusals may trigger selection recovery. The
+# discarded input is never retried, and auth/transport failures stay failures.
+pub fn client_hidden_reply(reply: text, pane: text) -> bool:
+    if pane == "": return false
+    return reply == "smux: frame failed: cursor pane is hidden by window zoom: " + pane or
+        reply == "smux: input pane is hidden by window zoom: " + pane or
+        reply == "smux: frame failed: cursor pane is missing or explicitly hidden: " + pane or
+        reply == "smux: input pane is explicitly hidden: " + pane
+
 fn request(client: TerminalClient, command: text) -> Result<text, text>:
     # Bind every post-admission read and mutation to this owner incarnation,
     # not just heartbeats. A stale client must not type into reused pane IDs
@@ -374,7 +383,7 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
                         else: notification_ack = 0
             refresh = now + 50
         val removed_window = error == smux_missing_window_reply(client.window)
-        val hidden_pane = error == "smux: frame failed: cursor pane is hidden by window zoom: " + client.pane or error == "smux: input pane is hidden by window zoom: " + client.pane
+        val hidden_pane = client_hidden_reply(error, client.pane)
         if removed_window or hidden_pane:
             # The refused action is never replayed into the replacement pane.
             val recovered = recover_window_view(client, removed_window)

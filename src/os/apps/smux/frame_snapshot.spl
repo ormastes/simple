@@ -1,6 +1,8 @@
 # Bounded, pure projection of one real window snapshot into safe terminal ANSI.
 use os.apps.smux.service.{ServiceState}
-use os.apps.smux.window_layout_service.{window_layout_rects}
+use os.apps.smux.contract.{MuxPanePresentation}
+use os.apps.smux.window_layout_service.{window_layout_rects, window_content_rects, window_content_valid}
+use os.apps.smux.pane_presentation.{pane_presentation, pane_is_hidden, pane_title_cells, pane_decoration_cell}
 use os.apps.smux.vt_screen.{vt_cell_width}
 use std.common.string_core.{text_to_bytes}
 
@@ -13,7 +15,11 @@ pub fn smux_frame_validate(st: ServiceState, session_id: text, window_id: text, 
         return "frame canvas exceeds remote limit"
     if window_layout_rects(st, session_id, window_id).len() == 0:
         return "select a layout before frame capture"
+    if not window_content_valid(st, session_id, window_id):
+        return "invalid child content viewport"
     if cursor_pane != "":
+        if pane_is_hidden(st, session_id, window_id, cursor_pane):
+            return "cursor pane is missing or explicitly hidden: " + cursor_pane
         if w.zoom_pane != "" and cursor_pane != w.zoom_pane:
             return "cursor pane is hidden by window zoom: " + cursor_pane
         val pi = st.find_pane_idx(cursor_pane)
@@ -40,7 +46,10 @@ pub fn smux_frame_from_state(st: ServiceState, session_id: text, window_id: text
     val reason = smux_frame_validate(st, session_id, window_id, cursor_pane)
     if reason != "": return Err(reason)
     val w = st.get_window(st.find_window_idx(window_id))
-    val rects = window_layout_rects(st, session_id, window_id)
+    val allocations = window_layout_rects(st, session_id, window_id)
+    val rects = window_content_rects(st, session_id, window_id)
+    var titles: [[text]] = []
+    var presentations: [MuxPanePresentation] = []
     var cells: [[[text]]] = []
     var attrs: [[[text]]] = []
     var cursor_row: i64 = 0
@@ -54,6 +63,9 @@ pub fn smux_frame_from_state(st: ServiceState, session_id: text, window_id: text
         if pr.pane.session_id != session_id or pr.pane.window_id != window_id:
             return Err("frame pane ownership mismatch")
         val s = pr.screen
+        val presentation = pane_presentation(w, rect.pane_id)
+        presentations.push(presentation)
+        titles.push(pane_title_cells(presentation.title, rect.cols))
         val frozen = s.frozen.len() > 0
         cells.push(if frozen: s.frozen else: s.cells)
         attrs.push(if frozen: s.frozen_attrs else: s.attrs)
@@ -81,6 +93,12 @@ pub fn smux_frame_from_state(st: ServiceState, session_id: text, window_id: text
             var i: i64 = 0
             while i < rects.len():
                 val rect = rects[i]
+                val allocation = allocations[i]
+                if y >= allocation.row and y < allocation.row + allocation.rows and x >= allocation.col and x < allocation.col + allocation.cols:
+                    cell = pane_decoration_cell(allocation, presentations[i], titles[i], x, y)
+                    val decoration_width = vt_cell_width(cell)
+                    if decoration_width == 2: width = 2
+                    elif decoration_width == 0: cell = " "
                 if y >= rect.row and y < rect.row + rect.rows and x >= rect.col and x < rect.col + rect.cols:
                     val row = y - rect.row
                     val col = x - rect.col

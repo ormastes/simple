@@ -4,6 +4,8 @@ use os.apps.smux.service.{ServiceState}
 use os.apps.smux.child_lifecycle.{close_owned_children}
 use os.apps.smux.window_layout_service.{window_base_rects, apply_window_viewports, commit_window_geometry}
 use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.contract.{MuxPanePresentation}
+use os.apps.smux.pane_presentation.{pane_presentation, window_store_presentation}
 
 pub struct PaneClosePending:
     session_id: text
@@ -49,18 +51,28 @@ pub fn remove_closed_pane_state(st: ServiceState, session_id: text, window_id: t
     if target.pty_fd >= 0 or target.child_pid > 0:
         return Err("pane cleanup pending or failed: " + pane_id)
     var survivor = ""
+    var first_survivor = ""
     var i = 0
     while i < st.pane_count:
         val pane = st.get_pane(i).pane
-        if pane.session_id == session_id and pane.window_id == window_id and pane.id != pane_id and survivor == "":
-            survivor = pane.id
+        if pane.session_id == session_id and pane.window_id == window_id and pane.id != pane_id:
+            if first_survivor == "": first_survivor = pane.id
+            if survivor == "" and not pane_presentation(window, pane.id).hidden: survivor = pane.id
         i = i + 1
-    if survivor == "": return Err("final pane requires checked window deletion")
+    if first_survivor == "": return Err("final pane requires checked window deletion")
+    val reveal = survivor == ""
+    if reveal: survivor = first_survivor
     var remaining: [MuxRect] = []
     for rect in window_base_rects(st, session_id, window_id):
         if rect.pane_id != pane_id: remaining.push(rect)
     var result = st.remove_pane(pi).replace_window(wi, window.with_geometry(remaining, window.canvas_cols, window.canvas_rows))
-    if target.focus:
+    if reveal:
+        val prior = pane_presentation(result.get_window(wi), survivor)
+        val shown = window_store_presentation(result.get_window(wi), MuxPanePresentation(
+            pane_id: survivor, title: prior.title, hidden: false, border: prior.border, status: prior.status))
+        if shown.is_err(): return Err(shown.unwrap_err())
+        result = result.replace_window(wi, shown.unwrap())
+    if target.focus or reveal:
         i = 0
         while i < result.pane_count:
             val pane = result.get_pane(i)

@@ -1,8 +1,6 @@
 # service.spl — Authoritative session/window/pane state for the smux service.
 #
-# Global mutable service state stored in module-level vars.
-# Provides session registry, window registry, pane registry, attach table,
-# and observable counters.
+# Explicit value-owned registry; API/server composition publishes these values.
 
 use os.apps.smux.contract.{
     MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
@@ -16,8 +14,9 @@ use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_resize, vt_text,
 # (the caret workbench's right-hand region), small enough to stay cheap to
 # re-split on every capture.
 use os.apps.smux.input_queue.{PaneInput, pane_input_new}
-
-const PANE_TAIL_LINES: i64 = 200
+use os.apps.smux.vt_capture_state.{vt_view_equal}
+use std.common.text_bytes.{text_to_bytes}
+use os.apps.smux.vt_retention.{vt_tail_retain}
 
 # =========================================================================
 # Pane record — pane state + its output tail
@@ -37,25 +36,45 @@ class PaneRecord:
     # its child sees isatty(0) true and `stty size` reports the pane geometry.
     pty_fd: i64
     # tail — the child's output, ANSI-stripped and newline-normalized, bounded
-    # to the last PANE_TAIL_LINES lines.
+    # to the last 200 lines and 1 MiB, with observable UTF-8-safe eviction.
     tail: text
+    tail_truncated: bool
     # screen — what a PTY child currently shows (a full-screen program redraws
     # in place, so its output is applied to a grid, not appended to `tail`).
     screen: VtScreen
     input: PaneInput
+    content_revision: u64
+    ingestion_sequence: u64
+    child_incarnation: u64
 
     me with_input(input: PaneInput) -> PaneRecord:
-        return PaneRecord(input: input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
+        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
 
     me feed_screen(raw: text) -> PaneRecord:
-        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_feed(me.screen, raw))
+        var out = me
+        out.screen = vt_feed(me.screen, raw)
+        out.ingestion_sequence = me.ingestion_sequence + (text_to_bytes(raw).len() as u64)
+        if out.screen.capture_dirty:
+            out.content_revision = me.content_revision + 1
+        return out
+
+    # Pipe output uses the same terminal model for shared capture; legacy tail
+    # remains available. Count UTF-8 bytes delivered by the text-read provider.
+    me ingest_pipe(raw: text, cleaned: text) -> PaneRecord:
+        var out = me
+        # A pipe's LF starts a new text line (there is no terminal OPOST).
+        # Account delivered text bytes, not native syscall bytes or inserted CR.
+        out.screen = vt_feed(me.screen, raw.replace("\n", "\r\n"))
+        out.ingestion_sequence = me.ingestion_sequence + (text_to_bytes(raw).len() as u64)
+        if out.screen.capture_dirty: out.content_revision = me.content_revision + 1
+        val retained = vt_tail_retain(me.tail, cleaned)
+        out.tail = retained.content
+        out.tail_truncated = me.tail_truncated or retained.truncated
+        if retained.content != me.tail: out.content_revision = me.content_revision + 1
+        return out
 
     me feed(output: text) -> PaneRecord:
-        var joined = me.tail + output
-        val lines = joined.split("\n")
-        if lines.len() > PANE_TAIL_LINES:
-            joined = lines[lines.len() - PANE_TAIL_LINES:].join("\n")
-        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: joined, screen: me.screen)
+        return me.ingest_pipe(output, output)
 
     me resize(c: int, r: int) -> PaneRecord:
         val p = me.pane
@@ -68,23 +87,56 @@ class PaneRecord:
             cols: c,
             rows: r
         )
-        return PaneRecord(input: me.input, pane: np, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: if me.pty_fd >= 0: vt_resize(me.screen, r, c) else: me.screen)
+        var out = me
+        out.pane = np
+        out.screen = vt_resize(me.screen, r, c)
+        if out.screen.capture_dirty: out.content_revision = me.content_revision + 1
+        return out
 
     me with_focus(f: bool) -> PaneRecord:
-        return PaneRecord(input: me.input, pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
+        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: me.screen)
 
     me with_child(pid: i64) -> PaneRecord:
-        return PaneRecord(input: pane_input_new(), pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd, tail: me.tail, screen: me.screen)
+        var out = me
+        out.input = pane_input_new()
+        out.child_pid = pid
+        if pid > 0 and pid != me.child_pid:
+            out.child_incarnation = me.child_incarnation + 1
+        return out
 
     me with_pty(pid: i64, fd: i64) -> PaneRecord:
-        return PaneRecord(input: pane_input_new(), pane: me.pane, focus: me.focus, child_pid: pid, pty_fd: fd, tail: me.tail, screen: if fd >= 0: vt_new(me.pane.rows, me.pane.cols) else: me.screen)
+        var out = me
+        out.input = pane_input_new()
+        out.child_pid = pid
+        out.pty_fd = fd
+        if fd >= 0 and fd != me.pty_fd:
+            out.child_incarnation = me.child_incarnation + 1
+            # A failed spawn may still own a deferred-close native handle.
+            # Retain the last screen until a real child was attached.
+            if pid > 0:
+                out.screen = vt_new(me.pane.rows, me.pane.cols)
+                out.tail = ""
+                out.tail_truncated = false
+                if me.tail != "" or not vt_view_equal(me.screen, out.screen):
+                    out.content_revision = me.content_revision + 1
+        return out
+
+    me can_attach() -> bool:
+        return me.child_incarnation < 18446744073709551615u64 and me.content_revision < 18446744073709551615u64
+
+    me can_ingest() -> bool:
+        # Native reads are bounded; reserve ample counter space before I/O.
+        return me.ingestion_sequence <= 18446744073708503039u64 and me.content_revision < 18446744073709551615u64
+
+    me uses_tail_capture() -> bool:
+        return me.pty_fd < 0 and (me.child_pid > 0 or me.tail != "")
 
     me capture(max_lines: int) -> MuxCapture:
         # A PTY child's output lives on its screen (only a PTY feeds it); a
         # piped child's in the tail. Trailing blank lines (the newline that
         # ended the last output line, an idle prompt's padding) are not content.
         val shown = vt_text(me.screen)
-        var lines = if shown != "": shown.split("\n") else: me.tail.split("\n")
+        var lines = if me.uses_tail_capture(): me.tail.split("\n") else: shown.split("\n")
         while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
             lines = lines[0:lines.len() - 1]
         if max_lines > 0 and lines.len() > max_lines:
@@ -96,6 +148,8 @@ class PaneRecord:
     me capture_history(max_lines: int) -> MuxCapture:
         if max_lines <= 0:
             return MuxCapture.create(me.pane.id, "", 0)
+        if me.uses_tail_capture():
+            return me.capture(max_lines)
         var content = vt_history_text(me.screen, max_lines as i64)
         if me.pty_fd < 0 and me.child_pid > 0 and not me.screen.alt.on and me.screen.frozen.len() == 0 and content == "":
             content = me.capture(max_lines).content
@@ -105,7 +159,7 @@ class PaneRecord:
     # Rows of the PTY screen with styling as ANSI SGR runs (the piped tail has
     # no styling, so it is returned plain).
     me styled_capture(max_lines: int) -> text:
-        var lines = if me.pty_fd >= 0: vt_styled_text(me.screen).split("\n") else: me.tail.split("\n")
+        var lines = if me.uses_tail_capture(): me.tail.split("\n") else: vt_styled_text(me.screen).split("\n")
         while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
             lines = lines[0:lines.len() - 1]
         if max_lines > 0 and lines.len() > max_lines:
@@ -117,13 +171,13 @@ class PaneRecord:
         return vt_replies(me.screen)
 
     me without_replies() -> PaneRecord:
-        return PaneRecord(input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_clear_replies(me.screen))
+        return PaneRecord(content_revision: me.content_revision, ingestion_sequence: me.ingestion_sequence, child_incarnation: me.child_incarnation, input: me.input, pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, tail_truncated: me.tail_truncated, screen: vt_clear_replies(me.screen))
 
     me bracketed_paste() -> bool:
         return me.pty_fd >= 0 and vt_bracketed_paste(me.screen)
 
     static fn create(p: MuxPane) -> PaneRecord:
-        return PaneRecord(input: pane_input_new(), pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", screen: vt_new(p.rows, p.cols))
+        return PaneRecord(content_revision: 0, ingestion_sequence: 0, child_incarnation: 0, input: pane_input_new(), pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", tail_truncated: false, screen: vt_new(p.rows, p.cols))
 
 
 # =========================================================================
@@ -438,6 +492,10 @@ class ServiceState:
             return me
         val blank = PaneRecord.create(MuxPane.create("", "", ""))
         var st = me
+        val removed = me.get_pane(idx).pane
+        val wi = st.find_window_idx(removed.window_id)
+        if wi >= 0:
+            st = st.replace_window(wi, st.get_window(wi).without_pane_presentation(removed.id))
         var i = idx
         while i < me.pane_count - 1:
             st = st.replace_pane(i, st.get_pane(i + 1))

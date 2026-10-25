@@ -1,0 +1,135 @@
+# Exact publication-time metadata comparison. No observation hashes, host calls
+# or independent service registry. Output/queue progress is deliberately absent.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.pane_lifecycle.{PaneClosePending}
+use os.apps.smux.pane_presentation.{pane_presentations_equal}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.client_leases.{ClientLeaseState}
+
+pub val SERVICE_REVISION_MAX: u64 = 18446744073709551615u64
+
+pub struct AttachmentRevisionIdentity:
+    session_id: text
+    client_id: text
+    generation: i64
+
+pub struct ServiceRevisionState:
+    value: u64
+    epoch: u64
+    valid: bool
+    closing_sessions: [text]
+    closing_windows: [text]
+    closing_panes: [PaneClosePending]
+    attachment_owner: text = ""
+    attachments: [AttachmentRevisionIdentity] = []
+
+pub fn service_revision_new() -> ServiceRevisionState:
+    return ServiceRevisionState(value: 1, epoch: 1, valid: true,
+        closing_sessions: [], closing_windows: [], closing_panes: [])
+
+# Reserve the final tick for retirement/checked cleanup. No new irreversible
+# operation may start without this preflight; cleanup remains permitted.
+pub fn service_revision_writable(clock: ServiceRevisionState) -> bool:
+    return clock.valid and clock.value < SERVICE_REVISION_MAX - 1
+
+# Compensation uses existing checkpoint authority, including after retirement.
+# This gate never authorizes a new split, spawn or caller-supplied replacement.
+pub fn service_revision_rollback_allowed(clock: ServiceRevisionState, checkpoint_present: bool, owner_closing: bool) -> bool:
+    return clock.value > 0 and clock.epoch > 0 and checkpoint_present and not owner_closing
+
+pub fn service_attachment_identities(leases: ClientLeaseState) -> [AttachmentRevisionIdentity]:
+    var ids: [AttachmentRevisionIdentity] = []
+    for lease in leases.leases:
+        ids.push(AttachmentRevisionIdentity(session_id: lease.session_id, client_id: lease.client_id, generation: lease.generation))
+    return ids
+
+fn same_attachments(a: [AttachmentRevisionIdentity], b: [AttachmentRevisionIdentity]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i].session_id != b[i].session_id or a[i].client_id != b[i].client_id or a[i].generation != b[i].generation: return false
+        i = i + 1
+    return true
+
+fn same_texts(a: [text], b: [text]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    return true
+
+fn same_pending(a: [PaneClosePending], b: [PaneClosePending]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i].session_id != b[i].session_id or a[i].window_id != b[i].window_id or a[i].pane_id != b[i].pane_id: return false
+        i = i + 1
+    return true
+
+fn same_rects(a: [MuxRect], b: [MuxRect]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i].pane_id != b[i].pane_id or a[i].col != b[i].col or a[i].row != b[i].row or a[i].cols != b[i].cols or a[i].rows != b[i].rows: return false
+        i = i + 1
+    return true
+
+pub fn service_configuration_equal(a: ServiceState, b: ServiceState) -> bool:
+    if a.session_count != b.session_count or a.window_count != b.window_count or a.pane_count != b.pane_count or a.client_count != b.client_count: return false
+    # Allocated identities cannot disappear from the revision history merely
+    # because a failed composite operation restores the visible collection.
+    if a.next_id != b.next_id: return false
+    var i = 0
+    while i < a.session_count:
+        val x = a.get_session(i)
+        val y = b.get_session(i)
+        if x.id != y.id or x.name != y.name or x.created_at != y.created_at or x.generation != y.generation: return false
+        i = i + 1
+    i = 0
+    while i < a.window_count:
+        val x = a.get_window(i)
+        val y = b.get_window(i)
+        if x.id != y.id or x.session_id != y.session_id or x.name != y.name or x.is_active != y.is_active or x.layout != y.layout or x.zoom_pane != y.zoom_pane: return false
+        if x.canvas_cols != y.canvas_cols or x.canvas_rows != y.canvas_rows or x.manual_cols != y.manual_cols or x.manual_rows != y.manual_rows: return false
+        if not same_rects(x.manual_rects, y.manual_rects) or not pane_presentations_equal(x.presentation, y.presentation): return false
+        i = i + 1
+    i = 0
+    while i < a.pane_count:
+        val x = a.get_pane(i)
+        val y = b.get_pane(i)
+        if x.pane.id != y.pane.id or x.pane.session_id != y.pane.session_id or x.pane.window_id != y.pane.window_id or x.pane.backend_kind != y.pane.backend_kind or x.pane.state != y.pane.state: return false
+        if x.focus != y.focus or x.pane.cols != y.pane.cols or x.pane.rows != y.pane.rows: return false
+        if x.child_pid != y.child_pid or x.pty_fd != y.pty_fd or x.child_incarnation != y.child_incarnation: return false
+        i = i + 1
+    i = 0
+    while i < a.client_count:
+        val x = a.get_client(i)
+        val y = b.get_client(i)
+        if x.client_id != y.client_id or x.session_id != y.session_id or x.attached != y.attached or x.cols != y.cols or x.rows != y.rows: return false
+        i = i + 1
+    return true
+
+pub fn service_revision_publish(clock: ServiceRevisionState, before: ServiceState, after: ServiceState,
+    sessions: [text], windows: [text], panes: [PaneClosePending], attachment_owner: text = "",
+    attachments: [AttachmentRevisionIdentity] = []) -> ServiceRevisionState:
+    val changed = not service_configuration_equal(before, after) or
+        not same_texts(clock.closing_sessions, sessions) or not same_texts(clock.closing_windows, windows) or not same_pending(clock.closing_panes, panes) or
+        clock.attachment_owner != attachment_owner or not same_attachments(clock.attachments, attachments)
+    var revision = clock.value
+    var valid = clock.valid
+    if changed:
+        if revision < SERVICE_REVISION_MAX: revision = revision + 1
+        else: valid = false
+        if revision == SERVICE_REVISION_MAX: valid = false
+    return ServiceRevisionState(value: revision, epoch: clock.epoch, valid: valid,
+        closing_sessions: sessions, closing_windows: windows, closing_panes: panes,
+        attachment_owner: attachment_owner, attachments: attachments)
+
+# Reset invalidates old owner references even when a later session reuses id1.
+pub fn service_revision_reset(clock: ServiceRevisionState) -> ServiceRevisionState:
+    val epoch = if clock.epoch < SERVICE_REVISION_MAX: clock.epoch + 1 else: clock.epoch
+    return ServiceRevisionState(value: clock.value, epoch: epoch,
+        valid: clock.valid and clock.epoch < SERVICE_REVISION_MAX,
+        closing_sessions: clock.closing_sessions, closing_windows: clock.closing_windows, closing_panes: clock.closing_panes,
+        attachment_owner: clock.attachment_owner, attachments: clock.attachments)

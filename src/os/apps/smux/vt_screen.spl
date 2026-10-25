@@ -1,3 +1,6 @@
+use os.apps.smux.vt_snapshot.{vt_history_text, vt_history_count, vt_set_history_limit, vt_text, vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible, vt_alt_screen}
+use os.apps.smux.vt_retention.*
+use std.common.text_bytes.{text_to_bytes}
 # vt_screen.spl — The visible screen of a terminal pane.
 #
 # A full-screen program (an agent TUI, an editor, ConPTY itself) does not print
@@ -33,70 +36,9 @@
 use os.apps.smux.vt_history.{vt_history_bound, vt_history_trim,
     vt_history_append, vt_history_capture, vt_grid_text, vt_grid_styled_text}
 
-# The SGR state applied to the next printed character.
-struct VtPen:
-    bold: bool
-    dim: bool
-    italic: bool
-    underline: bool
-    reverse: bool
-    # "" default, else the SGR parameters selecting it ("31", "38;5;196",
-    # "38;2;r;g;b"; the same with 4x/48 for the background).
-    fg: text
-    bg: text
-
-# Terminal modes and the parser side-channels.
-struct VtModes:
-    cursor_visible: bool
-    bracketed: bool
-    pen: VtPen
-    # Canonical SGR parameters of `pen` ("" = default), stored in each cell.
-    pen_sgr: text
-    # Bytes owed to the child in answer to queries, oldest first.
-    replies: text
-    # Leading bytes of the OSC string being parsed (enough to classify it).
-    osc: text
-
-# The main screen while the alternate screen is shown.
-struct VtAlt:
-    on: bool
-    cells: [[text]]
-    attrs: [[text]]
-    row: i64
-    col: i64
-
-struct VtScreen:
-    rows: i64
-    cols: i64
-    cells: [[text]]
-    # Per-cell canonical SGR parameters, parallel to `cells` ("" = default).
-    attrs: [[text]]
-    row: i64
-    col: i64
-    saved_row: i64
-    saved_col: i64
-    # Scroll region, inclusive rows.
-    top: i64
-    bottom: i64
-    # Escape-parser state, kept so a sequence split across two reads still
-    # parses: 0 text, 1 after ESC, 2 CSI, 3 OSC, 4 DCS/APC/PM/SOS string,
-    # 5 one designator byte to skip (ESC ( B and friends).
-    mode: i64
-    params: text
-    # Synchronized output (DEC mode 2026): while a program holds the mode set,
-    # this is the last complete frame and captures show it instead of the
-    # half-drawn `cells`. Empty when no frame is being drawn.
-    frozen: [[text]]
-    frozen_attrs: [[text]]
-    frozen_row: i64
-    frozen_col: i64
-    frozen_cursor_visible: bool
-    # Saved primary-screen cell rows; alternate output never appends here.
-    history: [[text]]
-    history_limit: i64
-    frozen_history: [[text]]
-    modes: VtModes
-    alt: VtAlt
+use os.apps.smux.vt_types.{VtPen, VtModes, VtAlt, VtScreen}
+use os.apps.smux.vt_capture_state.{vt_wrap_new, vt_wrap_shift, vt_wrap_trim,
+    vt_wrap_append, vt_mark_dirty, vt_rows_equal, vt_row_equal, vt_view_equal, vt_rows_copy, vt_wrap_copy}
 
 fn _blank_row(cols: i64, blank: text) -> [text]:
     var r: [text] = []
@@ -123,12 +65,14 @@ pub fn vt_new(rows: i64, cols: i64) -> VtScreen:
     val c = if cols > 0: cols else: 80
     val modes = VtModes(cursor_visible: true, bracketed: false,
         pen: _pen_default(), pen_sgr: "", replies: "", osc: "")
-    val alt = VtAlt(on: false, cells: [], attrs: [], row: 0, col: 0)
+    val alt = VtAlt(on: false, cells: [], attrs: [], wrapped: [], cell_loss: [], row: 0, col: 0)
     VtScreen(rows: r, cols: c, cells: _blank_grid(r, c, " "),
-        attrs: _blank_grid(r, c, ""), row: 0, col: 0, saved_row: 0,
+        attrs: _blank_grid(r, c, ""), wrapped: vt_wrap_new(r), cell_loss: vt_loss_new(r), row: 0, col: 0, saved_row: 0,
         saved_col: 0, top: 0, bottom: r - 1, mode: 0, params: "", frozen: [],
-        frozen_attrs: [], frozen_row: 0, frozen_col: 0, frozen_cursor_visible: true,
-        history: [], history_limit: 2000, frozen_history: [],
+        frozen_attrs: [], frozen_wrapped: [], frozen_loss: [], frozen_row: 0, frozen_col: 0, frozen_cursor_visible: true,
+        history: [], history_attrs: [], history_wrapped: [], history_loss: [], history_limit: 2000,
+        frozen_history: [], frozen_history_attrs: [], frozen_history_wrapped: [], frozen_history_loss: [],
+        discarded_controls: 0, capture_dirty: false,
         modes: modes, alt: alt)
 
 fn _clamp(v: i64, lo: i64, hi: i64) -> i64:
@@ -185,7 +129,12 @@ fn _erase_both(s0: VtScreen, row: i64, from: i64, to: i64) -> VtScreen:
     var s = s0
     s.cells = _erase(s.cells, s.cols, row, from, to, " ")
     s.attrs = _erase(s.attrs, s.cols, row, from, to, "")
-    s
+    s.cell_loss = vt_loss_clear(s.cell_loss, row, from, to)
+    if from <= 0 and to >= s.cols:
+        var wraps = s.wrapped
+        wraps[row] = false
+        s.wrapped = wraps
+    vt_mark_dirty(s, not vt_row_equal(s0.cells[row], s.cells[row]) or not vt_row_equal(s0.attrs[row], s.attrs[row]) or s0.wrapped[row] != s.wrapped[row] or s0.cell_loss[row].len() != s.cell_loss[row].len())
 
 # Removes `n` rows at `at` inside the scroll region and opens blank rows at the
 # region bottom (scroll up / delete lines).
@@ -222,22 +171,37 @@ fn _scroll_up(s0: VtScreen, at: i64, n: i64, save: bool) -> VtScreen:
         var i = 0
         while i < count:
             s.history = vt_history_append(s.history, s.cells[i], s.history_limit)
+            s.history_attrs = vt_history_append(s.history_attrs, s.attrs[i], s.history_limit)
+            s.history_wrapped = vt_wrap_append(s.history_wrapped, s.wrapped[i], s.history_limit)
+            s.history_loss = vt_loss_append(s.history_loss, s.cell_loss[i], s.history_limit)
             i = i + 1
     s.cells = _pull_rows(s.cells, s.bottom, at, count, s.cols, " ")
     s.attrs = _pull_rows(s.attrs, s.bottom, at, count, s.cols, "")
-    s
+    s.wrapped = vt_wrap_shift(s.wrapped, s.bottom, at, count, false)
+    s.cell_loss = vt_loss_shift(s.cell_loss, s.bottom, at, count, false)
+    vt_mark_dirty(s, not vt_view_equal(s0, s))
 
 fn _scroll_down(s0: VtScreen, at: i64, n: i64) -> VtScreen:
     var s = s0
     val count = _clamp(n, 0, s.bottom - at + 1)
     s.cells = _push_rows(s.cells, s.bottom, at, count, s.cols, " ")
     s.attrs = _push_rows(s.attrs, s.bottom, at, count, s.cols, "")
-    s
+    s.wrapped = vt_wrap_shift(s.wrapped, s.bottom, at, count, true)
+    s.cell_loss = vt_loss_shift(s.cell_loss, s.bottom, at, count, true)
+    vt_mark_dirty(s, not vt_view_equal(s0, s))
 
 fn _newline(s: VtScreen) -> VtScreen:
     if s.row == s.bottom:
         return _scroll_up(s, s.top, 1, true)
     _at(s, s.row + 1, s.col)
+
+fn _hard_newline(screen: VtScreen) -> VtScreen:
+    var s = screen
+    val changed = s.wrapped[s.row]
+    var wraps = s.wrapped
+    wraps[s.row] = false
+    s.wrapped = wraps
+    _newline(vt_mark_dirty(s, changed))
 
 fn _in(ch: text, lo: text, hi: text) -> bool:
     ch >= lo and ch <= hi
@@ -277,28 +241,45 @@ fn _put_char(s0: VtScreen, ch: text) -> VtScreen:
         if c >= 0 and c < s.cols and s.cells[s.row][c] == "":
             c = c - 1
         if c >= 0 and c < s.cols:
+            if text_to_bytes(s.cells[s.row][c]).len() + text_to_bytes(ch).len() > 256:
+                val prior_count = s.cell_loss[s.row].len()
+                s.cell_loss = vt_loss_note(s.cell_loss, s.row, c)
+                return vt_mark_dirty(s, prior_count != s.cell_loss[s.row].len())
             var cells = s.cells
             var line = cells[s.row]
             line[c] = line[c] + ch
             cells[s.row] = line
             s.cells = cells
+            s = vt_mark_dirty(s, true)
         return s
     if w > s.cols:
         w = 1
     if s.col + w > s.cols:
+        var wraps = s.wrapped
+        val changed = not wraps[s.row]
+        wraps[s.row] = true
+        s.wrapped = wraps
+        s = vt_mark_dirty(s, changed)
         s = _newline(_at(s, s.row, 0))
     var cells = s.cells
     var attrs = s.attrs
     var line = cells[s.row]
     var aline = attrs[s.row]
+    var changed = line[s.col] != ch or aline[s.col] != s.modes.pen_sgr
+    val old_loss_count = s.cell_loss[s.row].len()
+    s.cell_loss = vt_loss_clear(s.cell_loss, s.row, s.col, s.col + w)
     # Overwriting either half of a wide character blanks the other half.
     if line[s.col] == "" and s.col > 0:
+        s.cell_loss = vt_loss_clear(s.cell_loss, s.row, s.col - 1, s.col)
+        changed = changed or line[s.col - 1] != " "
         line[s.col - 1] = " "
     if s.col + w < s.cols and line[s.col + w] == "":
+        changed = true
         line[s.col + w] = " "
     line[s.col] = ch
     aline[s.col] = s.modes.pen_sgr
     if w == 2:
+        changed = changed or line[s.col + 1] != "" or aline[s.col + 1] != s.modes.pen_sgr
         line[s.col + 1] = ""
         aline[s.col + 1] = s.modes.pen_sgr
     cells[s.row] = line
@@ -306,7 +287,8 @@ fn _put_char(s0: VtScreen, ch: text) -> VtScreen:
     s.cells = cells
     s.attrs = attrs
     s.col = s.col + w
-    s
+    changed = changed or old_loss_count != s.cell_loss[s.row].len()
+    vt_mark_dirty(s, changed)
 
 fn _shift_line(line0: [text], col: i64, n: i64, cols: i64, insert: bool, blank: text) -> [text]:
     var line = line0
@@ -335,7 +317,8 @@ fn _row_edit(s0: VtScreen, final: text, n: i64) -> VtScreen:
     attrs[s.row] = _shift_line(attrs[s.row], s.col, n, s.cols, insert, "")
     s.cells = cells
     s.attrs = attrs
-    s
+    s.cell_loss = vt_loss_edit(s.cell_loss, s.row, s.col, n, s.cols, insert)
+    vt_mark_dirty(s, not vt_row_equal(s0.cells[s.row], s.cells[s.row]) or not vt_row_equal(s0.attrs[s.row], s.attrs[s.row]) or not vt_loss_equal(s0.cell_loss, s.cell_loss))
 
 # --- SGR -------------------------------------------------------------------
 
@@ -426,33 +409,48 @@ fn _set_alt(s0: VtScreen, on: bool, with_cursor: bool) -> VtScreen:
     if on == s.alt.on:
         return s
     if on:
-        s.alt = VtAlt(on: true, cells: s.cells, attrs: s.attrs, row: s.row, col: s.col)
+        s.alt = VtAlt(on: true, cells: vt_rows_copy(s.cells), attrs: vt_rows_copy(s.attrs), wrapped: vt_wrap_copy(s.wrapped), cell_loss: vt_loss_copy(s.cell_loss), row: s.row, col: s.col)
         s.cells = _blank_grid(s.rows, s.cols, " ")
         s.attrs = _blank_grid(s.rows, s.cols, "")
-        return s
+        s.wrapped = vt_wrap_new(s.rows)
+        s.cell_loss = vt_loss_new(s.rows)
+        return vt_mark_dirty(s, not vt_view_equal(s0, s))
     s.cells = s.alt.cells
     s.attrs = s.alt.attrs
+    s.wrapped = s.alt.wrapped
+    s.cell_loss = s.alt.cell_loss
     if with_cursor:
         s.row = s.alt.row
         s.col = s.alt.col
-    s.alt = VtAlt(on: false, cells: [], attrs: [], row: 0, col: 0)
-    s
+    s.alt = VtAlt(on: false, cells: [], attrs: [], wrapped: [], cell_loss: [], row: 0, col: 0)
+    vt_mark_dirty(s, not vt_view_equal(s0, s))
 
 fn _dec_mode(s0: VtScreen, n: i64, on: bool) -> VtScreen:
     var s = s0
     if n == 2026:
         if on:
             if s.frozen.len() == 0:
-                s.frozen = s.cells
-                s.frozen_attrs = s.attrs
+                s.frozen = vt_rows_copy(s.cells)
+                s.frozen_attrs = vt_rows_copy(s.attrs)
+                s.frozen_wrapped = vt_wrap_copy(s.wrapped)
+                s.frozen_loss = vt_loss_copy(s.cell_loss)
                 s.frozen_row = s.row
                 s.frozen_col = s.col
                 s.frozen_cursor_visible = s.modes.cursor_visible
-                s.frozen_history = if s.alt.on: [] else: s.history
+                s.frozen_history = if s.alt.on: [] else: vt_rows_copy(s.history)
+                s.frozen_history_attrs = if s.alt.on: [] else: vt_rows_copy(s.history_attrs)
+                s.frozen_history_wrapped = if s.alt.on: [] else: vt_wrap_copy(s.history_wrapped)
+                s.frozen_history_loss = if s.alt.on: [] else: vt_loss_copy(s.history_loss)
         else:
             s.frozen = []
             s.frozen_attrs = []
             s.frozen_history = []
+            s.frozen_wrapped = []
+            s.frozen_history_attrs = []
+            s.frozen_history_wrapped = []
+            s.frozen_loss = []
+            s.frozen_history_loss = []
+            s = vt_mark_dirty(s, not vt_view_equal(s0, s))
         return s
     if n == 25 or n == 2004:
         var m = s.modes
@@ -565,8 +563,12 @@ fn _csi(s0: VtScreen, final: text, params: text) -> VtScreen:
     if final == "J":
         val how = params.to_int() ?? 0
         if how == 3:
+            val changed = s.history.len() > 0 and not s.alt.on
             s.history = []
-            return s
+            s.history_attrs = []
+            s.history_wrapped = []
+            s.history_loss = []
+            return vt_mark_dirty(s, changed)
         var r = 0
         while r < s.rows:
             if how >= 2 or (how == 1 and r < s.row) or (how == 0 and r > s.row):
@@ -608,6 +610,7 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
     val esc = "\x1b"
     val bel = "\x07"
     var s = screen
+    s.capture_dirty = false
     for ch in raw.chars():
         if s.mode == 0:
             if ch == esc:
@@ -615,7 +618,7 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
             elif ch == "\r":
                 s = _at(s, s.row, 0)
             elif ch == "\n":
-                s = _newline(s)
+                s = _hard_newline(s)
             elif ch == "\b":
                 s = _at(s, s.row, s.col - 1)
             elif ch == "\t":
@@ -635,7 +638,9 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
             elif ch == "8":
                 s = _with_parser(_csi(s, "u", ""), 0, "")
             elif ch == "c":
+                val prior = s
                 s = vt_set_history_limit(vt_new(s.rows, s.cols), s.history_limit)
+                s.capture_dirty = prior.capture_dirty or not vt_view_equal(prior, s)
             elif ch == "P" or ch == "_" or ch == "^" or ch == "X":
                 s = _with_parser(s, 4, "")
             elif ch == "(" or ch == ")" or ch == "*" or ch == "+" or ch == "#" or ch == "%":
@@ -645,8 +650,22 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
         elif s.mode == 2:
             if ch >= "@" and ch <= "~":
                 s = _with_parser(_csi(s, ch, s.params), 0, "")
+            elif ch == esc:
+                s = _with_parser(s, 1, "")
+                if s.discarded_controls < 18446744073709551615u64:
+                    s.discarded_controls = s.discarded_controls + 1
             else:
-                s = _with_parser(s, 2, s.params + ch)
+                val parameters = s.params + ch
+                if ch < " " or ch > "?" or text_to_bytes(parameters).len() > 256:
+                    s = _with_parser(s, 6, "")
+                    if s.discarded_controls < 18446744073709551615u64:
+                        s.discarded_controls = s.discarded_controls + 1
+                else:
+                    s = _with_parser(s, 2, parameters)
+        elif s.mode == 6:
+            # Discard oversized CSI through its terminator; ESC cancels it.
+            if ch == esc: s = _with_parser(s, 1, "")
+            elif ch >= "@" and ch <= "~": s = _with_parser(s, 0, "")
         elif s.mode == 3:
             if ch == bel:
                 s = _with_parser(_osc_end(s, true), 0, "")
@@ -689,10 +708,22 @@ pub fn vt_resize(screen: VtScreen, rows: i64, cols: i64) -> VtScreen:
     val c = if cols > 0: cols else: screen.cols
     s.cells = _fit(screen.cells, screen.rows, screen.cols, r, c, " ")
     s.attrs = _fit(screen.attrs, screen.rows, screen.cols, r, c, "")
+    s.cell_loss = vt_loss_fit(screen.cell_loss, r, c)
+    # Physical resize does not reflow; clipped rows lose their soft continuation.
+    s.wrapped = vt_wrap_new(r)
+    if c == screen.cols:
+        for i in 0..r:
+            if i < screen.wrapped.len(): s.wrapped[i] = screen.wrapped[i]
     if screen.alt.on:
+        var alt_wraps = vt_wrap_new(r)
+        if c == screen.cols:
+            for i in 0..r:
+                if i < screen.alt.wrapped.len(): alt_wraps[i] = screen.alt.wrapped[i]
         s.alt = VtAlt(on: true,
             cells: _fit(screen.alt.cells, screen.rows, screen.cols, r, c, " "),
             attrs: _fit(screen.alt.attrs, screen.rows, screen.cols, r, c, ""),
+            wrapped: alt_wraps,
+            cell_loss: vt_loss_fit(screen.alt.cell_loss, r, c),
             row: _clamp(screen.alt.row, 0, r - 1), col: _clamp(screen.alt.col, 0, c))
     s.rows = r
     s.cols = c
@@ -705,64 +736,13 @@ pub fn vt_resize(screen: VtScreen, rows: i64, cols: i64) -> VtScreen:
     s.frozen = []
     s.frozen_attrs = []
     s.frozen_history = []
+    s.frozen_wrapped = []
+    s.frozen_history_attrs = []
+    s.frozen_history_wrapped = []
+    s.frozen_loss = []
+    s.frozen_history_loss = []
+    s.capture_dirty = not vt_view_equal(screen, s)
     s
-
-# Capture saved primary rows plus the visible frame, newest max_lines rows.
-# Alternate capture excludes the primary history; a synchronized frame freezes
-# both history and visible cells, even if alternate mode changes mid-update.
-pub fn vt_history_text(screen: VtScreen, max_lines: i64) -> text:
-    if screen.frozen.len() > 0:
-        return vt_history_capture(screen.frozen_history, screen.frozen, max_lines)
-    val saved = if screen.alt.on: [] else: screen.history
-    return vt_history_capture(saved, screen.cells, max_lines)
-
-pub fn vt_history_count(screen: VtScreen) -> i64:
-    if screen.frozen.len() > 0:
-        return screen.frozen_history.len()
-    if screen.alt.on:
-        return 0
-    return screen.history.len()
-
-pub fn vt_set_history_limit(screen: VtScreen, limit: i64) -> VtScreen:
-    var s = screen
-    s.history_limit = vt_history_bound(limit)
-    s.history = vt_history_trim(s.history, s.history_limit)
-    # Keep a synchronized capture immutable until release. Its saved snapshot
-    # was bounded when captured and is cleared at release/resize/reset.
-    return s
-
-# Visible serialization honors the same synchronized snapshot as history.
-pub fn vt_text(screen: VtScreen) -> text:
-    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
-    return vt_grid_text(shown)
-
-pub fn vt_styled_text(screen: VtScreen) -> text:
-    val frozen = screen.frozen.len() > 0
-    val shown = if frozen: screen.frozen else: screen.cells
-    val styles = if frozen: screen.frozen_attrs else: screen.attrs
-    return vt_grid_styled_text(shown, styles)
-
-# Bytes the child is owed in answer to its queries (write them to the PTY).
-pub fn vt_replies(screen: VtScreen) -> text:
-    screen.modes.replies
-
-pub fn vt_clear_replies(screen: VtScreen) -> VtScreen:
-    var s = screen
-    var m = s.modes
-    m.replies = ""
-    s.modes = m
-    s
-
-# True while the child has bracketed paste (?2004) enabled: pasted text should
-# then be sent as ESC[200~ ... ESC[201~.
-pub fn vt_bracketed_paste(screen: VtScreen) -> bool:
-    screen.modes.bracketed
-
-pub fn vt_cursor_visible(screen: VtScreen) -> bool:
-    screen.modes.cursor_visible
-
-pub fn vt_alt_screen(screen: VtScreen) -> bool:
-    screen.alt.on
 
 export VtScreen, vt_new, vt_feed, vt_resize, vt_text, vt_styled_text,
     vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible,

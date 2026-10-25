@@ -1,0 +1,256 @@
+# REQ-CMUX-003/005/006/008; NFR-CMUX-005/006/007/008. NOT_RUN: authored pure production-state controls.
+# These values do not establish authentication or claim any live provider.
+use std.spec.{describe, it, expect, step}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use os.apps.smux.contract.{MuxPane}
+use os.apps.smux.service.{PaneRecord}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_set_history_limit, vt_resize}
+use os.apps.smux.vt_capture.{vt_capture_page}
+use os.apps.smux.vt_retention.{vt_tail_retain}
+use os.apps.smux.capture_cursor.*
+
+fn lease(name: text = "lease-a") -> MuxHandleV1:
+    MuxHandleV1(owner_id: "capture-owner", owner_generation: 7, lease_id: name)
+
+fn pane_ref() -> MuxObjectRefV1:
+    MuxObjectRefV1(owner_id: "capture-owner", owner_generation: 7,
+        kind: MuxObjectKindV1.Pane, object_id: "pane-a")
+
+fn record() -> PaneRecord:
+    PaneRecord.create(MuxPane.create("pane-a", "window-a", "session-a")).resize(4, 2)
+
+fn request(range: MuxCaptureRangeV1, maximum: i64 = 3, token: text? = nil,
+    styled: bool = false, joined: bool = true) -> MuxCaptureV1:
+    MuxCaptureV1(pane: pane_ref(), range: range, join_wrapped: joined,
+        styled: styled, max_bytes: maximum, continuation: token)
+
+fn capture(owner: CaptureCursorOwner, rec: PaneRecord, req: MuxCaptureV1,
+    now: i64 = 100, client: text = "lease-a") -> CaptureCursorUpdate:
+    capture_cursor_apply(owner, lease(client), pane_ref(), rec, req, 11,
+        MuxIngestionV1.NotPolled, now)
+
+describe "CoreMux capture production value controls (NOT_RUN)":
+    it "selects logical lines independently of soft-wrap serialization":
+        # @req REQ-CMUX-005 NFR-CMUX-007
+        step("Write six cells across a four-column terminal")
+        val screen = vt_feed(vt_new(2, 4), "ABCDEF")
+        val joined = vt_capture_page(screen, MuxCaptureRangeV1.Lines(0, 0), true, false, 0, 100)
+        val physical = vt_capture_page(screen, MuxCaptureRangeV1.Lines(0, 0), false, false, 0, 100)
+        expect(bytes_to_text(joined.bytes)).to_equal("ABCDEF  ")
+        expect(bytes_to_text(physical.bytes)).to_equal("ABCD\nEF  ")
+        expect(joined.more).to_equal(false)
+
+    it "uses negative logical offsets from the current screen and retains styles":
+        # @req REQ-CMUX-005 NFR-CMUX-007
+        val screen = vt_feed(vt_new(2, 4), "\x1b[31mABCD\r\nEFGH\r\nIJKL")
+        val old = vt_capture_page(screen, MuxCaptureRangeV1.Lines(-1, -1), true, true, 0, 100)
+        val shown = vt_capture_page(screen, MuxCaptureRangeV1.Screen, true, false, 0, 100)
+        expect(bytes_to_text(old.bytes)).to_equal("\x1b[0;31mABCD\x1b[0m")
+        expect(bytes_to_text(shown.bytes)).to_equal("EFGH\nIJKL")
+        expect(screen.history_attrs[0][0]).to_equal("31")
+
+    it "reconstructs styled Unicode bytes across pages smaller than an ANSI token":
+        # @req REQ-CMUX-005 NFR-CMUX-007
+        val rec = record().feed_screen("\x1b[31m한A")
+        var owner = capture_cursor_new()
+        var token: text? = nil
+        var bytes: [u8] = []
+        var done = false
+        var pages = 0
+        while not done and pages < 64:
+            val result = capture(owner, rec, request(MuxCaptureRangeV1.Screen, 2, token, true))
+            expect(result.result.is_ok()).to_equal(true)
+            val page = result.result.unwrap()
+            expect(page.byte_extent).to_equal(page.bytes.len())
+            expect(page.byte_extent).to_be_less_than(3)
+            for byte in page.bytes: bytes.push(byte)
+            owner = result.owner
+            token = page.continuation
+            done = not page.truncated
+            pages = pages + 1
+        expect(done).to_equal(true)
+        # Independent expected wire bytes, not a second call to the serializer.
+        expect(bytes).to_equal(text_to_bytes("\x1b[0;31m한A\x1b[0m \n    "))
+        expect(owner.cursors.len()).to_equal(0)
+
+    it "preserves independently specified emoji byte pages and display-cell padding":
+        # @req REQ-CMUX-005 NFR-CMUX-007
+        val screen = vt_feed(vt_new(1, 4), "\x1b[32m😀Z")
+        val expected: [u8] = [27, 91, 48, 59, 51, 50, 109, 240, 159, 152, 128, 90, 27, 91, 48, 109, 32]
+        var actual: [u8] = []
+        for offset in 0..expected.len():
+            val page = vt_capture_page(screen, MuxCaptureRangeV1.Screen, true, true, offset, 1)
+            expect(page.bytes.len()).to_equal(1)
+            actual.push(page.bytes[0])
+        expect(actual).to_equal(expected)
+
+    it "does not let another lease advance a valid continuation":
+        # @req REQ-CMUX-008 NFR-CMUX-006
+        val rec = record().feed_screen("ABCDEF")
+        val initial = capture(capture_cursor_new(), rec, request(MuxCaptureRangeV1.Screen))
+        val next = request(MuxCaptureRangeV1.Screen, 3, initial.result.unwrap().continuation)
+        val denied = capture(initial.owner, rec, next, 101, "lease-b")
+        expect(denied.result.unwrap_err().kind).to_equal(MuxErrorKindV1.PermissionDenied)
+        val continued = capture(denied.owner, rec, next, 102)
+        expect(bytes_to_text(continued.result.unwrap().bytes)).to_equal("DEF")
+
+    it "rejects content, child incarnation, options, expiry and token replay changes":
+        # @req REQ-CMUX-008 NFR-CMUX-006
+        val rec = record().feed_screen("ABCDEF")
+        val initial = capture(capture_cursor_new(), rec, request(MuxCaptureRangeV1.Screen))
+        val token = initial.result.unwrap().continuation
+        val next = request(MuxCaptureRangeV1.Screen, 3, token)
+        expect(capture(initial.owner, rec.feed_screen("Z"), next).result.unwrap_err().kind).to_equal(MuxErrorKindV1.StaleRevision)
+        val attached = rec.with_pty(-1, 23)
+        expect(capture(initial.owner, attached, next).result.unwrap_err().kind).to_equal(MuxErrorKindV1.StaleRevision)
+        expect(capture(initial.owner, rec, request(MuxCaptureRangeV1.Screen, 4, token)).result.unwrap_err().kind).to_equal(MuxErrorKindV1.InvalidRequest)
+        expect(capture(initial.owner, rec, next, 30100).result.unwrap_err().kind).to_equal(MuxErrorKindV1.StaleRevision)
+        val advanced = capture(initial.owner, rec, next)
+        expect(capture(advanced.owner, rec, next).result.unwrap_err().kind).to_equal(MuxErrorKindV1.StaleRevision)
+
+    it "bounds descriptors and rejects capacity without evicting a live cursor":
+        # @req REQ-CMUX-006 REQ-CMUX-008 NFR-CMUX-005
+        val rec = record().feed_screen("ABCDEF")
+        var owner = capture_cursor_new()
+        for i in 0..16:
+            val issued = capture(owner, rec, request(MuxCaptureRangeV1.Screen, 1))
+            expect(issued.result.is_ok()).to_equal(true)
+            owner = issued.owner
+        val rejected = capture(owner, rec, request(MuxCaptureRangeV1.Screen, 1))
+        expect(rejected.result.unwrap_err().kind).to_equal(MuxErrorKindV1.Busy)
+        expect(rejected.owner.cursors.len()).to_equal(16)
+        expect(capture_cursor_forget_lease(owner, lease()).cursors.len()).to_equal(0)
+
+    it "counts query bytes without advancing content or metadata revisions":
+        # @req REQ-CMUX-003 NFR-CMUX-007
+        val rec = record().feed_screen("AB")
+        val query = rec.feed_screen("\x1b[6n")
+        expect(query.ingestion_sequence).to_equal(rec.ingestion_sequence + 4)
+        expect(query.content_revision).to_equal(rec.content_revision)
+        val repeated = query.feed_screen("\rAB")
+        expect(repeated.content_revision).to_equal(query.content_revision)
+        val captured = capture(capture_cursor_new(), repeated, request(MuxCaptureRangeV1.Screen, 100))
+        expect(captured.result.unwrap().observed_revision).to_equal(11)
+        expect(captured.result.unwrap().ingestion).to_equal(MuxIngestionV1.NotPolled)
+
+    it "accounts original pipe bytes while normalizing text line feeds":
+        # @req REQ-CMUX-003 NFR-CMUX-007
+        val rec = record().ingest_pipe("A\nB", "A\nB")
+        expect(rec.ingestion_sequence).to_equal(3)
+        val page = vt_capture_page(rec.screen, MuxCaptureRangeV1.Screen, false, false, 0, 100)
+        expect(bytes_to_text(page.bytes)).to_equal("A   \nB   ")
+
+    it "freezes cells, styles, history and soft wraps until synchronization release":
+        # @req REQ-CMUX-008 NFR-CMUX-006
+        val rec = record().feed_screen("\x1b[31mABCDEFGHIJ")
+        val before = vt_capture_page(rec.screen, MuxCaptureRangeV1.AllHistory, true, true, 0, 1000)
+        val hidden = rec.feed_screen("\x1b[?2026h\x1b[32m\r\nKLMN\x1b[?1049hX")
+        val during = vt_capture_page(hidden.screen, MuxCaptureRangeV1.AllHistory, true, true, 0, 1000)
+        expect(during.bytes).to_equal(before.bytes)
+        expect(hidden.content_revision).to_equal(rec.content_revision)
+        expect(hidden.ingestion_sequence).to_be_greater_than(rec.ingestion_sequence)
+        val released = hidden.feed_screen("\x1b[?2026l")
+        expect(released.content_revision).to_be_greater_than(rec.content_revision)
+        val again = vt_capture_page(rec.screen, MuxCaptureRangeV1.AllHistory, true, true, 0, 1000)
+        expect(again.bytes).to_equal(before.bytes)
+
+    it "retains a pending native handle and screen while blocking new attachment":
+        # @req REQ-CMUX-003 REQ-CMUX-008 NFR-CMUX-008
+        val rec = record().feed_screen("AB")
+        val pending = rec.with_pty(-1, 23)
+        expect(pending.pty_fd).to_equal(23)
+        expect(pending.child_pid).to_equal(-1)
+        expect(pending.child_incarnation).to_equal(rec.child_incarnation + 1)
+        expect(pending.content_revision).to_equal(rec.content_revision)
+        expect(pending.with_pty(-1, 23).child_incarnation).to_equal(pending.child_incarnation)
+        expect(pending.with_pty(-1, -1).child_incarnation).to_equal(pending.child_incarnation)
+        var exhausted = rec
+        exhausted.child_incarnation = 18446744073709551615u64
+        expect(exhausted.can_attach()).to_equal(false)
+
+    it "keeps history attrs and wrap arrays aligned across eviction and resize":
+        # @req REQ-CMUX-005 NFR-CMUX-007
+        val bounded = vt_set_history_limit(vt_new(2, 4), 1)
+        val screen = vt_feed(bounded, "\x1b[31mABCDEFGHIJKLMNOP")
+        expect(screen.history.len()).to_equal(1)
+        expect(screen.history_attrs.len()).to_equal(1)
+        expect(screen.history_wrapped.len()).to_equal(1)
+        expect(screen.history_wrapped[0]).to_equal(true)
+        val resized = vt_resize(screen, 3, 4)
+        expect(resized.wrapped[0]).to_equal(screen.wrapped[0])
+        expect(vt_set_history_limit(resized, 0).history_attrs.len()).to_equal(0)
+
+    it "preserves legacy pipe history beyond its current terminal grid":
+        # @req REQ-CMUX-003 REQ-CMUX-005 NFR-CMUX-005
+        # The production record feeds both views, but legacy capture selects tail.
+        var rec = record()
+        for i in 0..30:
+            val line = "pipe-line-" + i.to_text() + "\n"
+            rec = rec.ingest_pipe(line, line)
+        val legacy = rec.capture(200)
+        expect(legacy.rows).to_equal(30)
+        expect(legacy.content).to_start_with("pipe-line-0\n")
+        expect(legacy.content).to_end_with("pipe-line-29")
+        expect(rec.capture_history(200).content).to_equal(legacy.content)
+        val current = vt_capture_page(rec.screen, MuxCaptureRangeV1.Screen, true, false, 0, 100)
+        expect(bytes_to_text(current.bytes).contains("pipe-line-0")).to_equal(false)
+
+    it "bounds oversized and malformed CSI while resuming ordinary output":
+        # @req REQ-CMUX-005 REQ-CMUX-008 NFR-CMUX-005 NFR-CMUX-007
+        var parameters = ""
+        for i in 0..257: parameters = parameters + "1"
+        val first = vt_feed(vt_new(1, 4), "\x1b[" + parameters)
+        expect(first.params.len()).to_equal(0)
+        expect(first.mode).to_equal(6)
+        val resumed = vt_feed(first, "mOK")
+        expect(resumed.discarded_controls).to_equal(1)
+        expect(bytes_to_text(vt_capture_page(resumed, MuxCaptureRangeV1.Screen, false, false, 0, 100).bytes)).to_equal("OK  ")
+        val malformed = vt_feed(vt_new(1, 4), "\x1b[한mYES")
+        expect(malformed.discarded_controls).to_equal(1)
+        expect(malformed.cells[0][0]).to_equal("Y")
+
+    it "reports only selected combining-cell loss and recovers on overwrite or erase":
+        # @req REQ-CMUX-005 REQ-CMUX-008 NFR-CMUX-005 NFR-CMUX-007
+        var marks = ""
+        for i in 0..128: marks = marks + "\u{301}"
+        val damaged = record().feed_screen("A" + marks + "\r\nB")
+        expect(text_to_bytes(damaged.screen.cells[0][0]).len()).to_be_less_than(257)
+        val denied = capture(capture_cursor_new(), damaged, request(MuxCaptureRangeV1.Lines(0, 0), 1000))
+        expect(denied.result.unwrap_err().kind).to_equal(MuxErrorKindV1.Unavailable)
+        expect(capture(capture_cursor_new(), damaged, request(MuxCaptureRangeV1.Lines(1, 1), 1000)).result.is_ok()).to_equal(true)
+        val overwritten = damaged.feed_screen("\x1b[1;1HZ")
+        expect(capture(capture_cursor_new(), overwritten, request(MuxCaptureRangeV1.Screen, 1000)).result.is_ok()).to_equal(true)
+        val erased = damaged.feed_screen("\x1b[2J")
+        expect(capture(capture_cursor_new(), erased, request(MuxCaptureRangeV1.Screen, 1000)).result.is_ok()).to_equal(true)
+        expect(capture_retention_status(damaged)).to_contain("lost_cells: 1")
+        expect(capture_retention_status(erased)).to_contain("lost_cells: 0")
+
+    it "recovers history loss after eviction and preserves frozen loss until release":
+        # @req REQ-CMUX-005 REQ-CMUX-008 NFR-CMUX-005 NFR-CMUX-007
+        var marks = ""
+        for i in 0..128: marks = marks + "\u{301}"
+        var rec = record()
+        rec.screen = vt_set_history_limit(rec.screen, 1)
+        val damaged = rec.feed_screen("A" + marks + "\r\nB\r\nC")
+        expect(capture(capture_cursor_new(), damaged, request(MuxCaptureRangeV1.Screen, 1000)).result.is_ok()).to_equal(true)
+        expect(capture(capture_cursor_new(), damaged, request(MuxCaptureRangeV1.AllHistory, 1000)).result.is_err()).to_equal(true)
+        val evicted = damaged.feed_screen("\r\nD")
+        expect(capture(capture_cursor_new(), evicted, request(MuxCaptureRangeV1.AllHistory, 1000)).result.is_ok()).to_equal(true)
+        val frozen = damaged.feed_screen("\x1b[?2026h\x1b[3J")
+        expect(capture(capture_cursor_new(), frozen, request(MuxCaptureRangeV1.AllHistory, 1000)).result.is_err()).to_equal(true)
+        expect(capture(capture_cursor_new(), frozen.feed_screen("\x1b[?2026l"), request(MuxCaptureRangeV1.AllHistory, 1000)).result.is_ok()).to_equal(true)
+
+    it "retains a bounded recent Unicode tail without disabling subsequent output":
+        # @req REQ-CMUX-005 REQ-CMUX-008 NFR-CMUX-005 NFR-CMUX-007
+        var block = "한"
+        for i in 0..19: block = block + block
+        val retained = vt_tail_retain("", block)
+        expect(retained.truncated).to_equal(true)
+        expect(text_to_bytes(retained.content).len()).to_equal(1048575)
+        expect(retained.content).to_start_with("한")
+        expect(retained.content).to_end_with("한")
+        val continued = vt_tail_retain(retained.content, "\nREADY")
+        expect(text_to_bytes(continued.content).len()).to_be_less_than(1048577)
+        expect(continued.content).to_end_with("\nREADY")
