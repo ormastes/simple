@@ -2987,6 +2987,14 @@ impl MirLowering:
                         if val shape = bootstrap_fn_ret_array_element_shape_lookup(call_symbol.name):
                             val rebound = self.rebind_record_element_owner(element, shape)
                             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Array(rebound, size), span: found_type.span), 0, 0)
+                    # Same recovery as the Named arm below: the name-keyed
+                    # element registry can miss, and then the untyped
+                    # `val lines = make_lines(s)` binding inherited no
+                    # array_element_struct_syms row from this temp.
+                    if not self.array_element_struct_syms.contains(local.id):
+                        val array_return_elem_owner = self.optional_payload_struct_name(element)
+                        if array_return_elem_owner != "":
+                            self.array_element_struct_syms[local.id] = array_return_elem_owner
                 case HirTypeKind.Slice(element):
                     if val present_call_symbol = optional_call_symbol:
                         val call_symbol: HirSymbol = present_call_symbol
@@ -3640,7 +3648,25 @@ impl MirLowering:
                 # untag); see the revert commit for the falsified
                 # unconditional version.
                 val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
-                val esn = elem_struct_name ?? ""
+                var esn = elem_struct_name ?? ""
+                # WA-MIR-UNRESOLVED-slice root fix: a local bound from a call
+                # result or a typed let (`val lines: [Line] = make_lines(s)`)
+                # carries its Array HIR type (remember_call_hir_return /
+                # remember_local_hir_type) but no array_element_struct_syms
+                # row, so `lines[i]` decoded an untyped word, `.field` lost
+                # its declared type and `cl.raw.slice(..)` became
+                # "unresolved method call: slice". Recover the element owner
+                # from that HIR type through the same fail-closed
+                # Struct/Class + known-layout gate the Named-return arm uses.
+                if esn == "":
+                    if val base_hir_type = self.find_local_hir_type(base_local.id):
+                        match base_hir_type.kind:
+                            case HirTypeKind.Array(base_elem_type, _) | HirTypeKind.Slice(base_elem_type):
+                                val recovered_elem_owner = self.optional_payload_struct_name(base_elem_type)
+                                if recovered_elem_owner != "":
+                                    esn = recovered_elem_owner
+                                    self.array_element_struct_syms[base_local.id] = recovered_elem_owner
+                            case _: ()
                 val has_real_struct_name = esn != "" and esn != "__runtime_array__"
                 # A1 (bug cranelift_native_aggregate_return_nil_receiver_
                 # hosted_wm_2026-07-26): an element that is ITSELF an array
