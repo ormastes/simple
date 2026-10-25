@@ -1,0 +1,56 @@
+# Behavioral counterpart to the upstream constructor-coverage regression.
+# Execution is UNRUN until a qualified self-hosted test CLI is available.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirStruct, HirTrait}
+use compiler.hir.hir_codec.{hir_module_encode, hir_codec_header}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_module}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+fn presence_flags_module() -> HirModule:
+    val source = "struct Point:\n    x: i64\n\ntrait Area:\n    fn area() -> i64\n"
+    val parsed = parse_full_frontend(source, "presence_flags.spl", "presence_flags",
+        Logger(level: 0))
+    var lowering = HirLowering.with_filename("presence_flags.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn expect_concrete_absent_flags(module: HirModule):
+    expect(module.structs.len()).to_equal(1)
+    val structs = module.structs.keys()
+    val structure: HirStruct = module.structs[structs[0]]
+    expect(structure.name).to_equal("Point")
+    expect(structure.has_doc_comment).to_equal(false)
+    expect(structure.has_specialization_of).to_equal(false)
+    expect(structure.fields.len()).to_equal(1)
+    expect(structure.fields[0].name).to_equal("x")
+    expect(structure.fields[0].has_fixed_address).to_equal(false)
+    expect(module.traits.len()).to_equal(1)
+    val traits = module.traits.keys()
+    val trait_: HirTrait = module.traits[traits[0]]
+    expect(trait_.name).to_equal("Area")
+    expect(trait_.has_doc_comment).to_equal(false)
+    expect(trait_.has_specialization_of).to_equal(false)
+
+describe "Lowered HIR presence flags retain concrete false values":
+    it "sets absent struct, field and trait metadata through real lowering":
+        expect_concrete_absent_flags(presence_flags_module())
+
+    it "preserves the values through the hardened bounded decoder":
+        val original = presence_flags_module()
+        val blob = hir_module_encode(original)
+        expect(blob != "").to_equal(true)
+        val reader = FlatPoolReader.new_bounded(blob, 8 * 1024 * 1024,
+            128 * 1024 * 1024, 65536, 128, 1000000)
+        expect(reader.next()).to_equal(hir_codec_header())
+        val decoded = hc_dec_hir_module(reader)
+        expect(reader.ok).to_equal(true)
+        expect(reader.pos).to_equal(reader.lines.len() - 1)
+        expect_concrete_absent_flags(decoded)
+        expect(hir_module_encode(decoded)).to_equal(blob)
