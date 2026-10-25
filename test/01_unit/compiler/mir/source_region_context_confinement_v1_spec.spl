@@ -16,6 +16,7 @@ use compiler.mir.source_region_request_wrapper_v1.*
 use compiler.mir.source_region_request_flow_v1.*
 use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
 use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
+use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_builtin_finalize_v1}
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
 use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
 use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
@@ -33,6 +34,15 @@ fn source_request_test_account_v1(tiny: bool = false) -> MirLoopResourceAccountV
     match MirLoopResourceAccountV1.create(limits):
         case Ok(account): account
         case Err(_): fail("actual invocation resource account could not be created")
+
+fn source_request_capture_snapshot_v1(owner: MirLowering) -> [text]:
+    var rows: [text] = []
+    for capture in owner.verification_call_captures:
+        val resolved = match capture.resolved_callee_v1:
+            case Some(symbol): symbol.id.to_string()
+            case _: "absent"
+        rows.push("{capture.owner_symbol_id}|{capture.block_id}|{capture.instruction_index}|{capture.callee_symbol_id}|" + resolved)
+    rows
 
 fn source_actual_replay_hir_v1(extra: text = "", request: bool = false) -> HirModule:
     # Compile the actual account and private facade bodies, never fake facade
@@ -185,11 +195,43 @@ describe "actual emitted SOURCE hidden-context confinement":
                                     case Ok(wrapper):
                                         var candidate = specialized.module
                                         candidate.functions[wrapper.symbol] = wrapper
+                                        val full_account = source_request_test_account_v1()
                                         match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
                                                 direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
-                                                source_request_test_account_v1()):
+                                                full_account):
                                             case Err(message): fail(message)
                                             case Ok(_): ()
+                                        # Measure only the separately owned finalizer prefix,
+                                        # then constrain branching-state storage independently.
+                                        # This is a fixture budget, never a production policy cap.
+                                        val prefix_account = source_request_test_account_v1()
+                                        match canonical_enum_builtin_finalize_v1(candidate, wrapper,
+                                                owner.builder.canonical_enum_builtin_sites_v1, prefix_account):
+                                            case Err(message): fail(message)
+                                            case Ok(_): ()
+                                        val prefix = prefix_account.snapshot()
+                                        expect(prefix.state_fields).to_be_less_than(229376)
+                                        val completed = full_account.snapshot()
+                                        expect(completed.state_fields).to_be_greater_than(prefix.state_fields + 32768)
+                                        var bounded_limits = MirLoopResourceLimitsV1()
+                                        bounded_limits.max_state_fields = prefix.state_fields + 32768
+                                        val branching_account = match MirLoopResourceAccountV1.create(bounded_limits):
+                                            case Ok(account): account
+                                            case Err(_): fail("branching fixture account could not be created")
+                                        val original_body = serialize_mir_function(wrapper)
+                                        val original_captures = source_request_capture_snapshot_v1(owner)
+                                        val original_builtin_count = owner.builder.canonical_enum_builtin_sites_v1.len()
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                branching_account):
+                                            case Err(message): expect(message).to_contain("CAPACITY")
+                                            case Ok(_): fail("branching CFG exceeded its actual retained-state account")
+                                        val bounded = branching_account.snapshot()
+                                        expect(bounded.state_fields).to_be_greater_than(prefix.state_fields + 1000)
+                                        expect(bounded.state_fields).to_be_less_than(bounded_limits.max_state_fields + 1)
+                                        expect(serialize_mir_function(wrapper)).to_equal(original_body)
+                                        expect(source_request_capture_snapshot_v1(owner)).to_equal(original_captures)
+                                        expect(owner.builder.canonical_enum_builtin_sites_v1.len()).to_equal(original_builtin_count)
                                         val exhausted_account = source_request_test_account_v1(true)
                                         val before = exhausted_account.snapshot()
                                         match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
@@ -364,5 +406,19 @@ describe "actual emitted SOURCE hidden-context confinement":
                                                 source_request_test_account_v1()):
                                             case Err(_): ()
                                             case Ok(_): fail("failed release was permitted to hide retained ownership in outer Ok")
+                                        candidate.functions[wrapper.symbol] = wrapper
+                                        owner.enum_runtime_id_index_q = {}
+                                        owner.enum_runtime_id_index = {}
+                                        val errors_before_identity_check = owner.errors.len()
+                                        val names_before_identity_check = owner.enum_runtime_id_names.len()
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                source_request_test_account_v1()):
+                                            case Err(message): expect(message).to_contain("SOURCE-PIN-RESULT")
+                                            case Ok(_): fail("missing actual Result identity was lazily recreated during verification")
+                                        expect(owner.enum_runtime_id_index_q.len()).to_equal(0)
+                                        expect(owner.enum_runtime_id_index.len()).to_equal(0)
+                                        expect(owner.enum_runtime_id_names.len()).to_equal(names_before_identity_check)
+                                        expect(owner.errors.len()).to_equal(errors_before_identity_check)
 
 describe "actual SOURCE function replay and generic Result transport":

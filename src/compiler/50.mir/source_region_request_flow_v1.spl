@@ -10,7 +10,6 @@ use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirTypeKind}
-use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
 use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
 use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_builtin_finalize_v1}
@@ -221,8 +220,25 @@ impl MirLowering:
             if symbol.id < 0 or identities.has(symbol.id):
                 return Err("SOURCE-PIN-IDENTITY: absent or colliding canonical operation")
             identities[symbol.id] = true
-        val result_runtime_id = self.enum_runtime_id("Result")
-        budget.charge(1, state_fields: 20, output_bytes: 160)?
+        # Verification never lazily loads/registers enum declarations. The
+        # normal owning lowerer must already have established this exact key.
+        val index_entries = self.enum_runtime_id_index_q.len()
+        budget.charge(8)?
+        budget.charge(index_entries)?
+        if not self.enum_runtime_id_index_q.has("Result"):
+            return Err("SOURCE-PIN-RESULT: existing canonical Result identity is absent")
+        budget.charge(8)?
+        budget.charge(index_entries)?
+        # The normal native owner uses has+index too; Dict.get's native issue
+        # is recorded in doc/07_guide/language/dict_native_pitfalls.md.
+        val result_runtime_id = self.enum_runtime_id_index_q["Result"]
+        if result_runtime_id < 0:
+            return Err("SOURCE-PIN-RESULT: existing canonical Result identity is invalid")
+        # Distinct charges: the queue handle, its first element, then the
+        # nineteen-field Flow record. Later forks reuse the prepaid handle.
+        budget.charge(1, state_fields: 1, output_bytes: 8)?
+        budget.rows(1, 1, 8)?
+        budget.charge(1, state_fields: 19, output_bytes: 152)?
         var pending: [SourceRequestFlowV1] = [SourceRequestFlowV1(block: function.entry_block.id,
             phase: 0, slot: slot, context: -1, producer_result: -1, consumer_result: -1,
             previous_cleanup: -1, release_result: -1, first_error: -1, first_cleanup: -1,
