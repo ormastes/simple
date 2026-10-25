@@ -31,7 +31,9 @@
 #                next to the .object sidecar.
 # Times are monotonic ms; -1 = not observed by this role (a MIR child loads
 # HIR from cache, and MIR lowering and object emission happen inside one child,
-# so mir_done is not separately observable and stays -1).
+# so mir_done is only observed via the child's .mir-done stamp, see the P4
+# section at the end; deps_ready_ms is stamped by the worker when MIR(F) is
+# admitted).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_optional, getpid}
@@ -47,6 +49,7 @@ pub struct NativeFileWorkerReceiptV1:
     module: text
     hir_start_ms: i64
     hir_done_ms: i64
+    deps_ready_ms: i64
     mir_done_ms: i64
     obj_done_ms: i64
     status: text
@@ -95,7 +98,7 @@ pub fn native_file_worker_mir_count_v1(scheduled: i64, batch: i64) -> i64:
     if count > 0: count else: 1
 
 pub fn native_file_worker_receipt_encode_v1(r: NativeFileWorkerReceiptV1) -> text:
-    "module={r.module}\nhir_start_ms={r.hir_start_ms}\nhir_done_ms={r.hir_done_ms}\nmir_done_ms={r.mir_done_ms}\nobj_done_ms={r.obj_done_ms}\nstatus={r.status}\nobject={r.object}\n"
+    "module={r.module}\nhir_start_ms={r.hir_start_ms}\nhir_done_ms={r.hir_done_ms}\ndeps_ready_ms={r.deps_ready_ms}\nmir_done_ms={r.mir_done_ms}\nobj_done_ms={r.obj_done_ms}\nstatus={r.status}\nobject={r.object}\n"
 
 fn native_file_worker_status_valid_v1(status: text) -> bool:
     status == "PASS" or status == "FAILED" or status == "MONO-PENDING"
@@ -116,12 +119,14 @@ pub fn native_file_worker_receipt_parse_v1(content: text) -> Result<NativeFileWo
         return Err("receipt module or status invalid")
     val hs = fields["hir_start_ms"].to_i64() ?? -2
     val hd = fields["hir_done_ms"].to_i64() ?? -2
+    # deps_ready_ms is optional (receipts written before P4 lack it) -> -1.
+    val dr = if fields.contains_key("deps_ready_ms"): fields["deps_ready_ms"].to_i64() ?? -2 else: -1
     val md = fields["mir_done_ms"].to_i64() ?? -2
     val od = fields["obj_done_ms"].to_i64() ?? -2
-    if hs < -1 or hd < -1 or md < -1 or od < -1:
+    if hs < -1 or hd < -1 or dr < -1 or md < -1 or od < -1:
         return Err("receipt timestamp malformed")
     Ok(NativeFileWorkerReceiptV1(module: fields["module"], hir_start_ms: hs, hir_done_ms: hd,
-        mir_done_ms: md, obj_done_ms: od, status: status, object: fields["object"]))
+        deps_ready_ms: dr, mir_done_ms: md, obj_done_ms: od, status: status, object: fields["object"]))
 
 # Acceptance proof of per-file overlap: some module's object was done before
 # another module's HIR started. Unobserved (-1) stamps never count.
@@ -221,3 +226,148 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
             elif state != "PASS":
                 return -1
     if complete: 1 else: 0
+
+# ===== P4 wiring: module-scoped mono in the file-worker lane =====
+#
+# Under SIMPLE_MONO_MODULE_SCOPED=1 a worker no longer waits for the whole HIR
+# ledger. MIR(F) is admitted as soon as HIR(F) and the HIR of F's DIRECT
+# imports are PASS (native_file_worker_deps_ready_v1). Direct, not transitive:
+# module-scoped mono collects templates from the modules F imports; a template
+# reached only through a re-export chain shows up as E-MONO-040, and then the
+# MIR child widens ONCE to the transitive import closure (whose HIR is already
+# loaded in that child) and, if still missing, fails closed with MONO-PENDING.
+#
+# The HIR child records F's direct import source paths (from the frozen
+# ModuleSurface.import_target_indices) in <hir_queue>/<sha(path)>.deps before
+# publishing F's PASS terminal. The worker hands the ready paths to its MIR
+# child through SIMPLE_MIR_SHARD_ONLY_PATHS; that child claims only those
+# modules and runs module-scoped mono only for them.
+pub const NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1: text = "SIMPLE_MIR_SHARD_ONLY_PATHS"
+pub const NATIVE_MONO_MODULE_SCOPED_ENV_V1: text = "SIMPLE_MONO_MODULE_SCOPED"
+
+# Pure gate: module-scoped mono replaces the global pass only when the opt-in
+# flag is "1" AND a file worker named the claimed modules (otherwise the
+# targets are unknown and global mono stays the only correct choice).
+pub fn mono_module_scoped_selected_v1(env_value: text, file_worker_active: bool) -> bool:
+    env_value == "1" and file_worker_active
+
+pub fn native_file_worker_only_paths_parse_v1(raw: text) -> [text]:
+    var out: [text] = []
+    for part in raw.split("\n"):
+        if part != "" and not out.contains(part):
+            out = out.push(part)
+    out
+
+pub fn native_file_worker_only_paths_from_env_v1() -> [text]:
+    native_file_worker_only_paths_parse_v1(env_get_nullable(NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1) ?? "")
+
+pub fn native_file_worker_deps_path_v1(queue: text, path: text) -> text:
+    "{queue}/{sha256_text(path)}.deps"
+
+# Deps record: first line = the module's own source path, then one direct
+# import source path per line (self-imports dropped, duplicates dropped).
+pub fn native_file_worker_deps_encode_v1(path: text, deps: [text]) -> text:
+    var rows: [text] = [path]
+    for dep in deps:
+        if dep != "" and dep != path and not rows.contains(dep):
+            rows = rows.push(dep)
+    rows.join("\n") + "\n"
+
+pub fn native_file_worker_deps_parse_v1(path: text, content: text) -> Result<[text], text>:
+    val rows = content.split("\n")
+    if rows.len() == 0 or rows[0] != path:
+        return Err("deps record does not belong to {path}")
+    var out: [text] = []
+    var index = 1
+    while index < rows.len():
+        if rows[index] != "" and not out.contains(rows[index]):
+            out = out.push(rows[index])
+        index = index + 1
+    Ok(out)
+
+pub fn native_file_worker_deps_publish_v1(queue: text, path: text, deps: [text]) -> bool:
+    if queue == "" or path == "" or path.contains("\n"):
+        return false
+    for dep in deps:
+        if dep.contains("\n"):
+            return false
+    val target = native_file_worker_deps_path_v1(queue, path)
+    val temporary = "{target}.{getpid()}.tmp"
+    file_write(temporary, native_file_worker_deps_encode_v1(path, deps)) and file_rename(temporary, target)
+
+# Err when the record is missing or malformed (the caller fails closed).
+pub fn native_file_worker_deps_read_v1(queue: text, path: text) -> Result<[text], text>:
+    val record = native_file_worker_deps_path_v1(queue, path)
+    if not file_exists(record):
+        return Err("no deps record for {path}")
+    native_file_worker_deps_parse_v1(path, file_read(record))
+
+# Readiness of MIR(module) over HIR terminal states (key -> "PASS" | other |
+# absent): 1 = module and every direct import PASS, 0 = some still running,
+# -1 = module or an import has a non-PASS terminal (MIR can never start).
+pub fn native_file_worker_deps_ready_v1(module: text, deps: [text], states: Dict<text, text>) -> i64:
+    var keys: [text] = [module]
+    for dep in deps:
+        keys = keys.push(dep)
+    var ready: i64 = 1
+    for key in keys:
+        if not states.contains_key(key) or states[key] == "":
+            ready = 0
+        elif states[key] != "PASS":
+            return -1
+    ready
+
+# Transitive import closure (excluding `start` itself) over an edge table.
+pub fn native_file_worker_transitive_deps_v1(start: text, edges: Dict<text, [text]>) -> [text]:
+    var seen: [text] = [start]
+    var queue: [text] = [start]
+    var out: [text] = []
+    var pos = 0
+    while pos < queue.len():
+        val node = queue[pos]
+        pos = pos + 1
+        if edges.contains_key(node):
+            for dep in edges[node]:
+                if not seen.contains(dep):
+                    seen = seen.push(dep)
+                    queue = queue.push(dep)
+                    out = out.push(dep)
+    out
+
+pub fn native_file_worker_mono_template_missing_v1(diagnostics: [text]) -> bool:
+    for d in diagnostics:
+        if d.contains("E-MONO-040"):
+            return true
+    false
+
+# Module-scoped mono fallback decision: "ok" (no missing template), "widen"
+# (first E-MONO-040 -> retry with transitive imports), "MONO-PENDING" (still
+# missing after widening -> fail closed, no object).
+pub fn native_file_worker_mono_fallback_v1(diagnostics: [text], widened: bool) -> text:
+    if not native_file_worker_mono_template_missing_v1(diagnostics):
+        return "ok"
+    if widened: "MONO-PENDING" else: "widen"
+
+pub fn native_file_worker_mono_pending_path_v1(queue: text, path: text) -> text:
+    "{queue}/{sha256_text(path)}.mono-pending"
+
+pub fn native_file_worker_mono_pending_publish_v1(queue: text, path: text, reason: text) -> bool:
+    if queue == "":
+        return false
+    file_write(native_file_worker_mono_pending_path_v1(queue, path), "{path}\n{reason}\n")
+
+# MIR-done stamp: the MIR child writes the monotonic ms at which lower_to_mir
+# returned for its owner; the worker copies it into mir_done_ms.
+pub fn native_file_worker_mir_done_path_v1(queue: text, owner: text) -> text:
+    "{queue}/{sha256_text(owner)}.mir-done"
+
+pub fn native_file_worker_mir_done_publish_v1(queue: text, owner: text, ms: i64) -> bool:
+    if queue == "" or owner == "":
+        return false
+    file_write(native_file_worker_mir_done_path_v1(queue, owner), "{ms}\n")
+
+pub fn native_file_worker_mir_done_read_v1(queue: text, owner: text) -> i64:
+    val path = native_file_worker_mir_done_path_v1(queue, owner)
+    if not file_exists(path):
+        return -1
+    file_read(path).trim().to_i64() ?? -1

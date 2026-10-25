@@ -57,3 +57,54 @@ templates apart from none needed.
   module name); no path->module map is recorded.
 - Not measured: no stage2 run with `SIMPLE_FILE_WORKERS=1` yet; default flip
   waits on that.
+
+## P4 wiring: MIR(F) waits only on F and its imports (opt-in, 2026-10-25)
+
+With `SIMPLE_FILE_WORKERS=1` **and** `SIMPLE_MONO_MODULE_SCOPED=1` the worker
+runs `run_native_file_worker_scoped_v1` (`native_build_main.spl`) instead of
+the HIR-drain-then-wait loop. Without the mono flag the old behaviour is
+unchanged.
+
+- **Barrier removed:** the whole-HIR-ledger wait inside the pool. After every
+  HIR round the worker admits MIR(F) for each module it HIR-claimed once
+  HIR(F) and HIR of F's **direct** imports are PASS
+  (`native_file_worker_deps_ready_v1`). The HIR child writes
+  `<hir_queue>/<sha(path)>.deps` (F's direct import source paths, from the
+  frozen `ModuleSurface.import_target_indices`) before F's terminal
+  (`driver_hir_pipeline_lowering.spl`, streaming shard path).
+- **Why direct, not transitive:** module-scoped mono collects templates from
+  the modules F imports. A template reachable only through a re-export chain
+  shows up as `E-MONO-040`; the MIR child then widens once to the transitive
+  closure (deps records) and, if still missing, writes
+  `<mir_queue>/<sha(path)>.mono-pending`, fails, and the worker receipts
+  `MONO-PENDING` (no object is emitted).
+- **MIR child:** `SIMPLE_MIR_SHARD_ONLY_PATHS` (excluded from the native
+  environment identity) restricts its claims to the admitted paths
+  (`driver_pipeline_lowering.spl`), and `monomorphize_with_policy` takes the
+  gated branch `monomorphize_file_worker_scoped_v1` (pure gate
+  `mono_module_scoped_selected_v1(env, file_worker_active)`), which runs
+  `run_monomorphization_module_scoped_v1` per admitted module and skips the
+  global `process_modules`. Post-mono verify runs over the admitted modules
+  only.
+- **Receipts:** `deps_ready_ms` added (optional when parsing; older receipts
+  still parse), `mir_done_ms` filled from a `.mir-done` stamp the MIR child
+  writes when `lower_to_mir` returns. HIR receipts are published for PASS
+  modules too, so `file_worker_overlap_proven_v1` can see another module's
+  `hir_start` (proven on a 2-module fixture in
+  `test/01_unit/compiler/driver/native_file_worker_module_mono_spec.spl`).
+- A module without a deps record (non-streaming HIR lane) falls back to the
+  whole-ledger gate for that module only.
+
+### Still remaining
+
+- **P5:** every HIR/MIR child still parses the whole closure, and the MIR
+  child still loads (or, on a cache miss, lowers) every module's HIR, not
+  just F + imports. Templates come from that already-loaded HIR (which was
+  read from the HIR cache), not from a separate `hir_cache_load` per import.
+- **P4b:** instance bodies placed in F may still reference template-module
+  local SymbolIds (non-generic helpers, globals of T); only leaf templates are
+  safe until symbol relocation lands.
+- Cranelift / non-LLVM backends ignore `is_comdat`.
+- UNRUN: the spec fails on this Windows host before execution with
+  `parse: in ...\windows_redirected_process.spl: Unexpected token: expected
+  Fn, found Colon`. No stage2 run with both flags yet.

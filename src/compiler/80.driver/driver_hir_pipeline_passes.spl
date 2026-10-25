@@ -34,6 +34,9 @@ use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
 use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
 use compiler.driver.driver_mono_publication_v1.{driver_publish_mono_warnings_and_stats_v1, driver_publish_mono_diagnostics_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1,
+    mono_module_scoped_selected_v1, native_file_worker_deps_read_v1, native_file_worker_mono_fallback_v1,
+    native_file_worker_transitive_deps_v1, native_file_worker_mono_pending_publish_v1}
 
 
 impl CompilerDriver:
@@ -134,6 +137,12 @@ impl CompilerDriver:
         if skip_mono == "1":
             print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
             return true
+        # File-worker P4 (SIMPLE_MONO_MODULE_SCOPED=1 + SIMPLE_MIR_SHARD_ONLY_PATHS):
+        # this MIR child lowers only the admitted modules, so mono runs
+        # module-scoped for exactly those instead of the global pass.
+        val scoped_paths = native_file_worker_only_paths_from_env_v1()
+        if mono_module_scoped_selected_v1(env_get("SIMPLE_MONO_MODULE_SCOPED") ?? "", scoped_paths.len() > 0):
+            return self.monomorphize_file_worker_scoped_v1(scoped_paths)
         # Cycle-121: the modules dict comes back through the module-global
         # owner (mono_report_modules_owner), not the 4-tuple return -- the
         # tuple's native value ABI corrupted the dict slot (the docstring
@@ -163,6 +172,72 @@ impl CompilerDriver:
         # other profile warns, so the inventory is visible during migration.
         val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
         driver_publish_post_mono_report_v1(self.ctx, mono_report, self.ctx.hir_modules.len())
+
+    me monomorphize_file_worker_scoped_v1(target_paths: [text]) -> bool:
+        """Module-scoped mono for the file-worker MIR child. Templates for F
+        are the HIR (loaded from the HIR cache by this child) of F's direct
+        imports, read from the HIR ledger's deps record. On E-MONO-040 the
+        set is widened once to the transitive import closure; if a template is
+        still missing F is marked MONO-PENDING and the child fails closed, so
+        no object is ever emitted from a partial template set. Non-target
+        modules are left untouched: this child neither lowers nor emits them."""
+        val hir_queue = env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? ""
+        val mir_queue = env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+        var name_of_path: Dict<text, text> = {}
+        for src in self.ctx.sources:
+            name_of_path[src.path] = src.module_name
+        var verified: Dict<text, HirModule> = {}
+        for path in target_paths:
+            if not name_of_path.contains_key(path) or self.ctx.hir_modules[name_of_path[path]] == nil:
+                self.ctx.add_error("file-worker mono: no HIR for admitted module {path}")
+                return false
+            val name = name_of_path[path]
+            val direct = native_file_worker_deps_read_v1(hir_queue, path)
+            if direct.is_err():
+                self.ctx.add_error("file-worker mono: {direct.unwrap_err()}")
+                return false
+            var dep_paths: [text] = direct.unwrap()
+            var widened = false
+            var done = false
+            while not done:
+                var templates: Dict<text, HirModule> = {}
+                for dep in dep_paths:
+                    if name_of_path.contains_key(dep) and self.ctx.hir_modules[name_of_path[dep]] != nil:
+                        templates[name_of_path[dep]] = self.ctx.hir_modules[name_of_path[dep]]
+                val (scoped_module, scoped_stats, scoped_diags) =
+                    run_monomorphization_module_scoped_v1(self.ctx.hir_modules[name], templates)
+                val decision = native_file_worker_mono_fallback_v1(scoped_diags, widened)
+                if decision == "widen":
+                    var edges: Dict<text, [text]> = {}
+                    var frontier: [text] = [path]
+                    var pos = 0
+                    while pos < frontier.len():
+                        val node = frontier[pos]
+                        pos = pos + 1
+                        val node_deps = native_file_worker_deps_read_v1(hir_queue, node)
+                        if node_deps.is_ok():
+                            edges[node] = node_deps.unwrap()
+                            for d in node_deps.unwrap():
+                                if not frontier.contains(d):
+                                    frontier = frontier.push(d)
+                    dep_paths = native_file_worker_transitive_deps_v1(path, edges)
+                    widened = true
+                    print "[file-worker] mono widen module={name} templates={dep_paths.len()}"
+                elif decision == "MONO-PENDING":
+                    val _marked = native_file_worker_mono_pending_publish_v1(mir_queue, path, "E-MONO-040 after transitive widening")
+                    for diag in scoped_diags:
+                        self.ctx.add_error(diag)
+                    self.ctx.add_error("MONO-PENDING: module {name} needs a template not visible through its imports")
+                    return false
+                else:
+                    driver_publish_mono_warnings_and_stats_v1(self.ctx, scoped_stats, [])
+                    if not driver_publish_mono_diagnostics_v1(self.ctx, scoped_diags, 1):
+                        return false
+                    self.ctx.hir_modules[name] = scoped_module
+                    verified[name] = scoped_module
+                    done = true
+        val scoped_report = post_mono_verify_modules(verified)
+        driver_publish_post_mono_report_v1(self.ctx, scoped_report, verified.len())
 
 export publish_module_typecheck_receipt_v1
 

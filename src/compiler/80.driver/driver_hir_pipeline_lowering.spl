@@ -104,7 +104,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_has_rt_hal}
 use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_deps_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_cache_misses, hir_cache_adoption_receipt_v1}
@@ -1253,6 +1253,20 @@ impl CompilerDriver:
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
+                # File-worker P4: record F's direct import source paths (frozen
+                # surface import targets) before F's terminal, so the worker can
+                # admit MIR(F) once F and these imports are PASS.
+                if hir_shard_deps_wanted_v1():
+                    var shard_dep_paths: [text] = []
+                    for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
+                        if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
+                            val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
+                            if dep_source_index >= 0 and dep_source_index < self.ctx.sources.len():
+                                shard_dep_paths = shard_dep_paths.push(self.ctx.sources[dep_source_index].path)
+                    if not hir_shard_publish_deps_v1(source.path, shard_dep_paths):
+                        hir_shard_guard_block("HIR shard deps record publication failed")
+                        self.ctx.add_error("HIR shard deps record publication failed")
+                        return false
                 val shard_status = self.lower_streaming_hir_shard_transaction_v1(
                     lowering, source, is_requested_bootstrap_entry, hir_stream_key)
                 if shard_status < 0 or shard_status > 3:
