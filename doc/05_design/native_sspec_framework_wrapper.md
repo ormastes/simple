@@ -47,3 +47,31 @@ must execute3/pass3/exit0; failure_continuation must execute3/pass2/fail1/exit1.
 The negative result must be an actual matcher failure after body execution,
 with later bodies and after hooks observed, not a compile or ownership error.
 No tests were run while preparing this source candidate.
+
+## Child library profile transport
+
+The canonical test request is `TestOptions`; its default-empty `library_mode`
+field selects only the compiled child's library implementation. The test argv
+validator reuses `compiler.common.library_mode_policy_v1`, consumes both flag
+spellings, and refuses duplicate/invalid modes and unsupported routes. Explicit
+native AOT transports the exact token through parallel test children and the
+native-build command. Contradictory execution modes, safe/composite routes, and
+doctest lanes (including config-enabled lanes) are refused rather than silently
+ignoring selection. Unset behavior retains historical mode precedence.
+Selected-profile `--resume` is also refused: the legacy checkpoint lacks profile
+identity. The effective request is checked again after runner defaults and
+before discovery or checkpoint reads, so merged options cannot carry old totals
+or remove completed files under the new profile. Empty-mode resume is unchanged.
+
+The mode enters the versioned ordered-source identity, executable/private-cache
+namespace and metric identity only when nonempty. Native-build retains ownership
+of configured resolution and closure hashing. No host-wide family setting or
+physical-family source pin is introduced. The production runner may have a
+different configured family than the child it compiles. This forwarding repair
+does not assert that every accepted semantic profile has every requested owner.
+Missing-owner errors remain failures.
+
+Sixteen source-authored transport controls and the existing real positive and
+negative framework fixtures are described in
+`doc/06_spec/01_unit/lib/test_runner/library_mode_transport_spec.md`. All remain
+NOT_RUN pending actual admitted Phase 3 execution.
