@@ -505,8 +505,10 @@ impl CompilerDriver:
         emit their objects into the native cache via compile_to_native in
         flushing mode, then release their MIR. Gates keep the unstaged
         order: nothing is verified after a lowering failure, nothing is
-        borrow-checked after a verify failure, and no object is emitted once
-        any error is recorded (the batch is still released; the build fails).
+        borrow-checked after a verify failure, and no object is emitted for a
+        batch that recorded an error of its own (the batch is still released;
+        later batches keep emitting and the build fails at the end, naming
+        every failed batch via failed_batches).
         Returns false only for a whole-build failure (cache/session setup)."""
         var batch_names: [text] = []
         for held_name in self.ctx.mir_modules.keys():
@@ -524,6 +526,11 @@ impl CompilerDriver:
         # object of a batch that merely CONTAINS a failed module.
         if go_to_end and self.ctx.error_count_value > 0:
             self.go_to_end_absorb_errors_v1("mir")
+        # Batch-local gate: an error recorded by an EARLIER batch must not
+        # withhold this batch's objects (it used to: one failed batch left a
+        # 1495-module build with ~224 objects). The global count still fails
+        # the build after the last batch, so the link stays blocked.
+        val errors_at_batch_start = self.ctx.error_count_value
         if not self.native_staged_codegen.lowering_failed:
             if not self.verify_lowered_mir_v1():
                 self.native_staged_codegen.verify_failed = true
@@ -536,14 +543,15 @@ impl CompilerDriver:
         # `verify_failed` is part of both gates: under go-to-end the verify
         # errors were absorbed above, so the error count alone no longer
         # proves the batch is valid.
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+        if self.ctx.error_count_value == errors_at_batch_start and not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             val _async_state_machines = self.process_async()
             if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
                 self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
             self.weave_aop()
             self.apply_debug_trace()
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+        var batch_failed = self.ctx.error_count_value != errors_at_batch_start
+        if not batch_failed and not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             if self.ctx.freeze_storage_registry_for_schedule(
                     self.native_staged_codegen.scheduled_names) == "invalid":
@@ -558,7 +566,12 @@ impl CompilerDriver:
                     case CompileResult.CodegenError(message): message
                     case _: "staged native codegen batch {batch_index} failed"
                 self.ctx.add_error(batch_error)
-                return false
+                batch_failed = true
+        if batch_failed:
+            val failed_units = batch_names.join(",")
+            self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
+                "batch-{batch_index}: {failed_units}")
+            print "[staged-codegen] batch {batch_index} failed; continuing codegen for later batches (build will fail at end)"
         self.ctx.evict_mir_modules(batch_names)
         if go_to_end:
             # The verify verdict is per batch under go-to-end (the batch was
