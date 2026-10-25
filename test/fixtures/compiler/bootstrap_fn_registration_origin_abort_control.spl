@@ -11,6 +11,8 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.mir.hir_declaration_types_v1.*
 use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
@@ -61,4 +63,16 @@ val next = "origin.abort.no-revival"
 bootstrap_fn_ret_hir_type_register_declaration_v1(next, module, 0)
 if bootstrap_fn_ret_hir_type_lookup(next) == nil: panic("ordinary registration was changed by revocation")
 if bootstrap_fn_registry_origin_v1("return_hir", next) != nil: panic("revoked process revived provenance")
+# Exercise the actual first whole-registry promotion after the abandoned
+# first origin delta. It must skip the unavailable origin map and journal.
+val source = "fn after_origin_abort(value: i64) -> i64:\n    value\n"
+val ast = parse_full_frontend(source, "after_origin_abort.spl", "after_origin_abort", Logger(level: 0))
+var frontend = HirLowering.with_filename("after_origin_abort.spl")
+val actual = frontend.lower_module(ast)
+if frontend.errors.len() != 0: panic("post-abort frontend failed")
+var lowering = MirLowering.new(actual.symbols)
+val lowered = lowering.lower_module_transient_scoped(actual, [], false)
+if lowered.is_err() or lowering.errors.len() != 0: panic("post-abort ordinary scoped lowering failed")
+if bootstrap_fn_registry_origin_v1("return_hir", key) != nil: panic("post-abort promotion revived authority")
+if bootstrap_fn_registry_origin_v1("return_hir", next) != nil: panic("post-abort promotion accepted unbound metadata")
 print "bootstrap-origin-abort-control: PASS"
