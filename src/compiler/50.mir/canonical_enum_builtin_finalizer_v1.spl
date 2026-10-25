@@ -7,6 +7,12 @@ use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_operand, serialize_mir_type}
 use compiler.mir.verification_call_identity.{resolved_direct_call_module_hash_v1}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{SymbolId}
+
+# The scalar dictionary owner is authoritative. The generic `.len()` method
+# can route an erased receiver to rt_string_len (tracked native_dict_len bug);
+# do not allocate keys() merely to discover the reservation bound.
+extern fn rt_dict_len<K, V>(dictionary: Dict<K, V>) -> i64
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
 use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_charge_v1,
     canonical_enum_function_bound_v1, canonical_enum_operand_bound_v1,
@@ -52,7 +58,7 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
     # Candidate comparison and final body hashing use the existing serializer;
     # prepay their complete output/work bound BEFORE any serialization occurs.
     canonical_enum_charge_v1(account, function_bound * 4, 0, function_bound * 4)?
-    val count = module.functions.len()
+    val count = rt_dict_len(module.functions)
     if count < 0 or (count > 0 and count > 9223372036854775807 / count / 96):
         return Err("ENUM-BUDGET: module ordering bound overflow")
     canonical_enum_charge_v1(account, count * count * 96 + count, count)?
