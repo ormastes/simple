@@ -7,6 +7,7 @@ use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir.mir_data.{MirSignature, MirType}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 
 fn payload_metadata_lowering(generic: bool, omit_metadata: bool) -> MirLowering:
@@ -55,3 +56,127 @@ describe "declared enum constructor metadata admission":
         val result = lowering.lower_enum_construct_named("fixture.PayloadOwner", "Ready", [])
         expect(lowering.errors.len()).to_equal(0)
         expect(result.id).to_be_greater_than(-1)
+
+fn builtin_payload_metadata_lowering() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 93), "builtin_metadata_probe", MirSignature(
+        params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering.register_builtin_enum_seeds()
+    lowering
+
+fn builtin_metadata_int() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn builtin_metadata_text() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: Span.empty())
+
+fn builtin_payload_arg() -> HirCallArg:
+    val value = HirExpr(kind: HirExprKind.IntLit(17, nil), has_type_: true,
+        type_: builtin_metadata_int(), span: Span.empty())
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+describe "builtin generic declaration payload admission":
+    it "registers T and E slots in declaration order and retains unit None":
+        step("Read the builtin declaration schema, including its nullary variant")
+        var lowering = builtin_payload_metadata_lowering()
+        expect(lowering.enum_variant_payload_types["Result::Ok"][0].kind).to_equal(HirTypeKind.TypeParam("T", []))
+        expect(lowering.enum_variant_payload_types["Result::Err"][0].kind).to_equal(HirTypeKind.TypeParam("E", []))
+        expect(lowering.enum_variant_payload_types["Option::Some"][0].kind).to_equal(HirTypeKind.TypeParam("T", []))
+        expect(lowering.enum_variant_payload_kind["Option::None"]).to_equal("unit")
+        expect(lowering.enum_variant_payload_types["Option::None"].len()).to_equal(0)
+        expect(lowering.enum_single_payload_types.has("Option::Some")).to_equal(false)
+        expect(lowering.enum_single_payload_types.has("Result::Ok")).to_equal(false)
+        expect(lowering.enum_single_payload_types.has("Result::Err")).to_equal(false)
+
+    it "constructs inferred Ok Err Some and None with real payloads":
+        step("Lower all builtin variants using the ordinary named constructor")
+        var lowering = builtin_payload_metadata_lowering()
+        val ok = lowering.lower_enum_construct_named("Result", "Ok", [builtin_payload_arg()])
+        val err = lowering.lower_enum_construct_named("Result", "Err", [builtin_payload_arg()])
+        val some = lowering.lower_enum_construct_named("Option", "Some", [builtin_payload_arg()])
+        val none = lowering.lower_enum_construct_named("Option", "None", [])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(ok.id).to_be_greater_than(-1)
+        expect(err.id).to_be_greater_than(-1)
+        expect(some.id).to_be_greater_than(-1)
+        expect(none.id).to_be_greater_than(-1)
+
+    it "rejects missing and excess payloads before emitting a constructor":
+        step("Check arity on generic builtins, rather than bypassing their schema")
+        for variant in ["Ok", "Err", "Some", "None"]:
+            var lowering = builtin_payload_metadata_lowering()
+            val owner = if variant == "Ok" or variant == "Err": "Result" else: "Option"
+            val invalid_args: [HirCallArg] = if variant == "None": [builtin_payload_arg()] else: []
+            val rejected = lowering.lower_enum_construct_named(owner, variant, invalid_args)
+            expect(lowering.errors.len()).to_be_greater_than(0)
+            expect(lowering.errors[0].message).to_contain("payload arity mismatch")
+        var excess = builtin_payload_metadata_lowering()
+        val rejected = excess.lower_enum_construct_named("Result", "Ok", [builtin_payload_arg(), builtin_payload_arg()])
+        expect(excess.errors.len()).to_be_greater_than(0)
+        expect(excess.errors[0].message).to_contain("payload arity mismatch")
+
+    it "checks the active Result parameter instead of treating T and E alike":
+        step("Accept Ok i64 in Result i64 text and reject Err i64 in that same type")
+        val result_type = HirType(kind: HirTypeKind.Result(builtin_metadata_int(), builtin_metadata_text()), span: Span.empty())
+        var good = builtin_payload_metadata_lowering()
+        val accepted = good.lower_enum_construct_named("Result", "Ok", [builtin_payload_arg()], Some(result_type))
+        expect(good.errors.len()).to_equal(0)
+        expect(accepted.id).to_be_greater_than(-1)
+        var bad = builtin_payload_metadata_lowering()
+        val rejected = bad.lower_enum_construct_named("Result", "Err", [builtin_payload_arg()], Some(result_type))
+        expect(bad.errors.len()).to_be_greater_than(0)
+        expect(bad.errors[0].message).to_contain("payload type does not match")
+
+    it "rejects Some payload mismatch and keeps None's expected generic type":
+        step("Check Option text against an integer payload and retain typed absence")
+        val option_type = HirType(kind: HirTypeKind.Optional(builtin_metadata_text()), span: Span.empty())
+        var bad = builtin_payload_metadata_lowering()
+        val rejected = bad.lower_enum_construct_named("Option", "Some", [builtin_payload_arg()], Some(option_type))
+        expect(bad.errors.len()).to_be_greater_than(0)
+        var good = builtin_payload_metadata_lowering()
+        val none = good.lower_enum_construct_named("Option", "None", [], Some(option_type))
+        expect(good.errors.len()).to_equal(0)
+        expect(good.find_local_hir_type(none.id)).to_equal(Some(option_type))
+
+    it "does not overwrite explicit nongeneric shadow authority":
+        step("Register a user owner before the builtin seed")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.generic_enum_constructor_owners["Option"] = false
+        lowering.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+        expect(lowering.generic_enum_constructor_owners["Option"]).to_equal(false)
+        expect(lowering.builtin_enum_constructor_owners_v1.get("Option") ?? false).to_equal(false)
+        expect(lowering.enum_variant_payload_types.has("Option::Some")).to_equal(false)
+
+    it "forwards retained Option type through real call expression dispatch":
+        step("Lower a typed Some call whose integer payload contradicts Option text")
+        var lowering = builtin_payload_metadata_lowering()
+        val option_type = HirType(kind: HirTypeKind.Optional(builtin_metadata_text()), span: Span.empty())
+        val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "Some"),
+            has_type_: false, type_: nil, span: Span.empty())
+        val call = HirExpr(kind: HirExprKind.Call(callee, [builtin_payload_arg()], []),
+            has_type_: true, type_: Some(option_type), span: Span.empty())
+        val rejected = lowering.lower_expr(call)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+
+    it "revokes builtin authority when a later module declares its own Option":
+        step("Register an actual user declaration after builtin seeding, then seed again")
+        var lowering = builtin_payload_metadata_lowering()
+        val empty = HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+            type_: nil, span: Span.empty())
+        val variant = HirVariant(symbol: SymbolId(id: 191), name: "Some",
+            kind: HirVariantKind.Unit, has_discriminant: false,
+            discriminant: empty, span: Span.empty())
+        val declaration = HirEnum(symbol: SymbolId(id: 190), name: "Option",
+            runtime_name: "other_module.Option", type_params: [], variants: [variant],
+            visibility: Visibility.Public, is_public: true, doc_comment: nil,
+            span: Span.empty(), is_generic_template: false, specialization_of: nil, type_bindings: {})
+        lowering.register_enum_variants(declaration)
+        lowering.register_enum_runtime_id(declaration)
+        lowering.register_builtin_enum_seeds()
+        expect(lowering.builtin_enum_constructor_owners_v1["Option"]).to_equal(false)
+        expect(lowering.enum_variant_payload_kind["other_module.Option::Some"]).to_equal("unit")
+        val accepted = lowering.lower_enum_construct_named("other_module.Option", "Some", [])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(accepted.id).to_be_greater_than(-1)
