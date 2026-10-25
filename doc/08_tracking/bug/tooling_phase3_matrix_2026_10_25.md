@@ -186,3 +186,26 @@ Removal criterion: real native JSONL invalid-root array/scalar inputs receive
 the appropriate error and a subsequent valid request still dispatches; framed
 traffic remains intact. The exhausted six-cycle MCP budget prohibits another
 repair/build retry without the requested explicit extension. Keep the PR draft.
+
+## Independent T32/CMM object collection
+
+While compiler cycle five remained live, two bounded native object diagnostics
+used separate source-owned caches and enforced 2097152 KiB caps, LLVM and the
+pinned local stage-three producer. CMM lexer compilation succeeded: exit 0,
+peak 259812 KiB, `build/tooling-check/cmm_lexer.o` 54025 bytes, with real code
+symbols. Its two-source closure completed; this is not a linked CMM server or
+executed lexer/SSpec regression. Evidence: `cmm-lexer-object/`.
+
+T32 MCP `json_helpers.spl` object compilation failed before object emission:
+exit 1, peak 355516 KiB, 54 HIR sources, one poisoned module. Root diagnostic:
+unresolved `rt_process_run` at line 328 in `t32_shell_cmd`. That helper also
+hardcodes `/bin/sh`, shell `export`, and `/dev/null`, so adding an import alone
+would not prove Windows execution. Repair must use the platform process owner
+and preserve stdout/exit/error semantics; verify a real bounded command on
+Windows and POSIX, then the actual T32 MCP handler. Evidence: `t32-json-object/`.
+No diagnostic policy or environment/process guard was disabled.
+
+Conservative T32 campaign accounting is six diagnostic rows: CLI, actual MCP,
+CMM server, current-resolver probe, CMM lexer object and T32 helper object.
+No further repair/compile retry in this lane without an explicit budget
+extension. These results do not narrow the still-incomplete full phase matrix.
