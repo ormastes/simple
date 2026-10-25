@@ -1,6 +1,6 @@
 # C4 checked dictionary Struct projection
 
-Source-only implementation; executable controls authored UNRUN during Phase3.
+Focused native ASan/UBSan evidence exists for the reviewed implementation.
 This change supplies physical validation, not compiler nominal/lifetime admission.
 
 Native operation16 retains its existing signature, missing=0, positive stored
@@ -42,8 +42,27 @@ passthrough. Generic Cast and the fresh-allocation publication OR1 are not this
 proof. Caller, affine receipt, private backend emission and final artifact seal
 remain separate required owners/gates.
 
-Authored native controls cover raw/tag1 preservation, corrupted projected
+Native controls cover raw/tag1 preservation, corrupted projected
 foreign/preexisting/wrong-tag values, extent/generation mismatch, one-unit-short
 fuel and unchanged epoch, alongside existing alias-Stale/missing/retirement
-controls. The Simple fixture exercises real shared-account tagged output without
-claiming compiler nominal or lifetime authority. No executable jobs were run.
+controls. The Simple fixture is authored UNRUN; it describes real shared-account
+tagged output without claiming compiler nominal or lifetime authority.
+
+## Focused native evidence
+
+Attempt1 at source `1b462f50776` failed C compilation because repeated fixture
+sections redeclared locals in the same lexical scope. No binary was produced and
+no assertions executed. Evidence: `/tmp/read16-native-evidence-20261025/stdout.log`.
+
+Attempt2 at exact source `300f65ab50de24dc203f9fd4822d9f7c6a391d03` changed only
+six lexical-scope braces in the fixture. The ASan/UBSan fixture exited 0 with no
+findings; address reuse was **not observed**. Binary SHA256:
+`c673e84e1e9540e92d7ce31fb6a8d93d5322d5ecde81dea04b8b9a73ac7f5518`.
+Evidence: `/tmp/read16-native-evidence-20261025-attempt2/` (source revision,
+source hashes, stdout, binary and RSS receipt). Peak sampled RSS was 233836KiB
+under a 2GiB sampled guard; receipt `hard_memory_limit=0` means this was not a
+hard kernel memory limit. No passing fixture was rerun.
+
+Simple specs and full HIR/SOURCE execution remain UNRUN. This focused native
+result does not admit nominal compiler authority, affine lifetime/epoch proof,
+private backend publication, final artifact linking, or full SOURCE execution.
