@@ -1,0 +1,172 @@
+# Actual emitted-body confinement. This is not a request pin/lifetime receipt:
+# birth, native facade refinement and retained invocation ownership are separate.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirTypeKind, MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_type, serialize_mir_signature}
+use compiler.mir.source_region_function_request_v1.{SourceRegionFunctionPlanV1}
+
+fn source_region_operand_is_context_v1(operand: MirOperand, context: LocalId) -> bool:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id == context.id
+        case _: false
+
+fn source_region_no_context_operand_v1(operand: MirOperand, context: LocalId) -> Result<(), text>:
+    if source_region_operand_is_context_v1(operand, context):
+        return Err("SOURCE-CONFINEMENT-ESCAPE: hidden context used outside a scoped call")
+    Ok(())
+
+fn source_region_no_context_local_v1(local: LocalId, context: LocalId) -> Result<(), text>:
+    if local.id == context.id:
+        return Err("SOURCE-CONFINEMENT-LOCAL: hidden context overwritten or aliased")
+    Ok(())
+
+fn source_region_facade_borrows_context_v1(target: SymbolId, plan: SourceRegionFunctionPlanV1) -> bool:
+    val symbols = plan.facades
+    target.id == symbols.alloc.id or target.id == symbols.write_begin.id or target.id == symbols.write_commit.id or target.id == symbols.alias_write.id or target.id == symbols.stamp.id or target.id == symbols.read_begin.id or target.id == symbols.read_end.id or target.id == symbols.close.id
+
+impl MirLowering:
+    me source_region_verify_scoped_call_v1(output: MirFunction, context: LocalId,
+            plan: SourceRegionFunctionPlanV1, block: i64, instruction: i64,
+            destination: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), text>:
+        if val local = destination: source_region_no_context_local_v1(local, context)?
+        source_region_no_context_operand_v1(callee, context)?
+        var context_index = -1
+        for index in 0..args.len():
+            if source_region_operand_is_context_v1(args[index], context):
+                if context_index >= 0:
+                    return Err("SOURCE-CONFINEMENT-COPY: scoped call duplicates the context")
+                match args[index].kind:
+                    case MirOperandKind.Copy(_): ()
+                    case _: return Err("SOURCE-CONFINEMENT-MOVE: scoped callee cannot consume request context")
+                context_index = index
+        # Context-free generated codec calls do not borrow the pin. Their ABI
+        # and native boundary admission are NOT established by this verifier.
+        if context_index < 0: return Ok(())
+        var target = SymbolId(id: -1)
+        var matches = 0
+        for capture in self.verification_call_captures:
+            if (capture.owner_symbol_id == output.symbol.id.to_string() and
+                    capture.block_id == block and capture.instruction_index == instruction):
+                matches = matches + 1
+                match capture.resolved_callee_v1:
+                    case Some(symbol):
+                        if symbol.id < 0 or capture.callee_symbol_id != symbol.id.to_string():
+                            return Err("SOURCE-CONFINEMENT-IDENTITY: canonical capture and textual transport disagree")
+                        target = symbol
+                    case _: return Err("SOURCE-CONFINEMENT-IDENTITY: actual resolver SymbolId is absent")
+        if matches != 1:
+            return Err("SOURCE-CONFINEMENT-CAPTURE: context call requires one actual emitted-site capture")
+        var signature = output.signature
+        var expected_name = ""
+        var found = false
+        for original in plan.specialized_symbols.keys():
+            if plan.specialized_symbols[original].id == target.id:
+                if found: return Err("SOURCE-CONFINEMENT-TARGET: ambiguous specialized SymbolId")
+                if not plan.specialized_signatures.has(original):
+                    return Err("SOURCE-CONFINEMENT-TARGET: specialized signature is absent")
+                signature = plan.specialized_signatures[original]
+                if not plan.specialized_names.has(original):
+                    return Err("SOURCE-CONFINEMENT-TARGET: specialized linker binding is absent")
+                expected_name = plan.specialized_names[original]
+                found = true
+                if context_index != args.len() - 1:
+                    return Err("SOURCE-CONFINEMENT-ARGUMENT: internal borrow must be trailing")
+        if source_region_facade_borrows_context_v1(target, plan):
+            if found or not plan.module.functions.has(target):
+                return Err("SOURCE-CONFINEMENT-TARGET: facade identity is absent or collides")
+            signature = plan.module.functions[target].signature
+            expected_name = plan.module.functions[target].name
+            found = true
+            if context_index != 0:
+                return Err("SOURCE-CONFINEMENT-ARGUMENT: facade borrow must be first")
+        if not found:
+            return Err("SOURCE-CONFINEMENT-CALL: context passed to unproved callee")
+        if (signature.is_variadic or signature.params.len() != args.len() or
+                serialize_mir_type(signature.params[context_index]) != serialize_mir_type(plan.context_type)):
+            return Err("SOURCE-CONFINEMENT-SIGNATURE: canonical context parameter differs")
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                # Spelling is checked for consistency AFTER canonical identity
+                # selection; it never selects or authenticates the callee.
+                if name != expected_name:
+                    return Err("SOURCE-CONFINEMENT-IDENTITY: emitted target changed after canonical capture")
+                match type_.kind:
+                    case MirTypeKind.FuncPtr(actual):
+                        if serialize_mir_signature(actual) != serialize_mir_signature(signature):
+                            return Err("SOURCE-CONFINEMENT-SIGNATURE: emitted call differs from captured declaration")
+                    case _: return Err("SOURCE-CONFINEMENT-CALL: typed direct callable required")
+            case _: return Err("SOURCE-CONFINEMENT-CALL: indirect context borrow is forbidden")
+        Ok(())
+
+    me verify_source_region_current_function_v1(output: MirFunction, context: LocalId,
+            plan: SourceRegionFunctionPlanV1) -> Result<(), text>:
+        if output.signature.params.len() == 0 or output.signature.is_variadic:
+            return Err("SOURCE-CONFINEMENT-SIGNATURE: fixed hidden argument required")
+        if serialize_mir_type(output.signature.params[output.signature.params.len() - 1]) != serialize_mir_type(plan.context_type):
+            return Err("SOURCE-CONFINEMENT-SIGNATURE: hidden argument type differs")
+        var context_count = 0
+        for local in output.locals:
+            if local.id.id == context.id:
+                context_count = context_count + 1
+                if serialize_mir_type(local.type_) != serialize_mir_type(plan.context_type):
+                    return Err("SOURCE-CONFINEMENT-TYPE: hidden local has foreign identity")
+                match local.kind:
+                    case LocalKind.Arg(index):
+                        if index != output.signature.params.len() - 1:
+                            return Err("SOURCE-CONFINEMENT-ARGUMENT: context is not final argument")
+                    case _: return Err("SOURCE-CONFINEMENT-ARGUMENT: context is not an argument")
+            else:
+                if serialize_mir_type(local.type_) == serialize_mir_type(plan.context_type):
+                    return Err("SOURCE-CONFINEMENT-COPY: a second context local exists")
+        if context_count != 1:
+            return Err("SOURCE-CONFINEMENT-LOCAL: one hidden context local required")
+        var seen_blocks: Dict<i64, bool> = {}
+        for block in output.blocks:
+            if block.id.id < 0 or seen_blocks.has(block.id.id):
+                return Err("SOURCE-CONFINEMENT-BLOCK: duplicate or invalid block identity")
+            seen_blocks[block.id.id] = true
+            for index in 0..block.instructions.len():
+                match block.instructions[index].kind:
+                    case MirInstKind.Call(destination, callee, args):
+                        self.source_region_verify_scoped_call_v1(output, context, plan,
+                            block.id.id, index, destination, callee, args)?
+                    case MirInstKind.Const(dest, _, _) | MirInstKind.Alloc(dest, _) | MirInstKind.LoadGlobal(dest, _):
+                        source_region_no_context_local_v1(dest, context)?
+                    case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                        source_region_no_context_local_v1(dest, context)?
+                        source_region_no_context_local_v1(source, context)?
+                    case MirInstKind.BinOp(dest, _, left, right) | MirInstKind.CheckedBinOp(dest, _, left, right):
+                        source_region_no_context_local_v1(dest, context)?
+                        source_region_no_context_operand_v1(left, context)?
+                        source_region_no_context_operand_v1(right, context)?
+                    case MirInstKind.UnaryOp(dest, _, operand) | MirInstKind.Cast(dest, operand, _) | MirInstKind.Bitcast(dest, operand, _) | MirInstKind.Load(dest, operand) | MirInstKind.GetField(dest, operand, _):
+                        source_region_no_context_local_v1(dest, context)?
+                        source_region_no_context_operand_v1(operand, context)?
+                    case MirInstKind.Store(pointer, value) | MirInstKind.SetField(pointer, _, value):
+                        source_region_no_context_operand_v1(pointer, context)?
+                        source_region_no_context_operand_v1(value, context)?
+                    case MirInstKind.StoreGlobal(_, value):
+                        source_region_no_context_operand_v1(value, context)?
+                    case MirInstKind.Aggregate(dest, _, operands):
+                        source_region_no_context_local_v1(dest, context)?
+                        for operand in operands: source_region_no_context_operand_v1(operand, context)?
+                    case MirInstKind.GetElementPtr(dest, base, indices):
+                        source_region_no_context_local_v1(dest, context)?
+                        source_region_no_context_operand_v1(base, context)?
+                        for operand in indices: source_region_no_context_operand_v1(operand, context)?
+                    case MirInstKind.ResultMatchSemantic(scrutinee, destination, _, _, _, ok, err):
+                        for local in [scrutinee, destination, ok, err]: source_region_no_context_local_v1(local, context)?
+                    case MirInstKind.Nop: ()
+                    case _: return Err("SOURCE-CONFINEMENT-INCOMPLETE: instruction has no complete operand classification")
+            match block.terminator:
+                case MirTerminator.Ret(value):
+                    if val operand = value: source_region_no_context_operand_v1(operand, context)?
+                case MirTerminator.If(condition, _, _) | MirTerminator.Switch(condition, _, _):
+                    source_region_no_context_operand_v1(condition, context)?
+                case MirTerminator.Goto(_) | MirTerminator.Unreachable: ()
+                case _: return Err("SOURCE-CONFINEMENT-EXIT: suspended or exceptional pin transport is unproved")
+        Ok(())

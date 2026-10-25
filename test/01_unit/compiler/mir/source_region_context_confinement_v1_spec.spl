@@ -1,0 +1,294 @@
+# Actual-source confinement contracts, authored UNRUN. No hand-created context
+# metadata or capture rows supply a positive oracle; these lower actual source.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirTypeKind, SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.source_region_function_request_v1.*
+use compiler.mir.source_region_context_confinement_v1.*
+use compiler.mir.source_region_request_wrapper_v1.*
+use compiler.mir.source_region_request_flow_v1.*
+use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
+use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source_actual_replay_hir_v1(extra: text = "", request: bool = false) -> HirModule:
+    # Compile the actual account and private facade bodies, never fake facade
+    # signatures, guessed proof rows or caller-authored context metadata.
+    val account = rt_file_read_text("src/compiler/00.common/loop_resource_account_v1.spl") ?? ""
+    val facade = rt_file_read_text("src/compiler/00.common/source_region_context_v1.spl") ?? ""
+    if account == "" or facade == "": fail("actual SOURCE account/facade dependency is absent")
+    var request_source = ""
+    if request:
+        val slot = rt_file_read_text("src/compiler/00.common/source_region_request_v1.spl") ?? ""
+        val lifecycle = rt_file_read_text("src/compiler/00.common/source_region_pinned_lifecycle_v1.spl") ?? ""
+        if slot == "" or lifecycle == "": fail("actual retained request/lifecycle dependency is absent")
+        request_source = slot + "\n" + lifecycle + "\n"
+    val subject = "\nstruct C4Child:\n    value: i64\nstruct C4Parent:\n    child: C4Child\n" +
+        "fn c4_make_child() -> C4Child:\n    C4Child(value: 1)\n" +
+        "fn c4_subject() -> i64:\n    val child = c4_make_child()\n" +
+        "    val parent = C4Parent(child: child)\n    var alias = child\n" +
+        "    alias.value = 2\n    parent.child.value\n"
+    val parsed = parse_full_frontend(account + "\n" + facade + "\n" + request_source + subject + extra,
+        "c4_actual_replay.spl", "c4_actual_replay", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("c4_actual_replay.spl")
+    val hir = hir_owner.lower_module(parsed)
+    expect(hir_owner.errors.len()).to_equal(0)
+    hir
+
+fn source_actual_symbol_v1(hir: HirModule, name: text) -> SymbolId:
+    if val symbol = hir.symbols.lookup(name): return symbol
+    fail("actual parsed symbol is absent: {name}")
+
+impl MirLowering:
+    me source_actual_plan_v1(hir: HirModule, module: MirModule,
+            entry: SymbolId) -> Result<SourceRegionFunctionPlanV1, text>:
+        val facades = SourceRegionFacadeSymbolsV1(
+            create: source_actual_symbol_v1(hir, "source_region_create_v1"),
+            alloc: source_actual_symbol_v1(hir, "source_region_alloc_v1"),
+            write_begin: source_actual_symbol_v1(hir, "source_region_write_begin_v1"),
+            write_commit: source_actual_symbol_v1(hir, "source_region_write_commit_v1"),
+            alias_write: source_actual_symbol_v1(hir, "source_region_alias_write_v1"),
+            stamp: source_actual_symbol_v1(hir, "source_region_stamp_v1"),
+            read_begin: source_actual_symbol_v1(hir, "source_region_read_begin_v1"),
+            read_end: source_actual_symbol_v1(hir, "source_region_read_end_v1"),
+            close: source_actual_symbol_v1(hir, "source_region_close_v1"),
+            incomplete: source_actual_symbol_v1(hir, "source_region_incomplete_v1"))
+        val create_result = hir.functions[facades.create].return_type
+        val (context_hir, error_hir) = match create_result.kind:
+            case HirTypeKind.Result(ok, err): (ok, err)
+            case _: return Err("actual create declaration does not return Result")
+        val context = self.lower_type(context_hir)
+        var constructor: MirOperand? = nil
+        for block in module.functions[facades.incomplete].blocks:
+            for instruction in block.instructions:
+                if verification_direct_call_name_v2(instruction.kind) == "rt_enum_new":
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _): constructor = Some(callee)
+                        case _: ()
+        if constructor == nil: return Err("actual canonical Incomplete constructor was not emitted")
+        self.prepare_source_region_request_v1(module, entry, hir.functions,
+            context, error_hir, facades, SourceRegionResultConstructionV1(
+                constructor: constructor ?? mir_operand_const_int(0),
+                runtime_enum_id: self.enum_runtime_id("Result")))
+
+describe "actual emitted SOURCE hidden-context confinement":
+    it "accepts actual emitted scoped borrows and rejects injected escapes":
+        val hir = source_actual_replay_hir_v1()
+        var owner = MirLowering.new(hir.symbols)
+        val module = owner.lower_module(hir)
+        expect(owner.errors.len()).to_equal(0)
+        val entry = source_actual_symbol_v1(hir, "c4_subject")
+        match owner.source_actual_plan_v1(hir, module, entry):
+            case Err(message): fail(message)
+            case Ok(plan):
+                match owner.lower_source_region_function_v1(hir.functions[entry], plan):
+                    case Err(message): fail(message)
+                    case Ok(actual):
+                        val context = LocalId(id: actual.source_region_context_local_v1)
+                        match owner.verify_source_region_current_function_v1(actual, context, plan):
+                            case Err(message): fail(message)
+                            case Ok(_): ()
+                        # Each sabotage starts from the actual emitted body;
+                        # no caller-created lifetime metadata is accepted.
+                        var copied = MirFunction.with_blocks(actual, [])
+                        var original_blocks: [MirBlock] = []
+                        for block in actual.blocks: original_blocks.push(block)
+                        var first = original_blocks[0]
+                        var instructions: [MirInst] = []
+                        instructions.push(MirInst(kind: MirInstKind.Copy(
+                            LocalId(id: context.id + 100000), context), span: nil))
+                        for instruction in first.instructions: instructions.push(instruction)
+                        first.instructions = instructions
+                        var copy_blocks: [MirBlock] = [first]
+                        for index in 1..original_blocks.len(): copy_blocks.push(original_blocks[index])
+                        copied.blocks = copy_blocks
+                        match owner.verify_source_region_current_function_v1(copied, context, plan):
+                            case Err(message): expect(message).to_contain("CONFINEMENT-LOCAL")
+                            case Ok(_): fail("actual hidden context copy was accepted")
+
+                        var returned = MirFunction.with_blocks(actual, [])
+                        var return_block = original_blocks[0]
+                        return_block.terminator = MirTerminator.Ret(Some(mir_operand_copy(context)))
+                        returned.blocks = [return_block]
+                        match owner.verify_source_region_current_function_v1(returned, context, plan):
+                            case Err(message): expect(message).to_contain("CONFINEMENT-ESCAPE")
+                            case Ok(_): fail("actual hidden context return was accepted")
+
+                        var projected = MirFunction.with_blocks(actual, [])
+                        var projection_block = original_blocks[0]
+                        projection_block.instructions = [MirInst(kind: MirInstKind.GetField(
+                            LocalId(id: context.id + 100000), mir_operand_copy(context), 1), span: nil)]
+                        projected.blocks = [projection_block]
+                        match owner.verify_source_region_current_function_v1(projected, context, plan):
+                            case Err(message): expect(message).to_contain("CONFINEMENT-ESCAPE")
+                            case Ok(_): fail("native control projection from context was accepted")
+
+    it "lowers and checks the actual direct wrapper including failed-release retention":
+        val extra = "\nfn c4_pin_consumer(value: i64) -> i64:\n    value + 1\n" +
+            "fn c4_pin_producer(value: i64) -> i64:\n    c4_pin_consumer(value)\n"
+        val hir = source_actual_replay_hir_v1(extra, true)
+        var owner = MirLowering.new(hir.symbols)
+        val module = owner.lower_module(hir)
+        expect(owner.errors.len()).to_equal(0)
+        val producer = source_actual_symbol_v1(hir, "c4_pin_producer")
+        val consumer = source_actual_symbol_v1(hir, "c4_pin_consumer")
+        val slot_class = source_actual_symbol_v1(hir, "SourceRegionRequestV1")
+        val lifecycle = SourceRegionRequestLifecycleSymbolsV1(
+            slot_create: hir.classes[slot_class].methods["create"],
+            read_end_pinned: source_actual_symbol_v1(hir, "source_region_read_end_pinned_v1"),
+            revoke_pinned: source_actual_symbol_v1(hir, "source_region_revoke_pinned_v1"),
+            release_pinned: source_actual_symbol_v1(hir, "source_region_release_pinned_v1"),
+            retain_first_error: source_actual_symbol_v1(hir, "source_region_retain_first_error_v1"),
+            retain_cleanup_error: source_actual_symbol_v1(hir, "source_region_retain_cleanup_error_v1"))
+        val slot_type = match hir.functions[lifecycle.slot_create].return_type.kind:
+            case HirTypeKind.Result(ok, _): owner.lower_type(ok)
+            case _: fail("actual slot factory lacks canonical Result")
+        val account_type = owner.lower_type(hir.functions[lifecycle.slot_create].params[0].type_)
+        match owner.source_actual_plan_v1(hir, module, producer):
+            case Err(message): fail(message)
+            case Ok(plan):
+                match source_region_resolved_call_closure_v1(module, producer):
+                    case Err(message): fail(message)
+                    case Ok(closure):
+                        match owner.lower_source_region_request_v1(producer, closure.functions, plan):
+                            case Err(message): fail(message)
+                            case Ok(specialized):
+                                val direct_producer = plan.specialized_symbols[producer]
+                                val direct_consumer = plan.specialized_symbols[consumer]
+                                match owner.generate_source_region_request_wrapper_v1(specialized.module,
+                                        direct_producer, direct_consumer, slot_type, account_type, plan.facades,
+                                        lifecycle, hir, plan):
+                                    case Err(message): fail(message)
+                                    case Ok(wrapper):
+                                        var candidate = specialized.module
+                                        candidate.functions[wrapper.symbol] = wrapper
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                            case Err(message): fail(message)
+                                            case Ok(_): ()
+                                        # Both release outcomes are analyzed by the checker. This
+                                        # deliberately confers no caller-retention/pin receipt.
+                                        expect(wrapper.source_region_context_abi_v1).to_equal(0)
+                                        var slot_local = LocalId(id: -1)
+                                        var context_local = LocalId(id: -1)
+                                        for local in wrapper.locals:
+                                            match local.kind:
+                                                case LocalKind.Arg(0): slot_local = local.id
+                                                case _: ()
+                                        for block in wrapper.blocks:
+                                            for instruction in block.instructions:
+                                                match instruction.kind:
+                                                    case MirInstKind.GetField(dest, base, 0):
+                                                        match base.kind:
+                                                            case MirOperandKind.Copy(local):
+                                                                if local.id == slot_local.id: context_local = dest
+                                                            case _: ()
+                                                    case _: ()
+                                        expect(context_local.id).to_be_greater_than(-1)
+                                        var escaped = MirFunction.with_blocks(wrapper, [])
+                                        var escape_blocks: [MirBlock] = []
+                                        for block in wrapper.blocks:
+                                            var copied = block
+                                            var items: [MirInst] = []
+                                            for instruction in block.instructions: items.push(instruction)
+                                            match block.terminator:
+                                                case MirTerminator.Ret(_):
+                                                    # Appending preserves every actual captured call
+                                                    # index, while exercising a post-release borrow.
+                                                    items.push(MirInst(kind: MirInstKind.GetField(
+                                                        context_local, mir_operand_copy(slot_local), 0), span: nil))
+                                                case _: ()
+                                            copied.instructions = items
+                                            escape_blocks.push(copied)
+                                        escaped.blocks = escape_blocks
+                                        candidate.functions[wrapper.symbol] = escaped
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, escaped,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                            case Err(_): ()
+                                            case Ok(_): fail("use after final release was accepted")
+
+                                        for sabotage in 0..2:
+                                            var altered = MirFunction.with_blocks(wrapper, [])
+                                            var altered_blocks: [MirBlock] = []
+                                            for block in wrapper.blocks:
+                                                var copied = block
+                                                var items: [MirInst] = []
+                                                for instruction in block.instructions: items.push(instruction)
+                                                if block.id.id == wrapper.entry_block.id:
+                                                    if sabotage == 0:
+                                                        items.push(MirInst(kind: MirInstKind.Copy(
+                                                            LocalId(id: context_local.id + 100000), context_local), span: nil))
+                                                    else:
+                                                        # New raw call has no actual resolver/emitter
+                                                        # capture. No fake capture is added to the oracle.
+                                                        items.push(MirInst(kind: MirInstKind.Call(nil,
+                                                            mir_operand_copy(context_local), []), span: nil))
+                                                copied.instructions = items
+                                                altered_blocks.push(copied)
+                                            altered.blocks = altered_blocks
+                                            candidate.functions[wrapper.symbol] = altered
+                                            match owner.verify_source_region_request_wrapper_v1(candidate, altered,
+                                                    direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                                case Err(_): ()
+                                                case Ok(_): fail("actual wrapper context copy/unknown call was accepted")
+
+                                        var release_result = LocalId(id: -1)
+                                        var release_error_block = BlockId(id: -1)
+                                        for capture in owner.verification_call_captures:
+                                            if capture.resolved_callee_v1 == Some(lifecycle.release_pinned):
+                                                for block in wrapper.blocks:
+                                                    if block.id.id == capture.block_id:
+                                                        match block.instructions[capture.instruction_index].kind:
+                                                            case MirInstKind.Call(Some(local), _, _): release_result = local
+                                                            case _: fail("actual release capture is not its emitted call")
+                                        for block in wrapper.blocks:
+                                            for instruction in block.instructions:
+                                                match instruction.kind:
+                                                    case MirInstKind.ResultMatchSemantic(subject, _, _, err, _, _, _):
+                                                        if subject.id == release_result.id: release_error_block = err
+                                                    case _: ()
+                                        expect(release_error_block.id).to_be_greater_than(-1)
+                                        var outer_error_tag = LocalId(id: -1)
+                                        for site in owner.builder.canonical_enum_builtin_sites_v1:
+                                            if (site.block.id == release_error_block.id and
+                                                    site.operation == CanonicalEnumBuiltinOperationV1.New and site.discriminant == 1):
+                                                match site.operands[1].kind:
+                                                    case MirOperandKind.Copy(local): outer_error_tag = local
+                                                    case _: fail("actual constructor discriminant is not a typed local")
+                                        expect(outer_error_tag.id).to_be_greater_than(-1)
+                                        var concealed = MirFunction.with_blocks(wrapper, [])
+                                        var concealed_blocks: [MirBlock] = []
+                                        for block in wrapper.blocks:
+                                            var copied = block
+                                            var items: [MirInst] = []
+                                            for instruction in block.instructions:
+                                                match instruction.kind:
+                                                    case MirInstKind.Const(local, _, type_):
+                                                        if local.id == outer_error_tag.id:
+                                                            items.push(MirInst(kind: MirInstKind.Const(local,
+                                                                MirConstValue.Int(0), type_), span: instruction.span))
+                                                        else: items.push(instruction)
+                                                    case _: items.push(instruction)
+                                            copied.instructions = items
+                                            concealed_blocks.push(copied)
+                                        concealed.blocks = concealed_blocks
+                                        candidate.functions[wrapper.symbol] = concealed
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, concealed,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                            case Err(_): ()
+                                            case Ok(_): fail("failed release was permitted to hide retained ownership in outer Ok")
+
+describe "actual SOURCE function replay and generic Result transport":
