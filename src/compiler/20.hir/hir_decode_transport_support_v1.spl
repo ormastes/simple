@@ -1,0 +1,58 @@
+# Shared checks emitted by compiler_schema.codec_gen. These are logical
+# representation/work charges, not an allocator or peak-RSS measurement.
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_parse_i64}
+use std.common.encoding.utf8.{text_byte_len}
+
+fn hc_read_presence_v1(r: FlatPoolReader) -> bool:
+    val flag = r.next_i64()
+    if not r.ok: return false
+    if flag != 0 and flag != 1:
+        r.reject_malformed("presence_flag")
+        return false
+    flag == 1
+
+# Preserve the generated scalar's bare-value assignment. Returning a nullable
+# scalar from a helper changes its staged-native representation; validate the
+# wire first, then let the generated assignment retain that existing shape.
+fn hc_validate_i64_wire_v1(r: FlatPoolReader, raw: text) -> bool:
+    if not r.ok: return false
+    if raw == "N": return true
+    if not r.bounded: return true
+    val bytes = text_byte_len(raw)
+    if bytes > 20:
+        r.reject_bounds("integer")
+        return false
+    # Validation parse plus the generated assignment's second parse.
+    if not r.charge_work(bytes * 2 + 1): return false
+    val value = flat_pool_parse_i64(raw)
+    if raw != "{value}":
+        r.reject_malformed("integer")
+        return false
+    true
+
+fn hc_validate_bool_wire_v1(r: FlatPoolReader, raw: text) -> bool:
+    if not r.ok: return false
+    if not r.charge_work(text_byte_len(raw)): return false
+    if raw == "N" or raw == "0" or raw == "1": return true
+    r.reject_malformed("boolean")
+    false
+
+# next_len charges the ordinary array-slot envelope. Pair payloads and map
+# backing/index slots need an additional checked charge BEFORE materializing
+# an entry. Empty carrier shells are covered by enter_node's 4096-byte charge.
+fn hc_read_count_v1(r: FlatPoolReader, extra_stride: i64) -> i64:
+    val count = r.next_len()
+    if not r.ok: return 0
+    if not r.bounded: return count
+    if extra_stride < 0:
+        r.reject_bounds("container_stride")
+        return 0
+    if extra_stride > 0:
+        if count > (r.max_allocation_bytes - r.live_reserved_bytes) / extra_stride:
+            r.reject_bounds("container_allocation")
+            return 0
+        if not r.reserve(count * extra_stride): return 0
+    count
+
+export hc_read_presence_v1, hc_validate_i64_wire_v1, hc_validate_bool_wire_v1,
+    hc_read_count_v1

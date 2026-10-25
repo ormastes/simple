@@ -87,7 +87,8 @@ fn codec_use_lines() -> text:
     out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
     out = out + "use common.facet_abi.*\n"
     out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
-    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
+    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_decode_reject, hc_read_f64, hc_enc_enum_bool, hc_enc_enum_text, hc_enc_enum_char, hc_put_char, hc_read_char, hc_restore_enum_nil}}\n"
+    out = out + "use compiler.hir.hir_decode_transport_support_v1.{{hc_read_presence_v1, hc_validate_i64_wire_v1, hc_validate_bool_wire_v1, hc_read_count_v1}}\n"
     out = out + "use compiler.hir.hir_codec_key_order.{{hc_order_i64_keys_v1, hc_order_text_keys_v1, hc_order_symbol_id_keys_v1}}\n"
     out
 
@@ -494,6 +495,11 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
 
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
         required_node: bool = false) -> text:
+    _emit_dec_value(u, type_text, target, indent, c, required_node) +
+        indent + "if not r.ok: return nil\n"
+
+fn _emit_dec_value(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
+        required_node: bool = false) -> text:
     """Statements that read one value of `type_text` into a new local `target`."""
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
@@ -506,11 +512,13 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         val k0 = c.next()
         var out = indent + "val raw{k0} = r.next()\n"
         if s.cat == "prim_i64":
+            out = out + indent + "if not hc_validate_i64_wire_v1(r, raw{k0}): return nil\n"
             out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: flat_pool_parse_i64(raw{k0})\n"
         elif s.cat == "prim_bool":
+            out = out + indent + "if not hc_validate_bool_wire_v1(r, raw{k0}): return nil\n"
             out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
         else:
-            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": nil else: flat_pool_unescape(raw{k0})\n"
+            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": nil else: r.decode_text(raw{k0})\n"
         return out
     if s.cat == "prim_f64":
         return indent + "val " + target + " = hc_read_f64(r)\n"
@@ -529,7 +537,7 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # boxing; the `opt` branch below keeps that bare value for node/opaque
         # inners (see its note). Wire format is unchanged.
         var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
-        out = out + indent + "if r.next_i64() == 1:\n"
+        out = out + indent + "if hc_read_presence_v1(r):\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
         if required_node:
             out = out + indent + "else:\n"
@@ -538,7 +546,7 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
     val k = c.next()
     if s.cat == "opt":
         var out = indent + "var " + target + ": " + decl_type + " = nil\n"
-        out = out + indent + "if r.next_i64() == 1:\n"
+        out = out + indent + "if hc_read_presence_v1(r):\n"
         out = out + _emit_dec(u, s.a, "ov{k}", indent + "    ", c)
         # A node/opaque inner value is already decoded into a `T?` local
         # (statement form above). Wrapping it again as `Some(ov)` stores an
@@ -557,18 +565,18 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         return out
     if s.cat == "list":
         var out = indent + "var " + target + ": " + decl_type + " = []\n"
-        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "val n{k} = hc_read_count_v1(r, 0)\n"
         out = out + indent + "var i{k} = 0\n"
-        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + indent + "while i{k} < n{k} and r.ok:\n"
         out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c)
         out = out + indent + "    " + target + ".push(ev{k})\n"
         out = out + indent + "    i{k} = i{k} + 1\n"
         return out
     if s.cat == "pair":
         var out = indent + "var " + target + ": " + decl_type + " = []\n"
-        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "val n{k} = hc_read_count_v1(r, 64)\n"
         out = out + indent + "var i{k} = 0\n"
-        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + indent + "while i{k} < n{k} and r.ok:\n"
         out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c)
         out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c)
         out = out + indent + "    " + target + ".push((pa{k}, pb{k}))\n"
@@ -576,10 +584,15 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         return out
     if s.cat == "dict":
         var out = indent + "var " + target + ": " + decl_type + " = {}\n"
-        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "val n{k} = hc_read_count_v1(r, 256)\n"
         out = out + indent + "var i{k} = 0\n"
-        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + indent + "while i{k} < n{k} and r.ok:\n"
         out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        if s.a == "text":
+            out = out + indent + "    if not r.account_text_key_compare(dk{k}, dk{k}): return nil\n"
+        out = out + indent + "    if r.bounded and " + target + ".contains_key(dk{k}):\n"
+        out = out + indent + "        r.reject_malformed(\"duplicate_dictionary_key\")\n"
+        out = out + indent + "        return nil\n"
         val value_shape = u.classify(s.b)
         if value_shape.cat == "prim_i64":
             # Keep later emitted local names aligned with scalar _emit_dec.
@@ -670,7 +683,7 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
                 field_index = field_index + 1
             idx = idx + 1
-        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
@@ -685,9 +698,12 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
 # @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=generate-typed-enum-prototypes-and-schema-owned-wire-nil-slots
 fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + ":\n"]
+    parts.push("    if not r.enter_node(): return nil\n")
+    parts.push("    defer r.leave_node()\n")
     var c = EmitCounter(n: 0)
     if decl.is_enum:
         parts.push("    val tag = r.next_i64()\n")
+        parts.push("    if not r.ok: return nil\n")
         var idx = 0
         for row in decl.variants:
             val fields = parse_payload_fields(row.payload_schema)
@@ -704,6 +720,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     val flag = "wire_nil_" + f.binder
                     parts.push("        val raw{k} = r.next()\n")
                     if shape.cat == "prim_bool":
+                        parts.push("        if not hc_validate_bool_wire_v1(r, raw{k}): return nil\n")
                         parts.push("        val " + flag + " = raw{k} == \"N\"\n")
                         parts.push("        val " + target + " = raw{k} == \"1\"\n")
                     elif shape.cat == "prim_char":
@@ -712,13 +729,14 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                         parts.push("        if not r.ok: return nil\n")
                     else:
                         parts.push("        val " + flag + " = raw{k} == \"\\\\N\"\n")
-                        parts.push("        val " + target + " = if " + flag + ": \"\" else: flat_pool_unescape(raw{k})\n")
+                        parts.push("        val " + target + " = if " + flag + ": \"\" else: r.decode_text(raw{k})\n")
                     nil_flags.push(flag)
                     nil_indices.push(field_index)
                 else:
                     parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
                 names.push("f_" + f.binder)
                 field_index = field_index + 1
+            parts.push("        if not r.ok: return nil\n")
             if fields.len() == 0:
                 parts.push("        return " + decl.name + "." + row.variant + "\n")
             elif nil_flags.len() > 0:
@@ -735,16 +753,15 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             else:
                 parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
             idx = idx + 1
-        parts.push("    hc_bad_tag(\"" + decl.name + "\", tag)\n")
-        # Unreachable: hc_bad_tag exits. A typed tail keeps the checker happy
-        # on every lane without inventing a sentinel variant.
-        parts.push("    " + dec_fn_name(decl.name) + "(r)\n")
+        parts.push("    hc_decode_reject(r)\n")
+        parts.push("    nil\n")
         return parts.join("")
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
         parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
         names.push(f.binder + ": f_" + f.binder)
+    parts.push("    if not r.ok: return nil\n")
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
 
@@ -753,7 +770,8 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
     parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
     parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
-    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push("# satisfies the seed's match checker. Encoders reject the cache entry;\n")
+    parts.push("# decoders reject unknown stored tags through their reader.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
     for name in order:

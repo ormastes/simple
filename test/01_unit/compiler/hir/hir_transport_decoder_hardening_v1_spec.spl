@@ -1,0 +1,131 @@
+# Exact generated transport closure: type, expression, symbol table, module.
+# Runtime execution is pending a qualified self-hosted test runner.
+use std.spec.*
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_type, hc_dec_hir_expr,
+    hc_dec_symbol_table, hc_dec_hir_module, hc_dec_visibility}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirEnum, HirExprKind}
+use compiler.common.dependency.visibility.{Visibility}
+use std.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_codec_header}
+
+fn transport_reader(blob: text, nodes: i64 = 128, depth: i64 = 32,
+        allocation: i64 = 1048576) -> FlatPoolReader:
+    FlatPoolReader.new_bounded(blob, 1048576, allocation, nodes, depth, 1048576)
+
+fn optional_type_wire(depth: i64) -> text:
+    var wire = "1\n2\n0\n"
+    var index = 0
+    while index < depth:
+        wire = "1\n12\n1\n" + wire + "0\n"
+        index = index + 1
+    wire
+
+describe "Exact HIR transport decoder hardening":
+    it "rejects unknown nested tags and permits a later valid decode":
+        val malformed = transport_reader("1\n999\n")
+        expect(hc_dec_hir_expr(malformed)).to_equal(nil)
+        expect(malformed.failure_kind).to_equal("malformed")
+        val valid = transport_reader("0\n")
+        expect(hc_dec_visibility(valid)).to_equal(Visibility.Public)
+        expect(valid.ok).to_equal(true)
+        expect(valid.current_depth).to_equal(0)
+
+    it "refuses deep types before descending beyond the selected depth":
+        val reader = transport_reader(optional_type_wire(40), depth: 8)
+        expect(hc_dec_hir_type(reader)).to_equal(nil)
+        expect(reader.failure_detail).to_equal("depth")
+        expect(reader.maximum_depth).to_equal(8)
+        expect(reader.current_depth).to_equal(0)
+
+    it "refuses a node budget before reading another node payload":
+        val reader = transport_reader(optional_type_wire(3), nodes: 3)
+        expect(hc_dec_hir_type(reader)).to_equal(nil)
+        expect(reader.failure_detail).to_equal("nodes")
+        expect(reader.entered_nodes).to_equal(3)
+        expect(reader.current_depth).to_equal(0)
+
+    it "reserves a node shell before consuming even its valid enum tag":
+        val reader = transport_reader("0\n", allocation: 512)
+        expect(reader.ok).to_equal(true)
+        expect(hc_dec_visibility(reader)).to_equal(nil)
+        expect(reader.failure_detail).to_equal("allocation_bytes")
+        expect(reader.pos).to_equal(0)
+
+    it "rejects a wide symbol table before iterating its first entry":
+        val reader = transport_reader("5\n0\n0\n0\n0\n0\n", nodes: 4)
+        expect(hc_dec_symbol_table(reader)).to_equal(nil)
+        expect(reader.failure_detail).to_equal("container_count")
+        expect(reader.pos).to_equal(1)
+
+    it "does not publish a truncated module or invalid presence marker":
+        val truncated = transport_reader("module\n")
+        expect(hc_dec_hir_module(truncated)).to_equal(nil)
+        expect(truncated.ok).to_equal(false)
+        val invalid_presence = transport_reader("2\n")
+        expect(hc_dec_hir_type(invalid_presence)).to_equal(nil)
+        expect(invalid_presence.failure_kind).to_equal("malformed")
+
+    it "refuses malformed booleans and truncated container records":
+        val boolean = transport_reader("0\n2\n0\n0\n")
+        expect(hc_dec_hir_expr(boolean)).to_equal(nil)
+        expect(boolean.failure_detail).to_equal("boolean")
+        val truncated = transport_reader("4\n0\n")
+        expect(hc_dec_symbol_table(truncated)).to_equal(nil)
+        expect(truncated.failure_detail).to_equal("truncated_container")
+
+    it "rejects duplicate dictionary keys before replacing an earlier value":
+        # SymbolTable: empty symbols/scopes, absent scope, two scalar ids,
+        # then two text/text gpu target entries sharing the same key.
+        val reader = transport_reader("0\n0\n0\n0\n0\n2\nkey\none\nkey\ntwo\n")
+        expect(hc_dec_symbol_table(reader)).to_equal(nil)
+        expect(reader.failure_detail).to_equal("duplicate_dictionary_key")
+
+    it "preserves a valid recursive type's actual enum payload":
+        val reader = transport_reader(optional_type_wire(1), depth: 4)
+        val decoded = hc_dec_hir_type(reader)
+        expect(reader.ok).to_equal(true)
+        expect(reader.current_depth).to_equal(0)
+        expect(reader.maximum_depth).to_equal(4)
+        match decoded.kind:
+            case HirTypeKind.Optional(inner):
+                expect(inner.kind).to_equal(HirTypeKind.Bool)
+            case _: fail("valid Optional<Bool> changed semantic owner")
+        val one_short = transport_reader(optional_type_wire(1), depth: 3)
+        expect(hc_dec_hir_type(one_short)).to_equal(nil)
+        expect(one_short.failure_detail).to_equal("depth")
+
+    it "roundtrips real module defaults, enum order and symbol identities":
+        val source = "enum Choice:\n    First\n    Second\n\nfn answer(value: i64 = 7) -> i64:\n    value\n"
+        val parsed = parse_full_frontend(source, "transport.spl", "transport", Logger(level: 0))
+        var lowering = HirLowering.with_filename("transport.spl")
+        val original = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val blob = hir_module_encode(original)
+        expect(blob != "").to_equal(true)
+        val reader = transport_reader(blob, nodes: 4096, allocation: 33554432)
+        expect(reader.next()).to_equal(hir_codec_header())
+        val decoded = hc_dec_hir_module(reader)
+        expect(reader.ok).to_equal(true)
+        expect(reader.pos).to_equal(reader.lines.len() - 1)
+        expect(hir_module_encode(decoded)).to_equal(blob)
+        expect(decoded.functions.len()).to_equal(1)
+        val functions = decoded.functions.keys()
+        val function: HirFunction = decoded.functions[functions[0]]
+        expect(function.name).to_equal("answer")
+        expect(original.functions.contains_key(functions[0])).to_equal(true)
+        expect(function.symbol.id).to_equal(functions[0].id)
+        expect(function.params[0].has_default).to_equal(true)
+        match function.params[0].default.kind:
+            case HirExprKind.IntLit(value, _): expect(value).to_equal(7)
+            case _: fail("parameter default lost its literal value")
+        expect(decoded.enums.len()).to_equal(1)
+        val enums = decoded.enums.keys()
+        val enumeration: HirEnum = decoded.enums[enums[0]]
+        expect(enumeration.variants[0].name).to_equal("First")
+        expect(enumeration.variants[1].name).to_equal("Second")
