@@ -2680,6 +2680,11 @@ impl MirLowering:
                         case Named(owner_symbol, _):
                             if val owner_method = self.symbols.lookup_method_in_type(owner_symbol, method):
                                 return self.resolved_call_hir_return_type(owner_method)
+                            # Trait-object receiver (`self.codegen.compile_module(m)`
+                            # with `codegen: Codegen`): the declared trait
+                            # signature is the result type every impl shares.
+                            if val trait_method = self.symbols.lookup_trait_method(owner_symbol, method):
+                                return self.resolved_call_hir_return_type(trait_method)
                         case _: ()
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
@@ -4599,7 +4604,16 @@ impl MirLowering:
                     val payload_hir_type: HirType? = match result_payload_type:
                         case Some(known_payload_type): known_payload_type
                         case _:
-                            val declared_payload = self.enum_single_payload_types.get(payload_key)
+                            # Declaration-repository lane installs payload rows
+                            # lazily (register_enum_variants(_, false)); the
+                            # single-slot row is absent until demanded, which
+                            # left `case X86(caps)` / `case Tuple(elements)`
+                            # binds untyped (WA-MIR-UNRESOLVED-supports,
+                            # -size_bytes). Demand it like the multi-slot path.
+                            self.ensure_declaration_enum_payloads_v1(payload_key)
+                            var declared_payload: HirType? = self.enum_single_payload_types.get(payload_key)
+                            if declared_payload == nil:
+                                declared_payload = self.enum_variant_payload_type_at(payload_key, 0)
                             match declared_payload:
                                 case Some(known): Some(known)
                                 case _:
@@ -4722,6 +4736,22 @@ impl MirLowering:
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
+                    else:
+                        # Declared nominal payload (`case X86(caps)` with
+                        # `X86(X86Caps)`): give the bound local the same record
+                        # owner a typed parameter gets in function_lowering, so
+                        # trait-impl method dispatch finds `X86Caps::supports`.
+                        if val declared_owner_type = effective_payload_type:
+                            match declared_owner_type.kind:
+                                case HirTypeKind.Named(declared_owner_sym, _):
+                                    if val declared_owner = self.symbols.get_symbol_raw(declared_owner_sym.id):
+                                        var declared_owner_name = declared_owner.name
+                                        match declared_owner.kind:
+                                            case SymbolKind.Class: declared_owner_name = mir_class_identity(declared_owner)
+                                            case _: ()
+                                        if declared_owner_name != "" and self.struct_field_order.has(declared_owner_name):
+                                            self.struct_value_syms[bound_payload.id] = declared_owner_name
+                                case _: ()
             elif bind_syms.len() >= 1:
                 # Result/Optional each declare ONE payload field. If that
                 # exact instantiated field is Tuple, its storage is the raw
