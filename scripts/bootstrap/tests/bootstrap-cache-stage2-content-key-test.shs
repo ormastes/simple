@@ -46,11 +46,21 @@ bootstrap_cache_release_all
 [ "$(ls "$lane"/*.o | wc -l | tr -d ' ')" = 6 ] || fail 'lane objects not preserved'
 out=$(bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod2" "$new" bootstrap-main reuse 2>&1) &&
   fail 'changed producer must refuse the lane'
-case "$out" in *incompatible*) ;; *) fail "wrong producer refusal: $out" ;; esac
+case "$out" in *'incompatible'*'(changed: producer_sha256)'*) ;; *) fail "wrong producer refusal: $out" ;; esac
 bootstrap_cache_release_all
 out=$(bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod" "$old2" bootstrap-main reuse 2>&1) &&
   fail 'changed non-source inputs must refuse the lane'
+case "$out" in *'(changed: inputs_sha256)'*) ;; *) fail "wrong inputs refusal: $out" ;; esac
 bootstrap_cache_release_all
+# Tip change with a rebuilt seed (the WA-CACHE-IDENTITY evidence: every tip
+# touched src/compiler_rust) moves BOTH the producer and its runtime snapshot.
+printf 'rt2\n' > "$tmp/rt.txt"
+new_rt=$(inputs "$tmp/ck1.txt"); printf 'rt\n' > "$tmp/rt.txt"
+out=$(bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod2" "$new_rt" bootstrap-main reuse 2>&1) &&
+  fail 'rebuilt seed must refuse the lane'
+case "$out" in *'(changed: producer_sha256,inputs_sha256)'*) ;; *) fail "wrong seed-rebuild refusal: $out" ;; esac
+bootstrap_cache_release_all
+[ "$(ls "$lane"/*.o | wc -l | tr -d ' ')" = 6 ] || fail 'refusals must preserve lane objects'
 
 # Per-object reuse via the real seed when available.
 if [ -n "${SIMPLE_SEED_BIN:-}" ]; then
