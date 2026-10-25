@@ -2,6 +2,14 @@
 
 ## Current landing and qualification status — 2026-10-25
 
+### Superseding snapshot — 11:42 UTC
+
+The [current source/acceptance ledger](../09_report/releasephase3_progress_2026_10_25.md#superseding-source-and-acceptance-ledger--2026-10-25-1142-utc) is pinned to `release_phase3` at `a87d4fa2e3d5` / merged [PR #4815](https://github.com/ormastes/simple/pull/4815). Private function-owner transport is coded and landed, with actual registration/caller/worker provenance still open. Retained Optional CFG and generated caller work, the wrong-variant verifier repair and stable-origin repair have local committed candidates but are not landed at that pin. Native operation17, the complete HIR graph, text keys, arrays/rich children and complete source admission remain implementation/integration gaps; existing scalar/Struct/enum/dictionary foundations are not full-scope completion.
+
+The coordinator reports frozen source `83be` / admitted compiler-only `8cd` **Phase3 attempt4 RUNNING in HIR**, not an object or compiler PASS. No qualified full CLI/general SSpec runner or new feature execution is established. All **82 feature acceptance scopes remain UNRUN**. The historical inventory counts below are carried forward, not a new exhaustive current census. Exact commits, distinctions between landed/unlanded/uncoded work, and runtime limitations are in the ledger.
+
+### Earlier snapshots — preserved history
+
 The [current progress report](../09_report/releasephase3_progress_2026_10_25.md) records merged scope-read provider/interpreter PR #4657 at `c345d0a6e589`, preserving earlier landing/build snapshots. Its three actual interpreter dispatch tests and prior eight hosted runtime tests passed; native reader controls passed. Full typed facade execution, SOURCE construction/accounting and whole-compiler performance remain OPEN. The last full inventory remains **15 complete-unverified /54 partial /4 absent selected behaviors /9 authority decisions =82**, with all **82 feature acceptance scopes UNRUN**; static 33, C4 foundation 37 and builder 20 authored SSpecs remain UNRUN.
 
 The fixed-runtime Stage2 source `89d2e18cd14` rebuilt 1,496 modules with 0 reused/failed and linked candidate `95c332194465…`; focused admission and planner positive/negative controls passed. Its compiler test matrix is still running at the report snapshot, so no final matrix or full Phase3 PASS is claimed. It does not qualify newer scope-read source. The older ce7738/f5c0 provisional campaign stopped at HIR 960/1,441 with watchdog exit 89 and no binary; helper timing is not a proven SHA root cause. The separate source 1690 CLI/SCV and provisional SIG11 failures remain historical evidence. The requested 500-item batch is not yet recorded as executed. Exact receipts and remaining end conditions are linked in the report.

@@ -2,6 +2,8 @@
 
 This is an evidence update, not a fresh compiler build or acceptance run. Historical [82-scope inventory](releasephase3_coding_inventory_2026_10_25.md) and [selector reconciliation](robust_acceptance_selector_reconciliation_2026_10_25.md) are unchanged. Local `/tmp` evidence links name retained host artifacts; they are not portable repository artifacts.
 
+Latest status: [the 11:42 UTC source/acceptance ledger below](#superseding-source-and-acceptance-ledger--2026-10-25-1142-utc). Earlier build observations are preserved as dated history.
+
 ## Current update — 2026-10-25, after PR #4657
 
 GitHub confirms [PR #4657](https://github.com/ormastes/simple/pull/4657) merged at **c345d0a6e589a40c237d0dbe97899bae7c89da17** (04:59:54 UTC). The bounded dictionary scope-read providers and five interpreter wrappers are landed with source review GO. This adds real scalar reads through existing native C, pure Simple and hosted Rust owners, with owner/epoch/backing/fuel checks; it does not add the pending HIR constructor account or complete SOURCE integration.
@@ -123,3 +125,67 @@ Frozen source `46772223a7c39ddd50a4f8198c6c4724f40ab444` rebuilt 1,497 objects, 
 The [focused Stage2 admission](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-admitted/admission.env) is admitted and [sanity receipt](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env) passes. Both [frontend mode 0](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.status.env) and [frontend mode 1](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-1.status.env) record Hello positional raw status 0; the canonical owner requires exit 0 and Hello stdout before recording PASS. Full-profile stdout is not retained separately. Receiver and planner controls also passed. These are candidate-bound controls, not acceptance of newer live source.
 
 The latest coordinator watcher observation was HIR 814/2,914, succeeded 814, failed 0, elapsed 1,120,664ms in the [running compiler CLI build log](/tmp/phase3-resume-20261025-4674/canonical-admission/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/compiler_cli_build.log). This is a nonterminal snapshot: MATRIX RUNNING, full CLI not yet qualified. Stage3 has NOT STARTED. The requested cache-backed 500-item batch is NOT YET EXECUTED. No new build, test launch or whole-feature audit was performed for this documentation append; full Phase3 remains incomplete.
+
+## Superseding source and acceptance ledger — 2026-10-25 11:42 UTC
+
+This bounded update supersedes stale current-status wording above while retaining
+its evidence and history. The checked target is `release_phase3` at
+`a87d4fa2e3d5d0b8233ab8cd91f7b10b3d2b6ed6`. Local commit objects, relevant
+worktree heads/dirty scopes and actual target symbols were inspected; no compiler,
+native job, test, Hello control or whole-82-scope census was run. Local unlanded
+commits below are source candidates, not portable published artifacts or PASS.
+
+### Coded and landed at this target
+
+| Landed source | Bounded scope; qualification remains separate |
+|---|---|
+| [#4815](https://github.com/ormastes/simple/pull/4815), `a87d4fa2e3d5` | Private twenty-map function-owner transport, six typed declaration-reference factories, prepaid expression reconstruction, private re-encoding and atomic install. Fixtures manually assemble snapshots/origins; they do not establish actual registration or worker provenance. Availability remains false; all new transport/runtime controls UNRUN. |
+| [#4805](https://github.com/ormastes/simple/pull/4805), `4d28b903b73b` | Managed selective-worker ownership and prerequisite refusal. Requires a separately qualified cached V3 broker/image pin and delegated cgroup capability. Source does not admit current workers or prove a completed Phase3. |
+| [#4808](https://github.com/ormastes/simple/pull/4808), `9b84d1514e70`; [#4772](https://github.com/ormastes/simple/pull/4772), `8388797fdf01` | Concrete lowering presence flags with reserved-bitfield correction; bounded exact decoder closure. Behavioral controls and real generator regeneration remain UNRUN. Canonical availability remains false. These newer sources are absent from the live frozen producer. |
+| [#4787](https://github.com/ormastes/simple/pull/4787), `f321a4b796df`; [#4774](https://github.com/ormastes/simple/pull/4774), `874bbd5bf483` | Canonical enum capture/prepaid request verification and typed registration provenance foundations. Not complete actual-caller, full enum/composite or worker admission. |
+| [#4784](https://github.com/ormastes/simple/pull/4784), `9210d77123d0`; [#4789](https://github.com/ormastes/simple/pull/4789), `e3a710831d78`; [#4790](https://github.com/ormastes/simple/pull/4790), `15feac956b17` | Native dictionary operations13–16, typed Struct/Dictionary descriptor recipes and shared-account facades. Not operation17, text-key/rich-child/full-HIR support or complete root admission. |
+| [#4767](https://github.com/ormastes/simple/pull/4767), `115ae8a9ac00` | SOURCE seals carried through final ELF protection checks. Earlier focused relocation/provider controls remain bounded history; full compiler-produced SOURCE/JIT/facade qualification is not established. |
+
+### Coded locally but unlanded; still implementation/integration work
+
+All following commits exist locally and are **not ancestors** of checked target
+`a87d4fa2e3d5`. Active working edits are not folded into this report's owned delta.
+
+| Source candidate | What exists; what remains |
+|---|---|
+| Actual caller `294fccf3aaa` | A generated retained `me` caller body uses canonical Optional Some/None and Result flow. It is a WIP source candidate, not integrated caller acceptance; actual lowering/capture/verification/lifecycle closure remains incomplete. |
+| Retained Optional CFG `b1c9fc84f510` | Construction verifier handles retained Optional storage/guarded borrow and authored CFG controls. Current caller lane also has tracked working edits. It is not a landed complete caller or executed native proof. |
+| Verifier repair `7a9b9bc5ffc` | Rejects wrong-variant/default/shared branch targets with authored negative controls. Exact review was pending at this snapshot; do not count it as accepted or landed. |
+| Stable origin `acab67c325db` | Separates stable declaration identity from later producer bodies. Reviewed candidate remains dependency-blocked and unlanded; source review is not execution. |
+| Typed captures `297619c5f1ee`; request proof `2eb9285108e1` | Resolver identities and prepaid typed count changes exist locally. Final integration and actual caller/native verification remain open. |
+
+### Remaining selected behavior and evidence gaps
+
+| Scope | Status at this bounded snapshot |
+|---|---|
+| Native operation17 | Frozen Struct-to-Dictionary write ABI exists in the [edge contract](../05_design/compiler/c4_struct_dictionary_edge_v1.md). No `rt_source_region_struct_dict_write_v1` implementation/reference exists in checked target source/tests. Assigned result-helper implementation is not a landed provider. Other dictionary operations are already coded; this is not an entirely uncoded dictionary subsystem. |
+| Full graph and actual HIR root | [Integration contract](../05_design/compiler/c4_hir_region_root_integration_v1.md) remains a plan. Same-account construction before the first Dictionary/Scope birth, complete descendant/write-hook closure, authentic retained capacities and alias/staleness behavior are not complete. A post-construction graph walk/adoption cannot substitute. |
+| Text keys and arrays/rich children | Current native dictionary contract is raw i64 keys with exact Struct children. Required text-key binding dictionaries, certified immutable text inputs, arrays and rich symbol/type children are not implemented/admitted by that subset. |
+| Enums and Optional | Scalar/Struct and canonical enum foundations exist. The unlanded retained Optional CFG, exact owner captures and complete nested enum/composite replay/caller closure remain partial. Neither a blanket enum completion nor blanket enum absence is accurate. |
+| Source admission | Component source reviews, private snapshot mechanics and descriptor seals are coded. Actual constructor/registration/worker provenance, complete graph/type support, callable/static transport and integrated SOURCE→PLAN→EMIT→artifact execution remain open. Availability is not enabled. |
+| Qualified runtime and runner | The current admitted Stage2 is compiler-only. No qualified full CLI/general SSpec runner is established. All new compiler/source/transport scenarios above are UNRUN; earlier focused provider/interpreter/native controls retain only their original bounded claims. Logical accounting is not an exact native heap/RSS bound. |
+
+### Frozen build and acceptance boundary
+
+The coordinator reports **Phase3 attempt4 RUNNING, currently HIR**, using frozen
+source `83be266ace41f453c69edf3c7f92521b5d573483` with the retained reviewed tool
+lineage and admitted Stage2 SHA256
+`8cd080ef9b7d59794d161beaee33c04260ca643511c58d9c19d125d6092cce1e`.
+[Producer checkpoint](/tmp/phase3-next-measured-20261025/producer-only-admission-v2/stage2-producer-checkpoint.sdn)
+and [compiler admission](/tmp/phase3-next-measured-20261025/producer-only-admission-v2/stage3/aarch64-unknown-linux-gnu/stage2-admitted/admission.env)
+bind that producer-only boundary; matrix NOTRUN, tools UNQUALIFIED and
+full_qualification=false remain explicit. Its existing Hello/receiver PASS is
+not a Stage3 PASS or qualification of later landed source. This documentation
+update does not poll, restart or mutate attempt4, its source, caches, runtime,
+watcher or receipts. HIR progress is not an object inventory or final artifact.
+
+The historical **82 selected feature acceptance scopes remain UNRUN**. No new
+passing scenario count, full compiler/Phase3 PASS, invariant/termination proof,
+formal proof, source-admission PASS, native lifetime/RSS qualification or release
+readiness is added. The older 15/54/4/9 inventory is preserved as a dated census;
+this scoped update does not recalculate it or certify every current row.
