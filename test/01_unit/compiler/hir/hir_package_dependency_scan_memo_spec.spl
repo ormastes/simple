@@ -39,6 +39,39 @@ fn package_registry() -> ModuleSurfacesByName:
         [0, 1, 2])
     built.unwrap()
 
+fn declaration_owner_registry() -> ModuleSurfacesByName:
+    var first = ModuleSurface.empty("pkg.first")
+    first.callable_names = ["Shared", "FirstOnly"]
+    first.composite_names = ["Shared"]
+    var second = ModuleSurface.empty("pkg.second")
+    second.enum_names = ["Shared"]
+    second.type_alias_names = ["SecondOnly"]
+    val built = ModuleSurfacesByName.from_parts(
+        [first, second],
+        {"pkg.first": 0, "pkg.second": 1},
+        ["pkg.first", "pkg.second"], [0, 1])
+    built.unwrap()
+
+fn bounded_decl_owner_registry(count: i64) -> ModuleSurfacesByName:
+    var surfaces: [ModuleSurface] = []
+    var names: [text] = []
+    var source_indices: [i64] = []
+    var index_by_name: {text: i64} = {}
+    var index = 0
+    while index < count:
+        val name = "pkg.owner_{index}"
+        var surface = ModuleSurface.empty(name)
+        surface.callable_names = ["Shared", "Owner-{index}"]
+        surface.composite_names = ["Shared"]
+        surfaces = surfaces.push(surface)
+        names = names.push(name)
+        source_indices = source_indices.push(index)
+        index_by_name[name] = index
+        index = index + 1
+    val built = ModuleSurfacesByName.from_parts(
+        surfaces, index_by_name, names, source_indices)
+    built.unwrap()
+
 describe("HIR package-dependency scan memo", fn():
     it("scans the frozen registry once per (module, dependency) pair", fn():
         # @req REQ-SSPEC-UNIT
@@ -84,9 +117,38 @@ describe("HIR package-dependency scan memo", fn():
         expect(lowering.surface_decl_index_build_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val second = lowering.surface_decl_owner_indices("Other")
         expect(second.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        # The point of the index: a SECOND name costs a dict probe, not a
-        # second sweep of the registry.
+        # The second name resolves from the retained hash chains without
+        # rebuilding the registry index.
         expect(lowering.surface_decl_index_build_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    )
+
+    it("returns declaration owners in registry order without duplicate surfaces", fn():
+        step("Place the same name in two declaration kinds on one surface")
+        val registry = declaration_owner_registry()
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        expect(lowering.surface_decl_owner_indices("Shared")).to_equal([0, 1])
+        expect(lowering.surface_decl_owner_indices("FirstOnly")).to_equal([0])
+        expect(lowering.surface_decl_owner_indices("SecondOnly")).to_equal([1])
+        expect(lowering.surface_decl_owner_indices("Missing").len()).to_equal(0)
+        expect(lowering.surface_decl_index_build_count).to_equal(1)
+    )
+
+    it("bounds a 64-surface owner build and repeated lookup workload", fn():
+        step("Build one frozen index for a bounded multi-surface workload")
+        val registry = bounded_decl_owner_registry(64)
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        var expected: [i64] = []
+        var index = 0
+        while index < 64:
+            expected = expected.push(index)
+            index = index + 1
+        expect(lowering.surface_decl_owner_indices("Shared")).to_equal(expected)
+        expect(lowering.surface_decl_pair_names.len()).to_equal(192)
+        index = 0
+        while index < 64:
+            expect(lowering.surface_decl_owner_indices("Owner-{index}")).to_equal([index])
+            index = index + 1
+        expect(lowering.surface_decl_index_build_count).to_equal(1)
     )
 
     it("builds the package-sibling index once and lists direct members", fn():

@@ -43,14 +43,16 @@ assertions below all failed.
 
 use std.spec
 use std.spec.step
+use std.spec.fail
 use compiler.common.config.Logger
 use compiler.common.driver_core_types.SourceFile
 use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types_expr.{TypeKind}
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.hirlowering_for_module
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
-use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
 use compiler.hir.hir_definitions.{HirFunction}
 
 
@@ -109,6 +111,31 @@ fn template_function_count(m: HirModule) -> i64:
             n = n + 1
     n
 
+fn expect_bound_method_receivers(m: HirModule, expected_methods: i64, expected_arguments: i64):
+    expect(m.impls.len()).to_equal(1)
+    val implementation = m.impls[0]
+    expect(implementation.type_params.len()).to_equal(expected_arguments)
+    var checked = 0
+    for function in m.functions.values():
+        if function.is_method and not function.is_static:
+            expect(function.params.len()).to_be_greater_than(0)
+            match implementation.type_.kind:
+                case HirTypeKind.Named(expected_owner, _):
+                    match function.params[0].type_.kind:
+                        case HirTypeKind.Named(actual_owner, arguments):
+                            expect(actual_owner).to_equal(expected_owner)
+                            expect(arguments.len()).to_equal(expected_arguments)
+                            for index in 0..expected_arguments:
+                                match arguments[index].kind:
+                                    case HirTypeKind.Named(parameter, nested):
+                                        expect(parameter).to_equal(implementation.type_params[index].symbol)
+                                        expect(nested.len()).to_equal(0)
+                                    case _: fail("receiver argument lost its bound impl parameter")
+                        case _: fail("method receiver lost its nominal owner")
+                case _: fail("generic impl lost its nominal owner")
+            checked = checked + 1
+    expect(checked).to_equal(expected_methods)
+
 describe "generic class and generic impl lower as non-emittable templates":
     it "raises no declaration-site monomorphization gate error":
         # @req: REQ-SSPEC-LOCAL-001
@@ -152,3 +179,104 @@ describe "generic class and generic impl lower as non-emittable templates":
             if f.name == "main":
                 main_is_template = f.is_generic_template
         expect(main_is_template).to_equal(false)
+
+
+    it "retains ordered enum binders on the synthetic method receiver":
+        step("Parse inline methods of a two-parameter generic enum")
+        val source = "enum Ordered<First, Second>:\n    Pair(Second, First)\n    fn first(default: First) -> First:\n        default\n"
+        val parsed = parse_full_frontend(source, "enum_ordered.spl", "enum_ordered", Logger(level: 0))
+        expect(parsed.impls.len()).to_equal(1)
+        expect(parsed.impls[0].type_params.len()).to_equal(2)
+        expect(parsed.impls[0].type_params[0].name).to_equal("First")
+        expect(parsed.impls[0].type_params[1].name).to_equal("Second")
+        var receiver_name = ""
+        var argument_names: [text] = []
+        match parsed.impls[0].type_.kind:
+            case TypeKind.Named(name, args):
+                receiver_name = name
+                for argument in args:
+                    match argument.kind:
+                        case TypeKind.Named(parameter_name, _): argument_names.push(parameter_name)
+                        case _: argument_names.push("invalid")
+            case _: ()
+        expect(receiver_name).to_equal("Ordered")
+        expect(argument_names).to_equal(["First", "Second"])
+
+    it "lowers match self with impl-bound nominal type parameters":
+        step("Lower the FailSafeResult unwrap_or and is_ok shapes without a library workaround")
+        val source = "enum PatternResult<T>:\n    Ok(T)\n    Err(text)\n    fn unwrap_or(default: T) -> T:\n        match self:\n            case Ok(v): v\n            case Err(_): default\n    fn is_ok() -> bool:\n        match self:\n            case Ok(_): true\n            case Err(_): false\n"
+        val out = lower_one("enum_self_payload", source)
+        expect(out.errors.len()).to_equal(0)
+        expect(template_function_count(out.module)).to_equal(2)
+        expect_bound_method_receivers(out.module, 2, 1)
+        expect(out.module.impls.len()).to_equal(1)
+        val implementation = out.module.impls[0]
+        expect(implementation.type_params.len()).to_equal(1)
+        # Declaration payload templates use HirTypeKind.TypeParam, while an
+        # in-scope impl parameter is Named(the bound TypeParam symbol, []).
+        # Assert that identity rather than weakening the concrete-slot guard.
+        var receiver_parameter_is_bound = false
+        match implementation.type_.kind:
+            case HirTypeKind.Named(_, args):
+                if args.len() == 1:
+                    match args[0].kind:
+                        case HirTypeKind.Named(parameter_symbol, parameter_args):
+                            receiver_parameter_is_bound = parameter_symbol == implementation.type_params[0].symbol and parameter_args.len() == 0
+                        case _: ()
+            case _: ()
+        expect(receiver_parameter_is_bound).to_equal(true)
+
+    it "keeps receiver binders in declaration order when payload order differs":
+        step("Lower a generic enum method whose variant reverses its binder order")
+        val source = "enum Ordered<First, Second>:\n    Pair(Second, First)\n    fn first(default: First) -> First:\n        match self:\n            case Pair(second, first): first\n"
+        val out = lower_one("enum_ordered_receiver", source)
+        expect(out.errors.len()).to_equal(0)
+        expect_bound_method_receivers(out.module, 1, 2)
+
+    it "preserves an explicitly annotated receiver of another type":
+        step("An applied generic owner must not replace a different receiver annotation")
+        val source = "enum Annotated<T>:\n    Value(T)\n    fn probe(self: i64) -> i64:\n        self\n"
+        val out = lower_one("enum_annotated_receiver", source)
+        expect(out.errors.len()).to_equal(0)
+        var checked = 0
+        for function in out.module.functions.values():
+            if function.name == "probe":
+                expect(function.params.len()).to_equal(1)
+                match function.params[0].type_.kind:
+                    case HirTypeKind.Int(bits, signed):
+                        expect(bits).to_equal(64)
+                        expect(signed).to_equal(true)
+                    case _: fail("explicit receiver annotation was replaced")
+                checked = checked + 1
+        expect(checked).to_equal(1)
+
+    it "does not invent target arguments for an explicit generic bare impl":
+        step("An explicit impl<T> Missing keeps its argless target and fails the existing payload guard")
+        val source = "enum Missing<T>:\n    Value(T)\nimpl<T> Missing:\n    fn value() -> i64:\n        match self:\n            case Value(v): 1\n"
+        val parsed = parse_full_frontend(source, "enum_missing_args.spl", "enum_missing_args", Logger(level: 0))
+        expect(parsed.impls[0].type_params.len()).to_equal(1)
+        var receiver_argument_count = -1
+        match parsed.impls[0].type_.kind:
+            case TypeKind.Named(_, args): receiver_argument_count = args.len()
+            case _: ()
+        expect(receiver_argument_count).to_equal(0)
+        val out = lower_one("enum_missing_args", source)
+        var rejected_missing_arguments = false
+        for error in out.errors:
+            if error.contains("generic enum pattern requires concrete declaration-ordered type arguments"):
+                rejected_missing_arguments = true
+        expect(rejected_missing_arguments).to_equal(true)
+
+    it "does not rewrite the explicit reordered impl opaque target":
+        step("Preserve the existing explicit-head refusal marker instead of fabricating positional arguments")
+        val source = "enum Ordered<First, Second>:\n    Pair(Second, First)\nimpl<A, B> Ordered<B, A>:\n    fn tag() -> i64:\n        1\n"
+        val parsed = parse_full_frontend(source, "enum_explicit.spl", "enum_explicit", Logger(level: 0))
+        var argument_names: [text] = []
+        match parsed.impls[0].type_.kind:
+            case TypeKind.Named(_, args):
+                for argument in args:
+                    match argument.kind:
+                        case TypeKind.Named(parameter_name, _): argument_names.push(parameter_name)
+                        case _: argument_names.push("invalid")
+            case _: ()
+        expect(argument_names).to_equal(["__any"])

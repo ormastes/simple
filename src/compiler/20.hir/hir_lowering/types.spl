@@ -311,24 +311,20 @@ class HirLowering:
     # fallback. Observable mechanism counter for the memo above; a spec
     # pins that repeated identical queries do not raise it.
     field_package_dep_scan_count: i64
-    # PKGIDX (2026-08-21): inverted index over the FROZEN registry, declaration
-    # name -> owning surface indices. Replaces the per-item full sweeps in
-    # try_register_bootstrap_global_symbol (called lazily from BODY lowering for
-    # every unbound name -- see BGS1 in _Items/module_import_registration.spl)
-    # and in materialize_imported_field_package_dependency. Built once per
+    # PKGIDX (2026-08-21): scalar pair/hash index over the FROZEN registry.
+    # Replaces per-item full sweeps in try_register_bootstrap_global_symbol
+    # and materialize_imported_field_package_dependency. Built once per
     # lowerer; the registry cannot change while it is frozen.
-    surface_decl_owners: {text: [i64]}
     surface_decl_index_built: bool
     # Times the index above was actually built. A spec pins this at 1 across
     # many queries, which is the mechanism the wall clock only hints at.
     surface_decl_index_build_count: i64
     # BOOT-20 (2026-09-17): scalar pair mirror, the read authority for
     # surface_decl_owner_indices. One pair per (decl name, surface), built
-    # from the FROZEN name arrays. The class-field surface_decl_owners Dict
-    # contains_key false-negatives under Stage-2 native codegen, turning a
-    # genuine single-owner answer into [] and failing the ambient
-    # unique-owner probe ("unresolved name: error" et al in the stage-3
-    # closure); a linear scan over these arrays cannot misreport membership.
+    # from the FROZEN name arrays. A class-field Dict's contains_key had
+    # false-negatives under Stage-2 native codegen, turning a genuine
+    # single-owner answer into [] and failing the ambient unique-owner probe
+    # ("unresolved name: error" et al in the stage-3 closure).
     surface_decl_pair_names: [text]
     surface_decl_pair_surfaces: [i64]
     # BOOT-20 perf (2026-09-17): open-addressing hash chains (buckets + next)
@@ -653,7 +649,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_field_package_dep_memo: {text: i64} = {}
     val empty_surface_package_name_memo: {text: text} = {}
-    val empty_surface_decl_owners: {text: [i64]} = {}
     val empty_package_sibling_names: {text: [text]} = {}
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
@@ -748,7 +743,6 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         surface_package_name_memo_hash_next: [],
         surface_package_name_memo_hash_mask: 0,
         field_package_dep_scan_count: 0,
-        surface_decl_owners: empty_surface_decl_owners,
         surface_decl_index_built: false,
         surface_decl_index_build_count: 0,
         surface_decl_pair_names: [],
@@ -949,8 +943,8 @@ impl HirLowering:
 
     me promote_phase_memo_transient_owners() -> bool:
         # Phase memos survive module boundaries. A fresh native promotion walk
-        # visits persistent containers too; walking 49 owners separately repeats
-        # shared key/value graphs after every module. Batch exactly those owners
+        # visits persistent containers too; promoting each owner separately
+        # repeats shared key/value graphs after every module. Batch these roots
         # so the provider's one seen set deduplicates their reachable children.
         # Do not include the lowerer itself: module-local scratch must still die.
         val roots: [HirPhaseMemoRoot] = [
@@ -960,7 +954,6 @@ impl HirLowering:
             HirPhaseMemoRoot.Texts(self.surface_package_name_memo_values),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_buckets),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_next),
-            HirPhaseMemoRoot.IndexLists(self.surface_decl_owners),
             HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
             HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
             HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
