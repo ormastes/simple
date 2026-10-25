@@ -699,9 +699,11 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
     val expr = where_expr
     if not expr.right.?:
         return ""
-    val pattern = expr.right.value
+    # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 3):
+    # the flow-narrowed two-hop read loses `text` in native MIR, so `.slice` is unresolved.
+    val pattern: text = expr.right.value
     # Remove surrounding quotes if present
-    var pat = pattern
+    var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
         pat = pat.slice(1, pat.len() - 1)
     # Find first % and take everything before it as the prefix
@@ -728,8 +730,10 @@ fn _like_any_prefix(where_expr: SqlExpr?) -> text:
     val expr = where_expr
     if not expr.right.?:
         return ""
-    val pattern = expr.right.value
-    var pat = pattern
+    # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 3):
+    # the flow-narrowed two-hop read loses `text` in native MIR, so `.slice` is unresolved.
+    val pattern: text = expr.right.value
+    var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
         pat = pat.slice(1, pat.len() - 1)
     var i: i64 = 0
@@ -771,8 +775,10 @@ fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
     val expr = where_expr
     if not expr.right.?:
         return ""
-    val pattern = expr.right.value
-    var pat = pattern
+    # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 3):
+    # the flow-narrowed two-hop read loses `text` in native MIR, so `.slice` is unresolved.
+    val pattern: text = expr.right.value
+    var pat: text = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
         pat = pat.slice(1, pat.len() - 1)
     pat
@@ -1510,6 +1516,14 @@ fn _like_match(pattern: text, value: text) -> bool:
             return false
         pi = pi + 1
     true
+
+# @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1):
+# native MIR tags a direct call returning the ENUM DbValue with a struct owner; pushing
+# that result into a local [DbValue] taints the array, and indexing it in the same
+# function then fails "array return record element has no unique provider layout".
+# The same index read through a parameter carries no taint.
+fn _dbvalue_at(values: [DbValue], index: i32) -> DbValue:
+    values[index]
 
 fn _expr_to_dbvalue(expr: SqlExpr, params: [DbValue]) -> DbValue:
     if expr.kind == SqlExprKind.Literal:
