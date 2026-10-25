@@ -1,0 +1,200 @@
+# Real resolver + frozen collector regression for the admitted preclosed frontier.
+use std.spec.{describe, it, expect}
+use app.io.env_ops.{env_set}
+use std.io_runtime.{env_get_nullable, env_remove_process}
+use std.nogc_async_mut.sosix.environment.{sosix_cwd}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_dirname, _driver_collect_frozen_compiler_source_v1,
+    _driver_unique_physical_sources}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn fresh_root(label: text) -> text:
+    val root = sosix_cwd() + "/build/test_tmp/preclosed-alias-{label}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    expect(rt_dir_create(root, true)).to_equal(true)
+    root
+
+fn admitted(root: text, relative: text, content: text) -> [SourceFile]:
+    val path = root + "/" + relative
+    expect(rt_dir_create(_driver_entry_import_dirname(path), true)).to_equal(true)
+    expect(rt_file_write_text(path, content)).to_equal(true)
+    val loaded = _driver_collect_frozen_compiler_source_v1(path, sha256_text(content), content.len())
+    expect(loaded.is_ok()).to_equal(true)
+    loaded.unwrap()
+
+fn replay_in_snapshot(sources: [SourceFile], roots: [text], root: text) -> Result<[SourceFile], text>:
+    val before_length = sources.len()
+    var before_paths: [text] = []
+    var before_names: [text] = []
+    var before_contents: [text] = []
+    for source in sources:
+        before_paths = before_paths.push(source.path)
+        before_names = before_names.push(source.module_name)
+        before_contents = before_contents.push(source.content)
+    val previous = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_equal(true)
+    val replay = driver_preclosed_source_aliases_v1(sources, roots, root)
+    val restored = if previous != nil:
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous!)
+    else: env_remove_process("SIMPLE_SCV_SNAPSHOT_ROOT")
+    # Restore process authority before inspecting either the successful or error result.
+    expect(restored).to_equal(true)
+    expect(sources.len()).to_equal(before_length)
+    var index = 0
+    while index < before_length:
+        expect(sources[index].path).to_equal(before_paths[index])
+        expect(sources[index].module_name).to_equal(before_names[index])
+        expect(sources[index].content).to_equal(before_contents[index])
+        index = index + 1
+    replay
+
+fn named_path(sources: [SourceFile], name: text) -> text:
+    for source in sources:
+        if source.module_name == name: return source.path
+    ""
+
+fn alias_count(sources: [SourceFile], name: text) -> i64:
+    var count = 0
+    for source in sources:
+        if source.module_name == name: count = count + 1
+    count
+
+fn expect_originals(before: [SourceFile], after: [SourceFile]):
+    expect(_driver_unique_physical_sources(after).len()).to_equal(
+        _driver_unique_physical_sources(before).len())
+    var index = 0
+    while index < before.len():
+        expect(after[index].path).to_equal(before[index].path)
+        expect(after[index].content).to_equal(before[index].content)
+        expect(after[index].module_name).to_equal(before[index].module_name)
+        index = index + 1
+
+describe "preclosed source import alias replay":
+    it "repairs the old library-family gap and freezes aliases onto one physical surface":
+        val root = fresh_root("family")
+        val entry = admitted(root, "src/app/main.spl", "use file_system.types.\{sentinel\}\nfn main() -> i64:\n    sentinel()\n")
+        val provider = admitted(root, "src/lib/nogc_async_mut/file_system/types.spl", "pub fn sentinel() -> i64:\n    41\n")
+        val before = entry + provider
+        # This is the old preclosed path: frozen collection alone has no import spelling.
+        expect(named_path(before, "file_system.types")).to_equal("")
+        val replay = replay_in_snapshot(before,
+            [root + "/src/app", root + "/src/lib"], root)
+        expect(replay.is_ok()).to_equal(true)
+        val after = replay.unwrap()
+        expect_originals(before, after)
+        expect(named_path(after, "file_system.types")).to_equal(provider[0].path)
+        var modules: Dict<text, ParserModule> = {}
+        for source in after:
+            modules[source.module_name] = parse_and_build_module(source.content, source.path)
+        val frozen = module_surfaces_from_modules(modules, after)
+        expect(frozen.is_ok()).to_equal(true)
+        val registry = frozen.unwrap()
+        expect(registry.frozen).to_equal(true)
+        expect(registry.surfaces.len()).to_equal(2)
+        val canonical = provider[0].module_name
+        expect(registry.index_by_name["file_system.types"]).to_equal(registry.index_by_name[canonical])
+        val consumer = registry.surfaces[registry.index_by_name[entry[0].module_name]]
+        expect(consumer.import_target_names[0]).to_equal("file_system.types")
+        expect(consumer.import_target_indices[0]).to_equal(registry.index_by_name[canonical])
+        expect(consumer.import_resolution_traces.len()).to_equal(1)
+        expect(consumer.import_resolution_traces[0].selected).to_equal("file_system.types")
+
+    it "replays numbered monomorphize spellings from the same admitted provider":
+        val root = fresh_root("mono")
+        val entry = admitted(root, "src/app/main.spl", "use compiler.monomorphize.engine.\{sentinel\}\n")
+        val provider = admitted(root, "src/compiler/40.mono/monomorphize/engine.spl", "pub fn sentinel() -> i64:\n    52\n")
+        val before = entry + provider
+        expect(named_path(before, "compiler.monomorphize.engine")).to_equal("")
+        val replay = replay_in_snapshot(before,
+            [root + "/src/app", root + "/src/compiler"], root)
+        expect(replay.is_ok()).to_equal(true)
+        expect(named_path(replay.unwrap(), "compiler.monomorphize.engine")).to_equal(provider[0].path)
+        expect_originals(before, replay.unwrap())
+
+    it "preserves bare and single-dot sibling resolution without adding physical files":
+        val root = fresh_root("relative")
+        val entry = admitted(root, "src/app/main.spl", "use sibling.\{bare_value\}\nuse .peer.\{dot_value\}\n")
+        val sibling = admitted(root, "src/app/sibling.spl", "pub fn bare_value() -> i64:\n    61\n")
+        val peer = admitted(root, "src/app/peer.spl", "pub fn dot_value() -> i64:\n    62\n")
+        val before = entry + sibling + peer
+        val replay = replay_in_snapshot(before, [root + "/src/app"], root)
+        expect(replay.is_ok()).to_equal(true)
+        expect(named_path(replay.unwrap(), "sibling")).to_equal(sibling[0].path)
+        expect(named_path(replay.unwrap(), entry[0].module_name + ".peer")).to_equal(peer[0].path)
+        expect_originals(before, replay.unwrap())
+
+    it "keeps the ordered K1 composition owner instead of admitting the core stub":
+        val root = fresh_root("composition")
+        val entry = admitted(root, "src/app/main.spl", "use compiler.driver.bootstrap_k1_selected.\{sentinel\}\n")
+        val overlay = admitted(root, "src/compositions/k1/compiler/driver/bootstrap_k1_selected.spl", "pub fn sentinel() -> i64:\n    71\n")
+        val stub = admitted(root, "src/compiler/80.driver/bootstrap_k1_selected.spl", "pub fn sentinel() -> i64:\n    99\n")
+        val before = entry + overlay
+        val replay = replay_in_snapshot(before,
+            [root + "/src/compositions/k1", root + "/src/compiler", root + "/src/app"], root)
+        expect(replay.is_ok()).to_equal(true)
+        val owner = named_path(replay.unwrap(), "compiler.driver.bootstrap_k1_selected")
+        expect(owner).to_equal(overlay[0].path)
+        expect(owner == stub[0].path).to_equal(false)
+        expect_originals(before, replay.unwrap())
+
+    it "deduplicates an already present identical alias":
+        val root = fresh_root("dedup")
+        val entry = admitted(root, "src/app/main.spl", "use sibling.\{value\}\n")
+        val provider = admitted(root, "src/app/sibling.spl", "pub fn value() -> i64:\n    81\n")
+        val alias = SourceFile(path: provider[0].path, content: provider[0].content, module_name: "sibling")
+        val before = entry + provider + [alias]
+        val replay = replay_in_snapshot(before, [root + "/src/app"], root)
+        expect(replay.is_ok()).to_equal(true)
+        expect(replay.unwrap().len()).to_equal(before.len())
+        expect(alias_count(replay.unwrap(), "sibling")).to_equal(1)
+
+    it "rejects a resolver-selected physical provider outside the admitted frontier":
+        val root = fresh_root("frontier")
+        val entry = admitted(root, "src/app/main.spl", "use sibling.\{value\}\n")
+        val unselected = admitted(root, "src/app/sibling.spl", "pub fn value() -> i64:\n    91\n")
+        expect(unselected.len()).to_be_greater_than(0)
+        val replay = replay_in_snapshot(entry, [root + "/src/app"], root)
+        expect(replay.is_err()).to_equal(true)
+        expect(replay.unwrap_err()).to_start_with("PRECLOSED_ALIAS_PROVIDER_NOT_ADMITTED:")
+
+    it "rejects ambiguous numbered roots instead of choosing a provider":
+        val root = fresh_root("ambiguous")
+        val entry = admitted(root, "src/app/main.spl", "use compiler.backend.codegen_types.\{sentinel\}\n")
+        val first = admitted(root, "src/compiler/70.backend/backend/codegen_types.spl", "pub fn sentinel() -> i64:\n    101\n")
+        val second = admitted(root, "src/compiler/71.backend/backend/codegen_types.spl", "pub fn sentinel() -> i64:\n    102\n")
+        expect(second.len()).to_be_greater_than(0)
+        val replay = replay_in_snapshot(entry + first,
+            [root + "/src/compiler", root + "/src/app"], root)
+        expect(replay.is_err()).to_equal(true)
+        expect(replay.unwrap_err()).to_start_with("SOURCE_ROOT_AMBIGUOUS:")
+
+    it "rejects a conflicting preexisting name instead of rebinding an admitted owner":
+        val root = fresh_root("conflict")
+        val entry = admitted(root, "src/app/main.spl", "use sibling.\{value\}\n")
+        val provider = admitted(root, "src/app/sibling.spl", "pub fn value() -> i64:\n    111\n")
+        val other = admitted(root, "src/app/other.spl", "pub fn value() -> i64:\n    112\n")
+        val wrong = SourceFile(path: other[0].path, content: other[0].content, module_name: "sibling")
+        val replay = replay_in_snapshot(entry + provider + other + [wrong],
+            [root + "/src/app"], root)
+        expect(replay.is_err()).to_equal(true)
+        expect(replay.unwrap_err()).to_start_with("PRECLOSED_ALIAS_OWNER_CONFLICT:")
+
+    it "fails closed for two importer-local owners of one bare spelling":
+        val root = fresh_root("local-conflict")
+        val first_entry = admitted(root, "src/app/a/main.spl", "use sibling.\{value\}\n")
+        val first_owner = admitted(root, "src/app/a/sibling.spl", "pub fn value() -> i64:\n    121\n")
+        val second_entry = admitted(root, "src/app/b/main.spl", "use sibling.\{value\}\n")
+        val second_owner = admitted(root, "src/app/b/sibling.spl", "pub fn value() -> i64:\n    122\n")
+        val before = first_entry + first_owner + second_entry + second_owner
+        val replay = replay_in_snapshot(before, [root + "/src/app"], root)
+        expect(replay.is_err()).to_equal(true)
+        expect(replay.unwrap_err()).to_start_with("PRECLOSED_ALIAS_OWNER_CONFLICT:")
