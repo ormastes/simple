@@ -1,0 +1,87 @@
+# Compiler-owned per-function replay request. No saved/fabricated lowering owner.
+use compiler.hir.hir_types.{SymbolId, HirType}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionSpecializationV1}
+use compiler.mir.source_region_current_function_v1.*
+use compiler.mir.mir_types.{MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
+use std.common.crypto.sha256.{sha256_text}
+
+pub class SourceRegionFunctionPlanV1:
+    module: MirModule
+    originals: Dict<SymbolId, HirFunction>
+    specialized_symbols: Dict<SymbolId, SymbolId>
+    specialized_signatures: Dict<SymbolId, MirSignature>
+    specialized_names: Dict<SymbolId, text>
+    call_targets: Dict<text, SymbolId>
+    context_type: MirType
+    error_type: HirType
+    facades: SourceRegionFacadeSymbolsV1
+    result_construction: SourceRegionResultConstructionV1
+    closure_digest: text
+
+impl MirLowering:
+    pub me lower_source_region_function_v1(original: HirFunction,
+            plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
+        if plan.closure_digest == "" or not plan.specialized_symbols.has(original.symbol):
+            return Err("SOURCE-REQUEST: function is outside the resolved closure")
+        if not plan.originals.has(original.symbol):
+            return Err("SOURCE-REQUEST: actual HIR declaration is absent")
+        # lower_function resets metadata BEFORE this function, not afterwards.
+        # The codec therefore observes this function's real locals/container/
+        # tuple/struct provenance until the next lower_function invocation.
+        val lowered = self.lower_function(original)
+        if lowered.symbol.id != original.symbol.id:
+            return Err("SOURCE-REQUEST: current function identity differs")
+        self.specialize_current_function(original, lowered, plan)
+
+    pub me lower_source_region_request_v1(entry: SymbolId, order: [SymbolId],
+            plan: SourceRegionFunctionPlanV1) -> Result<SourceRegionSpecializationV1, text>:
+        if order.len() != plan.specialized_symbols.len():
+            return Err("SOURCE-REQUEST: incomplete closure replay order")
+        if not plan.specialized_symbols.has(entry):
+            return Err("SOURCE-REQUEST: entry is outside the resolved closure")
+        val context_symbol = match plan.context_type.kind:
+            case MirTypeKind.Struct(symbol): symbol
+            case _: return Err("SOURCE-REQUEST: resolved context declaration required")
+        var seen: Dict<SymbolId, bool> = {}
+        var functions: [MirFunction] = []
+        var canonical: [text] = ["source-region-owned-replay-v1", plan.closure_digest,
+            serialize_mir_type(plan.context_type)]
+        for symbol in order:
+            if seen.has(symbol) or not plan.originals.has(symbol):
+                return Err("SOURCE-REQUEST: duplicate or missing original function")
+            seen[symbol] = true
+            var function = self.lower_source_region_function_v1(plan.originals[symbol], plan)?
+            if function.source_region_context_local_v1 < 0:
+                return Err("SOURCE-REQUEST: rewritten function lacks context local")
+            # The final digest binds actual emitted codec locals/descriptors,
+            # not a caller's provisional seed. Exclude only the digest itself.
+            function.source_region_context_abi_v1 = 1
+            function.source_region_closure_digest_v1 = ""
+            canonical.push(serialize_mir_function(function))
+            functions.push(function)
+        val digest = sha256_text(canonical.join("\n"))
+        var published: Dict<SymbolId, MirFunction> = {}
+        for symbol in plan.module.functions.keys():
+            published[symbol] = plan.module.functions[symbol]
+        for function in functions:
+            var committed = function
+            committed.source_region_closure_digest_v1 = digest
+            published[committed.symbol] = committed
+        val original_module = plan.module
+        val output = MirModule(name: original_module.name, functions: published,
+            statics: original_module.statics, constants: original_module.constants,
+            types: original_module.types, external_layout_traces: original_module.external_layout_traces,
+            collection_plan_explanations: original_module.collection_plan_explanations,
+            enum_semantic_declarations: original_module.enum_semantic_declarations,
+            source_region_context_symbol_v1: context_symbol.id,
+            source_region_closure_digest_v1: digest)
+        Ok(SourceRegionSpecializationV1(module: output,
+            entry: plan.specialized_symbols[entry], closure_digest: digest))
