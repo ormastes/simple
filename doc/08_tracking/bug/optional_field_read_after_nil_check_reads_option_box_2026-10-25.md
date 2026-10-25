@@ -35,3 +35,6 @@ natively by an affected compiler.
 - Compiler fix: either field access on a `T?` local (after a narrowing nil check) must unwrap the payload,
   or the type checker must reject it.
 - A census of `if x == nil: return ...` followed by `x.field` on `T?` values is still to be done.
+
+## Bug DB
+DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
