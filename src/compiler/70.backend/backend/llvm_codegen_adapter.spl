@@ -15,6 +15,11 @@ use compiler.backend.llvm_backend_tools.{LlvmObjectCode,
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_ir_builder_set_simpleos_header}
 use compiler.common.mir_target_context.{mir_target_context_os_from}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 
 fn llvm_codegen_trace_enabled() -> bool:
     (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -152,8 +157,34 @@ pub fn llvm_compile_module_direct_to_path(
     else:
         llvm_codegen_bare_metal_requested()
     val config = retained_config ?? llvm_codegen_target_config_for(options, bare_metal)
+    # The LLVM object-path adapter bypasses the in-memory backend scope.
+    # Bound only translator scratch here: MIR optimization mutates its provider
+    # report before this call, and tool admission may initialize persistent
+    # bindings after it. Neither owner belongs to this scratch transaction.
+    var scoped = (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1"
+    # @workaround bug=llvm_bootstrap_string_cache_scope_escape_2026_10_25 reason=bootstrap-translator-publishes-heap-text-in-exported-global-cache
+    if scoped and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        eprint("[codegen-scope] WARNING LLVM bootstrap string cache requires unscoped translation: module={module.name}")
+        scoped = false
+    if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
+        eprint("[codegen-scope] WARNING LLVM translation scope refused; compiling UNSCOPED: module={module.name}")
+        scoped = false
     val llvm_ir = llvm_translate_module_direct_ir_for(
         options, module, bare_metal, retained_config)
+    if scoped:
+        # The IR is the only heap value that crosses this boundary. Object and
+        # diagnostic publication happens afterward, while the promoted IR is
+        # live. Never wrap the caller's backend-session authority mutations.
+        val paused = transient_scope_pause()
+        val kept = paused and transient_promote(llvm_ir)
+        val ended = transient_scope_end()
+        if not ended:
+            panic("LLVM translation scope ownership failed")
+        if not paused or not kept:
+            # Scope end may have freed llvm_ir: do not inspect or emit it.
+            backend_aot_write_diagnostic(diagnostic_path,
+                "LLVM translation scope promotion failed (object not written)")
+            return 1
     compile_ir_to_object_path(
         llvm_ir, config, options.opt_level, object_path, diagnostic_path, retained_config != nil)
 

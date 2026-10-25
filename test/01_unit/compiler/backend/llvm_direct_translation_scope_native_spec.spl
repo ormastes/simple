@@ -1,0 +1,167 @@
+# Native qualification: real LLVM object emission, no compiler/runtime rebuild.
+# This spec requires llc (or clang fallback) and the selected runtime's scopes.
+use std.spec.{describe, it, expect}
+use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct_to_path}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use std.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_size_raw,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end}
+
+fn llvm_scope_restore_env(key: text, previous: text):
+    if previous == nil: env_remove_process(key)
+    else: env_set(key, previous)
+
+fn llvm_scope_string_module() -> MirModule:
+    val ptr_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+    val print_signature = MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 5),
+        name: "local_string_print",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: Some("message"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("scope-literal-731"), ptr_type), span: nil),
+                    MirInst(kind: MirInstKind.Call(
+                        nil,
+                        MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_print"),
+                            MirType(kind: MirTypeKind.FuncPtr(print_signature))
+                        )),
+                        [mir_operand_copy(LocalId(id: 1))]
+                    ), span: nil)
+                ],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.scope_string", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "LLVM direct object-path translation scope":
+    it "preserves string objects, caller inputs and diagnostics across repeated scoped calls":
+        val previous_scope = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        val previous_bootstrap = env_get_nullable("SIMPLE_BOOTSTRAP")
+        defer llvm_scope_restore_env("SIMPLE_CODEGEN_MODULE_SCOPE", previous_scope)
+        defer llvm_scope_restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
+        expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
+        val directory = secure_temp_dir_raw("/tmp", "simple-llvm-scope")
+        expect(directory != "").to_equal(true)
+        defer dir_remove(directory, true)
+        val module = llvm_scope_string_module()
+        val options = compileoptions_default_options()
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Host, nil)
+        val original_arch = config.triple.arch
+        val diagnostic = "{directory}/diagnostic"
+        # Cold tool admission remains outside the new translation scope.
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "1")).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val first = "{directory}/first.o"
+        expect(llvm_compile_module_direct_to_path(options, module, first,
+            diagnostic, Some(config))).to_equal(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(file_size_raw(first)).to_be_greater_than(32)
+        val first_bytes = file_read_bytes(first)
+        # No debug info; identical module name/target/options fix object metadata.
+        for mode in ["0", "1"]:
+            expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", mode)).to_equal(true)
+            val repeated = "{directory}/repeat-{mode}.o"
+            expect(llvm_compile_module_direct_to_path(options, module, repeated,
+                diagnostic, Some(config))).to_equal(0)
+            expect(file_read_bytes(repeated)).to_equal(first_bytes)
+            expect(config.triple.arch).to_equal(original_arch)
+            expect(module.name).to_equal("test.llvm.scope_string")
+            expect(transient_array_scope_state_v1()).to_equal(0)
+        # Translation succeeds, then file publication fails outside its scope.
+        val missing_parent = "{directory}/absent/module.o"
+        expect(llvm_compile_module_direct_to_path(options, module, missing_parent,
+            diagnostic, Some(config))).to_equal(1)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(file_read_regular_no_follow_bounded(diagnostic, 4096).ok().unwrap()).to_contain(
+            "secure temporary directory creation failed")
+
+    it "leaves a caller-owned scope active and keeps bootstrap mode unscoped":
+        val previous_scope = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        val previous_bootstrap = env_get_nullable("SIMPLE_BOOTSTRAP")
+        defer llvm_scope_restore_env("SIMPLE_CODEGEN_MODULE_SCOPE", previous_scope)
+        defer llvm_scope_restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "1")).to_equal(true)
+        expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
+        val directory = secure_temp_dir_raw("/tmp", "simple-llvm-outer-scope")
+        expect(directory != "").to_equal(true)
+        defer dir_remove(directory, true)
+        val module = llvm_scope_string_module()
+        val options = compileoptions_default_options()
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Host, nil)
+        val object = "{directory}/outer.o"
+        val diagnostic = "{directory}/diagnostic"
+        # Admit tools before borrowing a scope; the borrowed-scope contract
+        # does not permit cold managed-tool initialization inside that scope.
+        expect(llvm_compile_module_direct_to_path(options, module,
+            "{directory}/warm.o", diagnostic, Some(config))).to_equal(0)
+        # Do not run assertion/reporting code inside the borrowed scope.
+        val began = transient_scope_begin()
+        if not began: panic("native scope fixture could not acquire its outer scope")
+        val status = llvm_compile_module_direct_to_path(options, module, object,
+            diagnostic, Some(config))
+        val caller_state = transient_array_scope_state_v1()
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        expect(status).to_equal(0)
+        expect(caller_state).to_equal(1)
+        expect(paused and ended).to_equal(true)
+        expect(file_size_raw(object)).to_be_greater_than(32)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val paused_object = "{directory}/paused-outer.o"
+        val began_paused_owner = transient_scope_begin()
+        val paused_owner = transient_scope_pause()
+        if not began_paused_owner or not paused_owner:
+            panic("native scope fixture could not pause its outer scope")
+        val paused_status = llvm_compile_module_direct_to_path(options, module,
+            paused_object, diagnostic, Some(config))
+        val paused_caller_state = transient_array_scope_state_v1()
+        val ended_paused_owner = transient_scope_end()
+        expect(paused_status).to_equal(0)
+        expect(paused_caller_state).to_equal(2)
+        expect(ended_paused_owner).to_equal(true)
+        expect(file_size_raw(paused_object)).to_be_greater_than(32)
+        expect(env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        val bootstrap_object = "{directory}/bootstrap.o"
+        expect(llvm_compile_module_direct_to_path(options, module, bootstrap_object,
+            diagnostic, Some(config))).to_equal(0)
+        expect(file_size_raw(bootstrap_object)).to_be_greater_than(32)
+        expect(transient_array_scope_state_v1()).to_equal(0)
