@@ -1,0 +1,58 @@
+# BuildSession — one per CompilerDriver.compile() (BSM tier T1).
+#
+# Design: doc/05_design/compiler/memory/build_session_memory_model_v1.md
+#   §2 T1, §3 I1-I4, §5, §7 P2.
+#
+# `heap == 0` means "no session": the runtime predates P1 (the extern answers
+# 0), the kill-switch SIMPLE_BUILD_SESSION=0 is set, or a module scope was
+# already active. Every caller then keeps the pre-session promote path.
+#
+# P2 deliberately has no `end()`: the CompileResult and every HIR/MIR
+# product are session-owned, so ending the session would free them under the
+# caller. `end()` lands in P6 together with result sharing and the Rust
+# rc x session fix.
+
+use std.env.{env_get}
+use compiler.hir.hir_lowering._Items.bootstrap_hir_store.{BootstrapHirStore}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_store, bootstrap_hir_store_set_session}
+
+@unsafe(reason: "begin the build session heap", capabilities: [ffi])
+extern fn rt_session_heap_begin() -> u32
+@unsafe(reason: "allocate session-owned containers inside a module scope", capabilities: [ffi])
+extern fn rt_session_alloc_begin() -> bool
+@unsafe(reason: "end session-owned allocation", capabilities: [ffi])
+extern fn rt_session_alloc_end() -> bool
+
+fn build_session_enabled_by_env() -> bool:
+    (env_get("SIMPLE_BUILD_SESSION") ?? "") != "0"
+
+class BuildSession:
+    heap: u32
+    hir_store: BootstrapHirStore
+
+    fn active() -> bool:
+        self.heap != 0u32
+
+    me begin() -> bool:
+        if self.heap != 0u32:
+            return true
+        if build_session_enabled_by_env():
+            unsafe(capabilities: [ffi]):
+                self.heap = rt_session_heap_begin()
+        # Set on the canonical store (the forwarders read it), not a copy.
+        bootstrap_hir_store_set_session(self.active())
+        self.active()
+
+    me publish_alloc_begin() -> bool:
+        if not self.active(): return false
+        unsafe(capabilities: [ffi]):
+            rt_session_alloc_begin()
+
+    me publish_alloc_end() -> bool:
+        if not self.active(): return false
+        unsafe(capabilities: [ffi]):
+            rt_session_alloc_end()
+
+
+fn build_session_inactive() -> BuildSession:
+    BuildSession(heap: 0u32, hir_store: bootstrap_hir_store())

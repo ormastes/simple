@@ -1,3 +1,4 @@
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
 use compiler.driver.cache.hir_tldr_cache_identity_v1.{hir_tldr_cache_closure_digest_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{
@@ -46,8 +47,7 @@ use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1
     driver_hir_abi_interface_digest_in_owned_scope_v1}
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_modules_reset,
-    bootstrap_hir_module_count,
-    bootstrap_hir_modules_promote_last
+    bootstrap_hir_module_count
 }
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics}
 use compiler.hir.hir_lowering.context_helpers.*
@@ -77,6 +77,7 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_dict_entry_count,
     driver_validate_value_struct_layout_declarations_v1,
     driver_rollback_flat_hir_row_or_abort,
+    driver_publish_flat_hir_row_v1,
     driver_finish_failed_parse_scope,
     driver_abort_reverse_reference_parse_scope_v1,
     driver_publish_reverse_reference_parse_scope_v1
@@ -567,14 +568,20 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR symbol table ownership promotion failed for {source_path}")
-        val flat_row_count_after = bootstrap_hir_module_count()
-        if flat_row_count_after != flat_row_count_before:
-            if (flat_row_count_after != flat_row_count_before + 1 or
-                not bootstrap_hir_modules_promote_last()):
-                driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-                return Err("flat HIR row ownership promotion failed for {source_path}")
-        if not driver_promote_frontend_registry_owners():
+        if not driver_publish_flat_hir_row_v1(self.ctx.session.active(), flat_row_count_before):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            return Err("flat HIR row publication failed for {source_path}")
+        # driver_promote_frontend_registry_owners() omits
+        # frontend_parse_cache_promote_transient_owner: the frontend-cache
+        # scope memo (set on the first frontend_parse_cache_scope() call, often
+        # inside an earlier transient scope) died un-promoted, and the hir-cache
+        # store's header then concatenated a dead limb — rt_file_write_text
+        # failed every store (io-write), forcing a re-lower. Promote it here
+        # (paused state, same as the other owners in this chain).
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=missing_cache_scope_memo_promote
+        val cache_scope_ok = frontend_parse_cache_promote_transient_owner()
+        if not (driver_promote_frontend_registry_owners() and cache_scope_ok):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
@@ -649,13 +656,10 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR symbol table ownership promotion failed for {source.path}")
-        val flat_row_count_after = bootstrap_hir_module_count()
-        if flat_row_count_after != flat_row_count_before:
-            if (flat_row_count_after != flat_row_count_before + 1 or
-                not bootstrap_hir_modules_promote_last()):
-                driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
-                val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
-                return Err("flat HIR row ownership promotion failed for {source.path}")
+        if not driver_publish_flat_hir_row_v1(self.ctx.session.active(), flat_row_count_before):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            return Err("flat HIR row publication failed for {source.path}")
         if not driver_promote_retained_frontend_owners_v1(
                 parser_initialization_generation_v1() != parser_generation):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)

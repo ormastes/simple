@@ -22,6 +22,7 @@ val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
 val REGISTRATION = "src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
 val LOWERING_TYPES = "src/compiler/20.hir/hir_lowering/types.spl"
 val LOWERING_HELPERS = "src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl"
+val BOOTSTRAP_HIR_STORE = "src/compiler/20.hir/hir_lowering/_Items/bootstrap_hir_store.spl"
 val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
 val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
 val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
@@ -256,7 +257,7 @@ describe "Stage4 streaming surface ownership":
         val diagnostics = body.index_of("lowering.promote_diagnostics_transient_owner()", promote)
         val memos = body.index_of("lowering.promote_phase_memo_transient_owners()", diagnostics)
         val symbols = body.index_of("lowering.promote_symbol_table_transient_owners()", memos)
-        val flat_row = body.index_of("bootstrap_hir_modules_promote_last()", symbols)
+        val flat_row = body.index_of("driver_publish_flat_hir_row_v1(self.ctx.session.active(), flat_row_count_before)", symbols)
         val registries = body.index_of("driver_promote_retained_frontend_owners_v1(", flat_row)
         val reclaim = body.index_of("if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):", registries)
         expect(begin).to_be_greater_than(0)
@@ -293,16 +294,16 @@ describe "Stage4 streaming surface ownership":
         expect(lowering_types.contains("rt_transient_heap_promote(self)")).to_equal(false)
 
     it "promotes only the new flat HIR row and rolls back every appended owner on failure":
-        # 4b88aebf00b: promote_last promotes exactly the newest committed row
+        # 4b88aebf00b + BSM P2: the no-session promote_last_legacy promotes exactly the newest committed row
         # (plus the seven outer owners); rollback_last pops every parallel
         # owner; the streaming driver rolls the row back on every failure path
         # after lowering.
-        val lowering_helpers = file_read(LOWERING_HELPERS)
+        val lowering_helpers = file_read(BOOTSTRAP_HIR_STORE)
         val driver = file_read(HIR_LOWERING)
         val support = file_read(HIR_SUPPORT)
-        val promote_start = lowering_helpers.index_of("fn bootstrap_hir_modules_promote_last() -> bool:")
-        val rollback_start = lowering_helpers.index_of("fn bootstrap_hir_modules_rollback_last(expected_count: i64) -> bool:")
-        val rollback_end = lowering_helpers.index_of("fn bootstrap_hir_entry_index() -> i64:")
+        val promote_start = lowering_helpers.index_of("fn promote_last_legacy() -> bool:")
+        val rollback_start = lowering_helpers.index_of("me rollback_last(expected_count: i64) -> bool:")
+        val rollback_end = lowering_helpers.index_of("fn bootstrap_hir_store_with_port(")
         expect(promote_start).to_be_greater_than(0)
         expect(rollback_start).to_be_greater_than(promote_start)
         expect(rollback_end).to_be_greater_than(rollback_start)
@@ -310,11 +311,12 @@ describe "Stage4 streaming surface ownership":
         val rollback = lowering_helpers.substring(rollback_start, rollback_end)
         expect(promote).to_contain("val last = committed - 1")
         for owner in ["names", "symbols", "functions", "constants", "enums", "structs", "classes"]:
-            expect(promote).to_contain("_sffi_transient_heap_promote(_bootstrap_hir_module_" + owner + "[last])")
-            expect(promote).to_contain("_sffi_transient_heap_promote(_bootstrap_hir_module_" + owner + ")")
-            expect(rollback).to_contain("_bootstrap_hir_module_" + owner + ".pop()")
+            val field = if owner == "names": "self.names" else: "self.module_" + owner
+            expect(promote).to_contain("promote(" + field + "[last])")
+            expect(promote).to_contain("promote(" + field + ")")
+            expect(rollback).to_contain(field + ".pop()")
         expect(rollback).to_contain("if expected_count < 0 or committed != expected_count + 1:")
-        expect(rollback).to_contain("_bootstrap_hir_module_committed_count = expected_count")
+        expect(rollback).to_contain("self.committed_count = expected_count")
         expect(support).to_contain("if bootstrap_hir_modules_rollback_last(expected_count):")
         expect(support).to_contain("    rt_exit(1)")
 
