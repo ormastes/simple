@@ -1,0 +1,149 @@
+# Template-body decision table for reader concrete instances (per-file P-G4).
+#
+# Backs the file worker's body-on-demand seam
+# (driver_reader_concrete_instance_v1). It does NOT load anything itself: it
+# decides WHICH owner body is admissible for an E-MONO-040 template and records
+# that decision; the driver then hands module-scoped mono the owner HIR that
+# the MIR child ALREADY admitted from the HIR cache (never a re-parse).
+# Instantiation, template-symbol relocation (E-MONO-041, #4580/#4597) and
+# COMDAT placement (#4575/#4603) stay in
+# MonomorphizationPass.process_module_scoped_v1.
+#
+# Owner resolution is restricted to F's own transitive import closure (what
+# name resolution would have searched): an owner outside the closure, or two
+# declarers inside it, is a miss -- never a guess.
+#
+# Identity: decisions are cached under a process-local TemplateBodyDecisionKeyV1
+# (owner + decl id + owner content digest + type-arg keys). This is NOT a
+# ConcreteTldrKey (that is concrete_tldr_key_for_v1, used by P-G1/P-G2/P-G5).
+# Set-once: a key is filled at most once per process, a repeat is a hit; an
+# owner whose content digest changed drops every decision cached for it.
+#
+# Fail closed: unknown owner, owner HIR not loaded, or empty digest is a miss
+# with `pending_reason`; the caller keeps its widen -> MONO-PENDING path.
+#
+# Named gap (P-G5 scope): loading an owner body that is NOT in the child's
+# loaded set from the HIR cache by content identity needs the owner's closure
+# digest, which the MIR child does not hold; see
+# doc/08_tracking/bug/pg4_template_body_hir_cache_load_gap_2026-10-25.md.
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub val TEMPLATE_BODY_SOURCE_LOADED_V1 = "loaded"
+pub val TEMPLATE_BODY_SOURCE_CACHE_V1 = "cache"
+
+pub struct TemplateBodyResultV1:
+    found: bool
+    owner_module: text
+    decision_key: text     # TemplateBodyDecisionKeyV1 (process-local)
+    source: text           # TEMPLATE_BODY_SOURCE_*_V1
+    pending_reason: text   # non-empty only when found == false
+
+fn _frame_v1(value: text) -> text:
+    "{value.len()}:{value}|"
+
+pub fn template_body_decision_key_v1(owner_module: text, generic_decl_id: text, owner_digest: text,
+        type_arg_keys: [text]) -> text:
+    var acc = _frame_v1("template-body-decision/v1") + _frame_v1(owner_module) +
+        _frame_v1(generic_decl_id) + _frame_v1(owner_digest) + _frame_v1("{type_arg_keys.len()}")
+    for k in type_arg_keys:
+        acc = acc + _frame_v1(k)
+    "sha256:" + sha256_text(acc)
+
+# Transitive import closure of `start` over module -> imported-module edges
+# (from loaded HirModule.imports[].module_path). `start` itself excluded.
+pub fn template_body_import_closure_v1(start: text, edges: Dict<text, [text]>) -> [text]:
+    var out: [text] = []
+    var frontier: [text] = [start]
+    var pos = 0
+    while pos < frontier.len():
+        val node = frontier[pos]
+        pos = pos + 1
+        if not edges.contains_key(node):
+            continue
+        val next: [text] = edges[node]
+        for d in next:
+            if d != start and not frontier.contains(d):
+                frontier = frontier.push(d)
+                out = out.push(d)
+    out
+
+# Owner of a template named by an E-MONO-040 diagnostic, among `closure` only:
+# a qualified name whose module prefix is in the closure wins; otherwise the
+# unique closure module that declares a generic named `name`. Outside the
+# closure, ambiguous, or unknown -> "".
+pub fn template_body_owner_of_v1(name: text, declared: Dict<text, [text]>, closure: [text]) -> text:
+    var best = ""
+    for owner in closure:
+        if name.starts_with(owner + ".") and owner.len() > best.len():
+            best = owner
+    if best != "":
+        return best
+    var found = ""
+    for owner in closure:
+        if not declared.contains_key(owner):
+            continue
+        val decls: [text] = declared[owner]
+        if decls.contains(name):
+            if found != "":
+                return ""
+            found = owner
+    found
+
+class TemplateBodyLoaderV1:
+    # owner -> content digest its cached decisions were made under
+    owner_digests: Dict<text, text>
+    # TemplateBodyDecisionKeyV1 -> owner module (set-once)
+    decisions: Dict<text, text>
+    loads: i64
+    hits: i64
+    misses: i64
+    invalidations: i64
+
+    static fn create() -> TemplateBodyLoaderV1:
+        TemplateBodyLoaderV1(owner_digests: {}, decisions: {}, loads: 0, hits: 0, misses: 0,
+            invalidations: 0)
+
+    me _miss(owner: text, reason: text) -> TemplateBodyResultV1:
+        self.misses = self.misses + 1
+        TemplateBodyResultV1(found: false, owner_module: owner, decision_key: "", source: "",
+            pending_reason: reason)
+
+    # `owner_loaded`: the owner's HIR body is held by this process (admitted
+    # from the HIR cache). `owner_digest`: its content identity (empty = unknown).
+    me load(owner_module: text, generic_decl_id: text, type_arg_keys: [text], owner_digest: text,
+            owner_loaded: bool) -> TemplateBodyResultV1:
+        if owner_module == "":
+            return self._miss(owner_module, "owner-unknown")
+        if not owner_loaded:
+            return self._miss(owner_module, "owner-body-unavailable")
+        if owner_digest == "":
+            return self._miss(owner_module, "owner-digest-unknown")
+        if self.owner_digests.contains_key(owner_module) and self.owner_digests[owner_module] != owner_digest:
+            self._invalidate(owner_module)
+        self.owner_digests[owner_module] = owner_digest
+        val key = template_body_decision_key_v1(owner_module, generic_decl_id, owner_digest, type_arg_keys)
+        if self.decisions.contains_key(key):
+            self.hits = self.hits + 1
+            return TemplateBodyResultV1(found: true, owner_module: owner_module, decision_key: key,
+                source: TEMPLATE_BODY_SOURCE_CACHE_V1, pending_reason: "")
+        self.decisions[key] = owner_module
+        self.loads = self.loads + 1
+        TemplateBodyResultV1(found: true, owner_module: owner_module, decision_key: key,
+            source: TEMPLATE_BODY_SOURCE_LOADED_V1, pending_reason: "")
+
+    me _invalidate(owner_module: text):
+        var kept: Dict<text, text> = {}
+        for key in self.decisions.keys():
+            val owner: text = self.decisions[key]
+            if owner == owner_module:
+                self.invalidations = self.invalidations + 1
+            else:
+                kept[key] = owner
+        self.decisions = kept
+
+    fn cached(key: text) -> bool:
+        self.decisions.contains_key(key)
+
+pub fn template_body_loader_new_v1() -> TemplateBodyLoaderV1:
+    TemplateBodyLoaderV1.create()
