@@ -1,0 +1,474 @@
+# Finite path analysis of the actual generated request CFG. No runtime flags,
+# source spellings, public proof rows or conditional theorem establish a pin.
+# This checks a BORROWED wrapper; caller retained-field ownership is a separate
+# mandatory gate. An Ok here is deliberately not a request admission receipt.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirTypeKind}
+use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
+use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_builtin_finalize_v1}
+use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_dict_count_v1}
+use compiler.mir.source_region_request_budget_v1.{SourceRegionRequestBudgetV1}
+use compiler.mir.source_region_request_type_check_v1.{source_request_types_same_v1, source_request_signatures_same_v1}
+
+struct SourceRequestConditionV1:
+    result: i64
+    tag: i64
+
+struct SourceRequestFlowV1:
+    block: i64
+    phase: i64
+    slot: i64
+    context: i64
+    producer_result: i64
+    consumer_result: i64
+    previous_cleanup: i64
+    release_result: i64
+    first_error: i64
+    first_cleanup: i64
+    aliases: Dict<i64, i64>
+    constants: Dict<i64, i64>
+    statuses: Dict<i64, i64>
+    payloads: Dict<i64, i64>
+    tags: Dict<i64, i64>
+    constructed_payloads: Dict<i64, i64>
+    conditions: Dict<i64, SourceRequestConditionV1>
+    handled_errors: Dict<i64, bool>
+    visited: [i64]
+
+fn source_request_root_v1(state: SourceRequestFlowV1, local: i64) -> i64:
+    state.aliases.get(local) ?? local
+
+fn source_request_operand_local_v1(operand: MirOperand) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local.id
+        case _: -1
+
+fn source_request_operand_root_v1(state: SourceRequestFlowV1, operand: MirOperand) -> i64:
+    val local = source_request_operand_local_v1(operand)
+    if local < 0: -1 else: source_request_root_v1(state, local)
+
+fn source_request_integer_v1(state: SourceRequestFlowV1, operand: MirOperand) -> Result<i64, text>:
+    match operand.kind:
+        case MirOperandKind.Const(MirConstValue.Int(value), _): Ok(value)
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+            if val value = state.constants.get(source_request_root_v1(state, local.id)): return Ok(value)
+            Err("SOURCE-PIN-CONSTANT: actual scalar constant provenance is absent")
+        case _: Err("SOURCE-PIN-CONSTANT: exact integer required")
+
+fn source_request_fork_v1(state: SourceRequestFlowV1, block: i64,
+        budget: SourceRegionRequestBudgetV1) -> Result<SourceRequestFlowV1, text>:
+    # Reserve the complete record, dictionary entry/key copies and path copy
+    # before creating any destination collection. Charges are never refunded;
+    # the pending queue retains processed states and their storage is counted.
+    budget.charge(10, state_fields: 20, output_bytes: 160)?
+    budget.rows(canonical_enum_dict_count_v1(state.aliases, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.constants, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.statuses, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.payloads, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.tags, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.constructed_payloads, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.conditions, budget.account)?, 4, 32, 2)?
+    budget.rows(canonical_enum_dict_count_v1(state.handled_errors, budget.account)?, 4, 32, 2)?
+    budget.rows(state.visited.len(), 1, 8)?
+    var aliases: Dict<i64, i64> = {}
+    var constants: Dict<i64, i64> = {}
+    var statuses: Dict<i64, i64> = {}
+    var payloads: Dict<i64, i64> = {}
+    var tags: Dict<i64, i64> = {}
+    var constructed: Dict<i64, i64> = {}
+    var conditions: Dict<i64, SourceRequestConditionV1> = {}
+    var handled: Dict<i64, bool> = {}
+    var visited: [i64] = []
+    for key in state.aliases.keys(): aliases[key] = state.aliases[key]
+    for key in state.constants.keys(): constants[key] = state.constants[key]
+    for key in state.statuses.keys(): statuses[key] = state.statuses[key]
+    for key in state.payloads.keys(): payloads[key] = state.payloads[key]
+    for key in state.tags.keys(): tags[key] = state.tags[key]
+    for key in state.constructed_payloads.keys(): constructed[key] = state.constructed_payloads[key]
+    for key in state.conditions.keys(): conditions[key] = state.conditions[key]
+    for key in state.handled_errors.keys(): handled[key] = state.handled_errors[key]
+    for value in state.visited: visited.push(value)
+    Ok(SourceRequestFlowV1(block: block, phase: state.phase, slot: state.slot, context: state.context,
+        producer_result: state.producer_result, consumer_result: state.consumer_result,
+        previous_cleanup: state.previous_cleanup, release_result: state.release_result,
+        first_error: state.first_error, first_cleanup: state.first_cleanup,
+        aliases: aliases, constants: constants, statuses: statuses, payloads: payloads, tags: tags,
+        constructed_payloads: constructed, conditions: conditions, handled_errors: handled, visited: visited))
+
+fn source_request_reject_protected_v1(state: SourceRequestFlowV1, operand: MirOperand) -> Result<(), text>:
+    val root = source_request_operand_root_v1(state, operand)
+    if root >= 0 and (root == state.slot or root == state.context):
+        return Err("SOURCE-PIN-ESCAPE: retained slot/context copied, projected or transported")
+    Ok(())
+
+fn source_request_expect_borrow_v1(state: SourceRequestFlowV1, operand: MirOperand,
+        expected: i64) -> Result<(), text>:
+    match operand.kind:
+        case MirOperandKind.Copy(local):
+            if expected >= 0 and source_request_root_v1(state, local.id) == expected: return Ok(())
+        case _: ()
+    Err("SOURCE-PIN-BORROW: exact nonconsuming protected operand required")
+
+fn source_request_check_previous_cleanup_v1(state: SourceRequestFlowV1) -> Result<(), text>:
+    if state.previous_cleanup < 0: return Ok(())
+    val status = state.statuses.get(state.previous_cleanup) ?? 0
+    if status == 0 or (status == 2 and not state.handled_errors.has(state.previous_cleanup)):
+        return Err("SOURCE-PIN-CLEANUP: cleanup outcome was ignored or error was not retained")
+    Ok(())
+
+fn source_request_builtin_is_v1(operation: CanonicalEnumBuiltinOperationV1?,
+        expected: CanonicalEnumBuiltinOperationV1) -> bool:
+    match operation:
+        case Some(actual): actual == expected
+        case _: false
+
+fn source_request_provenance_defined_v1(state: SourceRequestFlowV1, local: i64) -> bool:
+    state.constants.has(local) or state.statuses.has(local) or state.payloads.has(local) or state.tags.has(local) or state.conditions.has(local)
+
+impl MirLowering:
+    me source_request_captured_target_v1(function: MirFunction, block: i64,
+            index: i64, callee: MirOperand, budget: SourceRegionRequestBudgetV1) -> Result<SymbolId, text>:
+        budget.charge(20, output_bytes: 19)?
+        val owner_id = function.symbol.id.to_string()
+        var matches = 0
+        var target = SymbolId(id: -1)
+        budget.rows(self.verification_call_captures.len(), 0, 0, 22)?
+        for capture in self.verification_call_captures:
+            if (capture.owner_symbol_id == owner_id and
+                    capture.block_id == block and capture.instruction_index == index):
+                matches = matches + 1
+                match capture.resolved_callee_v1:
+                    case Some(symbol):
+                        budget.charge(20, output_bytes: 19)?
+                        if symbol.id < 0 or capture.callee_symbol_id != symbol.id.to_string():
+                            return Err("SOURCE-PIN-CAPTURE: canonical SymbolId disagrees")
+                        target = symbol
+                    case _: return Err("SOURCE-PIN-CAPTURE: actual canonical callee is absent")
+        if matches != 1: return Err("SOURCE-PIN-CAPTURE: every call needs one actual emitted-site identity")
+        val declaration = match self.symbols.get_symbol_raw(target.id):
+            case Some(value): value
+            case _: return Err("SOURCE-PIN-CAPTURE: canonical declaration absent from owning resolver")
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                budget.charge(declaration.name.len())?
+                budget.charge(1)?
+                if name != declaration.name:
+                    return Err("SOURCE-PIN-CAPTURE: call changed after canonical emission")
+                match type_.kind:
+                    case MirTypeKind.FuncPtr(_): ()
+                    case _: return Err("SOURCE-PIN-CAPTURE: direct typed callable required")
+            case _: return Err("SOURCE-PIN-CAPTURE: indirect call is forbidden")
+        Ok(target)
+
+    me verify_source_region_request_wrapper_v1(module: MirModule, function: MirFunction,
+            producer: SymbolId, consumer: SymbolId, slot_type: MirType,
+            context_type: MirType, lifecycle: SourceRegionRequestLifecycleSymbolsV1,
+            account: MirLoopResourceAccountV1) -> Result<(), text>:
+        val budget = SourceRegionRequestBudgetV1.begin(account)?
+        budget.charge(1)?
+        if self.builder.canonical_enum_builtin_error_v1 != "":
+            return Err("SOURCE-PIN-BUILTIN: actual builtin emission reported an error")
+        val builtin_manifest = canonical_enum_builtin_finalize_v1(module, function,
+            self.builder.canonical_enum_builtin_sites_v1, account)?
+        if function.blocks.len() == 0 or function.signature.params.len() == 0 or function.signature.is_variadic:
+            return Err("SOURCE-PIN-WRAPPER: actual executable fixed-signature wrapper required")
+        if not source_request_types_same_v1(function.signature.params[0], slot_type, budget)?:
+            return Err("SOURCE-PIN-SIGNATURE: exact slot borrow parameter required")
+        match function.signature.return_type.kind:
+            case MirTypeKind.Result(inner, cleanup_error):
+                match inner.kind:
+                    case MirTypeKind.Result(value, semantic_error):
+                        match value.kind:
+                            case MirTypeKind.I64: ()
+                            case _: return Err("SOURCE-PIN-SIGNATURE: rich consumer output may not escape")
+                        if not source_request_types_same_v1(semantic_error, cleanup_error, budget)?:
+                            return Err("SOURCE-PIN-SIGNATURE: canonical nested error identities differ")
+                        match cleanup_error.kind:
+                            case MirTypeKind.Enum(owner):
+                                if owner.id < 0: return Err("SOURCE-PIN-SIGNATURE: error declaration absent")
+                            case _: return Err("SOURCE-PIN-SIGNATURE: nominal error enum required")
+                    case _: return Err("SOURCE-PIN-SIGNATURE: actual nested semantic Result required")
+            case _: return Err("SOURCE-PIN-SIGNATURE: actual nested retained/released outcome required")
+        var slot = -1
+        budget.rows(function.locals.len(), 0, 0)?
+        for local in function.locals:
+            match local.kind:
+                case LocalKind.Arg(0):
+                    if slot >= 0 or not source_request_types_same_v1(local.type_, slot_type, budget)?:
+                        return Err("SOURCE-PIN-SLOT: unique typed retained-slot borrow required")
+                    slot = local.id.id
+                case _: ()
+        if slot < 0: return Err("SOURCE-PIN-SLOT: retained-slot argument is absent")
+        budget.charge(1, state_fields: 1, output_bytes: 8)?
+        var blocks: Dict<i64, i64> = {}
+        for index in 0..function.blocks.len():
+            budget.charge(1, state_fields: 2, output_bytes: 16)?
+            val id = function.blocks[index].id.id
+            if id < 0 or blocks.has(id): return Err("SOURCE-PIN-CFG: duplicate or invalid block")
+            blocks[id] = index
+        budget.charge(1, state_fields: 8, output_bytes: 64)?
+        var identities: Dict<i64, bool> = {}
+        for symbol in [producer, consumer, lifecycle.read_end_pinned, lifecycle.revoke_pinned,
+                lifecycle.release_pinned, lifecycle.retain_first_error, lifecycle.retain_cleanup_error]:
+            budget.charge(1, state_fields: 2, output_bytes: 16)?
+            if symbol.id < 0 or identities.has(symbol.id):
+                return Err("SOURCE-PIN-IDENTITY: absent or colliding canonical operation")
+            identities[symbol.id] = true
+        # Verification never lazily loads/registers enum declarations. The
+        # normal owning lowerer must already have established this exact key.
+        val index_entries = canonical_enum_dict_count_v1(self.enum_runtime_id_index_q, account)?
+        budget.charge(8)?
+        budget.charge(index_entries)?
+        if not self.enum_runtime_id_index_q.has("Result"):
+            return Err("SOURCE-PIN-RESULT: existing canonical Result identity is absent")
+        budget.charge(8)?
+        budget.charge(index_entries)?
+        # The normal native owner uses has+index too; Dict.get's native issue
+        # is recorded in doc/07_guide/language/dict_native_pitfalls.md.
+        val result_runtime_id = self.enum_runtime_id_index_q["Result"]
+        if result_runtime_id < 0:
+            return Err("SOURCE-PIN-RESULT: existing canonical Result identity is invalid")
+        # Distinct charges: the queue handle, its first element, then the
+        # nineteen-field Flow record. Later forks reuse the prepaid handle.
+        budget.charge(1, state_fields: 1, output_bytes: 8)?
+        budget.rows(1, 1, 8)?
+        budget.charge(1, state_fields: 19, output_bytes: 152)?
+        var pending: [SourceRequestFlowV1] = [SourceRequestFlowV1(block: function.entry_block.id,
+            phase: 0, slot: slot, context: -1, producer_result: -1, consumer_result: -1,
+            previous_cleanup: -1, release_result: -1, first_error: -1, first_cleanup: -1,
+            aliases: {}, constants: {}, statuses: {}, payloads: {}, tags: {},
+            constructed_payloads: {}, conditions: {}, handled_errors: {}, visited: [])]
+        var cursor = 0
+        var returns = 0
+        while cursor < pending.len():
+            budget.charge(1)?
+            var state = pending[cursor]
+            cursor = cursor + 1
+            budget.charge(state.visited.len())?
+            if state.visited.contains(state.block) or not blocks.has(state.block):
+                return Err("SOURCE-PIN-CFG: cycle or missing edge in finite wrapper")
+            budget.charge(1, state_fields: 1, output_bytes: 8)?
+            state.visited.push(state.block)
+            val block = function.blocks[blocks[state.block]]
+            for index in 0..block.instructions.len():
+                # A classified instruction can introduce at most three map
+                # rows, each holding a key and at most two scalar value slots.
+                budget.charge(4, state_fields: 9, output_bytes: 72)?
+                match block.instructions[index].kind:
+                    case MirInstKind.Const(dest, value, _):
+                        if dest.id == state.slot or dest.id == state.context or source_request_provenance_defined_v1(state, dest.id):
+                            return Err("SOURCE-PIN-FORGE: retained owner overwritten")
+                        state.aliases[dest.id] = dest.id
+                        match value:
+                            case MirConstValue.Int(integer): state.constants[dest.id] = integer
+                            case _: ()
+                    case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                        if dest.id == state.slot or dest.id == state.context or source_request_provenance_defined_v1(state, dest.id):
+                            return Err("SOURCE-PIN-FORGE: retained owner overwritten")
+                        source_request_reject_protected_v1(state, MirOperand(kind: MirOperandKind.Copy(source)))?
+                        state.aliases[dest.id] = source_request_root_v1(state, source.id)
+                    case MirInstKind.Cast(_, _, _) | MirInstKind.Bitcast(_, _, _):
+                        # Equal provenance is not equal scalar value: i64 ->
+                        # Bool -> i64 changes 7 into 1. No lossless codec cast
+                        # policy has been proved for this request subset.
+                        return Err("SOURCE-PIN-CODEC: unproved cast cannot preserve payload provenance")
+                    case MirInstKind.GetField(dest, base, field):
+                        if (state.phase != 0 or state.context >= 0 or field != 0 or
+                                source_request_operand_root_v1(state, base) != state.slot or source_request_provenance_defined_v1(state, dest.id)):
+                            return Err("SOURCE-PIN-FIELD: only one initial scoped context borrow is allowed")
+                        source_request_expect_borrow_v1(state, base, state.slot)?
+                        var typed = 0
+                        budget.rows(function.locals.len(), 0, 0)?
+                        for local in function.locals:
+                            if local.id.id == dest.id:
+                                if source_request_types_same_v1(local.type_, context_type, budget)?: typed = typed + 1
+                        if typed != 1: return Err("SOURCE-PIN-FIELD: actual context borrow type differs")
+                        state.context = dest.id
+                    case MirInstKind.Call(destination, callee, args):
+                        var builtin: CanonicalEnumBuiltinOperationV1? = nil
+                        budget.rows(builtin_manifest.sites.len(), 0, 0)?
+                        for site in builtin_manifest.sites:
+                            if site.owner.id == function.symbol.id and site.block.id == block.id.id and site.instruction_index == index:
+                                if builtin != nil: return Err("SOURCE-PIN-BUILTIN: duplicate actual primitive site")
+                                builtin = Some(site.operation)
+                        var target = SymbolId(id: -1)
+                        if builtin == nil:
+                            target = self.source_request_captured_target_v1(function, block.id.id, index, callee, budget)?
+                        if (target.id == producer.id or target.id == consumer.id or
+                                target.id == lifecycle.read_end_pinned.id or target.id == lifecycle.revoke_pinned.id or
+                                target.id == lifecycle.release_pinned.id or target.id == lifecycle.retain_first_error.id or
+                                target.id == lifecycle.retain_cleanup_error.id):
+                            if not module.functions.has(target) or module.functions[target].symbol.id != target.id:
+                                return Err("SOURCE-PIN-SIGNATURE: canonical executable declaration is absent")
+                            match callee.kind:
+                                case MirOperandKind.Const(_, type_):
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            if not source_request_signatures_same_v1(signature, module.functions[target].signature, budget)?:
+                                                return Err("SOURCE-PIN-SIGNATURE: actual call differs from canonical declaration")
+                                        case _: return Err("SOURCE-PIN-SIGNATURE: typed direct call required")
+                                case _: return Err("SOURCE-PIN-SIGNATURE: typed direct call required")
+                        val result = match destination:
+                            case Some(local): local.id
+                            case _: return Err("SOURCE-PIN-CALL: result-bearing canonical operation required")
+                        if result == state.slot or result == state.context or source_request_provenance_defined_v1(state, result):
+                            return Err("SOURCE-PIN-FORGE: call overwrites protected owner")
+                        if target.id == producer.id or target.id == consumer.id:
+                            if state.context < 0 or args.len() == 0 or source_request_operand_root_v1(state, args[args.len() - 1]) != state.context:
+                                return Err("SOURCE-PIN-BORROW: direct producer/consumer lacks exact context")
+                            source_request_expect_borrow_v1(state, args[args.len() - 1], state.context)?
+                            for arg_index in 0..args.len() - 1:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, args[arg_index])?
+                            if target.id == producer.id:
+                                if state.phase != 0: return Err("SOURCE-PIN-ORDER: producer invoked more than once or after cleanup")
+                                state.phase = 1
+                                state.producer_result = result
+                            else:
+                                if state.phase != 1 or (state.statuses.get(state.producer_result) ?? 0) != 1:
+                                    return Err("SOURCE-PIN-ORDER: consumer is not scoped to producer Ok")
+                                if args.len() != 2 or (state.payloads.get(source_request_operand_root_v1(state, args[0])) ?? -1) != state.producer_result:
+                                    return Err("SOURCE-PIN-CONSUMER: actual producer payload provenance differs")
+                                state.phase = 2
+                                state.consumer_result = result
+                            state.statuses[result] = 0
+                        elif (target.id == lifecycle.read_end_pinned.id or target.id == lifecycle.revoke_pinned.id or target.id == lifecycle.release_pinned.id):
+                            if args.len() != 1 or source_request_operand_root_v1(state, args[0]) != state.slot:
+                                return Err("SOURCE-PIN-CLEANUP: exact retained slot borrow required")
+                            source_request_expect_borrow_v1(state, args[0], state.slot)?
+                            source_request_check_previous_cleanup_v1(state)?
+                            if target.id == lifecycle.read_end_pinned.id:
+                                val failed_producer = state.phase == 1 and (state.statuses.get(state.producer_result) ?? 0) == 2 and state.first_error == state.producer_result
+                                val ended_consumer = state.phase == 2 and (state.statuses.get(state.consumer_result) ?? 0) > 0
+                                if not failed_producer and not ended_consumer:
+                                    return Err("SOURCE-PIN-ORDER: cleanup bypasses semantic Result handling")
+                                if ended_consumer and (state.statuses.get(state.consumer_result) ?? 0) == 2 and state.first_error != state.consumer_result:
+                                    return Err("SOURCE-PIN-ERROR: semantic first error was not retained")
+                                state.phase = 3
+                            elif target.id == lifecycle.revoke_pinned.id:
+                                if state.phase != 3: return Err("SOURCE-PIN-ORDER: revoke must follow one lease-end attempt")
+                                state.phase = 4
+                            else:
+                                if state.phase != 4: return Err("SOURCE-PIN-ORDER: release must follow one revoke attempt")
+                                state.phase = 5
+                                state.release_result = result
+                            state.previous_cleanup = result
+                            state.statuses[result] = 0
+                        elif target.id == lifecycle.retain_first_error.id or target.id == lifecycle.retain_cleanup_error.id:
+                            if args.len() != 2 or source_request_operand_root_v1(state, args[0]) != state.slot:
+                                return Err("SOURCE-PIN-ERROR: retained error lacks exact owned slot")
+                            source_request_expect_borrow_v1(state, args[0], state.slot)?
+                            val error_source = state.payloads.get(source_request_operand_root_v1(state, args[1])) ?? -1
+                            if error_source < 0 or (state.statuses.get(error_source) ?? 0) != 2:
+                                return Err("SOURCE-PIN-ERROR: actual failing Result payload provenance is absent")
+                            if target.id == lifecycle.retain_first_error.id:
+                                if (state.phase == 1 and error_source != state.producer_result) or (state.phase == 2 and error_source != state.consumer_result) or state.phase > 2:
+                                    return Err("SOURCE-PIN-ERROR: semantic error is not from active producer/consumer")
+                                if state.first_error < 0: state.first_error = error_source
+                            else:
+                                if state.phase < 3 or error_source != state.previous_cleanup:
+                                    return Err("SOURCE-PIN-ERROR: cleanup error is not from active cleanup attempt")
+                                if state.first_cleanup < 0: state.first_cleanup = error_source
+                            state.handled_errors[error_source] = true
+                        elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.CheckVariant):
+                            budget.rows(args.len(), 0, 0)?
+                            for argument in args:
+                                source_request_reject_protected_v1(state, argument)?
+                            if args.len() != 3 or source_request_integer_v1(state, args[1])? != result_runtime_id:
+                                return Err("SOURCE-PIN-RESULT: actual canonical Result identity differs")
+                            val tag = source_request_integer_v1(state, args[2])?
+                            if tag != 0 and tag != 1: return Err("SOURCE-PIN-RESULT: canonical Ok/Err discriminant required")
+                            state.conditions[result] = SourceRequestConditionV1(result: source_request_operand_root_v1(state, args[0]), tag: tag)
+                        elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.Payload):
+                            budget.rows(args.len(), 0, 0)?
+                            for argument in args:
+                                source_request_reject_protected_v1(state, argument)?
+                            if args.len() != 1: return Err("SOURCE-PIN-PAYLOAD: canonical single payload operation required")
+                            val source = source_request_operand_root_v1(state, args[0])
+                            if (state.statuses.get(source) ?? 0) == 0:
+                                return Err("SOURCE-PIN-PAYLOAD: payload read before actual Result arm discrimination")
+                            state.payloads[result] = source
+                        elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.New):
+                            budget.rows(args.len(), 0, 0)?
+                            for argument in args:
+                                source_request_reject_protected_v1(state, argument)?
+                            if args.len() != 3 or source_request_integer_v1(state, args[0])? != result_runtime_id:
+                                return Err("SOURCE-PIN-RESULT: constructor canonical Result identity differs")
+                            val tag = source_request_integer_v1(state, args[1])?
+                            if tag != 0 and tag != 1: return Err("SOURCE-PIN-RESULT: invalid constructed discriminant")
+                            state.tags[result] = tag
+                            state.statuses[result] = tag + 1
+                            state.constructed_payloads[result] = source_request_operand_root_v1(state, args[2])
+                        elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.Discriminant):
+                            budget.rows(args.len(), 0, 0)?
+                            for argument in args:
+                                source_request_reject_protected_v1(state, argument)?
+                            if args.len() != 1:
+                                return Err("SOURCE-PIN-RESULT: canonical discriminant arity differs")
+                        else:
+                            return Err("SOURCE-PIN-CALL: unknown call or unclassified lifetime effect")
+                    case MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _) | MirInstKind.Nop: ()
+                    case _: return Err("SOURCE-PIN-INCOMPLETE: actual instruction has no complete owner classification")
+            budget.charge(1)?
+            match block.terminator:
+                case MirTerminator.Goto(target):
+                    budget.rows(pending.len() + 1, 1, 8)?
+                    pending.push(source_request_fork_v1(state, target.id, budget)?)
+                case MirTerminator.If(condition, yes, no):
+                    val root = source_request_operand_root_v1(state, condition)
+                    val predicate = match state.conditions.get(root):
+                        case Some(value): value
+                        case _: return Err("SOURCE-PIN-BRANCH: branch is not an actual canonical Result check")
+                    val known = state.statuses.get(predicate.result) ?? 0
+                    val expected = predicate.tag + 1
+                    if known == 0 or known == expected:
+                        budget.rows(pending.len() + 1, 1, 8)?
+                        var success = source_request_fork_v1(state, yes.id, budget)?
+                        success.statuses[predicate.result] = expected
+                        pending.push(success)
+                    if known == 0 or known != expected:
+                        budget.rows(pending.len() + 1, 1, 8)?
+                        var failure = source_request_fork_v1(state, no.id, budget)?
+                        failure.statuses[predicate.result] = if expected == 1: 2 else: 1
+                        pending.push(failure)
+                case MirTerminator.Ret(value):
+                    source_request_check_previous_cleanup_v1(state)?
+                    if state.phase != 5: return Err("SOURCE-PIN-EXIT: exit bypasses single final release attempt")
+                    val operand = match value:
+                        case Some(actual): actual
+                        case _: return Err("SOURCE-PIN-EXIT: nested outcome required")
+                    source_request_reject_protected_v1(state, operand)?
+                    val root = source_request_operand_root_v1(state, operand)
+                    val tag = state.tags.get(root) ?? -1
+                    val release_status = state.statuses.get(state.release_result) ?? 0
+                    if release_status == 1:
+                        if tag != 0: return Err("SOURCE-PIN-EXIT: release Ok must return outer Ok")
+                        val inner = state.constructed_payloads.get(root) ?? -1
+                        val selected_error = if state.first_error >= 0: state.first_error else: state.first_cleanup
+                        val inner_tag = state.tags.get(inner) ?? -1
+                        val inner_payload = state.constructed_payloads.get(inner) ?? -1
+                        if selected_error >= 0:
+                            if inner_tag != 1 or (state.payloads.get(inner_payload) ?? -1) != selected_error:
+                                return Err("SOURCE-PIN-ERROR: first semantic/cleanup error was replaced")
+                        else:
+                            if inner_tag != 0 or (state.payloads.get(inner_payload) ?? -1) != state.consumer_result:
+                                return Err("SOURCE-PIN-VALUE: actual scalar consumer outcome was replaced")
+                    elif release_status == 2:
+                        if tag != 1 or not state.handled_errors.has(state.release_result):
+                            return Err("SOURCE-PIN-RETAIN: failed release returned success or lost cleanup ownership")
+                        val error = state.constructed_payloads.get(root) ?? -1
+                        if (state.payloads.get(error) ?? -1) != state.release_result:
+                            return Err("SOURCE-PIN-RETAIN: outer Err is not actual release failure")
+                    else:
+                        return Err("SOURCE-PIN-EXIT: release Result was not actually discriminated")
+                    returns = returns + 1
+                case _: return Err("SOURCE-PIN-CFG: unknown, exceptional or suspended lifetime edge")
+        if returns == 0: return Err("SOURCE-PIN-EXIT: no actual outcome exit")
+        Ok(())

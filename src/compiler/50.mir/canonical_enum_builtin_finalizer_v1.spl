@@ -1,0 +1,179 @@
+# Finalize actual canonical-emitter sites against the candidate body/module.
+use compiler.mir.canonical_enum_builtin_site_v1.*
+use compiler.mir.mir_types.{MirType, LocalId, MirConstValue}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_operand, serialize_mir_type}
+use compiler.mir.verification_call_identity.{resolved_direct_call_module_hash_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_charge_v1,
+    canonical_enum_function_bound_v1, canonical_enum_operand_bound_v1,
+    canonical_enum_type_bound_v1, canonical_enum_text_bound_v1,
+    canonical_enum_sum_v1, canonical_enum_product_v1, canonical_enum_dict_count_v1}
+
+fn canonical_enum_local_type_v1(function: MirFunction, operand: MirOperand,
+        account: MirLoopResourceAccountV1) -> Result<MirType, text>:
+    canonical_enum_charge_v1(account, 1)?
+    match operand.kind:
+        case MirOperandKind.Const(_, type_): Ok(type_)
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+            var count = 0
+            var type_ = MirType.unit()
+            for declared in function.locals:
+                canonical_enum_charge_v1(account, 1)?
+                if declared.id.id == local.id:
+                    count = count + 1
+                    type_ = declared.type_
+            if count != 1: return Err("ENUM-ORIGIN: operand lacks unique actual local")
+            Ok(type_)
+
+fn canonical_enum_uses_result_v1(operand: MirOperand, result: LocalId?) -> bool:
+    if val expected = result:
+        match operand.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local): return local.id == expected.id
+            case _: ()
+    false
+
+fn canonical_enum_expected_abi_name_v1(operation: CanonicalEnumBuiltinOperationV1) -> text:
+    match operation:
+        case CanonicalEnumBuiltinOperationV1.New: "rt_enum_new"
+        case CanonicalEnumBuiltinOperationV1.CheckVariant: "rt_enum_check_variant"
+        case CanonicalEnumBuiltinOperationV1.Payload: "rt_enum_payload"
+        case CanonicalEnumBuiltinOperationV1.Discriminant: "rt_enum_discriminant"
+        case CanonicalEnumBuiltinOperationV1.Panic: "rt_panic"
+
+pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFunction,
+        sites: [CanonicalEnumBuiltinSiteV1], account: MirLoopResourceAccountV1
+) -> Result<CanonicalEnumBuiltinManifestV1, text>:
+    canonical_enum_charge_v1(account, 1)?
+    val function_bound = canonical_enum_function_bound_v1(function, account)?
+    if function_bound > 1152921504606846975: return Err("ENUM-BUDGET: function bound overflow")
+    # Candidate comparison and final body hashing use the existing serializer;
+    # prepay their complete output/work bound BEFORE any serialization occurs.
+    canonical_enum_charge_v1(account, function_bound * 4, 0, function_bound * 4)?
+    val count = canonical_enum_dict_count_v1(module.functions, account)?
+    val sort_bound = canonical_enum_product_v1(canonical_enum_product_v1(count, count)?, 96)?
+    canonical_enum_charge_v1(account, canonical_enum_sum_v1(sort_bound, count)?, count)?
+    for symbol in module.functions.keys():
+        canonical_enum_charge_v1(account, 1)?
+        val bound = canonical_enum_function_bound_v1(module.functions[symbol], account)?
+        canonical_enum_charge_v1(account, bound, 1, bound)?
+    val module_text_bound = canonical_enum_text_bound_v1(module.name, account)?
+    val module_rows_bound = canonical_enum_sum_v1(module_text_bound, canonical_enum_product_v1(count, 96)?)?
+    canonical_enum_charge_v1(account, module_rows_bound, count, module_rows_bound)?
+    val actual = module.functions.get(function.symbol)
+    if actual == nil: return Err("ENUM-ORIGIN: function absent from candidate module")
+    if val declared = actual:
+        if serialize_mir_function(declared) != serialize_mir_function(function):
+            return Err("ENUM-ORIGIN: candidate function body differs")
+    canonical_enum_charge_v1(account, 32, 16, 32)?
+    var seen: Dict<text, bool> = {}
+    var rows: [text] = ["CanonicalEnumBuiltin-v1"]
+    var uses: [CanonicalEnumBuiltinCfgUseV1] = []
+    for index in 0..sites.len():
+        canonical_enum_charge_v1(account, 64, 32, 128)?
+        val site = sites[index]
+        if site.owner.id != function.symbol.id or site.abi != 1:
+            return Err("ENUM-ORIGIN: foreign owner or primitive ABI")
+        match site.callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                # The producer supplies the operation; this checks its emitted
+                # ABI spelling, never infers origin from an arbitrary name.
+                if name != canonical_enum_expected_abi_name_v1(site.operation):
+                    return Err("ENUM-ORIGIN: operation and emitted primitive ABI differ")
+            case _: return Err("ENUM-ORIGIN: canonical primitive call operand absent")
+        val key = "{site.block.id}:{site.instruction_index}"
+        if seen.has(key): return Err("ENUM-ORIGIN: duplicate primitive site")
+        seen[key] = true
+        var block_index = -1
+        for candidate in 0..function.blocks.len():
+            canonical_enum_charge_v1(account, 1)?
+            if function.blocks[candidate].id.id == site.block.id:
+                if block_index >= 0: return Err("ENUM-ORIGIN: duplicate actual block")
+                block_index = candidate
+        if block_index < 0 or site.instruction_index < 0:
+            return Err("ENUM-ORIGIN: actual site absent")
+        val block = function.blocks[block_index]
+        if site.instruction_index >= block.instructions.len():
+            return Err("ENUM-ORIGIN: actual instruction absent")
+        match block.instructions[site.instruction_index].kind:
+            case MirInstKind.Call(destination, callee, arguments):
+                val callee_bound = canonical_enum_operand_bound_v1(callee, account)?
+                val saved_callee_bound = canonical_enum_operand_bound_v1(site.callee, account)?
+                canonical_enum_charge_v1(account, callee_bound, 0, callee_bound)?
+                canonical_enum_charge_v1(account, saved_callee_bound, 0, saved_callee_bound)?
+                if (serialize_operand(callee) != serialize_operand(site.callee) or
+                        arguments.len() != site.operands.len() or arguments.len() != site.operand_types.len()):
+                    return Err("ENUM-ORIGIN: actual call operands differ")
+                if (destination == nil) != (site.result == nil):
+                    return Err("ENUM-ORIGIN: actual destination presence differs")
+                if val local = destination:
+                    if local.id != (site.result ?? LocalId(id: -1)).id:
+                        return Err("ENUM-ORIGIN: actual destination identity differs")
+                    val result_type = canonical_enum_local_type_v1(function,
+                        MirOperand(kind: MirOperandKind.Copy(local)), account)?
+                    val bound = canonical_enum_type_bound_v1(result_type, account)?
+                    val saved_bound = canonical_enum_type_bound_v1(site.result_type, account)?
+                    canonical_enum_charge_v1(account, bound, 0, bound)?
+                    canonical_enum_charge_v1(account, saved_bound, 0, saved_bound)?
+                    if serialize_mir_type(result_type) != serialize_mir_type(site.result_type):
+                        return Err("ENUM-ORIGIN: actual result type differs")
+                for argument in 0..arguments.len():
+                    canonical_enum_charge_v1(account, 1)?
+                    val operand_bound = canonical_enum_operand_bound_v1(arguments[argument], account)?
+                    val saved_operand_bound = canonical_enum_operand_bound_v1(site.operands[argument], account)?
+                    canonical_enum_charge_v1(account, operand_bound, 0, operand_bound)?
+                    canonical_enum_charge_v1(account, saved_operand_bound, 0, saved_operand_bound)?
+                    if serialize_operand(arguments[argument]) != serialize_operand(site.operands[argument]):
+                        return Err("ENUM-ORIGIN: changed primitive argument")
+                    val type_ = canonical_enum_local_type_v1(function, arguments[argument], account)?
+                    val type_bound = canonical_enum_type_bound_v1(type_, account)?
+                    val saved_type_bound = canonical_enum_type_bound_v1(site.operand_types[argument], account)?
+                    canonical_enum_charge_v1(account, type_bound, 0, type_bound)?
+                    canonical_enum_charge_v1(account, saved_type_bound, 0, saved_type_bound)?
+                    if serialize_mir_type(type_) != serialize_mir_type(site.operand_types[argument]):
+                        return Err("ENUM-ORIGIN: actual argument type differs")
+            case _: return Err("ENUM-ORIGIN: actual site is not a call")
+        # These are observations of actual CFG, not predicted success flags.
+        for user in function.blocks:
+            canonical_enum_charge_v1(account, 1)?
+            match user.terminator:
+                case MirTerminator.If(condition, _, _) | MirTerminator.Switch(condition, _, _):
+                    if canonical_enum_uses_result_v1(condition, site.result):
+                        canonical_enum_charge_v1(account, 8, 8)?
+                        uses.push(CanonicalEnumBuiltinCfgUseV1(site_index: index,
+                            block: user.id, terminator: user.terminator))
+                case _: ()
+        canonical_enum_charge_v1(account, 256, 8, 256)?
+        rows.push(key + "|" + site.operation.name() + "|abi={site.abi}|enum={site.enum_runtime_id}|disc={site.discriminant}|")
+        val callee_row_bound = canonical_enum_operand_bound_v1(site.callee, account)?
+        canonical_enum_charge_v1(account, callee_row_bound, 1, callee_row_bound)?
+        rows.push(serialize_operand(site.callee))
+        for operand in site.operands:
+            val bound = canonical_enum_operand_bound_v1(operand, account)?
+            canonical_enum_charge_v1(account, bound, 1, bound)?
+            rows.push(serialize_operand(operand))
+        for type_ in site.operand_types:
+            val bound = canonical_enum_type_bound_v1(type_, account)?
+            canonical_enum_charge_v1(account, bound, 1, bound)?
+            rows.push(serialize_mir_type(type_))
+        val result_row_bound = canonical_enum_type_bound_v1(site.result_type, account)?
+        canonical_enum_charge_v1(account, result_row_bound, 1, result_row_bound)?
+        rows.push(serialize_mir_type(site.result_type))
+    val function_digest = sha256_text(serialize_mir_function(function))
+    val module_digest = resolved_direct_call_module_hash_v1(module)
+    rows.push(function_digest)
+    rows.push(module_digest)
+    var joined_bound = 0
+    for row in rows:
+        canonical_enum_charge_v1(account, 1)?
+        if row.len() > 9223372036854775806 - joined_bound:
+            return Err("ENUM-BUDGET: manifest digest bound overflow")
+        joined_bound = joined_bound + row.len() + 1
+    canonical_enum_charge_v1(account, joined_bound, 1, joined_bound)?
+    Ok(CanonicalEnumBuiltinManifestV1(sites: sites, cfg_uses: uses,
+        function_digest: function_digest, module_digest: module_digest,
+        digest: sha256_text(rows.join("\n"))))
+

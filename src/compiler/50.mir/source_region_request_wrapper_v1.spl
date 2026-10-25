@@ -1,0 +1,278 @@
+# Compiler-generated direct request body, lowered by the actual owning session.
+# Generation is NOT pin admission. The caller must verify actual retained-field
+# ownership and this emitted CFG before publishing or enabling private cleanup.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.source_region_function_request_v1.{SourceRegionFunctionPlanV1}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
+
+fn source_request_expr_v1(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn source_request_unit_v1() -> HirExpr:
+    source_request_expr_v1(HirExprKind.UnitLit, HirType(kind: HirTypeKind.Unit, span: Span.empty()))
+
+fn source_request_var_v1(symbol: SymbolId, type_: HirType) -> HirExpr:
+    source_request_expr_v1(HirExprKind.Var(symbol), type_)
+
+fn source_request_block_v1(statements: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: statements, has: true, value: value, span: Span.empty(), unsafe_caps: [])
+
+fn source_request_statement_v1(value: HirExpr) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(value), span: Span.empty())
+
+fn source_request_enum_v1(type_: HirType, variant: text, value: HirExpr) -> HirExpr:
+    source_request_expr_v1(HirExprKind.EnumLit(type_, variant,
+        Some(HirEnumPayload.Tuple([value]))), type_)
+
+fn source_request_arm_v1(result: HirType, variant: text, symbol: SymbolId,
+        payload: HirType, body: HirBlock) -> HirMatchArm:
+    val binding = HirPattern(kind: HirPatternKind.Binding(symbol, false),
+        has_type_: true, type_: payload, span: Span.empty())
+    HirMatchArm(pattern: HirPattern(kind: HirPatternKind.Enum(result, variant,
+        Some(HirPatternPayload.Tuple([binding]))), has_type_: true,
+        type_: result, span: Span.empty()), has_guard: false,
+        guard: source_request_unit_v1(), body: body, span: Span.empty())
+
+fn source_request_signature_same_v1(expected: MirType, actual: MirSignature) -> bool:
+    match expected.kind:
+        case MirTypeKind.FuncPtr(signature):
+            if actual.is_variadic or signature.params.len() != actual.params.len(): return false
+            if serialize_mir_type(signature.return_type) != serialize_mir_type(actual.return_type): return false
+            for index in 0..signature.params.len():
+                if serialize_mir_type(signature.params[index]) != serialize_mir_type(actual.params[index]): return false
+            true
+        case _: false
+
+impl MirLowering:
+    me source_request_symbol_v1(type_: HirType, kind: SymbolKind, mutable_: bool,
+            owner: text) -> SymbolId:
+        val name = "__source_request_local_{self.symbols.next_symbol_id}"
+        self.symbols.define_with_binding(name, kind, Some(type_), Span.empty(),
+            Visibility.Private, mutable_, Some(owner), false)
+
+    me source_request_call_v1(target: SymbolId, parameters: [HirType],
+            result: HirType, values: [HirExpr]) -> HirExpr:
+        var args: [HirCallArg] = []
+        for value in values:
+            args.push(HirCallArg(has_name: false, name: "", value: value, span: Span.empty()))
+        val callable = HirType(kind: HirTypeKind.Function(parameters, result, []), span: Span.empty())
+        source_request_expr_v1(HirExprKind.Call(source_request_var_v1(target, callable), args, []), result)
+
+    me source_request_retain_error_v1(slot: HirExpr, slot_type: HirType,
+            error: HirExpr, error_type: HirType, result: HirType,
+            target: SymbolId) -> HirStmt:
+        source_request_statement_v1(self.source_request_call_v1(target,
+            [slot_type, error_type], result, [slot, error]))
+
+    me source_request_cleanup_step_v1(slot: HirExpr, slot_type: HirType,
+            error_type: HirType, scalar: HirType, result: HirType,
+            outcome: SymbolId, target: SymbolId, retain: SymbolId,
+            owner: text) -> HirStmt:
+        val success = self.source_request_symbol_v1(scalar, SymbolKind.Variable, false, owner)
+        val failure = self.source_request_symbol_v1(error_type, SymbolKind.Variable, false, owner)
+        val old_ok = self.source_request_symbol_v1(scalar, SymbolKind.Variable, false, owner)
+        val old_err = self.source_request_symbol_v1(error_type, SymbolKind.Variable, false, owner)
+        val error = source_request_var_v1(failure, error_type)
+        val replace = HirStmt(kind: HirStmtKind.Assign(source_request_var_v1(outcome, result), nil,
+            source_request_enum_v1(result, "Err", error)), span: Span.empty())
+        val preserve_first = source_request_expr_v1(HirExprKind.MatchCase(
+            source_request_var_v1(outcome, result), [
+                source_request_arm_v1(result, "Ok", old_ok, scalar,
+                    source_request_block_v1([replace], source_request_unit_v1())),
+                source_request_arm_v1(result, "Err", old_err, error_type,
+                    source_request_block_v1([], source_request_unit_v1()))]),
+            HirType(kind: HirTypeKind.Unit, span: Span.empty()))
+        val failure_body = source_request_block_v1([
+            self.source_request_retain_error_v1(slot, slot_type, error, error_type, result, retain),
+            source_request_statement_v1(preserve_first)], source_request_unit_v1())
+        val call = self.source_request_call_v1(target, [slot_type], result, [slot])
+        source_request_statement_v1(source_request_expr_v1(HirExprKind.MatchCase(call, [
+            source_request_arm_v1(result, "Ok", success, scalar, source_request_block_v1([], source_request_unit_v1())),
+            source_request_arm_v1(result, "Err", failure, error_type, failure_body)]),
+            HirType(kind: HirTypeKind.Unit, span: Span.empty())))
+
+    pub me generate_source_region_request_wrapper_v1(module: MirModule,
+            producer: SymbolId, consumer: SymbolId, slot_type: MirType,
+            account_type: MirType, facades: SourceRegionFacadeSymbolsV1,
+            lifecycle: SourceRegionRequestLifecycleSymbolsV1,
+            source: HirModule, plan: SourceRegionFunctionPlanV1
+    ) -> Result<MirFunction, text>:
+        if self.builder.current_function != nil or self.verification_capture_error != "":
+            return Err("SOURCE-WRAPPER-OWNER: active function or prior canonical capture failure cannot be replaced")
+        if (not module.functions.has(producer) or not module.functions.has(consumer) or
+                not source.functions.has(lifecycle.slot_create)):
+            return Err("SOURCE-WRAPPER-DECLARATION: actual direct declarations are absent")
+        val create = source.functions[lifecycle.slot_create]
+        if create.params.len() != 1 or serialize_mir_type(self.lower_type(create.params[0].type_)) != serialize_mir_type(account_type):
+            return Err("SOURCE-WRAPPER-CREATE: canonical account parameter differs")
+        val (slot_hir, error_hir) = match create.return_type.kind:
+            case HirTypeKind.Result(ok, err): (ok, err)
+            case _: return Err("SOURCE-WRAPPER-CREATE: canonical request Result required")
+        if (serialize_mir_type(self.lower_type(slot_hir)) != serialize_mir_type(slot_type) or
+                not hir_types_equal(error_hir, plan.error_type)):
+            return Err("SOURCE-WRAPPER-CREATE: request/error nominal declaration differs")
+        val slot_symbol = match slot_hir.kind:
+            case HirTypeKind.Named(symbol, args):
+                if args.len() != 0: return Err("SOURCE-WRAPPER-SLOT: generic request storage is unproved")
+                symbol
+            case _: return Err("SOURCE-WRAPPER-SLOT: nominal actual request storage required")
+        if not source.classes.has(slot_symbol):
+            return Err("SOURCE-WRAPPER-SLOT: actual request class declaration absent")
+        val fields = source.classes[slot_symbol].fields
+        if fields.len() != 5 or serialize_mir_type(self.lower_type(fields[0].type_)) != serialize_mir_type(plan.context_type):
+            return Err("SOURCE-WRAPPER-SLOT: actual retained context field differs")
+        var producer_original = SymbolId(id: -1)
+        var consumer_original = SymbolId(id: -1)
+        for original in plan.specialized_symbols.keys():
+            if plan.specialized_symbols[original].id == producer.id:
+                if producer_original.id >= 0: return Err("SOURCE-WRAPPER-IDENTITY: ambiguous producer")
+                producer_original = original
+            if plan.specialized_symbols[original].id == consumer.id:
+                if consumer_original.id >= 0: return Err("SOURCE-WRAPPER-IDENTITY: ambiguous consumer")
+                consumer_original = original
+        if (not plan.originals.has(producer_original) or not plan.originals.has(consumer_original)):
+            return Err("SOURCE-WRAPPER-IDENTITY: actual specialized HIR origins absent")
+        val producer_source = plan.originals[producer_original]
+        val consumer_source = plan.originals[consumer_original]
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val payload = producer_source.return_type
+        if (consumer_source.params.len() != 1 or
+                not hir_types_equal(consumer_source.params[0].type_, payload) or
+                not hir_types_equal(consumer_source.return_type, scalar)):
+            return Err("SOURCE-WRAPPER-CONSUMER: exact typed producer-to-scalar-consumer contract required")
+        val result = HirType(kind: HirTypeKind.Result(scalar, error_hir), span: Span.empty())
+        val produced_result = HirType(kind: HirTypeKind.Result(payload, error_hir), span: Span.empty())
+        val outer = HirType(kind: HirTypeKind.Result(result, error_hir), span: Span.empty())
+        val context_hir = fields[0].type_
+        var producer_types: [HirType] = []
+        for parameter in producer_source.params: producer_types.push(parameter.type_)
+        producer_types.push(context_hir)
+        # Bind every supplied identity against the actual compiled declaration
+        # before allocating a wrapper or emitting calls. No spelling selects IDs.
+        val expected_producer = HirType(kind: HirTypeKind.Function(producer_types, produced_result, []), span: Span.empty())
+        val expected_consumer = HirType(kind: HirTypeKind.Function([payload, context_hir], result, []), span: Span.empty())
+        if (not source_request_signature_same_v1(self.lower_type(expected_producer), module.functions[producer].signature) or
+                not source_request_signature_same_v1(self.lower_type(expected_consumer), module.functions[consumer].signature)):
+            return Err("SOURCE-WRAPPER-SIGNATURE: actual specialized signatures differ")
+        var lifecycle_ids: Dict<i64, bool> = {}
+        for target in [lifecycle.read_end_pinned, lifecycle.revoke_pinned, lifecycle.release_pinned,
+                lifecycle.retain_first_error, lifecycle.retain_cleanup_error]:
+            if target.id < 0 or lifecycle_ids.has(target.id) or not source.functions.has(target) or not module.functions.has(target):
+                return Err("SOURCE-WRAPPER-LIFECYCLE: absent or colliding canonical helper declaration")
+            lifecycle_ids[target.id] = true
+            val declaration = source.functions[target]
+            val retain = target.id == lifecycle.retain_first_error.id or target.id == lifecycle.retain_cleanup_error.id
+            val arity = if retain: 2 else: 1
+            if (declaration.params.len() != arity or not hir_types_equal(declaration.params[0].type_, slot_hir) or
+                    not hir_types_equal(declaration.return_type, result)):
+                return Err("SOURCE-WRAPPER-LIFECYCLE: exact slot/error helper signature required")
+            if retain and not hir_types_equal(declaration.params[1].type_, error_hir):
+                return Err("SOURCE-WRAPPER-LIFECYCLE: retained error nominal identity differs")
+        val name = "__source_region_request_v1_{self.symbols.next_symbol_id}"
+        var wrapper_types: [HirType] = [slot_hir]
+        for parameter in producer_source.params: wrapper_types.push(parameter.type_)
+        val wrapper_type = HirType(kind: HirTypeKind.Function(wrapper_types, outer, []), span: Span.empty())
+        val symbol = self.symbols.define_with_binding(name, SymbolKind.Function, Some(wrapper_type),
+            Span.empty(), Visibility.Private, false, Some(module.name), false)
+        val slot = self.source_request_symbol_v1(slot_hir, SymbolKind.Parameter, true, module.name)
+        val slot_var = source_request_var_v1(slot, slot_hir)
+        var parameters: [HirParam] = [HirParam(symbol: slot, name: "slot", type_: slot_hir,
+            has_default: false, default: source_request_unit_v1(), span: Span.empty(), is_mutable: true)]
+        var producer_args: [HirExpr] = []
+        for index in 0..producer_source.params.len():
+            val type_ = producer_source.params[index].type_
+            val argument = self.source_request_symbol_v1(type_, SymbolKind.Parameter, false, module.name)
+            parameters.push(HirParam(symbol: argument, name: "argument_{index}", type_: type_,
+                has_default: false, default: source_request_unit_v1(), span: Span.empty(), is_mutable: false))
+            producer_args.push(source_request_var_v1(argument, type_))
+        val context = self.source_request_symbol_v1(context_hir, SymbolKind.Variable, false, module.name)
+        val context_var = source_request_var_v1(context, context_hir)
+        producer_args.push(context_var)
+        val produced = self.source_request_symbol_v1(payload, SymbolKind.Variable, false, module.name)
+        val producer_error = self.source_request_symbol_v1(error_hir, SymbolKind.Variable, false, module.name)
+        val consumed = self.source_request_symbol_v1(scalar, SymbolKind.Variable, false, module.name)
+        val consumer_error = self.source_request_symbol_v1(error_hir, SymbolKind.Variable, false, module.name)
+        val outcome = self.source_request_symbol_v1(result, SymbolKind.Variable, true, module.name)
+        val first_producer_error = source_request_var_v1(producer_error, error_hir)
+        val first_consumer_error = source_request_var_v1(consumer_error, error_hir)
+        val consumer_call = self.source_request_call_v1(consumer, [payload, context_hir], result,
+            [source_request_var_v1(produced, payload), context_var])
+        val consumer_match = source_request_expr_v1(HirExprKind.MatchCase(consumer_call, [
+            source_request_arm_v1(result, "Ok", consumed, scalar, source_request_block_v1([],
+                source_request_enum_v1(result, "Ok", source_request_var_v1(consumed, scalar)))),
+            source_request_arm_v1(result, "Err", consumer_error, error_hir, source_request_block_v1([
+                self.source_request_retain_error_v1(slot_var, slot_hir, first_consumer_error, error_hir, result,
+                    lifecycle.retain_first_error)], source_request_enum_v1(result, "Err", first_consumer_error)))]), result)
+        val producer_match = source_request_expr_v1(HirExprKind.MatchCase(
+            self.source_request_call_v1(producer, producer_types, produced_result, producer_args), [
+                source_request_arm_v1(produced_result, "Ok", produced, payload, source_request_block_v1([], consumer_match)),
+                source_request_arm_v1(produced_result, "Err", producer_error, error_hir, source_request_block_v1([
+                    self.source_request_retain_error_v1(slot_var, slot_hir, first_producer_error, error_hir, result,
+                        lifecycle.retain_first_error)], source_request_enum_v1(result, "Err", first_producer_error)))]), result)
+        var statements: [HirStmt] = [
+            HirStmt(kind: HirStmtKind.Let(context, context_hir, source_request_expr_v1(
+                HirExprKind.Field(slot_var, fields[0].name, Some(fields[0].symbol)), context_hir)), span: Span.empty()),
+            HirStmt(kind: HirStmtKind.Let(outcome, result, producer_match), span: Span.empty())]
+        statements.push(self.source_request_cleanup_step_v1(slot_var, slot_hir, error_hir, scalar, result,
+            outcome, lifecycle.read_end_pinned, lifecycle.retain_cleanup_error, module.name))
+        statements.push(self.source_request_cleanup_step_v1(slot_var, slot_hir, error_hir, scalar, result,
+            outcome, lifecycle.revoke_pinned, lifecycle.retain_cleanup_error, module.name))
+        val released = self.source_request_symbol_v1(scalar, SymbolKind.Variable, false, module.name)
+        val release_error = self.source_request_symbol_v1(error_hir, SymbolKind.Variable, false, module.name)
+        val cleanup_error = source_request_var_v1(release_error, error_hir)
+        val release_call = self.source_request_call_v1(lifecycle.release_pinned, [slot_hir], result, [slot_var])
+        val release_match = source_request_expr_v1(HirExprKind.MatchCase(release_call, [
+            source_request_arm_v1(result, "Ok", released, scalar, source_request_block_v1([],
+                source_request_enum_v1(outer, "Ok", source_request_var_v1(outcome, result)))),
+            source_request_arm_v1(result, "Err", release_error, error_hir, source_request_block_v1([
+                self.source_request_retain_error_v1(slot_var, slot_hir, cleanup_error, error_hir, result,
+                    lifecycle.retain_cleanup_error)], source_request_enum_v1(outer, "Err", cleanup_error)))]), outer)
+        val wrapper = HirFunction(symbol: symbol, name: name, type_params: [], params: parameters,
+            return_type: outer, body: source_request_block_v1(statements, release_match), effects: [],
+            visibility: Visibility.Private, is_async: false, is_static: false, is_public: false,
+            is_method: false, is_mutable: false, is_const: false, is_extern: false,
+            func_attr: FunctionAttr.default(), has_export_attr: false, export_attr: nil,
+            has_driver_manifest_attr: false, driver_manifest_attr: nil, has_suspension: false,
+            has_vhdl_metadata: false, vhdl_metadata: nil, has_doc_comment: false, doc_comment: "",
+            span: Span.empty(), is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+            verification_contract: nil, is_generic_template: false)
+        # Capture actual direct HIR calls as they are emitted. These entries
+        # derive from actual compiled declarations, not caller-authored rows.
+        val was_enabled = self.verification_capture_enabled
+        var actual_builder = self.builder
+        val builtin_was_enabled = actual_builder.canonical_enum_builtin_capture_enabled_v1
+        actual_builder.canonical_enum_builtin_capture_enabled_v1 = true
+        actual_builder.canonical_enum_builtin_compile_account_v1 = Some(plan.compile_account)
+        self.builder = actual_builder
+        self.verification_capture_enabled = true
+        self.verification_capture_error = ""
+        self.verification_call_captures = []
+        for target in [producer, consumer, lifecycle.read_end_pinned, lifecycle.revoke_pinned,
+                lifecycle.release_pinned, lifecycle.retain_first_error, lifecycle.retain_cleanup_error]:
+            self.verification_call_declarations[target.id] = module.functions[target].signature
+        val errors_before = self.errors.len()
+        val lowered = self.lower_function(wrapper)
+        actual_builder = self.builder
+        actual_builder.canonical_enum_builtin_capture_enabled_v1 = builtin_was_enabled
+        actual_builder.canonical_enum_builtin_compile_account_v1 = nil
+        self.builder = actual_builder
+        self.verification_capture_enabled = was_enabled
+        if (self.errors.len() != errors_before or self.verification_capture_error != "" or
+                self.builder.canonical_enum_builtin_error_v1 != ""):
+            return Err("SOURCE-WRAPPER-LOWERING: actual owning lowering failed: " + self.verification_capture_error)
+        if lowered.symbol.id != symbol.id:
+            return Err("SOURCE-WRAPPER-LOWERING: actual wrapper identity differs")
+        # Deliberately no SOURCE authority metadata or pin receipt. The actual
+        # caller owner-field and emitted-CFG verifier is the publication gate.
+        Ok(lowered)

@@ -1,0 +1,165 @@
+# Finite upper bounds for the existing canonical serializer's supported shapes.
+# Unsupported shapes fail before serialization; this is not a substitute hash.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+
+# Existing scalar runtime owner; avoids the tracked erased-receiver Dict.len
+# fallback and does not allocate a keys snapshot before its bound is paid.
+extern fn rt_dict_len<K, V>(dictionary: Dict<K, V>) -> i64
+
+pub fn canonical_enum_dict_count_v1<K, V>(dictionary: Dict<K, V>,
+        account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    val count = rt_dict_len(dictionary)
+    if count < 0: return Err("ENUM-BUDGET: dictionary owner count unavailable")
+    Ok(count)
+
+pub fn canonical_enum_charge_v1(account: MirLoopResourceAccountV1,
+        work: i64, state: i64 = 0, bytes: i64 = 0) -> Result<(), text>:
+    if account == nil or work < 0 or state < 0 or bytes < 0:
+        return Err("ENUM-BUDGET: actual invocation account or bound absent")
+    if work > 9223372036854775807 - state or work + state > 9223372036854775807 - bytes:
+        return Err("ENUM-BUDGET: reservation overflow")
+    match account.reserve(work + state + bytes, 0, 0, 0, state, 0, bytes):
+        case Ok(_): Ok(())
+        case Err(_): Err("ENUM-BUDGET: actual invocation account exhausted or closed")
+
+pub fn canonical_enum_sum_v1(left: i64, right: i64) -> Result<i64, text>:
+    if left < 0 or right < 0 or left > 9223372036854775807 - right:
+        return Err("ENUM-BUDGET: serialization bound overflow")
+    Ok(left + right)
+
+pub fn canonical_enum_product_v1(left: i64, right: i64) -> Result<i64, text>:
+    if left < 0 or right < 0 or (right > 0 and left > 9223372036854775807 / right):
+        return Err("ENUM-BUDGET: serialization product overflow")
+    Ok(left * right)
+
+pub fn canonical_enum_text_bound_v1(value: text, account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    val length = value.len()
+    if length < 0 or length > 1537228672809129298:
+        return Err("ENUM-BUDGET: text bound overflow")
+    # JSON needs at most six output bytes per input byte/scalar plus quotes.
+    Ok(length * 6 + 16)
+
+pub fn canonical_enum_type_bound_v1(type_: MirType, account: MirLoopResourceAccountV1,
+        depth: i64 = 0) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    if depth > account.limits().max_depth: return Err("ENUM-BUDGET: type depth exhausted")
+    match type_.kind:
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.Unit:
+            Ok(32)
+        case MirTypeKind.Struct(_) | MirTypeKind.Enum(_): Ok(96)
+        case MirTypeKind.Opaque(name): canonical_enum_text_bound_v1(name, account)
+        case MirTypeKind.Ptr(inner, _) | MirTypeKind.Ref(inner, _) | MirTypeKind.Array(inner, _) | MirTypeKind.Slice(inner):
+            canonical_enum_sum_v1(128, canonical_enum_type_bound_v1(inner, account, depth + 1)?)
+        case MirTypeKind.Result(left, right) | MirTypeKind.Dict(left, right):
+            canonical_enum_sum_v1(128, canonical_enum_sum_v1(
+                canonical_enum_type_bound_v1(left, account, depth + 1)?,
+                canonical_enum_type_bound_v1(right, account, depth + 1)?)?)
+        case MirTypeKind.Tuple(elements):
+            var bound = 128
+            for element in elements:
+                bound = canonical_enum_sum_v1(bound, canonical_enum_type_bound_v1(element, account, depth + 1)?)?
+            Ok(bound)
+        case MirTypeKind.FuncPtr(signature): canonical_enum_signature_bound_v1(signature, account, depth + 1)
+        case _: Err("ENUM-BUDGET: unsupported canonical type shape")
+
+fn canonical_enum_signature_bound_v1(signature: MirSignature, account: MirLoopResourceAccountV1,
+        depth: i64) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    var bound = canonical_enum_sum_v1(512, canonical_enum_type_bound_v1(signature.return_type, account, depth)?)?
+    for type_ in signature.params:
+        bound = canonical_enum_sum_v1(bound, canonical_enum_type_bound_v1(type_, account, depth)?)?
+    for type_ in signature.declared_params:
+        bound = canonical_enum_sum_v1(bound, canonical_enum_type_bound_v1(type_, account, depth)?)?
+    Ok(bound)
+
+pub fn canonical_enum_operand_bound_v1(operand: MirOperand, account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    match operand.kind:
+        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): Ok(96)
+        case MirOperandKind.Const(value, type_):
+            var bound = canonical_enum_sum_v1(128, canonical_enum_type_bound_v1(type_, account)?)?
+            match value:
+                case MirConstValue.Int(_) | MirConstValue.Bool(_) | MirConstValue.Zero: ()
+                case MirConstValue.Str(text_): bound = canonical_enum_sum_v1(bound, canonical_enum_text_bound_v1(text_, account)?)?
+                case _: return Err("ENUM-BUDGET: unsupported canonical constant shape")
+            Ok(bound)
+
+fn canonical_enum_operands_bound_v1(values: [MirOperand], account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    var bound = 32
+    for value in values: bound = canonical_enum_sum_v1(bound, canonical_enum_operand_bound_v1(value, account)?)?
+    Ok(bound)
+
+fn canonical_enum_instruction_bound_v1(kind: MirInstKind, account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    match kind:
+        case MirInstKind.Const(_, value, type_):
+            canonical_enum_sum_v1(128, canonical_enum_operand_bound_v1(MirOperand(kind: MirOperandKind.Const(value, type_)), account)?)
+        case MirInstKind.Copy(_, _) | MirInstKind.Move(_, _) | MirInstKind.Drop(_) | MirInstKind.LoadGlobal(_, _) | MirInstKind.GlobalAddr(_, _, _) | MirInstKind.Nop: Ok(256)
+        case MirInstKind.BinOp(_, _, left, right) | MirInstKind.CheckedBinOp(_, _, left, right):
+            canonical_enum_sum_v1(256, canonical_enum_operands_bound_v1([left, right], account)?)
+        case MirInstKind.UnaryOp(_, _, value) | MirInstKind.Load(_, value) | MirInstKind.GetField(_, value, _) | MirInstKind.StoreGlobal(_, value):
+            canonical_enum_sum_v1(256, canonical_enum_operand_bound_v1(value, account)?)
+        case MirInstKind.Store(left, right) | MirInstKind.SetField(left, _, right):
+            canonical_enum_sum_v1(256, canonical_enum_operands_bound_v1([left, right], account)?)
+        case MirInstKind.Cast(_, value, type_) | MirInstKind.Bitcast(_, value, type_):
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(canonical_enum_operand_bound_v1(value, account)?, canonical_enum_type_bound_v1(type_, account)?)?)
+        case MirInstKind.Alloc(_, type_): canonical_enum_sum_v1(128, canonical_enum_type_bound_v1(type_, account)?)
+        case MirInstKind.Call(_, callee, args):
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(canonical_enum_operand_bound_v1(callee, account)?, canonical_enum_operands_bound_v1(args, account)?)?)
+        case MirInstKind.CallIndirect(_, callee, args, signature):
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(canonical_enum_operand_bound_v1(callee, account)?, canonical_enum_sum_v1(canonical_enum_operands_bound_v1(args, account)?, canonical_enum_signature_bound_v1(signature, account, 0)?)?)?)
+        case MirInstKind.Intrinsic(_, name, args):
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(canonical_enum_text_bound_v1(name, account)?, canonical_enum_operands_bound_v1(args, account)?)?)
+        case MirInstKind.Aggregate(_, kind_, values):
+            var extra = 128
+            match kind_:
+                case AggregateKind.Array(type_): extra = canonical_enum_type_bound_v1(type_, account)?
+                case _: ()
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(extra, canonical_enum_operands_bound_v1(values, account)?)?)
+        case MirInstKind.GetElementPtr(_, base, indices):
+            canonical_enum_sum_v1(256, canonical_enum_sum_v1(canonical_enum_operand_bound_v1(base, account)?, canonical_enum_operands_bound_v1(indices, account)?)?)
+        case MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _): Ok(1024)
+        case _: Err("ENUM-BUDGET: unsupported canonical instruction shape")
+
+fn canonical_enum_terminator_bound_v1(term: MirTerminator, account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    match term:
+        case MirTerminator.Goto(_) | MirTerminator.Unreachable: Ok(128)
+        case MirTerminator.Ret(value):
+            if val operand = value: return canonical_enum_sum_v1(128, canonical_enum_operand_bound_v1(operand, account)?)
+            Ok(128)
+        case MirTerminator.If(value, _, _): canonical_enum_sum_v1(256, canonical_enum_operand_bound_v1(value, account)?)
+        case MirTerminator.Switch(value, targets, _):
+            var bound = canonical_enum_sum_v1(256, canonical_enum_operand_bound_v1(value, account)?)?
+            for target in targets:
+                canonical_enum_charge_v1(account, 1)?
+                bound = canonical_enum_sum_v1(bound, 128)?
+            Ok(bound)
+        case MirTerminator.Abort(message): canonical_enum_sum_v1(128, canonical_enum_text_bound_v1(message, account)?)
+        case _: Err("ENUM-BUDGET: unsupported canonical terminator shape")
+
+pub fn canonical_enum_function_bound_v1(function: MirFunction, account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    if function.enum_matches.len() != 0: return Err("ENUM-BUDGET: named-match metadata needs its bounded owner")
+    var bound = canonical_enum_sum_v1(1024, canonical_enum_text_bound_v1(function.name, account)?)?
+    bound = canonical_enum_sum_v1(bound, canonical_enum_text_bound_v1(function.source_region_closure_digest_v1, account)?)?
+    bound = canonical_enum_sum_v1(bound, canonical_enum_signature_bound_v1(function.signature, account, 0)?)?
+    for local in function.locals:
+        canonical_enum_charge_v1(account, 1)?
+        bound = canonical_enum_sum_v1(bound, 256)?
+        if val name = local.name: bound = canonical_enum_sum_v1(bound, canonical_enum_text_bound_v1(name, account)?)?
+        bound = canonical_enum_sum_v1(bound, canonical_enum_type_bound_v1(local.type_, account)?)?
+    for block in function.blocks:
+        canonical_enum_charge_v1(account, 1)?
+        bound = canonical_enum_sum_v1(bound, 256)?
+        if val label = block.label: bound = canonical_enum_sum_v1(bound, canonical_enum_text_bound_v1(label, account)?)?
+        for instruction in block.instructions:
+            bound = canonical_enum_sum_v1(bound, canonical_enum_instruction_bound_v1(instruction.kind, account)?)?
+        bound = canonical_enum_sum_v1(bound, canonical_enum_terminator_bound_v1(block.terminator, account)?)?
+    Ok(bound)

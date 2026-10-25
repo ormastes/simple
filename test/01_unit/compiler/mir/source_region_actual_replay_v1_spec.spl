@@ -16,8 +16,14 @@ use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
 use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
 use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
 use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
 
 extern fn rt_file_read_text(path: text) -> text
+
+fn source_actual_compile_account_v1() -> MirLoopResourceAccountV1:
+    match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()):
+        case Ok(account): account
+        case Err(_): fail("compilation invocation account creation failed")
 
 fn source_actual_replay_hir_v1() -> HirModule:
     # Compile the actual account and private facade bodies, never fake facade
@@ -43,7 +49,7 @@ fn source_actual_symbol_v1(hir: HirModule, name: text) -> SymbolId:
 
 impl MirLowering:
     me source_actual_plan_v1(hir: HirModule, module: MirModule,
-            entry: SymbolId) -> Result<SourceRegionFunctionPlanV1, text>:
+            entry: SymbolId, compile_account: MirLoopResourceAccountV1) -> Result<SourceRegionFunctionPlanV1, text>:
         val facades = SourceRegionFacadeSymbolsV1(
             create: source_actual_symbol_v1(hir, "source_region_create_v1"),
             alloc: source_actual_symbol_v1(hir, "source_region_alloc_v1"),
@@ -71,10 +77,11 @@ impl MirLowering:
         self.prepare_source_region_request_v1(module, entry, hir.functions,
             context, error_hir, facades, SourceRegionResultConstructionV1(
                 constructor: constructor ?? mir_operand_const_int(0),
-                runtime_enum_id: self.enum_runtime_id("Result")))
+                runtime_enum_id: self.enum_runtime_id("Result")), compile_account)
 
 describe "actual SOURCE function replay and generic Result transport":
     it "specializes a real rich-return constructor and two-node alias producer":
+        val compile_account = source_actual_compile_account_v1()
         val hir = source_actual_replay_hir_v1()
         var owner = MirLowering.new(hir.symbols)
         val module = owner.lower_module(hir)
@@ -82,7 +89,7 @@ describe "actual SOURCE function replay and generic Result transport":
         val entry = source_actual_symbol_v1(hir, "c4_subject")
         val child = source_actual_symbol_v1(hir, "c4_make_child")
         val before = serialize_mir_function(module.functions[entry])
-        match owner.source_actual_plan_v1(hir, module, entry):
+        match owner.source_actual_plan_v1(hir, module, entry, compile_account):
             case Err(message): fail(message)
             case Ok(plan):
                 val closure = source_region_resolved_call_closure_v1(module, entry)
@@ -106,13 +113,14 @@ describe "actual SOURCE function replay and generic Result transport":
                                 expect(output.source_region_closure_digest_v1).to_equal(result.closure_digest)
 
     it "rejects stale input and duplicate/original-colliding identities before replay":
+        val compile_account = source_actual_compile_account_v1()
         val hir = source_actual_replay_hir_v1()
         var owner = MirLowering.new(hir.symbols)
         val module = owner.lower_module(hir)
         expect(owner.errors.len()).to_equal(0)
         val entry = source_actual_symbol_v1(hir, "c4_subject")
         val child = source_actual_symbol_v1(hir, "c4_make_child")
-        match owner.source_actual_plan_v1(hir, module, entry):
+        match owner.source_actual_plan_v1(hir, module, entry, compile_account):
             case Err(message): fail(message)
             case Ok(plan):
                 match source_region_resolved_call_closure_v1(module, entry):

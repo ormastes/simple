@@ -8,6 +8,8 @@ use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
 use compiler.mir.mir_types.{LocalId, MirType, MirConstValue}
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
+use compiler.mir.canonical_enum_builtin_capture_v1.*
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.resident_default_global_owner.*
@@ -3793,6 +3795,12 @@ impl MirLowering:
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
         val scrut_local = self.lower_expr(scrutinee)
         val scrutinee_enum_type = self.enum_match_subject_type(scrutinee, scrut_local.id)
+        var primitive_enum_origin_v1: i64 = -1
+        if val declared = scrutinee_enum_type:
+            match declared.kind:
+                case HirTypeKind.Result(_, _): primitive_enum_origin_v1 = self.enum_runtime_id("Result")
+                case HirTypeKind.Optional(_): primitive_enum_origin_v1 = self.enum_runtime_id("Option")
+                case _: ()
         var enum_semantic_capture: i64 = -1
         if self.enum_semantic_capture_enabled:
             var eligible = false
@@ -3812,7 +3820,8 @@ impl MirLowering:
             MirConstValue.Str("rt_enum_discriminant"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
-        val disc_res = bd.emit_call(disc_func, [mir_operand_copy(scrut_local)], MirType.i64())
+        val disc_res = bd.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Discriminant,
+            primitive_enum_origin_v1, -1, disc_func, [mir_operand_copy(scrut_local)], MirType.i64())
         self.builder = bd
         var disc_local = LocalId(id: 0)
         if val dl = disc_res:
@@ -4401,8 +4410,8 @@ impl MirLowering:
                         params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false
                     )))
                 ))
-                val checked = b_cmp.emit_call(
-                    check_variant,
+                val checked = b_cmp.emit_canonical_enum_builtin_v1(
+                    CanonicalEnumBuiltinOperationV1.CheckVariant, expected_enum_id, enum_discs[ci], check_variant,
                     [mir_operand_copy(scrut_local), mir_operand_copy(enum_id_local), mir_operand_copy(key_local)],
                     MirType.bool()
                 )
@@ -4468,7 +4477,8 @@ impl MirLowering:
                     MirConstValue.Str(payload_symbol),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
-                val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
+                val pr = bp.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Payload,
+                    expected_enum_id, enum_discs[ci], pf, [mir_operand_copy(scrut_local)], MirType.i64())
                 self.builder = bp
                 if val pl = pr:
                     self.builder.enum_semantic_node = self.enum_semantic_child_v1(enum_semantic_capture, semantic_pattern_root, bind_pos_row[0])
@@ -5080,7 +5090,8 @@ impl MirLowering:
                         MirConstValue.Str("rt_panic"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
                     ))
-                    b_ft.emit_call(tpanic_op, [mir_operand_copy(tmsg_local)], MirType.unit())
+                    b_ft.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Panic,
+                        expected_enum_id, -1, tpanic_op, [mir_operand_copy(tmsg_local)], MirType.unit())
                     b_ft.terminate_abort(tmsg)
                 self.builder = b_ft
             elif partial_match_trap_ok:
@@ -5114,7 +5125,8 @@ impl MirLowering:
                         MirConstValue.Str("rt_panic"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
                     ))
-                    b_ft.emit_call(ppanic_op, [mir_operand_copy(pmsg_local)], MirType.unit())
+                    b_ft.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Panic,
+                        expected_enum_id, -1, ppanic_op, [mir_operand_copy(pmsg_local)], MirType.unit())
                     b_ft.terminate_abort(pmsg)
                 self.builder = b_ft
 
@@ -5635,7 +5647,9 @@ impl MirLowering:
             payload_moves = self.struct_field_requires_move(payload_values[0], declared_slot)
         val payload_operand = if payload_moves: mir_operand_move(payload_local) else: mir_operand_copy(payload_local)
         var b2 = self.builder
-        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), payload_operand], MirType.i64())
+        val result = b2.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.New,
+            self.enum_runtime_id(enum_name), disc, func_operand,
+            [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), payload_operand], MirType.i64())
         self.builder = b2
         if val r = result:
             val tagged = self.tag_enum_construct_result(r)
@@ -5843,7 +5857,9 @@ impl MirLowering:
             payload_moves = self.struct_field_requires_move(args[0].value, declared_slot)
         val payload_operand = if payload_moves: mir_operand_move(payload_local) else: mir_operand_copy(payload_local)
         var b2 = self.builder
-        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), payload_operand], MirType.i64())
+        val result = b2.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.New,
+            self.enum_runtime_id(enum_name), disc, func_operand,
+            [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), payload_operand], MirType.i64())
         self.builder = b2
         if val r = result:
             # Bug #189: see tag_enum_construct_result's docstring (used by
@@ -5968,7 +5984,9 @@ impl MirLowering:
         val payload_moves = self.struct_field_requires_move(args[0].value, result_slot)
         val payload_operand = if payload_moves: mir_operand_move(payload_local) else: mir_operand_copy(payload_local)
         var b = self.builder
-        val result = b.emit_call(func_operand, [enum_id_operand, disc_operand, payload_operand], result_mir_type)
+        val result = b.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.New,
+            self.enum_runtime_id("Result"), disc, func_operand,
+            [enum_id_operand, disc_operand, payload_operand], result_mir_type)
         self.builder = b
         if val typed_result = result:
             self.mark_runtime_value_local(typed_result.id)
