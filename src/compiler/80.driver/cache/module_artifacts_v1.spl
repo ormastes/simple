@@ -331,35 +331,26 @@ fn _module_import_source_paths_v1(parsed: ParserModule, source_path: text) -> [t
     out
 
 # Generic view of the imports, read from their FRESH companions:
-# (templates, names imported from generic-bearing modules, unknown). unknown
-# when an import does not resolve, its companion is missing/stale/undecodable,
-# or a generic-bearing module is imported by wildcard or alias.
+# (templates, names imported from generic-bearing modules, unknown,
+# generic-bearing import source paths). unknown when an import does not
+# resolve, its companion is missing/stale/undecodable, or a generic-bearing
+# module is imported by wildcard or alias.
 pub fn module_tldr_imported_generic_view_v1(imports: [ParserImport], source_path: text,
-        tldr_root: text) -> ([GenericTemplateEntryV1], [text], bool):
+        tldr_root: text) -> ([GenericTemplateEntryV1], [text], bool, [text]):
     var templates: [GenericTemplateEntryV1] = []
     var names: [text] = []
+    var paths: [text] = []
     var unknown = false
     for imp in imports:
         val path = resolve_module_path(imp.module, source_path)
-        val companion = if path == "": "" else: module_tldr_companion_path_v1(tldr_root, path)
-        if path == "" or not file_exists(path) or not file_exists(companion):
+        val (entries, bearing, ok) = _module_tldr_generic_templates_of_import_v1(path, tldr_root)
+        if not ok:
             unknown = true
             continue
-        val src = file_read(path)
-        val content = file_read(companion)
-        if module_tldr_companion_body_v1(content, src) == "":
-            unknown = true
+        if not bearing:
             continue
-        val sections = module_tldr_companion_sections_v1(content, src)
-        var generic_bearing = false
-        for s in sections:
-            if s.starts_with("generic-template|") or s.starts_with("generic|"):
-                generic_bearing = true
-        if not generic_bearing:
-            continue
-        val (entries, ok) = generic_templates_of_sections_v1(sections)
-        if not ok: unknown = true
         for e in entries: templates.push(e)
+        if not paths.contains(path): paths.push(path)
         if imp.items.len() == 0:
             unknown = true
         for item in imp.items:
@@ -367,15 +358,86 @@ pub fn module_tldr_imported_generic_view_v1(imports: [ParserImport], source_path
                 unknown = true
             elif not names.contains(item.name):
                 names.push(item.name)
-    (templates, names, unknown)
+    (templates, names, unknown, paths)
+
+# (templates, generic-bearing, ok) of one import's FRESH companion; ok=false
+# when the path does not resolve or the companion is missing/stale/undecodable.
+fn _module_tldr_generic_templates_of_import_v1(path: text, tldr_root: text) -> ([GenericTemplateEntryV1], bool, bool):
+    var none: [GenericTemplateEntryV1] = []
+    val companion = if path == "": "" else: module_tldr_companion_path_v1(tldr_root, path)
+    if path == "" or not file_exists(path) or not file_exists(companion):
+        return (none, false, false)
+    val src = file_read(path)
+    val content = file_read(companion)
+    if module_tldr_companion_body_v1(content, src) == "":
+        return (none, false, false)
+    val sections = module_tldr_companion_sections_v1(content, src)
+    var generic_bearing = false
+    for s in sections:
+        if s.starts_with("generic-template|") or s.starts_with("generic|"):
+            generic_bearing = true
+    if not generic_bearing:
+        return (none, false, true)
+    val (entries, ok) = generic_templates_of_sections_v1(sections)
+    (entries, true, ok)
 
 # Concrete generic type uses module-scoped mono observed for one module
-# (P-G5), as parallel name / argument-spelling lists.
+# (P-G5), as parallel owner / name / argument-spelling lists. `owners` are TLDR
+# module ids (module_artifact_module_id_v1 of the declaring source), "" unknown.
 pub struct MonoGenericUsesV1:
+    owners: [text]
     names: [text]
     args: [[text]]
     complete: bool
     fn_instances: [text]   # imported generic function instances ("<module>.<fn>")
+
+# What the post-mono rewrite needs from the emit-time parse, recorded in the
+# companion (`generic-spec-ctx` section) so the MIR child never re-parses:
+# the module's ActiveGuardRoot, the names it imports from generic-bearing
+# modules, whether such an import was unknown, and those imports' source paths
+# (their templates are re-read from their own fresh companions).
+pub struct GenericSpecInputsV1:
+    guard_root: ActiveGuardRootV1
+    import_names: [text]
+    imports_unknown: bool
+    import_paths: [text]
+
+val _GENERIC_SPEC_CTX_MAGIC_V1 = "generic-spec-ctx/v1"
+
+fn _ctx_field_ok_v1(values: [text]) -> bool:
+    for v in values:
+        if v.contains("\n") or v.contains("\u001f"): return false
+    true
+
+fn _ctx_list_v1(s: text) -> [text]:
+    if s == "": [] else: s.split("\u001f")
+
+# "" when a field cannot be framed (the rewrite then fails closed).
+pub fn module_tldr_generic_spec_ctx_section_v1(i: GenericSpecInputsV1) -> text:
+    val g = i.guard_root
+    if not _ctx_field_ok_v1([g.profile_digest, g.root_digest]) or not _ctx_field_ok_v1(g.sorted_entries) or
+            not _ctx_field_ok_v1(g.unevaluable) or not _ctx_field_ok_v1(i.import_names) or
+            not _ctx_field_ok_v1(i.import_paths):
+        return ""
+    val complete_flag = if g.complete: "1" else: "0"
+    val unknown_flag = if i.imports_unknown: "1" else: "0"
+    val lines = [_GENERIC_SPEC_CTX_MAGIC_V1, g.profile_digest, complete_flag, g.root_digest,
+        g.sorted_entries.join("\u001f"), g.unevaluable.join("\u001f"), i.import_names.join("\u001f"),
+        unknown_flag, i.import_paths.join("\u001f")]
+    "generic-spec-ctx|" + lines.join("\n")
+
+pub fn module_tldr_generic_spec_ctx_of_sections_v1(sections: [text]) -> GenericSpecInputsV1?:
+    for s in sections:
+        if s.starts_with("generic-spec-ctx|"):
+            val f = s.substring(17).split("\n")
+            if f.len() != 9 or f[0] != _GENERIC_SPEC_CTX_MAGIC_V1:
+                return nil
+            return Some(GenericSpecInputsV1(
+                guard_root: ActiveGuardRootV1(profile_digest: f[1], sorted_entries: _ctx_list_v1(f[4]),
+                    complete: f[2] == "1", unevaluable: _ctx_list_v1(f[5]), root_digest: f[3]),
+                import_names: _ctx_list_v1(f[6]), imports_unknown: f[7] == "1",
+                import_paths: _ctx_list_v1(f[8])))
+    nil
 
 # `generic-spec` section: the concrete generic instances this module
 # requires, over its own and its imports' templates, keyed under the host
@@ -392,8 +454,14 @@ pub fn module_tldr_generic_spec_section_v1(source: text, module_id: text, own_se
 pub fn module_tldr_generic_spec_section_mono_v1(source: text, module_id: text, own_sections: [text],
         imports: [ParserImport], source_path: text, tldr_root: text,
         guard_root: ActiveGuardRootV1, mono: MonoGenericUsesV1?) -> text:
+    val (imported, names, unknown, _paths) = module_tldr_imported_generic_view_v1(imports, source_path, tldr_root)
+    _module_tldr_generic_spec_section_of_v1(source, module_id, own_sections, imported, names, unknown,
+        guard_root, mono)
+
+fn _module_tldr_generic_spec_section_of_v1(source: text, module_id: text, own_sections: [text],
+        imported: [GenericTemplateEntryV1], names: [text], unknown: bool,
+        guard_root: ActiveGuardRootV1, mono: MonoGenericUsesV1?) -> text:
     val (own, own_ok) = generic_templates_of_sections_v1(own_sections)
-    val (imported, names, unknown) = module_tldr_imported_generic_view_v1(imports, source_path, tldr_root)
     var templates = own
     for e in imported: templates.push(e)
     val ctx = GenericSpecContextV1(profile_digest: GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
@@ -401,8 +469,8 @@ pub fn module_tldr_generic_spec_section_mono_v1(source: text, module_id: text, o
     var list = GenericSpecializationListV1(complete: false, specs: [])
     match mono:
         case Some(m):
-            list = generic_specializations_of_mono_v1(m.names, m.args, m.complete, m.fn_instances, module_id,
-                templates, ctx)
+            list = generic_specializations_of_mono_v1(m.owners, m.names, m.args, m.complete,
+                m.fn_instances, module_id, templates, ctx)
         case nil:
             list = generic_specializations_text_fallback_v1(source, module_id, templates, ctx)
     if not own_ok:
@@ -462,9 +530,17 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     val macro_key_section = module_tldr_macro_key_section_v1(macro_projection)
     if macro_key_section != "":
         sections.push(macro_key_section)
-    val spec_section = module_tldr_generic_spec_section_v1(source, module_id, sections,
-        parsed.imports, source_path, tldr_root,
-        active_guard_root_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1, guard_evals))
+    val guard_root = active_guard_root_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1, guard_evals)
+    val (imported, import_names, imports_unknown, import_paths) =
+        module_tldr_imported_generic_view_v1(parsed.imports, source_path, tldr_root)
+    # Emit-time list: text-scan fallback, never complete (mono has not run).
+    val spec_section = _module_tldr_generic_spec_section_of_v1(source, module_id, sections,
+        imported, import_names, imports_unknown, guard_root, nil)
+    val ctx_section = module_tldr_generic_spec_ctx_section_v1(GenericSpecInputsV1(
+        guard_root: guard_root, import_names: import_names, imports_unknown: imports_unknown,
+        import_paths: import_paths))
+    if ctx_section != "":
+        sections.push(ctx_section)
     if spec_section != "":
         sections.push(spec_section)
     if not module_artifact_publish_atomic_v1(tldr_path,
@@ -476,6 +552,12 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
 # `generic-spec` section with the list mono actually instantiated, through the
 # same temp + atomic rename publish. The companion must already be fresh for
 # the source (emit ran); otherwise nothing is written and the error is returned.
+# No parse: the guard root and generic import view come from the companion's
+# `generic-spec-ctx` section, imported templates from the imports' own fresh
+# companions (a missing/stale one marks the list incomplete).
+# Race: emit and this rewrite can both replace the same companion; each is an
+# atomic rename and emit's list is never complete, so the worst interleaving
+# leaves an incomplete list (a wide rebuild), never a wrong complete one.
 pub fn module_tldr_update_generic_spec_from_mono_v1(source_path: text, tldr_root: text,
         mono: MonoGenericUsesV1) -> text:
     if not file_exists(source_path):
@@ -492,12 +574,18 @@ pub fn module_tldr_update_generic_spec_from_mono_v1(source_path: text, tldr_root
     for s in module_tldr_companion_sections_v1(content, source):
         if not s.starts_with("generic-spec|"):
             sections.push(s)
-    val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
-    val (_macro_source, guard_evals) = macro_module_source_from_parse_guarded_v1("", module_id,
-        source_path, source)
-    val spec_section = module_tldr_generic_spec_section_mono_v1(source, module_id, sections,
-        parsed.imports, source_path, tldr_root,
-        active_guard_root_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1, guard_evals), Some(mono))
+    val inputs = module_tldr_generic_spec_ctx_of_sections_v1(sections)
+    if inputs == nil:
+        return "tldr companion has no generic-spec-ctx: {tldr_path}"
+    val i = inputs!
+    var imported: [GenericTemplateEntryV1] = []
+    var unknown = i.imports_unknown
+    for p in i.import_paths:
+        val (entries, _bearing, ok) = _module_tldr_generic_templates_of_import_v1(p, tldr_root)
+        if not ok: unknown = true
+        for e in entries: imported.push(e)
+    val spec_section = _module_tldr_generic_spec_section_of_v1(source, module_id, sections,
+        imported, i.import_names, unknown, i.guard_root, Some(mono))
     if spec_section != "":
         sections.push(spec_section)
     val rendered = module_tldr_companion_render_sections_v1(module_id, source, sections)
@@ -507,7 +595,8 @@ pub fn module_tldr_update_generic_spec_from_mono_v1(source_path: text, tldr_root
         return "tldr publish failed: {tldr_path}"
     ""
 
-export MonoGenericUsesV1, module_tldr_generic_spec_section_mono_v1
+export MonoGenericUsesV1, GenericSpecInputsV1, module_tldr_generic_spec_section_mono_v1
+export module_tldr_generic_spec_ctx_section_v1, module_tldr_generic_spec_ctx_of_sections_v1
 export module_tldr_update_generic_spec_from_mono_v1
 export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1

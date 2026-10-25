@@ -21,7 +21,7 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
     transient_scope_end, transient_promote}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.cache.module_artifacts_v1.{MonoGenericUsesV1,
-    module_tldr_update_generic_spec_from_mono_v1}
+    module_tldr_update_generic_spec_from_mono_v1, module_artifact_module_id_v1}
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
     safety_pass_severity_phased
@@ -211,8 +211,10 @@ impl CompilerDriver:
         val hir_queue = env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? ""
         val mir_queue = env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
         var name_of_path: Dict<text, text> = {}
+        var tldr_id_of_module: Dict<text, text> = {}
         for src in self.ctx.sources:
             name_of_path[src.path] = src.module_name
+            tldr_id_of_module[src.module_name] = module_artifact_module_id_v1(src.path)
         var verified: Dict<text, HirModule> = {}
         for path in target_paths:
             if not name_of_path.contains_key(path) or self.ctx.hir_modules[name_of_path[path]] == nil:
@@ -281,7 +283,7 @@ impl CompilerDriver:
                         return false
                     self.ctx.hir_modules[name] = scoped_module
                     verified[name] = scoped_module
-                    driver_publish_generic_spec_from_mono_v1(path)
+                    driver_publish_generic_spec_from_mono_v1(path, tldr_id_of_module)
                     done = true
         val scoped_report = post_mono_verify_modules(verified)
         driver_publish_post_mono_report_v1(self.ctx, scoped_report, verified.len())
@@ -291,21 +293,26 @@ export publish_module_typecheck_receipt_v1
 # P-G5: rewrite the module's TLDR `generic-spec` list from what the module-scoped
 # mono run that just finished actually instantiated. No frontend cache dir or
 # an unfinished run leaves the emit-time (incomplete, text-scan) list in place.
-fn driver_publish_generic_spec_from_mono_v1(path: text):
+# `tldr_id_of_module`: HIR module name -> TLDR module id of its source, so an
+# observed use resolves to its template by exact owner-qualified symbol id.
+fn driver_publish_generic_spec_from_mono_v1(path: text, tldr_id_of_module: Dict<text, text>):
     val cache_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
     val (uses, complete, ready) = mono_scoped_generic_uses_last_v1()
     if cache_dir == "" or not ready:
         return
+    var owners: [text] = []
     var names: [text] = []
     var args: [[text]] = []
     for u in uses:
+        owners.push(if tldr_id_of_module.contains_key(u.owner): tldr_id_of_module[u.owner] else: "")
         names.push(u.name)
         args.push(u.arg_texts)
     var fn_instances: [text] = []
     for fi in mono_scoped_generic_fn_instances_last_v1():
-        fn_instances.push(fi.name)
+        fn_instances.push(fi.owner + "." + fi.name)
     val err = module_tldr_update_generic_spec_from_mono_v1(path, cache_dir + "/tldr",
-        MonoGenericUsesV1(names: names, args: args, complete: complete, fn_instances: fn_instances))
+        MonoGenericUsesV1(owners: owners, names: names, args: args, complete: complete,
+            fn_instances: fn_instances))
     if err != "":
         # Fail closed: the emit-time list stays incomplete, so planners fall back.
         print "[file-worker] generic-spec update skipped module={path}: {err}"

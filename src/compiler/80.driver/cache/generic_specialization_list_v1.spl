@@ -27,7 +27,10 @@
 # instantiated for the file after inference (generic_specializations_of_mono_v1,
 # written post-mono by module_tldr_update_generic_spec_from_mono_v1). The text
 # scan is only the emit-time fallback (generic_specializations_text_fallback_v1)
-# and is then never complete. Nominal
+# and is then never complete. Known gap (P-G6): generic FUNCTION templates have
+# no TLDR entry, so a module that places an imported generic function instance
+# stays incomplete (doc/08_tracking/bug/generic_instance_plan_has_no_consumer_pg6_2026-10-25.md).
+# Nominal
 # argument types are qualified to the consuming module like
 # generic_tldr_projector does.
 
@@ -342,23 +345,41 @@ pub fn generic_specializations_of_source_v1(source: text, module_id: text,
 # -> `Pair<i64, f64>`) are included, so the list can be complete. Each use is
 # keyed exactly like a textual one (required_specialization_v1 ->
 # concrete_tldr_key_for_v1). Incomplete when mono could not render a use, a
-# name is ambiguous, an argument is unkeyable, the guard root cannot key, or a
-# generic-bearing import is unknown (its templates may be missing).
-pub fn generic_specializations_of_mono_v1(use_names: [text], use_args: [[text]], uses_complete: bool,
-        fn_instances: [text], module_id: text, templates: [GenericTemplateEntryV1],
+# name is ambiguous or names no visible template, an argument is unkeyable,
+# the guard root cannot key, or a generic-bearing import is unknown.
+# `use_owners[i]` is the TLDR module id of the use's declaring module ("" =
+# unknown): a known owner resolves by exact symbol id `owner.Name` only; an
+# unknown owner falls back to short-name resolution. Either way a use that
+# resolves to no visible template is NOT dropped -- mono saw an instance the
+# list cannot key, so the list is incomplete.
+pub fn generic_specializations_of_mono_v1(use_owners: [text], use_names: [text], use_args: [[text]],
+        uses_complete: bool, fn_instances: [text], module_id: text, templates: [GenericTemplateEntryV1],
         ctx: GenericSpecContextV1) -> GenericSpecializationListV1:
     var specs: [RequiredSpecializationV1] = []
     # An imported generic FUNCTION instance has no TLDR template entry, so no
     # ConcreteTldrKey: its body can change without any keyed row naming this
     # module. Until function templates are keyed, such a module stays incomplete.
     var complete = uses_complete and not ctx.generic_imports_unknown and
-        use_names.len() == use_args.len() and fn_instances.len() == 0
+        use_names.len() == use_args.len() and use_names.len() == use_owners.len() and
+        fn_instances.len() == 0
     var u = 0
-    while u < use_names.len() and u < use_args.len():
+    while u < use_names.len() and u < use_args.len() and u < use_owners.len():
         val args = use_args[u]
-        val (ti, ambiguous) = _resolve_template_v1(use_names[u], module_id, templates)
+        var ti = -1
+        var ambiguous = false
+        if use_owners[u] != "":
+            val qualified = use_owners[u] + "." + use_names[u]
+            var t = 0
+            while t < templates.len():
+                if templates[t].symbol_id == qualified: ti = t
+                t = t + 1
+        else:
+            val (st, sa) = _resolve_template_v1(use_names[u], module_id, templates)
+            ti = st
+            ambiguous = sa
         u = u + 1
         if ti < 0:
+            complete = false
             continue
         if ambiguous:
             complete = false
