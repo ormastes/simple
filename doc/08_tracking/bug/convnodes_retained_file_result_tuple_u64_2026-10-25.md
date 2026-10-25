@@ -12,5 +12,11 @@ Run-27e Phase 3 failures (no object for the modules below).
    Same class as resopt_result_optional_tuple_unwrap_2026-10-25.md.
    Workaround (@workaround in source): return a `RetainedMeta` record instead of a tuple.
    Open compiler bug: admit u64 (and u8 arrays) in Result tuple slots.
-3. `retained_file_abi` has only extern/export declarations; it lowers through HIR with no
-   error and emits no object of its own (no defined symbols).
+
+## Trap: decorator placement
+`@unsafe(...)` attaches to the next item. Inserting a struct between the decorator
+and `fn _retained_metadata` moved @unsafe onto the struct and left the fn without
+it. Put new declarations ABOVE the decorator.
+
+Also swept every `else: nil` into an `Expr?` slot and `defer_return_replay(nil, ...)`
+in convert_nodes.spl to `None`.
