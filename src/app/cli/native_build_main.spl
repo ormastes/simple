@@ -63,6 +63,12 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use std.nogc_sync_mut.io_runtime.{thread_sleep}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
+use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{
+    FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1,
+    file_worker_inc_receipt_line_v1}
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
+    file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -1318,16 +1324,36 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if not env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, hir_queue):
         return "skip"
     print "[file-worker] workers={parallel} hir_ledger={hir_queue} mir_ledger={mir_queue}"
+    # P-E incremental: reuse cached objects for modules the planner keeps.
+    val inc_output = output_path_arg(args)
+    if (env_get("SIMPLE_BINARY") ?? "") == "":
+        env_set("SIMPLE_BINARY", simple_bin)
+    val inc_producer = file_worker_inc_producer_v1(
+        native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity()), args)
+    val inc_dir = if inc_output == "": "" else: file_worker_inc_dir_v1(machine_cache_root(), inc_producer, path_absolute(inc_output))
+    val (reuse_path, reused) = file_worker_inc_prepare_v1(inc_dir, inc_producer)
+    val old_reuse = env_get(FILE_WORKER_REUSE_ENV_V1) ?? ""
+    env_set(FILE_WORKER_REUSE_ENV_V1, reuse_path)
     val run = run_ledger_shards("file-worker", "--file-worker", NATIVE_FILE_WORKER_QUEUE_ENV_V1,
         NATIVE_FILE_WORKER_OWNER_ENV_V1, base, mir_queue, args, parallel, parallel,
         simple_bin, timeout_ms)
+    env_set(FILE_WORKER_REUSE_ENV_V1, old_reuse)
     env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, old_hir_queue)
+    if reuse_path != "":
+        val _dropped = file_delete(reuse_path)
     var receipts = native_file_worker_receipts_in_v1(hir_queue)
     for r in native_file_worker_receipts_in_v1(mir_queue):
         receipts = receipts.push(r)
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
+        if inc_dir != "":
+            val fin = file_worker_inc_finish_v1(inc_dir, inc_producer, mir_queue, hir_queue, inc_output, reused)
+            print file_worker_inc_receipt_line_v1(fin.reused, fin.rebuilt, fin.relink)
+            env_set(FILE_WORKER_INC_DIR_ENV_V1, inc_dir)
+            env_set(FILE_WORKER_INC_PRODUCER_ENV_V1, inc_producer)
+            if not fin.relink:
+                env_set(FILE_WORKER_LINK_PLACED_ENV_V1, "1")
         return mir_queue
     if outcome == "fail":
         eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"

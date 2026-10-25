@@ -1,0 +1,163 @@
+# File-worker P-E coordinator I/O: manifest/object cache on disk, TLDR
+# interface digests, and the link-or-place decision. Pure planning lives in
+# native_file_worker_incremental_v1.spl (kept free of driver_aot_native_output
+# so its spec loads in the interpreter).
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_create_all, getpid}
+use std.nogc_sync_mut.io_runtime.{file_copy, file_hash_sha256_or_empty}
+use compiler.driver.cache.incremental_rebuild_plan_v1.{incremental_link_decision_v1}
+use compiler.driver.driver_aot_native_output.{driver_native_source_interface_text}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_deps_read_v1}
+use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1, file_worker_reuse_encode_v1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
+    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1, file_worker_inc_select_v1,
+    file_worker_inc_link_objects_v1}
+
+# ------------------------------------------------------------------ paths --
+
+pub fn file_worker_inc_producer_v1(scope: text, args: [text]) -> text:
+    if scope == "":
+        return ""
+    sha256_text(scope + "
+" + args.join("
+"))
+
+# One directory per (producer, output): another compiler, lane or option set
+# never sees this cache.
+pub fn file_worker_inc_dir_v1(cache_root: text, producer: text, output: text) -> text:
+    if producer == "" or output == "":
+        return ""
+    "{cache_root}/file-worker-incremental/{producer}/{sha256_text(output)}"
+
+fn _manifest_path_v1(dir: text) -> text:
+    "{dir}/manifest"
+
+fn _publish_v1(path: text, content: text) -> bool:
+    val tmp = "{path}.{getpid()}.tmp"
+    file_write(tmp, content) and file_rename(tmp, path)
+
+pub fn file_worker_inc_iface_digest_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    sha256_text(driver_native_source_interface_text(file_read(path)))
+
+pub fn file_worker_inc_source_digest_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    file_hash_sha256_or_empty(path)
+
+# --------------------------------------------------------- coordinator I/O --
+
+fn _reuse_rows_v1(rows: [FileWorkerIncRowV1]) -> [FileWorkerReuseRowV1]:
+    var out: [FileWorkerReuseRowV1] = []
+    for r in rows:
+        out = out.push(FileWorkerReuseRowV1(path: r.path, cached_object: r.cached_object,
+            functions: r.functions, statics: r.statics, capsule: r.capsule))
+    out
+
+# Before the pool. Returns the reuse-file path ("" = nothing reusable) and
+# the number of reused modules.
+pub fn file_worker_inc_prepare_v1(dir: text, producer: text) -> (text, i64):
+    if dir == "" or not file_exists(_manifest_path_v1(dir)):
+        return ("", 0)
+    val (prev, _out_digest) = file_worker_inc_manifest_parse_v1(file_read(_manifest_path_v1(dir)), producer)
+    var src: Dict<text, text> = {}
+    var iface: Dict<text, text> = {}
+    for r in prev:
+        src[r.path] = file_worker_inc_source_digest_v1(r.path)
+        iface[r.path] = file_worker_inc_iface_digest_v1(r.path)
+    val sel = file_worker_inc_select_v1(prev, src, iface, [])
+    var verified: [FileWorkerIncRowV1] = []
+    for r in sel.reuse:
+        if r.cached_object == "":
+            verified = verified.push(r)
+        elif file_exists(r.cached_object) and file_hash_sha256_or_empty(r.cached_object) == r.object_digest:
+            verified = verified.push(r)
+    if verified.len() == 0:
+        return ("", 0)
+    val reuse_path = "{dir}/reuse.{getpid()}"
+    if not _publish_v1(reuse_path, file_worker_reuse_encode_v1(_reuse_rows_v1(verified))):
+        return ("", 0)
+    (reuse_path, verified.len())
+
+pub struct FileWorkerIncFinishV1:
+    rebuilt: i64
+    reused: i64
+    relink: bool
+
+fn _sidecar_v1(queue: text, name: text) -> [text]:
+    val p = "{queue}/{sha256_text(name)}.object"
+    if not file_exists(p):
+        return []
+    file_read(p).split("\n")
+
+# After a "link" outcome. Copies every ledger object into the cache, writes
+# the pending manifest, and places the cached output when no object changed
+# and no module was added or removed. A ledger this cannot read invalidates
+# the cache (manifest removed) so the next run rebuilds everything.
+pub fn file_worker_inc_finish_v1(dir: text, producer: text, mir_queue: text, hir_queue: text, output: text,
+        reused: i64) -> FileWorkerIncFinishV1:
+    val fallback = FileWorkerIncFinishV1(rebuilt: 0, reused: reused, relink: true)
+    if dir == "" or not dir_create_all("{dir}/obj"):
+        return fallback
+    var prev: [FileWorkerIncRowV1] = []
+    var prev_output = ""
+    if file_exists(_manifest_path_v1(dir)):
+        val (prev_rows, out_digest) = file_worker_inc_manifest_parse_v1(file_read(_manifest_path_v1(dir)), producer)
+        prev = prev_rows
+        prev_output = out_digest
+    val inventory = file_read("{mir_queue}/inventory").split("\n")
+    var rows: [FileWorkerIncRowV1] = []
+    var i = 1
+    while i < inventory.len():
+        val name = inventory[i]
+        i = i + 1
+        if name == "":
+            continue
+        val sc = _sidecar_v1(mir_queue, name)
+        var cached = ""
+        var digest = "objectless"
+        var ok = sc.len() == 5
+        if ok and sc[0] != "":
+            cached = "{dir}/obj/{sha256_text(name)}.o"
+            digest = file_hash_sha256_or_empty(sc[0])
+            ok = digest != "" and (sc[0] == cached or file_copy(sc[0], cached))
+        if not ok:
+            val _dropped = file_delete(_manifest_path_v1(dir))
+            return fallback
+        val deps = native_file_worker_deps_read_v1(hir_queue, name)
+        val known = deps.is_ok() and file_exists(name)
+        val imports: [text] = if deps.is_ok(): deps.unwrap() else: []
+        rows = rows.push(FileWorkerIncRowV1(path: name,
+            source_digest: file_worker_inc_source_digest_v1(name),
+            iface_digest: file_worker_inc_iface_digest_v1(name), imports_known: known,
+            imports: imports, object_digest: digest, cached_object: cached,
+            functions: sc[1].to_i64() ?? 0, statics: sc[2].to_i64() ?? 0, capsule: sc[3]))
+    val cached_output = "{dir}/output"
+    val output_present = prev_output != "" and file_exists(cached_output) and
+        file_hash_sha256_or_empty(cached_output) == prev_output
+    val decision = incremental_link_decision_v1(file_worker_inc_link_objects_v1(prev, rows), output_present)
+    val rebuilt = rows.len() - reused
+    if decision.place_cached and output != "" and file_copy(cached_output, output):
+        val _held = _publish_v1("{dir}/pending", file_worker_inc_manifest_encode_v1(rows, prev_output, producer))
+        return FileWorkerIncFinishV1(rebuilt: rebuilt, reused: reused, relink: false)
+    val _pending = _publish_v1("{dir}/pending", file_worker_inc_manifest_encode_v1(rows, "", producer))
+    FileWorkerIncFinishV1(rebuilt: rebuilt, reused: reused, relink: true)
+
+# After a successful link: cache the output and promote the pending manifest.
+pub fn file_worker_inc_commit_v1(dir: text, producer: text, output: text, relinked: bool) -> bool:
+    val pending = "{dir}/pending"
+    if dir == "" or not file_exists(pending):
+        return false
+    val (rows, digest) = file_worker_inc_manifest_parse_v1(file_read(pending), producer)
+    val _gone = file_delete(pending)
+    var out_digest = digest
+    if relinked:
+        if output == "" or not file_exists(output) or not file_copy(output, "{dir}/output"):
+            return false
+        out_digest = file_hash_sha256_or_empty("{dir}/output")
+    _publish_v1(_manifest_path_v1(dir), file_worker_inc_manifest_encode_v1(rows, out_digest, producer))
+
+export FileWorkerIncFinishV1
+export file_worker_inc_producer_v1, file_worker_inc_dir_v1, file_worker_inc_iface_digest_v1, file_worker_inc_source_digest_v1
+export file_worker_inc_prepare_v1, file_worker_inc_finish_v1, file_worker_inc_commit_v1
