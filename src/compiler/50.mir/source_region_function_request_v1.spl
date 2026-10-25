@@ -1,0 +1,224 @@
+# Compiler-owned per-function replay request. No saved/fabricated lowering owner.
+use compiler.hir.hir_types.{SymbolId, HirType, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionSpecializationV1}
+use compiler.mir.source_region_current_function_v1.*
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
+use compiler.mir.mir_types.{MirTypeKind}
+use compiler.mir.mir_types.{MirTypeDefKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
+use std.common.crypto.sha256.{sha256_text}
+
+pub class SourceRegionFunctionPlanV1:
+    module: MirModule
+    originals: Dict<SymbolId, HirFunction>
+    specialized_symbols: Dict<SymbolId, SymbolId>
+    specialized_signatures: Dict<SymbolId, MirSignature>
+    specialized_names: Dict<SymbolId, text>
+    call_targets: Dict<text, SymbolId>
+    context_type: MirType
+    error_type: HirType
+    facades: SourceRegionFacadeSymbolsV1
+    result_construction: SourceRegionResultConstructionV1
+    closure_digest: text
+
+impl MirLowering:
+    me validate_source_region_context_v1(module: MirModule, context_type: MirType,
+            error_type: HirType, facades: SourceRegionFacadeSymbolsV1) -> Result<(), text>:
+        val lowered_error = self.lower_type(error_type)
+        val context_symbol = match context_type.kind:
+            case MirTypeKind.Struct(symbol): symbol
+            case _: return Err("SOURCE-REQUEST: nominal context declaration required")
+        if not module.types.has(context_symbol) or not module.functions.has(facades.create) or not module.functions.has(facades.incomplete):
+            return Err("SOURCE-REQUEST: actual context/facade declarations are absent")
+        match lowered_error.kind:
+            case MirTypeKind.Enum(symbol):
+                if symbol.id < 0: return Err("SOURCE-REQUEST: resolved error declaration required")
+            case _: return Err("SOURCE-REQUEST: nominal error enum required")
+        val create = module.functions[facades.create]
+        val incomplete = module.functions[facades.incomplete]
+        if create.signature.params.len() != 1 or create.signature.is_variadic:
+            return Err("SOURCE-REQUEST: exact context factory account signature required")
+        match create.signature.return_type.kind:
+            case MirTypeKind.Result(ok, error):
+                if serialize_mir_type(ok) != serialize_mir_type(context_type) or serialize_mir_type(error) != serialize_mir_type(lowered_error):
+                    return Err("SOURCE-REQUEST: actual context factory Result differs")
+            case _: return Err("SOURCE-REQUEST: actual context factory Result required")
+        if (incomplete.signature.params.len() != 0 or incomplete.signature.is_variadic or
+                serialize_mir_type(incomplete.signature.return_type) != serialize_mir_type(MirType.result(MirType.i64(), lowered_error))):
+            return Err("SOURCE-REQUEST: actual Incomplete factory Result differs")
+        match module.types[context_symbol].kind:
+            case MirTypeDefKind.Struct(fields):
+                if (fields.len() < 3 or fields[0].name != "account" or fields[1].name != "native_control" or fields[2].name != "generation"):
+                    return Err("SOURCE-REQUEST: context public prefix differs")
+                if (serialize_mir_type(fields[0].type_) != serialize_mir_type(create.signature.params[0]) or
+                        serialize_mir_type(fields[1].type_) != serialize_mir_type(MirType.i64()) or
+                        serialize_mir_type(fields[2].type_) != serialize_mir_type(MirType.i64())):
+                    return Err("SOURCE-REQUEST: actual context field types differ")
+            case _: return Err("SOURCE-REQUEST: context storage is not a struct")
+        Ok(())
+
+    pub me prepare_source_region_request_v1(module: MirModule, entry: SymbolId,
+            originals: Dict<SymbolId, HirFunction>, context_type: MirType,
+            error_type: HirType, facades: SourceRegionFacadeSymbolsV1,
+            result_construction: SourceRegionResultConstructionV1
+    ) -> Result<SourceRegionFunctionPlanV1, text>:
+        val closure = source_region_resolved_call_closure_v1(module, entry)?
+        self.validate_source_region_context_v1(module, context_type, error_type, facades)?
+        val lowered_error = self.lower_type(error_type)
+        var names: Dict<text, bool> = {}
+        for symbol in module.functions.keys(): names[module.functions[symbol].name] = true
+        # Validate every source/signature before allocating any new identity.
+        for symbol in closure.functions:
+            if not originals.has(symbol) or originals[symbol].symbol.id != symbol.id:
+                return Err("SOURCE-REQUEST: original HIR closure declaration absent")
+            val function = module.functions[symbol]
+            val declaration = originals[symbol]
+            if function.signature.is_variadic or function.signature.params.len() != declaration.params.len():
+                return Err("SOURCE-REQUEST: exact original signature required")
+            # Ordinary lowering does not set params_known. Authenticate its
+            # signature from the actual HIR declaration, not that default bit.
+            for index in 0..declaration.params.len():
+                val parameter_type = self.lower_type(declaration.params[index].type_)
+                if serialize_mir_type(parameter_type) != serialize_mir_type(function.signature.params[index]):
+                    return Err("SOURCE-REQUEST: actual HIR parameter type differs")
+            if serialize_mir_type(self.lower_type(declaration.return_type)) != serialize_mir_type(function.signature.return_type):
+                return Err("SOURCE-REQUEST: actual HIR return type differs")
+        var symbols: Dict<SymbolId, SymbolId> = {}
+        var signatures: Dict<SymbolId, MirSignature> = {}
+        var specialized_names: Dict<SymbolId, text> = {}
+        for symbol in closure.functions:
+            val function = module.functions[symbol]
+            val name = function.name + "__source_region_v1_{self.symbols.next_symbol_id}"
+            if names.has(name): return Err("SOURCE-REQUEST: specialized linker name collision")
+            val fresh = self.symbols.define_with_binding(name, SymbolKind.Function, nil,
+                function.span, Visibility.Private, false, Some(module.name), false)
+            if module.functions.has(fresh):
+                return Err("SOURCE-REQUEST: actual allocator collided with original identity")
+            var params: [MirType] = []
+            for parameter in function.signature.params: params.push(parameter)
+            params.push(context_type)
+            symbols[symbol] = fresh
+            signatures[symbol] = MirSignature(params: params,
+                return_type: MirType.result(function.signature.return_type, lowered_error),
+                is_variadic: false, params_known: true)
+            specialized_names[symbol] = name
+            names[name] = true
+        Ok(SourceRegionFunctionPlanV1(module: module, originals: originals,
+            specialized_symbols: symbols, specialized_signatures: signatures,
+            specialized_names: specialized_names, call_targets: closure.targets_by_name,
+            context_type: context_type, error_type: error_type, facades: facades,
+            result_construction: result_construction, closure_digest: closure.input_digest))
+
+    pub me lower_source_region_function_v1(original: HirFunction,
+            plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
+        if plan.closure_digest == "" or not plan.specialized_symbols.has(original.symbol):
+            return Err("SOURCE-REQUEST: function is outside the resolved closure")
+        if not plan.originals.has(original.symbol):
+            return Err("SOURCE-REQUEST: actual HIR declaration is absent")
+        # lower_function resets metadata BEFORE this function, not afterwards.
+        # The codec therefore observes this function's real locals/container/
+        # tuple/struct provenance until the next lower_function invocation.
+        val errors_before = self.errors.len()
+        val lowered = self.lower_function(original)
+        if self.errors.len() != errors_before:
+            return Err("SOURCE-REQUEST: actual function replay reported lowering errors")
+        if lowered.symbol.id != original.symbol.id:
+            return Err("SOURCE-REQUEST: current function identity differs")
+        self.specialize_current_function(original, lowered, plan)
+
+    pub me lower_source_region_request_v1(entry: SymbolId, order: [SymbolId],
+            plan: SourceRegionFunctionPlanV1) -> Result<SourceRegionSpecializationV1, text>:
+        self.validate_source_region_context_v1(plan.module, plan.context_type, plan.error_type, plan.facades)?
+        if order.len() != plan.specialized_symbols.len():
+            return Err("SOURCE-REQUEST: incomplete closure replay order")
+        if not plan.specialized_symbols.has(entry):
+            return Err("SOURCE-REQUEST: entry is outside the resolved closure")
+        # Revalidate the proposed map against canonical C3 discovery once at
+        # the request boundary, before any lowering or publication mutation.
+        val closure = source_region_resolved_call_closure_v1(plan.module, entry)?
+        if plan.closure_digest != closure.input_digest or order.len() != closure.functions.len():
+            return Err("SOURCE-REQUEST: proposed closure input identity differs")
+        if plan.call_targets.len() != closure.targets_by_name.len():
+            return Err("SOURCE-REQUEST: proposed call target set differs")
+        for name in closure.targets_by_name.keys():
+            if not plan.call_targets.has(name) or plan.call_targets[name].id != closure.targets_by_name[name].id:
+                return Err("SOURCE-REQUEST: proposed resolved call target differs")
+        var existing_names: Dict<text, bool> = {}
+        for symbol in plan.module.functions.keys():
+            existing_names[plan.module.functions[symbol].name] = true
+        var target_ids: Dict<i64, bool> = {}
+        var target_names: Dict<text, bool> = {}
+        for index in 0..order.len():
+            val symbol = order[index]
+            if symbol.id != closure.functions[index].id or not plan.originals.has(symbol):
+                return Err("SOURCE-REQUEST: proposed replay order/original differs")
+            if (not plan.specialized_symbols.has(symbol) or not plan.specialized_names.has(symbol) or
+                    not plan.specialized_signatures.has(symbol)):
+                return Err("SOURCE-REQUEST: specialization mapping is incomplete")
+            val target = plan.specialized_symbols[symbol]
+            val name = plan.specialized_names[symbol]
+            if (target.id < 0 or target_ids.has(target.id) or name == "" or target_names.has(name) or
+                    plan.module.functions.has(target) or existing_names.has(name)):
+                return Err("SOURCE-REQUEST: specialization would collide with an existing function")
+            if plan.originals[symbol].symbol.id != symbol.id:
+                return Err("SOURCE-REQUEST: HIR declaration identity differs")
+            val allocated = self.symbols.get_symbol_raw(target.id)
+            if allocated == nil:
+                return Err("SOURCE-REQUEST: specialization lacks actual allocator ownership")
+            if val actual = allocated:
+                if actual.name != name:
+                    return Err("SOURCE-REQUEST: allocated specialization name differs")
+                match actual.kind:
+                    case SymbolKind.Function: ()
+                    case _: return Err("SOURCE-REQUEST: allocated specialization is not a function")
+            target_ids[target.id] = true
+            target_names[name] = true
+        val context_symbol = match plan.context_type.kind:
+            case MirTypeKind.Struct(symbol): symbol
+            case _: return Err("SOURCE-REQUEST: resolved context declaration required")
+        var seen: Dict<SymbolId, bool> = {}
+        var functions: [MirFunction] = []
+        var canonical: [text] = ["source-region-owned-replay-v1", plan.closure_digest,
+            serialize_mir_type(plan.context_type)]
+        for symbol in order:
+            if seen.has(symbol) or not plan.originals.has(symbol):
+                return Err("SOURCE-REQUEST: duplicate or missing original function")
+            seen[symbol] = true
+            var function = self.lower_source_region_function_v1(plan.originals[symbol], plan)?
+            if function.symbol.id != plan.specialized_symbols[symbol].id or function.name != plan.specialized_names[symbol]:
+                return Err("SOURCE-REQUEST: rewritten function identity differs from allocated target")
+            if function.source_region_context_local_v1 < 0:
+                return Err("SOURCE-REQUEST: rewritten function lacks context local")
+            # The final digest binds actual emitted codec locals/descriptors,
+            # not a caller's provisional seed. Exclude only the digest itself.
+            function.source_region_context_abi_v1 = 1
+            function.source_region_closure_digest_v1 = ""
+            canonical.push(serialize_mir_function(function))
+            functions.push(function)
+        val digest = sha256_text(canonical.join("\n"))
+        var published: Dict<SymbolId, MirFunction> = {}
+        for symbol in plan.module.functions.keys():
+            published[symbol] = plan.module.functions[symbol]
+        for function in functions:
+            var committed = function
+            committed.source_region_closure_digest_v1 = digest
+            published[committed.symbol] = committed
+        val original_module = plan.module
+        val output = MirModule(name: original_module.name, functions: published,
+            statics: original_module.statics, constants: original_module.constants,
+            types: original_module.types, external_layout_traces: original_module.external_layout_traces,
+            collection_plan_explanations: original_module.collection_plan_explanations,
+            enum_semantic_declarations: original_module.enum_semantic_declarations,
+            source_region_context_symbol_v1: context_symbol.id,
+            source_region_closure_digest_v1: digest)
+        Ok(SourceRegionSpecializationV1(module: output,
+            entry: plan.specialized_symbols[entry], closure_digest: digest))

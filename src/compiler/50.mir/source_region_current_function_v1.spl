@@ -1,0 +1,280 @@
+# Runs only immediately after the actual owner's replay of this HIR function.
+# All generated locals/codecs use that same builder and provenance maps.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.source_region_function_request_v1.{SourceRegionFunctionPlanV1}
+use compiler.mir.source_region_instruction_plan_v1.{source_region_instruction_plan_v1}
+use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.source_region_result_payload_codec_v1.*
+
+fn source_region_current_runtime_v1(name: text, params: [MirType], result: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params,
+            return_type: result, is_variadic: false, params_known: true)))))
+
+impl MirLowering:
+    me source_region_current_call_v1(callee: MirOperand, args: [MirOperand],
+            result: MirType) -> LocalId:
+        var builder = self.builder
+        val local = builder.emit_call_value(callee, args, result)
+        self.builder = builder
+        local
+
+    me source_region_current_payload_v1(result: LocalId) -> LocalId:
+        self.source_region_current_call_v1(source_region_current_runtime_v1(
+            "rt_enum_payload", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(result)], MirType.i64())
+
+    me source_region_current_construct_v1(value: LocalId, expected: HirType,
+            discriminant: i64, outer: MirType, plan: SourceRegionFunctionPlanV1
+    ) -> Result<LocalId, text>:
+        val encoded = self.encode_source_region_result_payload_v1(value, expected)?
+        val constructor = source_region_current_runtime_v1("rt_enum_new",
+            [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], outer)
+        Ok(self.source_region_current_call_v1(constructor, [
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(plan.result_construction.runtime_enum_id), MirType(kind: MirTypeKind.I32))),
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(discriminant), MirType(kind: MirTypeKind.I32))),
+            mir_operand_copy(encoded)], outer))
+
+    me source_region_current_propagate_v1(result: LocalId, outer: MirType,
+            plan: SourceRegionFunctionPlanV1) -> Result<(), text>:
+        val raw = self.source_region_current_payload_v1(result)
+        val error = self.decode_source_region_result_payload_v1(raw, plan.error_type)?
+        val wrapped = self.source_region_current_construct_v1(error, plan.error_type, 1, outer, plan)?
+        var builder = self.builder
+        builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(wrapped))))
+        self.builder = builder
+        Ok(())
+
+    me source_region_current_unwrap_v1(result: LocalId, success: HirType,
+            outer: MirType, plan: SourceRegionFunctionPlanV1) -> Result<LocalId, text>:
+        val expected_ok = self.lower_type(success)
+        val expected_error = self.lower_type(plan.error_type)
+        if val actual = self.local_mir_type_of(result):
+            match actual.kind:
+                case MirTypeKind.Result(ok, err):
+                    if (serialize_mir_type(ok) != serialize_mir_type(expected_ok) or
+                            serialize_mir_type(err) != serialize_mir_type(expected_error)):
+                        return Err("SOURCE-CURRENT: actual Result payload declaration differs")
+                case _: return Err("SOURCE-CURRENT: actual local is not typed Result")
+        else:
+            return Err("SOURCE-CURRENT: Result local is outside actual builder")
+        val tag = self.source_region_current_call_v1(source_region_current_runtime_v1(
+            "rt_enum_discriminant", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(result)], MirType.i64())
+        var builder = self.builder
+        val ok_block = builder.new_block(Some("source_region_ok"))
+        val err_block = builder.new_block(Some("source_region_err"))
+        val malformed_block = builder.new_block(Some("source_region_incomplete"))
+        builder.set_terminator(MirTerminator.Switch(mir_operand_copy(tag), [
+            SwitchCase(value: 0, target: ok_block), SwitchCase(value: 1, target: err_block)], malformed_block))
+        builder.switch_to_block(err_block)
+        self.builder = builder
+        self.source_region_current_propagate_v1(result, outer, plan)?
+        builder = self.builder
+        builder.switch_to_block(malformed_block)
+        self.builder = builder
+        val incomplete = plan.module.functions.get(plan.facades.incomplete)
+        if incomplete == nil: return Err("SOURCE-CURRENT: Incomplete factory declaration absent")
+        if val factory = incomplete:
+            if (factory.signature.params.len() != 0 or factory.signature.is_variadic or
+                    serialize_mir_type(factory.signature.return_type) != serialize_mir_type(MirType.result(MirType.i64(), expected_error))):
+                return Err("SOURCE-CURRENT: Incomplete factory signature differs")
+            # This exact compiler-private factory constructs Err(Incomplete).
+            # Its payload is re-encoded through the owning canonical E codec.
+            val failure = self.source_region_current_call_v1(
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(factory.name),
+                    MirType(kind: MirTypeKind.FuncPtr(factory.signature)))), [], factory.signature.return_type)
+            self.source_region_current_propagate_v1(failure, outer, plan)?
+        builder = self.builder
+        builder.switch_to_block(ok_block)
+        self.builder = builder
+        val raw = self.source_region_current_payload_v1(result)
+        self.decode_source_region_result_payload_v1(raw, success)
+
+    me source_region_current_return_local_v1(operand: MirOperand, expected: HirType
+    ) -> Result<LocalId, text>:
+        match operand.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                if self.local_mir_type_of(local) == nil:
+                    return Err("SOURCE-CURRENT: return local is not owned by this function")
+                Ok(local)
+            case MirOperandKind.Const(value, type_):
+                if serialize_mir_type(type_) != serialize_mir_type(self.lower_type(expected)):
+                    return Err("SOURCE-CURRENT: literal return type differs from declaration")
+                match value:
+                    case MirConstValue.Int(_) | MirConstValue.Bool(_) | MirConstValue.Zero:
+                        var builder = self.builder
+                        val local = builder.new_temp(type_)
+                        builder.emit_const(local, value, type_)
+                        self.builder = builder
+                        self.remember_local_hir_type(local.id, expected, 0, 0)
+                        Ok(local)
+                    case _: Err("SOURCE-CURRENT: literal storage provenance is unproved")
+
+    pub me specialize_current_function(original: HirFunction, lowered: MirFunction,
+            plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
+        if (original.symbol.id != lowered.symbol.id or self.source_region_replay_symbol_v1 != original.symbol.id or
+                plan.closure_digest == "" or not plan.originals.has(original.symbol) or
+                not plan.specialized_symbols.has(original.symbol) or
+                not plan.specialized_signatures.has(original.symbol) or
+                not plan.specialized_names.has(original.symbol)):
+            return Err("SOURCE-CURRENT: actual replay owner/closure identity differs")
+        # Consume before changing code or metadata; a second hook invocation
+        # cannot borrow a completed function's provenance under a fresh plan.
+        self.source_region_replay_symbol_v1 = -1
+        if self.builder.locals.len() != lowered.locals.len() or self.builder.blocks.len() != lowered.blocks.len():
+            return Err("SOURCE-CURRENT: replay builder no longer owns this function")
+        for index in 0..lowered.locals.len():
+            val actual = self.builder.locals[index]
+            val retained = lowered.locals[index]
+            if actual.id.id != retained.id.id or serialize_mir_type(actual.type_) != serialize_mir_type(retained.type_):
+                return Err("SOURCE-CURRENT: replay local identity/type differs")
+        if lowered.enum_matches.len() != 0 or lowered.verification_contract != nil:
+            return Err("SOURCE-CURRENT: semantic witnesses require owner revalidation")
+        if lowered.is_export_c or lowered.is_kernel or lowered.is_naked or lowered.is_generic_template:
+            return Err("SOURCE-CURRENT: unsupported execution domain/template")
+        for parameter in lowered.signature.params:
+            match parameter.kind:
+                case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Bool: ()
+                case _: return Err("SOURCE-CURRENT: rich input provenance has no admitted capture")
+        if self.enum_runtime_id("Result") != plan.result_construction.runtime_enum_id:
+            return Err("SOURCE-CURRENT: canonical Result runtime identity differs")
+        val signature = plan.specialized_signatures[original.symbol]
+        val error_type = self.lower_type(plan.error_type)
+        val outer = MirType.result(lowered.signature.return_type, error_type)
+        if (signature.is_variadic or not signature.params_known or
+                signature.params.len() != lowered.signature.params.len() + 1 or
+                serialize_mir_type(signature.return_type) != serialize_mir_type(outer)):
+            return Err("SOURCE-CURRENT: precomputed specialized signature differs")
+        for index in 0..lowered.signature.params.len():
+            if serialize_mir_type(signature.params[index]) != serialize_mir_type(lowered.signature.params[index]):
+                return Err("SOURCE-CURRENT: original parameter signature differs")
+        if serialize_mir_type(signature.params[signature.params.len() - 1]) != serialize_mir_type(plan.context_type):
+            return Err("SOURCE-CURRENT: trailing typed context differs")
+        # Reuse the real owner's fresh identity allocator and original locals.
+        var builder = self.builder
+        val context = builder.new_local(Some("__source_region_context_v1"), plan.context_type,
+            LocalKind.Arg(lowered.signature.params.len()))
+        var output = MirFunction.with_blocks(lowered, [])
+        output.symbol = plan.specialized_symbols[original.symbol]
+        output.name = plan.specialized_names[original.symbol]
+        output.signature = signature
+        output.is_export_c = false
+        output.export_name = ""
+        output.is_global = false
+        # Replace only code in this actual builder, retaining its provenance
+        # maps and original local identities for canonical rich payload codecs.
+        var placeholders: [MirBlock] = []
+        for block in lowered.blocks:
+            placeholders.push(MirBlock(id: block.id, label: block.label,
+                instructions: [], terminator: MirTerminator.Unreachable))
+        builder.blocks = placeholders
+        builder.instructions = []
+        builder.current_function = Some(output)
+        builder.current_block = lowered.entry_block
+        self.builder = builder
+        for block in lowered.blocks:
+            builder = self.builder
+            builder.switch_to_block(block.id)
+            self.builder = builder
+            for instruction in block.instructions:
+                builder = self.builder
+                builder.current_span = instruction.span
+                self.builder = builder
+                match instruction.kind:
+                    case MirInstKind.Call(destination, _, args):
+                        val name = verification_direct_call_name_v2(instruction.kind)
+                        if not plan.call_targets.has(name):
+                            return Err("SOURCE-CURRENT: unresolved direct call target")
+                        val target = plan.call_targets[name]
+                        if (not plan.originals.has(target) or not plan.specialized_signatures.has(target) or
+                                not plan.specialized_names.has(target)):
+                            return Err("SOURCE-CURRENT: call is outside exact resolved closure")
+                        val target_signature = plan.specialized_signatures[target]
+                        var forwarded: [MirOperand] = []
+                        for argument in args: forwarded.push(argument)
+                        forwarded.push(mir_operand_copy(context))
+                        if target_signature.params.len() != forwarded.len():
+                            return Err("SOURCE-CURRENT: call argument arity differs")
+                        for index in 0..forwarded.len():
+                            var actual_type = MirType.unit()
+                            match forwarded[index].kind:
+                                case MirOperandKind.Const(_, type_): actual_type = type_
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                    if val type_ = self.local_mir_type_of(local): actual_type = type_
+                                    else: return Err("SOURCE-CURRENT: call local provenance absent")
+                            if serialize_mir_type(actual_type) != serialize_mir_type(target_signature.params[index]):
+                                return Err("SOURCE-CURRENT: actual call parameter type differs")
+                        val result = self.source_region_current_call_v1(
+                            MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(plan.specialized_names[target]),
+                                MirType(kind: MirTypeKind.FuncPtr(target_signature)))), forwarded, target_signature.return_type)
+                        val decoded = self.source_region_current_unwrap_v1(result,
+                            plan.originals[target].return_type, outer, plan)?
+                        if val local = destination:
+                            builder = self.builder
+                            builder.emit(MirInst(kind: MirInstKind.Copy(local, decoded), span: instruction.span))
+                            self.builder = builder
+                    case _:
+                        var actual_function = output
+                        actual_function.locals = self.builder.locals
+                        val replacement = source_region_instruction_plan_v1(plan.module,
+                            actual_function, instruction, context, plan.facades, self.builder.next_local_id)?
+                        if val operations = replacement:
+                            builder = self.builder
+                            for local in operations.locals:
+                                val allocated = builder.new_local(local.name, local.type_, local.kind)
+                                if allocated.id != local.id.id:
+                                    return Err("SOURCE-CURRENT: planned local is not actual builder allocation")
+                            self.builder = builder
+                            for operation in operations.steps:
+                                builder = self.builder
+                                for item in operation.prelude: builder.emit(item)
+                                self.builder = builder
+                                val result = self.source_region_current_call_v1(operation.facade,
+                                    operation.args, operation.result_type)
+                                val decoded = self.source_region_current_unwrap_v1(result,
+                                    HirType(kind: HirTypeKind.Int(64, true), span: lowered.span), outer, plan)?
+                                builder = self.builder
+                                if val local = operation.destination:
+                                    builder.emit(MirInst(kind: MirInstKind.Copy(local, decoded), span: instruction.span))
+                                for item in operation.success: builder.emit(item)
+                                self.builder = builder
+                        else:
+                            builder = self.builder
+                            builder.emit(instruction)
+                            self.builder = builder
+            match block.terminator:
+                case MirTerminator.Ret(value):
+                    var local = LocalId(id: -1)
+                    if val operand = value:
+                        local = self.source_region_current_return_local_v1(operand, original.return_type)?
+                    else:
+                        match original.return_type.kind:
+                            case HirTypeKind.Unit:
+                                local = self.source_region_current_return_local_v1(
+                                    MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero, MirType.unit())), original.return_type)?
+                            case _: return Err("SOURCE-CURRENT: non-unit return value absent")
+                    val result = self.source_region_current_construct_v1(local, original.return_type, 0, outer, plan)?
+                    builder = self.builder
+                    builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(result))))
+                    self.builder = builder
+                case MirTerminator.Goto(_) | MirTerminator.If(_, _, _) | MirTerminator.Switch(_, _, _) | MirTerminator.Unreachable:
+                    builder = self.builder
+                    builder.set_terminator(block.terminator)
+                    self.builder = builder
+                case _: return Err("SOURCE-CURRENT: exceptional/suspended control edge is open")
+        builder = self.builder
+        output = builder.end_function()
+        self.builder = builder
+        output.source_region_context_local_v1 = context.id
+        output.source_region_context_abi_v1 = 1
+        output.source_region_closure_digest_v1 = plan.closure_digest
+        Ok(output)

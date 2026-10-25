@@ -1,0 +1,79 @@
+# Real normal-lowering lifecycle tests. Execution UNRUN; no native SOURCE gate.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.source_region_current_function_v1.*
+use compiler.mir.source_region_function_request_v1.{SourceRegionFunctionPlanV1}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
+
+fn source_replay_hir_v1() -> HirModule:
+    val parsed = parse_full_frontend("fn first() -> i64: 1\nfn second() -> i64: 2\n",
+        "source_replay.spl", "source_replay", Logger(level: 0))
+    var owner = HirLowering.with_filename("source_replay.spl")
+    val module = owner.lower_module(parsed)
+    expect(owner.errors.len()).to_equal(0)
+    module
+
+fn source_replay_function_v1(module: HirModule, name: text) -> HirFunction:
+    if val symbol = module.symbols.lookup(name): return module.functions[symbol]
+    fail("parser-produced function did not resolve")
+
+# Deliberately invalid plan used ONLY to test early owner rejection. It cannot
+# authenticate source authority; assertions demand the exact lifecycle error.
+fn source_replay_invalid_plan_v1(original: HirFunction) -> SourceRegionFunctionPlanV1:
+    val missing = SymbolId(id: -1)
+    val facades = SourceRegionFacadeSymbolsV1(create: missing, alloc: missing,
+        write_begin: missing, write_commit: missing, alias_write: missing,
+        stamp: missing, read_begin: missing, read_end: missing, close: missing, incomplete: missing)
+    SourceRegionFunctionPlanV1(module: MirModule(name: "negative_only", functions: {},
+        statics: {}, constants: {}, types: {}), originals: {original.symbol: original},
+        specialized_symbols: {original.symbol: original.symbol},
+        specialized_signatures: {original.symbol: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)},
+        specialized_names: {original.symbol: original.name}, call_targets: {}, context_type: MirType.i64(),
+        error_type: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()),
+        facades: facades, result_construction: SourceRegionResultConstructionV1(
+            constructor: mir_operand_const_int(0), runtime_enum_id: -1), closure_digest: "negative-only")
+
+describe "SOURCE replay uses a one-use actual lowering receipt":
+    it "normal parser-produced lowering retains its real identity after diagnostics end":
+        val hir = source_replay_hir_v1()
+        val original = source_replay_function_v1(hir, "first")
+        var owner = MirLowering.new(hir.symbols)
+        val lowered = owner.lower_function(original)
+        expect(owner.errors.len()).to_equal(0)
+        expect(lowered.symbol.id).to_equal(original.symbol.id)
+        expect(lowered.blocks.len()).to_be_greater_than(0)
+        expect(owner.mir_tag_probe_active_function).to_equal("")
+        expect(owner.source_region_replay_symbol_v1).to_equal(original.symbol.id)
+
+    it "rejects the old function after another real lowering resets its provenance":
+        val hir = source_replay_hir_v1()
+        val first = source_replay_function_v1(hir, "first")
+        val second = source_replay_function_v1(hir, "second")
+        var owner = MirLowering.new(hir.symbols)
+        val old = owner.lower_function(first)
+        val current = owner.lower_function(second)
+        expect(owner.source_region_replay_symbol_v1).to_equal(current.symbol.id)
+        match owner.specialize_current_function(first, old, source_replay_invalid_plan_v1(first)):
+            case Err(message): expect(message).to_contain("actual replay owner/closure identity differs")
+            case Ok(_): fail("old function borrowed another function's metadata")
+
+    it "invalidates the receipt with the actual per-function metadata reset":
+        val hir = source_replay_hir_v1()
+        val original = source_replay_function_v1(hir, "first")
+        var owner = MirLowering.new(hir.symbols)
+        val lowered = owner.lower_function(original)
+        owner.reset_function_local_tracking()
+        expect(owner.source_region_replay_symbol_v1).to_equal(-1)
+        match owner.specialize_current_function(original, lowered, source_replay_invalid_plan_v1(original)):
+            case Err(message): expect(message).to_contain("actual replay owner/closure identity differs")
+            case Ok(_): fail("reset metadata retained SOURCE authority")

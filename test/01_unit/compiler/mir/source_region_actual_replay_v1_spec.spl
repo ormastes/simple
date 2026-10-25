@@ -1,0 +1,138 @@
+# Actual-source compiler replay contracts, authored UNRUN. These inspect real
+# parser/HIR/MIR specialization; native provider/lifetime acceptance is separate.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirTypeKind, SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.source_region_function_request_v1.*
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
+use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source_actual_replay_hir_v1() -> HirModule:
+    # Compile the actual account and private facade bodies, never fake facade
+    # signatures, guessed proof rows or caller-authored context metadata.
+    val account = rt_file_read_text("src/compiler/00.common/loop_resource_account_v1.spl") ?? ""
+    val facade = rt_file_read_text("src/compiler/00.common/source_region_context_v1.spl") ?? ""
+    if account == "" or facade == "": fail("actual SOURCE account/facade dependency is absent")
+    val subject = "\nstruct C4Child:\n    value: i64\nstruct C4Parent:\n    child: C4Child\n" +
+        "fn c4_make_child() -> C4Child:\n    C4Child(value: 1)\n" +
+        "fn c4_subject() -> i64:\n    val child = c4_make_child()\n" +
+        "    val parent = C4Parent(child: child)\n    var alias = child\n" +
+        "    alias.value = 2\n    parent.child.value\n"
+    val parsed = parse_full_frontend(account + "\n" + facade + subject,
+        "c4_actual_replay.spl", "c4_actual_replay", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("c4_actual_replay.spl")
+    val hir = hir_owner.lower_module(parsed)
+    expect(hir_owner.errors.len()).to_equal(0)
+    hir
+
+fn source_actual_symbol_v1(hir: HirModule, name: text) -> SymbolId:
+    if val symbol = hir.symbols.lookup(name): return symbol
+    fail("actual parsed symbol is absent: {name}")
+
+impl MirLowering:
+    me source_actual_plan_v1(hir: HirModule, module: MirModule,
+            entry: SymbolId) -> Result<SourceRegionFunctionPlanV1, text>:
+        val facades = SourceRegionFacadeSymbolsV1(
+            create: source_actual_symbol_v1(hir, "source_region_create_v1"),
+            alloc: source_actual_symbol_v1(hir, "source_region_alloc_v1"),
+            write_begin: source_actual_symbol_v1(hir, "source_region_write_begin_v1"),
+            write_commit: source_actual_symbol_v1(hir, "source_region_write_commit_v1"),
+            alias_write: source_actual_symbol_v1(hir, "source_region_alias_write_v1"),
+            stamp: source_actual_symbol_v1(hir, "source_region_stamp_v1"),
+            read_begin: source_actual_symbol_v1(hir, "source_region_read_begin_v1"),
+            read_end: source_actual_symbol_v1(hir, "source_region_read_end_v1"),
+            close: source_actual_symbol_v1(hir, "source_region_close_v1"),
+            incomplete: source_actual_symbol_v1(hir, "source_region_incomplete_v1"))
+        val create_result = hir.functions[facades.create].return_type
+        val (context_hir, error_hir) = match create_result.kind:
+            case HirTypeKind.Result(ok, err): (ok, err)
+            case _: return Err("actual create declaration does not return Result")
+        val context = self.lower_type(context_hir)
+        var constructor: MirOperand? = nil
+        for block in module.functions[facades.incomplete].blocks:
+            for instruction in block.instructions:
+                if verification_direct_call_name_v2(instruction.kind) == "rt_enum_new":
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _): constructor = Some(callee)
+                        case _: ()
+        if constructor == nil: return Err("actual canonical Incomplete constructor was not emitted")
+        self.prepare_source_region_request_v1(module, entry, hir.functions,
+            context, error_hir, facades, SourceRegionResultConstructionV1(
+                constructor: constructor ?? mir_operand_const_int(0),
+                runtime_enum_id: self.enum_runtime_id("Result")))
+
+describe "actual SOURCE function replay and generic Result transport":
+    it "specializes a real rich-return constructor and two-node alias producer":
+        val hir = source_actual_replay_hir_v1()
+        var owner = MirLowering.new(hir.symbols)
+        val module = owner.lower_module(hir)
+        expect(owner.errors.len()).to_equal(0)
+        val entry = source_actual_symbol_v1(hir, "c4_subject")
+        val child = source_actual_symbol_v1(hir, "c4_make_child")
+        val before = serialize_mir_function(module.functions[entry])
+        match owner.source_actual_plan_v1(hir, module, entry):
+            case Err(message): fail(message)
+            case Ok(plan):
+                val closure = source_region_resolved_call_closure_v1(module, entry)
+                match closure:
+                    case Err(message): fail(message)
+                    case Ok(resolved):
+                        match owner.lower_source_region_request_v1(entry, resolved.functions, plan):
+                            case Err(message): fail(message)
+                            case Ok(result):
+                                expect(result.entry.id).to_equal(plan.specialized_symbols[entry].id)
+                                expect(serialize_mir_function(result.module.functions[entry])).to_equal(before)
+                                val output = result.module.functions[plan.specialized_symbols[child]]
+                                match output.signature.return_type.kind:
+                                    case MirTypeKind.Result(ok, _):
+                                        match ok.kind:
+                                            case MirTypeKind.Struct(_): ()
+                                            case _: fail("rich return was erased to a scalar")
+                                    case _: fail("rich constructor lacks outer Result")
+                                expect(output.source_region_context_abi_v1).to_equal(1)
+                                expect(output.source_region_context_local_v1).to_be_greater_than(-1)
+                                expect(output.source_region_closure_digest_v1).to_equal(result.closure_digest)
+
+    it "rejects stale input and duplicate/original-colliding identities before replay":
+        val hir = source_actual_replay_hir_v1()
+        var owner = MirLowering.new(hir.symbols)
+        val module = owner.lower_module(hir)
+        expect(owner.errors.len()).to_equal(0)
+        val entry = source_actual_symbol_v1(hir, "c4_subject")
+        val child = source_actual_symbol_v1(hir, "c4_make_child")
+        match owner.source_actual_plan_v1(hir, module, entry):
+            case Err(message): fail(message)
+            case Ok(plan):
+                match source_region_resolved_call_closure_v1(module, entry):
+                    case Err(message): fail(message)
+                    case Ok(closure):
+                        val receipt = owner.source_region_replay_symbol_v1
+                        val seed = plan.closure_digest
+                        plan.closure_digest = "stale"
+                        match owner.lower_source_region_request_v1(entry, closure.functions, plan):
+                            case Err(message): expect(message).to_contain("input identity differs")
+                            case Ok(_): fail("stale plan was published")
+                        plan.closure_digest = seed
+                        val fresh_child = plan.specialized_symbols[child]
+                        plan.specialized_symbols[child] = plan.specialized_symbols[entry]
+                        match owner.lower_source_region_request_v1(entry, closure.functions, plan):
+                            case Err(message): expect(message).to_contain("collide")
+                            case Ok(_): fail("duplicate specialized identity was published")
+                        plan.specialized_symbols[child] = fresh_child
+                        plan.specialized_symbols[entry] = entry
+                        match owner.lower_source_region_request_v1(entry, closure.functions, plan):
+                            case Err(message): expect(message).to_contain("collide")
+                            case Ok(_): fail("ordinary function was overwritten")
+                        expect(owner.source_region_replay_symbol_v1).to_equal(receipt)
