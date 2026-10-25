@@ -143,6 +143,7 @@ commits below are source candidates, not portable published artifacts or PASS.
 | [#4805](https://github.com/ormastes/simple/pull/4805), `4d28b903b73b` | Managed selective-worker ownership and prerequisite refusal. Requires a separately qualified cached V3 broker/image pin and delegated cgroup capability. Source does not admit current workers or prove a completed Phase3. |
 | [#4808](https://github.com/ormastes/simple/pull/4808), `9b84d1514e70`; [#4772](https://github.com/ormastes/simple/pull/4772), `8388797fdf01` | Concrete lowering presence flags with reserved-bitfield correction; bounded exact decoder closure. Behavioral controls and real generator regeneration remain UNRUN. Canonical availability remains false. These newer sources are absent from the live frozen producer. |
 | [#4787](https://github.com/ormastes/simple/pull/4787), `f321a4b796df`; [#4774](https://github.com/ormastes/simple/pull/4774), `874bbd5bf483` | Canonical enum capture/prepaid request verification and typed registration provenance foundations. Not complete actual-caller, full enum/composite or worker admission. |
+| Equivalent landed source, `1f17a8d84a0` and `c4326166835` | Typed resolver capture/validation and prepaid scalar request-proof counts are already in the target through the combined foundation. Local original hashes `297619c5f1ee` and `2eb9285108e1` are not ancestors, but their source changes are landed. Actual caller/native integration remains OPEN. |
 | [#4784](https://github.com/ormastes/simple/pull/4784), `9210d77123d0`; [#4789](https://github.com/ormastes/simple/pull/4789), `e3a710831d78`; [#4790](https://github.com/ormastes/simple/pull/4790), `15feac956b17` | Native dictionary operations13–16, typed Struct/Dictionary descriptor recipes and shared-account facades. Not operation17, text-key/rich-child/full-HIR support or complete root admission. |
 | [#4767](https://github.com/ormastes/simple/pull/4767), `115ae8a9ac00` | SOURCE seals carried through final ELF protection checks. Earlier focused relocation/provider controls remain bounded history; full compiler-produced SOURCE/JIT/facade qualification is not established. |
 
@@ -150,6 +151,8 @@ commits below are source candidates, not portable published artifacts or PASS.
 
 All following commits exist locally and are **not ancestors** of checked target
 `a87d4fa2e3d5`. Active working edits are not folded into this report's owned delta.
+Classification additionally checks actual source equivalence: nonancestor hashes
+alone do not establish unlanded code, as the combined-foundation row above shows.
 
 | Source candidate | What exists; what remains |
 |---|---|
@@ -157,7 +160,6 @@ All following commits exist locally and are **not ancestors** of checked target
 | Retained Optional CFG `b1c9fc84f510` | Construction verifier handles retained Optional storage/guarded borrow and authored CFG controls. Current caller lane also has tracked working edits. It is not a landed complete caller or executed native proof. |
 | Verifier repair `7a9b9bc5ffc` | Rejects wrong-variant/default/shared branch targets with authored negative controls. Scoped Astra SOURCE_GO is recorded; the repair remains unlanded and runtime/integration UNRUN. Source approval adds no feature-acceptance count. |
 | Stable origin `acab67c325db` | Separates stable declaration identity from later producer bodies. Reviewed candidate remains dependency-blocked and unlanded; source review is not execution. |
-| Typed captures `297619c5f1ee`; request proof `2eb9285108e1` | Resolver identities and prepaid typed count changes exist locally. Final integration and actual caller/native verification remain open. |
 
 ### Remaining selected behavior and evidence gaps
 
