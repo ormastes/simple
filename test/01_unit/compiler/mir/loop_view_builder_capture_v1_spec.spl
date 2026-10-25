@@ -1,0 +1,346 @@
+# @manual: show
+# @req: C4-LOOP-PRODUCER-VIEW-001
+# Tests-first actual MirBuilder / provider publication. All execution UNRUN.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.{MirBuilder, MirType, MirTypeKind, AggregateKind, SwitchCase, MirSignature, LocalId, LocalKind, MirOperand, MirInst, MirConstValue, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{BlockId}
+use compiler.mir.loop_builder_capture_v1.{MirLoopBuilderCaptureV1}
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.mir.loop_module_shape_owner_v1.{MirLoopShapeOwnerV1, MirLoopSealedViewV1}
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1}
+
+fn lpv1_builder_setup(instruction_cap: i64 = 65536) -> Result<MirBuilder, MirLoopShapeErrorV1>:
+    val account = match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_instructions: instruction_cap)):
+        case Ok(value): value
+        case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+    val owner = MirLoopShapeOwnerV1.create(account)?
+    val namespace = owner.reserve_text(4)?.publish("test")?
+    owner.publish_namespace(namespace)?
+    val capture = MirLoopBuilderCaptureV1.create(owner)?
+    val return_type = owner.begin(MirLoopShapeTagV1.TypeUnit)?.finish()?
+    val signature = owner.begin(MirLoopShapeTagV1.Signature)?
+    signature.scalar(0, 0)?
+    signature.scalar(1, 1)?
+    signature.scalar(2, 0)?
+    signature.scalar(3, 0)?
+    signature.child(return_type)?
+    val signature_cursor = signature.finish()?
+    var builder = MirBuilder.new()
+    builder.loop_view_capture_v1 = Some(capture)
+    builder.begin_function(SymbolId.new(7), "subject", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false, params_known: true), Span.new(2, 9, 3, 4), signature_cursor)
+    Ok(builder)
+
+fn lpv1_builder_capture(builder: MirBuilder) -> Result<MirLoopBuilderCaptureV1, MirLoopShapeErrorV1>:
+    match builder.loop_view_capture_v1:
+        case Some(value): Ok(value)
+        case None: Err(MirLoopShapeErrorV1.InvalidState)
+
+fn lpv1_builder_block(view: MirLoopSealedViewV1, id: i64) -> Result<i64, MirLoopShapeErrorV1>:
+    val function = view.function_at(0)?
+    for index in 0..view.child_count(function)?:
+        val child = view.child(function, index)?
+        if view.tag(child)? == MirLoopShapeTagV1.Block and view.scalar(child, 0)? == id:
+            return Ok(child)
+    Err(MirLoopShapeErrorV1.InvalidCursor)
+
+fn lpv1_builder_case(kind: i64) -> Result<(), MirLoopShapeErrorV1>:
+    var instruction_cap: i64 = 65536
+    if kind == 5: instruction_cap = 0
+    if kind == 15: instruction_cap = 1
+    var builder = lpv1_builder_setup(instruction_cap)?
+    val capture = lpv1_builder_capture(builder)?
+    val owner = capture.owner()
+    if kind == 0:
+        val value = builder.emit_const_int(41)
+        builder.terminate_return_copy(value)
+        val sentinel = builder.end_function()
+        expect(sentinel.locals.len()).to_equal(0)
+        expect(sentinel.blocks.len()).to_equal(0)
+        expect(sentinel.symbol.id).to_equal(-1)
+        val view = owner.seal()?
+        expect(view.function_count()?).to_equal(1)
+        val block = lpv1_builder_block(view, 0)?
+        expect(view.child_count(block)?).to_equal(2)
+        expect(view.tag(view.child(block, 0)?)?).to_equal(MirLoopShapeTagV1.InstConst)
+        expect(view.scalar(view.child(view.child(block, 0)?, 0)?, 0)?).to_equal(41)
+        expect(view.tag(view.child(block, 1)?)?).to_equal(MirLoopShapeTagV1.TermRet)
+    elif kind == 1:
+        builder.emit_const_int(1)
+        builder.finalize_block()
+        builder.finalize_block()
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        expect(view.child_count(lpv1_builder_block(view, 0)?)?).to_equal(2)
+    elif kind == 2:
+        builder.emit_const_int(1)
+        builder.terminate_return_void()
+        builder.switch_to_block(BlockId.entry())
+        builder.emit_const_int(2)
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        val block = lpv1_builder_block(view, 0)?
+        expect(view.revision(block)?).to_be_greater_than(0)
+        expect(view.child_count(block)?).to_equal(2)
+        expect(view.scalar(view.child(view.child(block, 0)?, 0)?, 0)?).to_equal(2)
+    elif kind == 3:
+        val local = builder.new_local(Some("before"), MirType.i64(), LocalKind.Var)
+        capture.bind_source_symbol(local.id, 77)?
+        builder.set_local_name(local, "after")
+        builder.set_local_type(local, MirType.bool())
+        builder.terminate_return_void()
+        val cursor = capture.local_cursor(local.id)?
+        builder.end_function()
+        val view = owner.seal()?
+        expect(view.scalar(cursor, 4)?).to_equal(1)
+        expect(view.scalar(cursor, 5)?).to_equal(77)
+        expect(view.tag(view.child(cursor, 0)?)?).to_equal(MirLoopShapeTagV1.TypeBool)
+        expect(view.revision(cursor)?).to_equal(3)
+    elif kind == 4:
+        builder.emit(MirInst(kind: MirInstKind.Drop(LocalId(id: 0)), span: nil))
+        builder.terminate_return_void()
+        builder.end_function()
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Incomplete).to_equal(true)
+    elif kind == 5:
+        val before = owner.observation().nodes
+        builder.emit_const_int(1)
+        match owner.inspect():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Capacity).to_equal(true)
+        expect(owner.observation().functions).to_equal(0)
+        expect(capture.account().snapshot().instructions).to_equal(0)
+        expect(owner.observation().nodes).to_be_greater_than(before)
+        # The local/type can be admitted; the instruction itself cannot grow.
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Capacity).to_equal(true)
+    elif kind == 6:
+        builder.set_terminator(MirTerminator.Ret(None))
+        builder.end_function()
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Incomplete).to_equal(true)
+    elif kind == 7:
+        builder.end_function()
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Incomplete).to_equal(true)
+    elif kind == 8:
+        val next_block = builder.new_block(Some("next"))
+        builder.terminate_goto(next_block)
+        builder.switch_to_block(next_block)
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        val first = lpv1_builder_block(view, 0)?
+        expect(view.scalar(view.child(first, 0)?, 0)?).to_equal(next_block.id)
+        expect(view.scalar(lpv1_builder_block(view, next_block.id)?, 0)?).to_equal(next_block.id)
+    elif kind == 9:
+        builder.emit_entry_alloc(MirType.i64())
+        builder.terminate_return_void()
+        builder.end_function()
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Unsupported).to_equal(true)
+    elif kind == 10:
+        val local = builder.emit_const_int(4)
+        builder.terminate_return_copy(local)
+        builder.end_function()
+        val view = owner.seal()?
+        val instruction = view.child(lpv1_builder_block(view, 0)?, 0)?
+        val span = view.span(instruction)?
+        expect(view.scalar(span, 0)?).to_equal(2)
+        expect(view.scalar(span, 1)?).to_equal(9)
+        expect(view.scalar(span, 2)?).to_equal(3)
+        expect(view.scalar(span, 3)?).to_equal(4)
+    elif kind == 11:
+        val value = builder.emit_const_int(5)
+        val element_type = capture.local_type_cursor(value.id)?
+        val tuple_writer = owner.begin(MirLoopShapeTagV1.TypeTuple)?
+        tuple_writer.child(element_type)?
+        val tuple_type = tuple_writer.finish()?
+        val tuple_local = builder.emit_aggregate(AggregateKind.Tuple, [MirOperand.copy(value)], MirType(kind: MirTypeKind.Tuple([MirType.i64()])), tuple_type)
+        builder.terminate_return_void()
+        val local_cursor = capture.local_cursor(tuple_local.id)?
+        builder.end_function()
+        val view = owner.seal()?
+        val aggregate = view.child(lpv1_builder_block(view, 0)?, 1)?
+        expect(view.tag(aggregate)?).to_equal(MirLoopShapeTagV1.InstAggregate)
+        expect(view.child(aggregate, 0)?).to_equal(-1)
+        expect(view.child(local_cursor, 0)?).to_equal(tuple_type)
+        expect(view.child_count(aggregate)?).to_equal(2)
+    elif kind == 12:
+        val value = builder.emit_const_int(4)
+        val target = builder.new_block(Some("shared"))
+        builder.terminate_switch(MirOperand.copy(value), [SwitchCase(value: 11, target: target), SwitchCase(value: 22, target: target)], target)
+        builder.switch_to_block(target)
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        val term = view.child(lpv1_builder_block(view, 0)?, 1)?
+        expect(view.child_count(term)?).to_equal(3)
+        expect(view.scalar(term, 0)?).to_equal(target.id)
+        for index in 0..2:
+            val arm = view.child(term, index + 1)?
+            expect(view.scalar(arm, 0)?).to_equal(target.id)
+            expect(view.scalar(view.child(arm, 0)?, 0)?).to_equal(if index == 0: 11 else: 22)
+        expect(capture.account().snapshot().edges).to_equal(3)
+    elif kind == 13:
+        val local = builder.emit_const_int(9)
+        val writer = capture.instruction(MirLoopShapeTagV1.InstDrop)?
+        writer.scalar(0, local.id)?
+        capture.prepare_instruction(writer.finish()?)?
+        builder.emit(MirInst(kind: MirInstKind.Drop(local), span: nil))
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        expect(view.tag(view.child(lpv1_builder_block(view, 0)?, 1)?)?).to_equal(MirLoopShapeTagV1.InstDrop)
+        expect(capture.account().snapshot().instructions).to_equal(2)
+    elif kind == 14:
+        val local = builder.new_temp(MirType(kind: MirTypeKind.Tuple([MirType.i64()])))
+        expect(local.id).to_equal(-1)
+        expect(builder.locals.len()).to_equal(0)
+        expect(capture.local_count()).to_equal(0)
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Incomplete).to_equal(true)
+    elif kind == 15:
+        builder.emit_const_int(1)
+        expect(capture.account().snapshot().instructions).to_equal(1)
+        builder.emit_const_int(2)
+        expect(capture.account().snapshot().instructions).to_equal(1)
+        expect(builder.instructions.len()).to_equal(1)
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.Capacity).to_equal(true)
+    elif kind == 16:
+        builder.current_span = Some(Span(start: 2, end: 9, line: 3, col: 4, file: "actual.spl", length: 99))
+        builder.emit_const_int(6)
+        builder.terminate_return_void()
+        builder.end_function()
+        val view = owner.seal()?
+        val instruction = view.child(lpv1_builder_block(view, 0)?, 0)?
+        val span = view.span(instruction)?
+        expect(view.scalar(span, 0)?).to_equal(2)
+        expect(view.scalar(span, 1)?).to_equal(9)
+        expect(view.scalar(span, 4)?).to_equal(99)
+    elif kind == 17:
+        builder.terminate_return_void()
+        val normal = builder.end_function()
+        expect(normal.symbol.id).to_equal(-1)
+        expect(normal.blocks.len()).to_equal(0)
+        # Invalid repeated completion consumes the one pre-reserved emergency
+        # return; the next completion must not construct another rich record.
+        val emergency = builder.end_function()
+        expect(emergency.symbol.id).to_equal(-1)
+        expect(emergency.blocks.len()).to_equal(0)
+        val before = capture.account().snapshot()
+        val refused = builder.end_function()
+        expect(refused).to_be_nil()
+        expect(capture.account().snapshot().state_fields).to_equal(before.state_fields)
+        expect(capture.account().snapshot().work_used).to_equal(before.work_used)
+        match owner.seal():
+            case Ok(_): return Err(MirLoopShapeErrorV1.Incomplete)
+            case Err(error): expect(error == MirLoopShapeErrorV1.InvalidState).to_equal(true)
+    Ok(())
+
+fn lpv1_builder_assert_case(kind: i64):
+    match lpv1_builder_case(kind):
+        case Ok(_): ()
+        case Err(_): fail("actual builder publication or scalar read failed")
+
+describe "actual producer MirBuilder capture":
+    it "publishes real constructor rows and returns a constant empty sentinel":
+        step("Use actual builder begin, constant, return and end on one real provider")
+        lpv1_builder_assert_case(0)
+    it "keeps prior instructions across repeated empty flushes":
+        step("Finalize twice before completing the actual entry block")
+        lpv1_builder_assert_case(1)
+    it "replaces a reopened block sequence under its stable cursor":
+        step("Reopen and replace the actual entry sequence, then inspect its revision")
+        lpv1_builder_assert_case(2)
+    it "retains scalar source binding through actual local rename and retype":
+        step("Bind a real local symbol then perform both existing setters")
+        lpv1_builder_assert_case(3)
+    it "refuses an unpaired raw instruction publication":
+        step("Call actual raw emit without a scalar constructor event")
+        lpv1_builder_assert_case(4)
+    it "refuses before instruction growth when its category is exhausted":
+        step("Create a zero instruction account and call actual const emit")
+        lpv1_builder_assert_case(5)
+    it "refuses an unpaired raw terminator publication":
+        step("Call actual set_terminator without a scalar event")
+        lpv1_builder_assert_case(6)
+    it "does not accept construction-only unreachable as a completed block":
+        step("End a function without constructing any actual terminator")
+        lpv1_builder_assert_case(7)
+    it "retains exact actual block identifiers and goto targets":
+        step("Create and switch to a real second block")
+        lpv1_builder_assert_case(8)
+    it "fails the owner for an unsupported off-path entry allocation":
+        step("Invoke the existing direct entry mutation helper")
+        lpv1_builder_assert_case(9)
+    it "retains actual constructor source span scalars":
+        step("Read the published instruction span through the sealed view")
+        lpv1_builder_assert_case(10)
+    it "leaves ordinary builder capture absent and returns ordinary rich bodies":
+        step("Use the ordinary default constructor without any provider")
+        var builder = MirBuilder.new()
+        expect(builder.loop_view_capture_v1).to_be_nil()
+        builder.begin_function(SymbolId.new(1), "ordinary", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        builder.emit_const_int(8)
+        builder.terminate_return_void()
+        val result = builder.end_function()
+        expect(result.name).to_equal("ordinary")
+        expect(result.blocks.len()).to_equal(1)
+        expect(result.blocks[0].instructions.len()).to_equal(1)
+        expect(result.locals.len()).to_equal(1)
+    it "retains a real tuple aggregate with an explicit structural type cursor":
+        step("Construct a tuple local while preserving absent non-array kind type")
+        lpv1_builder_assert_case(11)
+    it "retains ordered switch values sharing the same actual target":
+        step("Publish two ordered switch arms and count every actual edge")
+        lpv1_builder_assert_case(12)
+    it "accepts one correctly paired actual raw instruction constructor":
+        step("Reserve the scalar instruction before constructing the real raw instruction")
+        lpv1_builder_assert_case(13)
+    it "refuses a structural local without its actual constructor cursor":
+        step("Missing pairing cannot invent a structural type identity")
+        lpv1_builder_assert_case(14)
+    it "admits the exact instruction limit and refuses the next instruction":
+        step("Inspect both the actual pending instructions and shared category counter")
+        lpv1_builder_assert_case(15)
+    it "preserves actual Span.length even when distinct from end minus start":
+        step("Set the actual builder span payload and read its retained length slot")
+        lpv1_builder_assert_case(16)
+    it "returns nil after both funded terminal return credits are consumed":
+        step("Complete once, consume the emergency return, then refuse without another rich construction")
+        lpv1_builder_assert_case(17)
+
+    it "preserves current short-borrow metadata when ordinary locals are renamed and retyped":
+        step("Create a current local with short-borrow provenance")
+        var builder = MirBuilder.new()
+        builder.begin_simple_function("ordinary", "i64")
+        val local = builder.new_local(nil, MirType.i64(), LocalKind.Var)
+        var original = builder.locals[local.id]
+        original.short_borrow = true
+        original.short_mutable = true
+        original.short_boundary = 83
+        builder.locals[local.id] = original
+        step("Rename and retype through the actual builder methods")
+        builder.set_local_name(local, "renamed")
+        builder.set_local_type(local, MirType.bool())
+        val changed = builder.locals[local.id]
+        expect(changed.name).to_equal(Some("renamed"))
+        expect(changed.type_.kind).to_equal(MirTypeKind.Bool)
+        expect(changed.short_borrow).to_equal(true)
+        expect(changed.short_mutable).to_equal(true)
+        expect(changed.short_boundary).to_equal(83)
+        expect(builder.loop_view_capture_v1).to_equal(nil)

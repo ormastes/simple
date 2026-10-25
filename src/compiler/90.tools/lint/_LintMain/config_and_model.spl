@@ -1,5 +1,6 @@
 # LintDiag config, levels, profiles, and the LintDiag/LintRunResult/Linter model.
 use compiler.tools.lint.main.*
+use compiler.semantics.symbol_id.semantic_markdown.{SemanticMarkdownSourceV1}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -220,6 +221,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["ui_no_raw_variant"] = "warn"
     levels["ui_no_raw_theme_name"] = "warn"
     levels["stale_md_diagrams"] = "warn"
+    levels["semantic_markdown_links"] = "warn"
     levels["llvm_backend_type_safety"] = "deny"
     levels["hash_bracket_attribute"] = "warn"
     # Newly-configurable families. Preserve the original suppression level for
@@ -478,16 +480,26 @@ class LintCliPolicy:
     gpu_2d_perf: bool
     profile: Option<LintProfile>
     error: String
+    semantic_options: Dict<text, text>
 
 impl LintCliPolicy:
     static fn from_args(args: [text]) -> LintCliPolicy:
         var policy = LintCliPolicy(
             deny_all: false, warn_all: false, json_output: false,
             fix_mode: false, fix_all: false, fix_dry_run: false,
-            wm_lane: false, gpu_2d_perf: false, profile: nil, error: "")
+            wm_lane: false, gpu_2d_perf: false, profile: nil, error: "", semantic_options: {})
         var expect_profile = false
+        var semantic_key = ""
         for arg in args:
-            if expect_profile:
+            if semantic_key != "":
+                if arg == "" or arg.starts_with("-") or policy.semantic_options.contains_key(semantic_key):
+                    policy.error = "duplicate or missing semantic source authority: " + semantic_key
+                else:
+                    policy.semantic_options[semantic_key] = arg
+                semantic_key = ""
+            elif semantic_markdown_authority_option_v1(arg):
+                semantic_key = arg
+            elif expect_profile:
                 val parsed = parse_lint_profile(arg)
                 match parsed:
                     case Some(profile): policy.profile = Some(profile)
@@ -508,6 +520,8 @@ impl LintCliPolicy:
                 match parsed:
                     case Some(profile): policy.profile = Some(profile)
                     case nil: policy.error = "unknown profile: {profile_text}"
+        if semantic_key != "":
+            policy.error = "missing semantic source authority: " + semantic_key
         if expect_profile and policy.error == "":
             policy.error = "--profile requires a tier"
         policy
@@ -1007,6 +1021,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "ui_no_raw_variant"
     if code == "UI003":
         return "ui_no_raw_theme_name"
+    if code == "W-DOC-AST-001":
+        return "semantic_markdown_links"
     if code == "DIAG001":
         return "stale_md_diagrams"
     if code == "LLVM001":
@@ -1340,6 +1356,7 @@ class Linter:
     last_error_count: i64
     last_warning_count: i64
     last_not_analyzed: bool
+    semantic_markdown_sources: [SemanticMarkdownSourceV1]
 
 fn linter_find_project_sdn(linter: Linter, file_path: String) -> String:
     """Resolve one source's project manifest with a bounded command cache."""

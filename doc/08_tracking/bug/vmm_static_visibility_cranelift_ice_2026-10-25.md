@@ -70,7 +70,7 @@ The payload loss is the existing class
 Carrying the text would mean threading it through the statics result. That is a
 compiler change that needs a Stage 2 rebuild, so it is out of scope for this source fix.
 
-## Verification (2026-10-25, Stage 2 p2shard-17, cranelift, aarch64)
+## Original release/1.0.0 verification (2026-10-25, Stage 2 p2shard-17, cranelift, aarch64)
 
 The test was a tiny entry importing `os.kernel.memory.{vmm,vmm_vma,vmm_copy,vmm_address_space}`
 with `--source src/os` and a 22-module closure.
@@ -80,3 +80,25 @@ with `--source src/os` and a 22-module closure.
   undefined references in the three consumer objects is defined by the new `vmm.o`.
 - `os.kernel.memory.vmm` itself must be rebuilt. The run-27e cached vmm object
   defines 0 `global_address` accessors, because they are emitted only for `pub` statics.
+
+## Port to release_phase3
+
+Port base: `ec223ca1f1e0a14ff09fd0d15b1c1349e153f859`. The provider file
+on this base is byte-identical to the parent of the original fix
+`dd919a7ceacb0af59f14551de49ff1fc8b1587ae`; the 25 visibility declarations
+apply without semantic conflict. The associated source-shape spec comes from
+`f8ba8546fa3214afdcd6630eb037638f5bce7646` (release/1.0.0 PR #4549).
+
+The original native results above belong to that earlier build lineage.
+This port checks unchanged declaration values, visibility coverage, diff
+whitespace, direct-env guards, and executable-spec layout. It does not claim
+new native compilation, SSpec execution, or a Phase 3 pass. The available
+`simple-p3fix-cltest` candidate has a successful Stage 2 sanity receipt but its
+`phase2-compatibility.manifest.not-published` remains unpublished after the
+qualification was terminated. No source-matched admitted producer for this
+port base is established.
+
+The next qualified compile must rebuild the provider `vmm.spl` together with
+`vmm_copy.spl`, `vmm_address_space.spl`, and `vmm_vma.spl`, using a private
+cache. Reusing the old private provider object would leave the consumer
+accessor references unresolved even after this source correction.

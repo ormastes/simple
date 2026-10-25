@@ -1527,7 +1527,12 @@ typedef struct RtCoreDict {
     int64_t len;       /* live entries */
     int64_t tombstones;
     RtCoreDictEntry* entries;
+    int64_t read_owner;
+    int64_t read_epoch;
+    int64_t read_backing;
 } RtCoreDict;
+
+static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
 
 /* Heap-boxed f64 (see RT_VALUE_HEAP_FLOAT). A leaf object: the full double is
  * stored verbatim so container/Any floats round-trip exactly. Discrimination is
@@ -11670,11 +11675,21 @@ static int rt_core_dict_key_eq(int64_t a, int64_t b) {
     return rt_native_eq(a, b) != 0;
 }
 
+/* Reader invalidation never prevents an ordinary dictionary mutation. Zero
+ * permanently poisons the optional reader when its bounded epoch is spent. */
+static void rt_core_dict_read_advance(RtCoreDict* d) {
+    if (d->read_epoch > 0)
+        d->read_epoch = d->read_epoch == INT64_MAX ? 0 : d->read_epoch + 1;
+}
+
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
     if (!fresh) return;
+    rt_core_dict_read_advance(d);
+    if (d->read_backing == INT64_MAX) d->read_epoch = 0;
+    else d->read_backing++;
     d->entries = fresh;
     d->cap = new_cap;
     d->len = 0;
@@ -11689,6 +11704,7 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
     if (!d || !d->entries) return 0;
+    rt_core_dict_read_advance(d);
     /* Resize at 70% load (live + tombstones). */
     if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
         /* A delete-heavy workload (`d[k] = v; d.remove(k)` in a loop) drives
@@ -11785,6 +11801,7 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
         if (e->occupied == 0) return 0;
         if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
             if (removed) *removed = e->value;
+            rt_core_dict_read_advance(d);
             e->occupied = -1;
             d->len--;
             d->tombstones++;
@@ -11816,6 +11833,13 @@ int64_t rt_dict_new(int64_t cap_hint) {
         free(d);
         return rt_core_nil();
     }
+    int64_t owner = atomic_load_explicit(&rt_core_dict_read_owner_counter, memory_order_relaxed);
+    while (owner < INT64_MAX &&
+           !atomic_compare_exchange_weak_explicit(&rt_core_dict_read_owner_counter,
+               &owner, owner + 1, memory_order_relaxed, memory_order_relaxed)) { }
+    d->read_owner = owner == INT64_MAX ? 0 : owner + 1;
+    d->read_epoch = 1;
+    d->read_backing = 1;
     return (int64_t)(((uint64_t)(uintptr_t)d) | RT_VALUE_TAG_HEAP);
 }
 
@@ -11859,11 +11883,14 @@ int8_t rt_dict_remove(int64_t dict, int64_t key) {
 int8_t rt_dict_clear(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d || !d->entries) return 0;
+    rt_core_dict_read_advance(d);
     for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
     d->len = 0;
     d->tombstones = 0;
     return 1;
 }
+
+#include "runtime_dict_scope_read_v1.h"
 
 int64_t rt_dict_len(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);

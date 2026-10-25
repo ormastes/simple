@@ -538,6 +538,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_dict_clear" => value::rt_dict_clear as *const () as usize,
         "rt_dict_keys" => value::rt_dict_keys as *const () as usize,
         "rt_dict_values" => value::rt_dict_values as *const () as usize,
+        "rt_dict_scope_read_bound_v1" => value::rt_dict_scope_read_bound_v1 as *const () as usize,
+        "rt_dict_scope_read_owner_v1" => value::rt_dict_scope_read_owner_v1 as *const () as usize,
+        "rt_dict_scope_read_epoch_v1" => value::rt_dict_scope_read_epoch_v1 as *const () as usize,
+        "rt_dict_scope_read_meta_v1" => value::rt_dict_scope_read_meta_v1 as *const () as usize,
+        "rt_dict_scope_read_slot_v1" => value::rt_dict_scope_read_slot_v1 as *const () as usize,
 
         // Host/GPU lane marker runtime bridge
         "rt_host_gpu_lane_event" => host_gpu_lane::rt_host_gpu_lane_event as *const () as usize,

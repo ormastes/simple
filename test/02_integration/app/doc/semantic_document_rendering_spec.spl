@@ -1,6 +1,7 @@
 # REQ-MC-008 B4 verified semantic declaration links in the existing spec renderer.
 # Authored production-bound scenarios; runtime and docgen UNRUN.
 use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run_timeout}
 use app.doc.spec_gen.types.{SpecFile, TestCase}
 use app.doc.spec_gen.markdown.{render_markdown_with_symbol_links_v1, generate_markdown_semantic_v1, publish_semantic_markdown_content_v1}
 use app.doc.spec_gen.semantic_links.{semantic_doc_symbol_map_v1, semantic_doc_label_v1}
@@ -12,7 +13,7 @@ use std.env.platform.{get_temp_dir}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
 
-fn robust_06_semantic_docs_setup_render_source(source: text) -> text:
+fn prepare_semantic_doc_source_v1(source: text) -> text:
     val path = get_temp_dir() + "/semantic-render-{getpid()}-{time_now_unix_micros()}.spl"
     expect(file_write(path, source)).to_equal(true)
     path
@@ -31,7 +32,7 @@ describe "verified semantic links in generated specifications":
     it "should render one verified link consistently in summary index and detail":
         step("Prepare the production input")
         val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
-        val path = robust_06_semantic_docs_setup_render_source(source)
+        val path = prepare_semantic_doc_source_v1(source)
         val revision = sha256_text(source)
         val document = open_semantic_link_document_v1("pkg", "sample.math", path, revision).unwrap()
         val uri = semantic_link_document_uri_v1(document, 0, true).unwrap()
@@ -49,7 +50,7 @@ describe "verified semantic links in generated specifications":
     it "should refuse malformed unresolved and stale links rather than print verified output":
         step("Prepare the production input")
         val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
-        val path = robust_06_semantic_docs_setup_render_source(source)
+        val path = prepare_semantic_doc_source_v1(source)
         val revision = sha256_text(source)
         val document = open_semantic_link_document_v1("pkg", "sample.math", path, revision).unwrap()
         val uri = semantic_link_document_uri_v1(document, 0, false).unwrap()
@@ -79,7 +80,7 @@ describe "verified semantic links in generated specifications":
     it "should preserve an existing output file when a source revision becomes stale":
         step("Prepare the production input")
         val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
-        val path = robust_06_semantic_docs_setup_render_source(source)
+        val path = prepare_semantic_doc_source_v1(source)
         val output = path + ".md"
         expect(file_write(output, "previous document")).to_equal(true)
         val revision = sha256_text(source)
@@ -96,7 +97,7 @@ describe "verified semantic links in generated specifications":
     it "should preserve the old file and clean staging when the atomic provider cannot create a temporary output":
         step("Prepare the production input")
         val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
-        val path = robust_06_semantic_docs_setup_render_source(source)
+        val path = prepare_semantic_doc_source_v1(source)
         val directory = secure_temp_dir(get_temp_dir(), "semantic-render-").unwrap()
         # The admitted Linux filesystem supports a 255-byte leaf. Existing
         # atomic provider appends .tmp.pid.sequence, forcing staging open to
@@ -121,7 +122,7 @@ describe "verified semantic links in generated specifications":
     it "should recheck real source after rendering and bind successful publication to its exact revision":
         step("Prepare the production input")
         val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
-        val path = robust_06_semantic_docs_setup_render_source(source)
+        val path = prepare_semantic_doc_source_v1(source)
         val output = path + ".md"
         val previous = "previous verified page"
         expect(file_write(output, previous)).to_equal(true)
@@ -145,3 +146,57 @@ describe "verified semantic links in generated specifications":
         expect(published).to_contain("[sample.math.increment](" + uri + ")")
         expect(file_delete(path)).to_equal(true)
         expect(file_delete(output)).to_equal(true)
+
+fn check_semantic_doc_output_v1(output: text, uri: text, revision: text):
+    val rendered = file_read(output)
+    expect(rendered).to_contain("[sample.math.increment](" + uri + ")")
+    expect(rendered).to_contain("<!-- semantic-source-revision-sha256: " + revision + " -->")
+    expect(rendered.contains("[guessed_symbol](")).to_equal(false)
+
+describe "semantic declaration links through the actual SPipe command":
+    it "should publish authenticated declarations and preserve the page for unresolved stale and forged authority":
+        step("Prepare the production input")
+        val root = secure_temp_dir(get_temp_dir(), "semantic-spipe-cli-").unwrap()
+        val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
+        val source_file = root + "/math.spl"
+        val spec_file = root + "/increment_spec.spl"
+        val output_dir = root + "/manual"
+        val output = output_dir + "/increment_spec.md"
+        expect(file_write(source_file, source)).to_equal(true)
+        val revision = sha256_text(source)
+        val document = open_semantic_link_document_v1("pkg", "sample.math", source_file, revision).unwrap()
+        val uri = semantic_link_document_uri_v1(document, 0, true).unwrap()
+        val fixture = "describe \"increment\":\n    it \"should increment\":\n        \"\"\"\n        **Links:** " + uri + ", guessed_symbol\n        \"\"\"\n        expect(increment(1)).to_equal(2)\n"
+        expect(file_write(spec_file, fixture)).to_equal(true)
+        val options = ["spipe-docgen", spec_file, "--output", output_dir, "--no-index", "--source-file", source_file, "--package", "pkg", "--module", "sample.math", "--revision", revision]
+        step("Generate semantic declaration links through SPipe docgen")
+        val (out, err, code) = process_run_timeout("bin/simple", options, 30000)
+        expect(code).to_equal(0)
+        check_semantic_doc_output_v1(output, uri, revision)
+        val published = file_read(output)
+        step("Reject unresolved and forged declarations without replacing the page")
+        for bad_uri in [uri.replace(".increment~", ".missing~"), uri.replace("sample.math", "forged.math")]:
+            expect(file_write(spec_file, fixture.replace(uri, bad_uri))).to_equal(true)
+            val (bad_out, bad_err, bad_code) = process_run_timeout("bin/simple", options, 30000)
+            expect(bad_code).to_equal(1)
+            expect(file_read(output)).to_equal(published)
+        expect(file_write(spec_file, fixture)).to_equal(true)
+        expect(file_write(source_file, source + "# changed\n")).to_equal(true)
+        val (stale_out, stale_err, stale_code) = process_run_timeout("bin/simple", options, 30000)
+        expect(stale_code).to_equal(1)
+        expect(file_read(output)).to_equal(published)
+        step("Reject explicit semantic claims without source authority")
+        val (unbound_out, unbound_err, unbound_code) = process_run_timeout("bin/simple", ["spipe-docgen", spec_file, "--output", output_dir, "--no-index"], 30000)
+        expect(unbound_code).to_equal(1)
+        expect(file_read(output)).to_equal(published)
+        step("Reject incomplete authority before generation")
+        val (partial_out, partial_err, partial_code) = process_run_timeout("bin/simple", ["spipe-docgen", spec_file, "--output", output_dir, "--source-file", source_file], 30000)
+        expect(partial_code).to_equal(1)
+        expect(file_read(output)).to_equal(published)
+        step("Preserve legacy generation without explicit semantic claims")
+        expect(file_write(spec_file, fixture.replace(uri, "increment"))).to_equal(true)
+        val (legacy_out, legacy_err, legacy_code) = process_run_timeout("bin/simple", ["spipe-docgen", spec_file, "--output", output_dir, "--no-index"], 30000)
+        expect(legacy_code).to_equal(0)
+        expect(file_read(output)).to_contain("increment")
+        expect(file_read(output).contains("## Verified Declarations")).to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
