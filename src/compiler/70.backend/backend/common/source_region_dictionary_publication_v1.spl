@@ -1,0 +1,49 @@
+# Physical codec preconditions only; never a SOURCE admission receipt.
+# The actual owner-bound positive Get16 relation must be checked by the final
+# construction emission gate before either backend uses this codec.
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.backend.common.source_region_typed_struct_descriptor_v1.{source_region_value_layout_recipe_v1}
+
+enum SourceRegionDictionaryPublicationModeV1:
+    RawPointer
+    TaggedPassthrough
+
+struct SourceRegionDictionaryPublicationLayoutV1:
+    mode: SourceRegionDictionaryPublicationModeV1
+    nominal: SymbolId
+    layout_digest: text
+
+fn source_region_dictionary_publication_layout_v1(types: Dict<SymbolId, MirTypeDef>,
+    destination: MirType, source: MirType, physical_representation: i64
+) -> Result<SourceRegionDictionaryPublicationLayoutV1, text>:
+    if source.kind != MirTypeKind.I64:
+        return Err("SOURCE-DICTIONARY-PUBLICATION-WORD")
+    var mode = SourceRegionDictionaryPublicationModeV1.RawPointer
+    if physical_representation == 2:
+        mode = SourceRegionDictionaryPublicationModeV1.TaggedPassthrough
+    elif physical_representation != 1:
+        return Err("SOURCE-DICTIONARY-PUBLICATION-REPRESENTATION")
+    match destination.kind:
+        case Struct(symbol):
+            match source_region_value_layout_recipe_v1(types, symbol):
+                case Ok(digest):
+                    Ok(SourceRegionDictionaryPublicationLayoutV1(mode: mode,
+                        nominal: symbol, layout_digest: digest))
+                case Err(_): Err("SOURCE-DICTIONARY-PUBLICATION-LAYOUT")
+        case _: Err("SOURCE-DICTIONARY-PUBLICATION-NOMINAL")
+
+# Called only after the actual emitter has checked the owner-bound relation.
+# LLVM's preserved Get16 representation is already the raw data address.
+fn source_region_dictionary_publication_llvm_v1(layout: SourceRegionDictionaryPublicationLayoutV1,
+    destination: text, source: text) -> Result<text, text>:
+    if layout.mode != SourceRegionDictionaryPublicationModeV1.RawPointer:
+        return Err("SOURCE-DICTIONARY-PUBLICATION-LLVM-REPRESENTATION")
+    Ok("  {destination} = inttoptr i64 {source} to ptr")
+
+# Cranelift Get16 preserves the existing tag1 word; no OR, allocation or offset.
+fn source_region_dictionary_publication_cranelift_v1(layout: SourceRegionDictionaryPublicationLayoutV1,
+    source_value: i64) -> Result<i64, text>:
+    if layout.mode != SourceRegionDictionaryPublicationModeV1.TaggedPassthrough:
+        return Err("SOURCE-DICTIONARY-PUBLICATION-CRANELIFT-REPRESENTATION")
+    Ok(source_value)
