@@ -1,0 +1,61 @@
+"""P4/P6: the real forward weave reuses per-directory pointcut match shards."""
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.config.{Logger}
+use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.driver.cache.aop_match_cache_driver_v1.{AopMatchDriverStateV1,
+    aop_directory_facts_from_hir_v1, aop_weave_with_match_cache_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{pointcut_match_shard_compute_v1,
+    pointcut_selector_parse_v1}
+
+val FORWARDER = "fn submit_impl(n: i64) -> i64:\n    n + 1\n\nfn submit_view(n: i64) -> i64:\n    submit_impl(n)\n\n"
+val ADVICE_V1 = "\n@advice(forward, submit_view)\n@readonly\n@noalloc\n@bounded_time\nfn trace_submit():\n    val z: i64 = 0\n"
+val ADVICE_V2 = "\n@advice(forward, submit_view)\n@readonly\n@noalloc\n@bounded_time\nfn trace_submit():\n    val z: i64 = 1\n"
+val OTHER = "fn other_impl(n: i64) -> i64:\n    n\n\nfn other_view(n: i64) -> i64:\n    other_impl(n)\n"
+
+fn lower(src: text, path: text, name: text) -> HirModule:
+    val module = parse_full_frontend(src, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(module)
+
+fn modules_with(advice: text, b_src: text) -> Dict<text, HirModule>:
+    {"am_a": lower(FORWARDER + advice, "a/am_a.spl", "am_a"),
+     "am_b": lower(b_src, "b/am_b.spl", "am_b")}
+
+describe "aop_weave_with_match_cache_v1":
+    it "builds one complete facts shard per directory":
+        val dirs = aop_directory_facts_from_hir_v1(modules_with(ADVICE_V1, OTHER))
+        expect(dirs.len()).to_equal(2)
+        for d in dirs:
+            expect(d.complete).to_equal(true)
+    it "weaves like the legacy path and reuses shards on an advice-body edit":
+        val state = AopMatchDriverStateV1.create()
+        val m1 = modules_with(ADVICE_V1, OTHER)
+        expect(validate_aspect_contracts(m1).len()).to_equal(0)
+        expect(aop_weave_with_match_cache_v1(state, m1)).to_equal(1)
+        expect(state.shard_misses).to_equal(2)
+        expect(state.shard_hits).to_equal(0)
+        # Advice body edit: directory facts and selector unchanged -> all hits.
+        val m2 = modules_with(ADVICE_V2, OTHER)
+        expect(aop_weave_with_match_cache_v1(state, m2)).to_equal(1)
+        expect(state.shard_misses).to_equal(2)
+        expect(state.shard_hits).to_equal(2)
+        expect(state.fallbacks).to_equal(0)
+    it "a new matching forwarder in one directory misses only that shard":
+        val state = AopMatchDriverStateV1.create()
+        expect(aop_weave_with_match_cache_v1(state, modules_with(ADVICE_V1, OTHER))).to_equal(1)
+        val grown = modules_with(ADVICE_V1, OTHER + "\n" + FORWARDER)
+        expect(aop_weave_with_match_cache_v1(state, grown)).to_equal(2)
+        expect(state.shard_hits).to_equal(1)
+        expect(state.shard_misses).to_equal(3)
+    it "carries function attributes into facts so attr(...) selectors match":
+        val src = "@logged\nfn sv_impl(n: i64) -> i64:\n    n\n\n@logged\nfn sv_view(n: i64) -> i64:\n    sv_impl(n)\n\nfn plain_view(n: i64) -> i64:\n    sv_impl(n)\n"
+        val m: Dict<text, HirModule> = {"am_c": lower(src, "c/am_c.spl", "am_c")}
+        val dirs = aop_directory_facts_from_hir_v1(m)
+        val r = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("attr(logged)"), dirs[0])
+        expect(r.sorted_matching_ids).to_equal(["am_c::sv_view"])
