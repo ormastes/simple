@@ -1,0 +1,92 @@
+#!/bin/sh
+# P-F per-file knob transport: Stage 3 worker refuses knob-suffixed lanes it
+# does not accept, and the resume args hash equals the worker vector when
+# SIMPLE_FILE_WORKERS=1 is passed through as lane suffix "per-file:fw=1".
+# Only text slices of the real worker/resume scripts run; nothing is compiled.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-stage3-lane-pf.XXXXXX")
+case "$tmp" in "$temp_parent"/simple-stage3-lane-pf.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+worker_file="$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh"
+resume_file="$repo/scripts/bootstrap/resume-stage3-from-admitted.sh"
+
+# slice FILE START END INCLUDE_END: text from START up to END (END "" = EOF).
+slice() {
+  awk -v s="$2" -v e="$3" -v inc="$4" '
+    { buf = buf $0 "\n" }
+    END {
+      i = index(buf, s); if (i == 0) exit 3
+      rest = substr(buf, i)
+      if (e == "") { printf "%s", rest; exit 0 }
+      j = index(rest, e); if (j == 0) exit 3
+      n = j - 1; if (inc == "1") n += length(e)
+      printf "%s", substr(rest, 1, n)
+    }' "$1"
+}
+awk -v s='BOOTSTRAP_STAGE3_FACADE_PATH=' '{ buf = buf $0 "\n" } END { i = index(buf, s); if (i == 0) exit 3; printf "%s", substr(buf, 1, i - 1) }' "$worker_file" >"$tmp/prefix"
+slice "$worker_file" 'bootstrap_stage3_run_transcribed "$transcript"' '' 0 >"$tmp/recipe"
+slice "$resume_file" 'stage3_lowering_lane=per-file' 'stage3_cold_init_env=' 0 >"$tmp/lane"
+slice "$resume_file" 'stage3_args=$(bootstrap_stage3_args_sha256' 'src/app/cli/bootstrap_main.spl)' 1 >"$tmp/digest"
+
+{
+  cat "$tmp/prefix"
+  printf '%s\n' 'bootstrap_stage3_run_transcribed() { shift 6; printf "%s\0" "$@" >"$CONTROL_RECORD"; }'
+  printf '%s\n' 'timeout_args=' '[ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"'
+  cat "$tmp/recipe"
+} >"$tmp/worker.sh"
+
+aaaa=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+run_worker() { # lane record [env...]
+  lane=$1; rec=$2; shift 2
+  rm -f "$rec"
+  env -i PATH=/usr/bin:/bin CONTROL_RECORD="$rec" "$@" sh -c "$(cat "$tmp/worker.sh")" lane-test \
+    /fixture/transcript /fixture/root /fixture/log /fixture/home /fixture/tmp /usr/bin:/bin \
+    /fixture/admitted aarch64-apple-darwin llvm 10 600 "/fixture/cache with space" \
+    /fixture/runtime /fixture/candidate /fixture/progress /fixture/phase /fixture/memory \
+    fixture-id native none 4194304 "" "" "" 4096 v1 /fixture/admission "$aaaa" \
+    "" "" 1000 "$lane" >"$tmp/out" 2>"$tmp/err"
+}
+
+fail=0
+for lane in 'per-file:fw=2' 'per-file:mono=1'; do
+  rc=0; run_worker "$lane" "$tmp/vec" || rc=$?
+  if [ "$rc" -eq 64 ] && grep -q 'invalid lowering lane' "$tmp/err" && [ ! -e "$tmp/vec" ]; then
+    echo "PASS: worker refuses lane '$lane' before recording"
+  else
+    echo "FAIL: lane '$lane' rc=$rc" >&2; cat "$tmp/err" >&2; fail=1
+  fi
+done
+
+# Resume digest with SIMPLE_FILE_WORKERS=1 must equal the worker vector for
+# lane per-file:fw=1, minus the "--" separator and the admitted binary.
+{
+  printf '%s\n' 'set -eu' transcript=/fixture/transcript root=/fixture/root log=/fixture/log \
+    home=/fixture/home tmp=/fixture/tmp path=/usr/bin:/bin admitted=/fixture/admitted \
+    platform=aarch64-apple-darwin stage2_backend=llvm stage3_threads=10 timeout_seconds=600 \
+    "stage3_cache='/fixture/cache with space'" runtime=/fixture/runtime candidate=/fixture/candidate \
+    progress=/fixture/progress phase_profile=/fixture/phase memory_snapshot=/fixture/memory \
+    evidence_run_id=fixture-id stage3_requested_route=native stage3_fallback_route=none \
+    stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env= stage3_compiler_ceiling_env= \
+    resume_abi_policy=v1 stage2_admission=/fixture/admission "stage3_timeout_args='--timeout 600'"
+  cat "$tmp/lane"
+  printf '%s\n' 'bootstrap_stage3_args_sha256() { printf "%s\0" "$@" >"$CONTROL_RECORD"; }'
+  cat "$tmp/digest"
+} >"$tmp/resume.sh"
+rc=0
+env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/expected" SIMPLE_FILE_WORKERS=1 \
+  sh -c "$(cat "$tmp/resume.sh")" lane-test >"$tmp/out" 2>"$tmp/err" || rc=$?
+wrc=0; run_worker 'per-file:fw=1' "$tmp/actual" || wrc=$?
+if [ "$rc" -eq 0 ] && [ "$wrc" -eq 0 ] && [ -e "$tmp/expected" ] && [ -e "$tmp/actual" ]; then
+  tr '\0' '\n' <"$tmp/expected" >"$tmp/expected.txt"
+  tr '\0' '\n' <"$tmp/actual" | awk 'skip > 0 { skip--; next } !done && $0 == "--" { done = 1; skip = 1; next } { print }' >"$tmp/actual.txt"
+  if cmp -s "$tmp/expected.txt" "$tmp/actual.txt" && grep -q 'SIMPLE_FILE_WORKERS=1' "$tmp/actual.txt"; then
+    echo "PASS: resume hash vector equals worker vector for per-file:fw=1"
+  else
+    echo "FAIL: per-file:fw=1 vector mismatch" >&2; diff "$tmp/expected.txt" "$tmp/actual.txt" >&2 || true; fail=1
+  fi
+else
+  echo "FAIL: per-file:fw=1 resume rc=$rc worker rc=$wrc" >&2; cat "$tmp/err" >&2; fail=1
+fi
+exit "$fail"

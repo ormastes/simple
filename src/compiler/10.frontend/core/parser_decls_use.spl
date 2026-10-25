@@ -33,7 +33,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_pa
 use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size}
 use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{par_prof_enabled}
-use compiler.frontend.core.lexer.{lex_token_start_get}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_source_slice}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
@@ -468,6 +468,30 @@ fn parse_var_decl() -> i64:
 
 # ===== Class/Impl Method Parsing =====
 
+fn method_name_is_implicitly_static(name: text) -> bool:
+    # `with_*` and `init` are deliberately excluded: builders (`with_fix`) and
+    # initialisers are routinely called on an instance. Builders use
+    # `self`, and the body check below is the only guard against promotion.
+    name == "new" or name == "create" or name == "default" or name.starts_with("from_")
+
+fn source_mentions_self_word(source: text) -> bool:
+    # Conservative: `self` anywhere (code, comment or string) keeps the
+    # method an instance method, exactly as before this promotion existed.
+    var pos = source.find("self")
+    while pos >= 0:
+        val before = if pos == 0: " " else: source[pos - 1:pos]
+        val after = if pos + 4 >= source.len(): " " else: source[pos + 4:pos + 5]
+        if not text_is_ident_char(before) and not text_is_ident_char(after):
+            return true
+        val next = source[pos + 4:].find("self")
+        if next < 0:
+            return false
+        pos = pos + 4 + next
+    false
+
+fn text_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
 fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
     parse_class_body_method_typed(struct_name, is_static, is_me, -1)
 
@@ -568,19 +592,35 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
     representation_declaration_header_v1(representation_owner)
     _pp = parse_prof_mark("method:signature", _pp)
     var body: [i64] = []
+    var body_mentions_self = true
     if par_kind_get() == 161:
+        val body_source_start = lex_token_start_get()
         parser_advance()
         body = parse_block()
+        if method_name_is_implicitly_static(method_name):
+            body_mentions_self = source_mentions_self_word(lex_source_slice(body_source_start, lex_token_start_get()))
     _pp = parse_prof_mark("method:body", _pp)
 
     val mangled_name: text = struct_name + "__" + method_name
     # static_flag: 0=fn (immutable self), 1=static (no self), 2=me (mutable self)
     var static_flag: i64 = 0
-    if is_static:
+    # Implicitly static constructor names (doc/07_guide/language/syntax.md):
+    # `fn new(...)` in an impl with no explicit `self`/`me` and a body that
+    # never mentions `self` is a static method. Before this it got a
+    # synthesized `self` param (SymbolKind.Method), so `Type.new(...)` hit
+    # MIR's static-nominal arm, which only accepts a Function, and failed as
+    # "unresolved method call: new" -- and every builder chained on the
+    # const-0 placeholder (`.with_fix(..)`) failed with it.
+    var method_is_static = is_static
+    if not is_static and not is_me and not body_mentions_self:
+        val explicit_receiver = param_names.len() > 0 and (param_names[0] == "self" or param_names[0] == "me")
+        if not explicit_receiver:
+            method_is_static = true
+    if method_is_static:
         static_flag = 1
     if is_me:
         static_flag = 2
-    if not is_static:
+    if not method_is_static:
         var self_type = 0
         var self_type_id = named_type_find(struct_name)
         # An extension `impl Imported:` names a type declared in ANOTHER file,
