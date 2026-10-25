@@ -15,6 +15,7 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.backend.common.source_region_descriptor_v1.{source_region_descriptor_slots_v1, source_region_descriptor_extent_v1, source_region_llvm_descriptor_v1, source_region_resolve_struct_slots_v1}
+use compiler.backend.common.source_region_descriptor_v1.{source_region_dictionary_descriptor_slots_v1, source_region_llvm_dictionary_descriptor_v1}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -631,6 +632,27 @@ impl MirToLlvm:
                     self.value_types[target_name] = "ptr"
                 else:
                     self.codegen_error("C4 publication requires a destination")
+            case "source_region_dictionary_descriptor_v1":
+                if val target = dest:
+                    if self.native_int() != "i64" or self.get_local_type(target.id) != "i64":
+                        self.codegen_error("C4 dictionary descriptor requires a qualified i64 address destination")
+                        return
+                    match source_region_dictionary_descriptor_slots_v1(args, 1):
+                        case Ok(slots):
+                            val descriptor_name = self.source_region_descriptor_binding_v1(target.id)
+                            match source_region_llvm_dictionary_descriptor_v1(descriptor_name, slots):
+                                case Ok(declaration):
+                                    if self.bootstrap_string_globals_active:
+                                        llvm_bootstrap_string_globals_add(declaration)
+                                    else:
+                                        self.string_globals = self.string_globals.push(declaration)
+                                    val target_name = self.get_local(target.id)
+                                    self.builder.emit("  {target_name} = ptrtoint ptr @{descriptor_name} to i64")
+                                    self.value_types[target_name] = "i64"
+                                case Err(_): self.codegen_error("C4 dictionary descriptor has an invalid entry template")
+                        case Err(_): self.codegen_error("C4 dictionary descriptor requires a compiler ordinary Struct token")
+                else:
+                    self.codegen_error("C4 dictionary descriptor requires an address destination")
             case "source_region_struct_descriptor_v1":
                 if val target = dest:
                     match source_region_descriptor_slots_v1(args):
