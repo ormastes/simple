@@ -9,7 +9,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.*
-use std.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_bytes}
+use std.io_runtime.{env_get_nullable, env_set, file_read_bytes}
+use std.nogc_sync_mut.io_runtime.{env_remove_process}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_size_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
@@ -20,6 +21,16 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
 fn llvm_scope_restore_env(key: text, previous: text):
     if previous == nil: env_remove_process(key)
     else: env_set(key, previous)
+
+fn llvm_scope_same_bytes(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index: i64 = 0
+    while index < left.len():
+        val left_byte: u8 = left[index]
+        val right_byte: u8 = right[index]
+        if left_byte != right_byte: return false
+        index = index + 1
+    true
 
 fn llvm_scope_string_module() -> MirModule:
     val ptr_type = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
@@ -80,7 +91,7 @@ describe "LLVM direct object-path translation scope":
         defer llvm_scope_restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
         expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
         val directory = secure_temp_dir_raw("/tmp", "simple-llvm-scope")
-        expect(directory != "").to_equal(true)
+        expect(directory.len()).to_be_greater_than(0)
         defer dir_remove(directory, true)
         val module = llvm_scope_string_module()
         val options = compileoptions_default_options()
@@ -96,13 +107,14 @@ describe "LLVM direct object-path translation scope":
         expect(transient_array_scope_state_v1()).to_equal(0)
         expect(file_size_raw(first)).to_be_greater_than(32)
         val first_bytes = file_read_bytes(first)
+        expect(first_bytes.len()).to_be_greater_than(32)
         # No debug info; identical module name/target/options fix object metadata.
         for mode in ["0", "1"]:
             expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", mode)).to_equal(true)
             val repeated = "{directory}/repeat-{mode}.o"
             expect(llvm_compile_module_direct_to_path(options, module, repeated,
                 diagnostic, Some(config))).to_equal(0)
-            expect(file_read_bytes(repeated)).to_equal(first_bytes)
+            expect(llvm_scope_same_bytes(file_read_bytes(repeated), first_bytes)).to_equal(true)
             expect(config.triple.arch).to_equal(original_arch)
             expect(module.name).to_equal("test.llvm.scope_string")
             expect(transient_array_scope_state_v1()).to_equal(0)
@@ -122,7 +134,7 @@ describe "LLVM direct object-path translation scope":
         expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "1")).to_equal(true)
         expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
         val directory = secure_temp_dir_raw("/tmp", "simple-llvm-outer-scope")
-        expect(directory != "").to_equal(true)
+        expect(directory.len()).to_be_greater_than(0)
         defer dir_remove(directory, true)
         val module = llvm_scope_string_module()
         val options = compileoptions_default_options()
