@@ -92,6 +92,14 @@ fn source_request_reject_protected_v1(state: SourceRequestFlowV1, operand: MirOp
         return Err("SOURCE-PIN-ESCAPE: retained slot/context copied, projected or transported")
     Ok(())
 
+fn source_request_expect_borrow_v1(state: SourceRequestFlowV1, operand: MirOperand,
+        expected: i64) -> Result<(), text>:
+    match operand.kind:
+        case MirOperandKind.Copy(local):
+            if expected >= 0 and source_request_root_v1(state, local.id) == expected: return Ok(())
+        case _: ()
+    Err("SOURCE-PIN-BORROW: exact nonconsuming protected operand required")
+
 fn source_request_check_previous_cleanup_v1(state: SourceRequestFlowV1) -> Result<(), text>:
     if state.previous_cleanup < 0: return Ok(())
     val status = state.statuses.get(state.previous_cleanup) ?? 0
@@ -221,6 +229,7 @@ impl MirLowering:
                         if (state.phase != 0 or state.context >= 0 or field != 0 or
                                 source_request_operand_root_v1(state, base) != state.slot or source_request_provenance_defined_v1(state, dest.id)):
                             return Err("SOURCE-PIN-FIELD: only one initial scoped context borrow is allowed")
+                        source_request_expect_borrow_v1(state, base, state.slot)?
                         var typed = 0
                         for local in function.locals:
                             if local.id.id == dest.id and serialize_mir_type(local.type_) == serialize_mir_type(context_type): typed = typed + 1
@@ -257,6 +266,7 @@ impl MirLowering:
                         if target.id == producer.id or target.id == consumer.id:
                             if state.context < 0 or args.len() == 0 or source_request_operand_root_v1(state, args[args.len() - 1]) != state.context:
                                 return Err("SOURCE-PIN-BORROW: direct producer/consumer lacks exact context")
+                            source_request_expect_borrow_v1(state, args[args.len() - 1], state.context)?
                             for arg_index in 0..args.len() - 1: source_request_reject_protected_v1(state, args[arg_index])?
                             if target.id == producer.id:
                                 if state.phase != 0: return Err("SOURCE-PIN-ORDER: producer invoked more than once or after cleanup")
@@ -273,6 +283,7 @@ impl MirLowering:
                         elif (target.id == lifecycle.read_end_pinned.id or target.id == lifecycle.revoke_pinned.id or target.id == lifecycle.release_pinned.id):
                             if args.len() != 1 or source_request_operand_root_v1(state, args[0]) != state.slot:
                                 return Err("SOURCE-PIN-CLEANUP: exact retained slot borrow required")
+                            source_request_expect_borrow_v1(state, args[0], state.slot)?
                             source_request_check_previous_cleanup_v1(state)?
                             if target.id == lifecycle.read_end_pinned.id:
                                 val failed_producer = state.phase == 1 and (state.statuses.get(state.producer_result) ?? 0) == 2 and state.first_error == state.producer_result
@@ -294,6 +305,7 @@ impl MirLowering:
                         elif target.id == lifecycle.retain_first_error.id or target.id == lifecycle.retain_cleanup_error.id:
                             if args.len() != 2 or source_request_operand_root_v1(state, args[0]) != state.slot:
                                 return Err("SOURCE-PIN-ERROR: retained error lacks exact owned slot")
+                            source_request_expect_borrow_v1(state, args[0], state.slot)?
                             val error_source = state.payloads.get(source_request_operand_root_v1(state, args[1])) ?? -1
                             if error_source < 0 or (state.statuses.get(error_source) ?? 0) != 2:
                                 return Err("SOURCE-PIN-ERROR: actual failing Result payload provenance is absent")
