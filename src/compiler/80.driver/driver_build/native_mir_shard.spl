@@ -111,21 +111,43 @@ pub fn native_mir_shard_lpt_order_v1(names: [text], weights: [i64]) -> [i64]:
 #   "link"     -- aggregate PASS; the final worker links from the ledger.
 #   "fallback" -- ONLY when the pass failed (code != 0) with no module
 #                 verdict (failed_modules == 0), no module ever claimed
-#                 (total_claims == 0) and every worker reaped (all_stopped):
-#                 the workers never got a usable HIR inventory/cache, so the
-#                 final worker lowers MIR in process (unsharded). That is the
-#                 ordinary path: it can only cost time, never admit a partial
-#                 ledger.
+#                 (total_claims == 0), every worker reaped, and every
+#                 expected owner published completion plus the typed
+#                 unsupported-lane fallback receipt. The final worker then
+#                 lowers MIR in process (unsharded); it can never admit a
+#                 partial ledger.
 #   "fail"     -- everything else, and the build stops: a module failure, a
 #                 crash or timeout after claiming (a claim with no terminal),
 #                 an unreaped live worker, or an unreadable ledger (-1).
 pub fn native_mir_shard_outcome_v1(aggregate_code: i64, failed_modules: i64,
-        total_claims: i64, all_stopped: bool) -> text:
+        total_claims: i64, all_stopped: bool, protocol_complete: bool,
+        recoverable_no_claim: bool) -> text:
     if aggregate_code == 0:
         return "link"
-    if failed_modules == 0 and total_claims == 0 and all_stopped:
+    if failed_modules == 0 and total_claims == 0 and all_stopped and
+            protocol_complete and recoverable_no_claim:
         return "fallback"
     "fail"
+
+# Invocation/owner-bound witness for the one supported zero-claim recovery:
+# a completed worker explicitly refused MIR sharding because its output lane
+# is unsupported. Generic worker exits and HIR failures never write this file.
+fn native_mir_shard_fallback_record_v1(queue: text, owner: text) -> text:
+    "{queue}/{sha256_text(owner)}.recoverable-fallback"
+
+pub fn native_mir_shard_publish_unsupported_fallback_v1(queue: text, owner: text) -> bool:
+    if queue == "" or owner == "": return false
+    val path = native_mir_shard_fallback_record_v1(queue, owner)
+    val temporary = "{path}.{getpid()}.tmp"
+    val record = "simple-mir-shard-recoverable-fallback-v1\n{owner}\nUNSUPPORTED_LANE\n"
+    if not file_write(temporary, record): return false
+    if file_rename(temporary, path): true else:
+        file_exists(path) and file_read(path) == record
+
+pub fn native_mir_shard_has_unsupported_fallback_v1(queue: text, owner: text) -> bool:
+    if queue == "" or owner == "": return false
+    file_read(native_mir_shard_fallback_record_v1(queue, owner)) ==
+        "simple-mir-shard-recoverable-fallback-v1\n{owner}\nUNSUPPORTED_LANE\n"
 
 fn native_mir_shard_record_base_v1(queue: text, module_name: text) -> text:
     "{queue}/{sha256_text(module_name)}"

@@ -33,7 +33,7 @@ use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenState
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_publish_unsupported_fallback_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
@@ -564,7 +564,14 @@ impl CompilerDriver:
         if not self.native_mir_shard_eligible_v1():
             val _blocked = hir_shard_recovery_block(queue, "MIR sharding is unsupported for this build lane")
             val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
+            # Go-to-end may have recovered HIR errors and cleared ctx errors
+            # before MIR admission. Such a worker is collecting real semantic
+            # failures, not a clean unsupported-lane fallback candidate.
+            val fallback_witness = self.go_to_end.len() == 0 and self.ctx.error_count_value == 0 and
+                native_mir_shard_publish_unsupported_fallback_v1(queue, owner)
             val _completed = hir_shard_recovery_complete(queue, owner)
+            if not fallback_witness:
+                return CompileResult.CodegenError("MIR unsupported-lane fallback receipt could not be published")
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
         var shard_state = NativeStagedCodegenStateV1.begin(0)
         shard_state.active = true

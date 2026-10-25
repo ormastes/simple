@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+main=src/app/cli/native_build_main.spl
+mir=src/compiler/80.driver/driver_build/native_mir_shard.spl
+pipeline=src/compiler/80.driver/driver_aot_pipeline.spl
+
+require() {
+    pattern=$1
+    file=$2
+    if ! grep -Fq "$pattern" "$file"; then
+        echo "FAIL: missing '$pattern' in $file" >&2
+        exit 1
+    fi
+}
+
+# The coordinator consumes owner-bound fallback evidence only after the
+# worker completion receipt. The compiler emits that evidence solely from its
+# explicit unsupported-output lane branch.
+require 'native_mir_shard_has_unsupported_fallback_v1(queue_dir, owner)' "$main"
+require 'recoverable_fallback_receipts == workers_started' "$main"
+require 'workers_started == count or unsupported_short_circuit' "$main"
+require 'recoverable_no_claim)' "$main"
+require 'native_mir_shard_publish_unsupported_fallback_v1(queue, owner)' "$pipeline"
+require 'self.go_to_end.len() == 0 and self.ctx.error_count_value == 0' "$pipeline"
+require 'simple-mir-shard-recoverable-fallback-v1' "$mir"
+require 'protocol_complete and recoverable_no_claim' "$mir"
+
+outcome() {
+    code=$1 failures=$2 claims=$3 stopped=$4 protocol=$5 recoverable=$6
+    if [ "$code" -eq 0 ]; then echo link
+    elif [ "$failures" -eq 0 ] && [ "$claims" -eq 0 ] &&
+            [ "$stopped" = 1 ] && [ "$protocol" = 1 ] && [ "$recoverable" = 1 ]; then
+        echo fallback
+    else
+        echo fail
+    fi
+}
+
+# Observed semantic HIR failure: worker exits before its MIR protocol and has
+# no typed unsupported-lane receipt, so it must not trigger the second pass.
+[ "$(outcome 1 0 0 1 0 0)" = fail ]
+# A worker that completed the explicit unsupported-output path remains a
+# recoverable zero-claim fallback.
+[ "$(outcome 1 0 0 1 1 1)" = fallback ]
+# A failed module terminal remains fatal even if fallback evidence is present.
+[ "$(outcome 1 1 0 1 1 1)" = fail ]
+
+echo "PASS: MIR zero-claim fallback requires explicit recoverable worker evidence"
