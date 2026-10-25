@@ -1,0 +1,94 @@
+# Compiler-private typed dictionary facade. Unsafe inputs require actual typed
+# capture/descriptor provenance; this leaf does not issue SOURCE admission.
+use compiler.common.source_region_context_v1.*
+
+@unsafe(reason: "native dictionary owner observation", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_observation_bound_v1() -> i64
+@unsafe(reason: "typed born dictionary descriptor required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_new_v1(control: i64, generation: i64, epoch: i64,
+    descriptor: i64, capacity: i64, work: i64) -> i64
+@unsafe(reason: "typed same-region dictionary edge required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_put_v1(control: i64, generation: i64, epoch: i64,
+    dictionary: i64, key: i64, value: i64, work: i64) -> i64
+@unsafe(reason: "typed dictionary owner required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_remove_v1(control: i64, generation: i64, epoch: i64,
+    dictionary: i64, key: i64, work: i64) -> i64
+@unsafe(reason: "typed dictionary and authoritative saved epoch required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_get_v1(control: i64, generation: i64, epoch: i64,
+    dictionary: i64, key: i64, work: i64) -> i64
+
+fn source_region_dictionary_live_v1(context: SourceRegionContextV1) -> Result<(), SourceRegionErrorV1>:
+    if context == nil: return Err(SourceRegionErrorV1.Incomplete)
+    if not context.live_ or context.revoked_: return Err(SourceRegionErrorV1.Closed)
+    if context.account == nil: return Err(SourceRegionErrorV1.Incomplete)
+    if context.account.is_closed(): return Err(SourceRegionErrorV1.Closed)
+    Ok(())
+
+@unsafe(reason: "prepaid dictionary owner bound observations", capabilities: [ffi, raw_ptr])
+fn source_region_dictionary_prepare_v1(context: SourceRegionContextV1,
+        operation: i64, dictionary: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    source_region_reserve_v1(context.account, 1)?
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_dict_observation_bound_v1()
+    val allowance = source_region_value_v1(raw)?
+    if allowance <= 0: return Err(SourceRegionErrorV1.Incomplete)
+    if allowance > 3074457345618258602: return Err(SourceRegionErrorV1.Capacity)
+    # Each metric may authenticate dictionary membership. All three lookups
+    # are prepaid before the first one; native code revalidates the allowance.
+    source_region_reserve_v1(context.account, 3 * allowance)?
+    # Reuse the common metric/error/reservation path, including its three
+    # fixed request-overhead units in addition to prepaid owner lookup work.
+    source_region_prepare_v1(context.account, operation, dictionary, allowance)
+
+@unsafe(reason: "compiler-owned readonly dictionary descriptor required", capabilities: [ffi, raw_ptr])
+pub fn source_region_dict_new_v1(context: SourceRegionContextV1,
+        descriptor: i64, capacity: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    val epoch = source_region_stamp_v1(context)?
+    val work = source_region_prepare_v1(context.account, 13, descriptor, capacity)?
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_dict_new_v1(context.native_control, context.generation,
+            epoch, descriptor, capacity, work)
+    val dictionary = source_region_value_v1(raw)?
+    if dictionary == 0: return Err(SourceRegionErrorV1.Incomplete)
+    Ok(dictionary)
+
+@unsafe(reason: "actual typed dictionary and same-region child provenance required", capabilities: [ffi, raw_ptr])
+pub fn source_region_dict_put_v1(context: SourceRegionContextV1,
+        dictionary: i64, key: i64, value: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    # Mutation obtains a current epoch; it never refreshes a saved read view.
+    val epoch = source_region_stamp_v1(context)?
+    val work = unsafe(capabilities: [ffi, raw_ptr]):
+        source_region_dictionary_prepare_v1(context, 14, dictionary)?
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_dict_put_v1(context.native_control, context.generation,
+            epoch, dictionary, key, value, work)
+    source_region_value_v1(raw)
+
+@unsafe(reason: "actual typed dictionary provenance required", capabilities: [ffi, raw_ptr])
+pub fn source_region_dict_remove_v1(context: SourceRegionContextV1,
+        dictionary: i64, key: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    val epoch = source_region_stamp_v1(context)?
+    val work = unsafe(capabilities: [ffi, raw_ptr]):
+        source_region_dictionary_prepare_v1(context, 15, dictionary)?
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_dict_remove_v1(context.native_control, context.generation,
+            epoch, dictionary, key, work)
+    source_region_value_v1(raw)
+
+@unsafe(reason: "actual typed dictionary and retained epoch authority required", capabilities: [ffi, raw_ptr])
+pub fn source_region_dict_get_v1(context: SourceRegionContextV1,
+        expected_epoch: i64, dictionary: i64, key: i64) -> Result<Option<i64>, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    # A read MUST use its caller's authoritative epoch. No fresh stamp here.
+    val work = unsafe(capabilities: [ffi, raw_ptr]):
+        source_region_dictionary_prepare_v1(context, 16, dictionary)?
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_dict_get_v1(context.native_control, context.generation,
+            expected_epoch, dictionary, key, work)
+    val value = source_region_value_v1(raw)?
+    if value == 0: return Ok(None)
+    Ok(Some(value))

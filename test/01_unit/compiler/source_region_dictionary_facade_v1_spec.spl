@@ -1,0 +1,193 @@
+# Native private-facade fixtures, authored UNRUN. Owned descriptor buffers are
+# initialized once and remain unchanged until teardown; they are NOT compiler
+# seals, affine pin receipts, or full SOURCE acceptance evidence.
+use std.spec.{describe, it, expect}
+use compiler.common.loop_resource_account_v1.*
+use compiler.common.source_region_context_v1.*
+use compiler.common.source_region_dictionary_v1.*
+
+@unsafe(reason: "owned native fixture storage", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(bytes: i64) -> i64
+@unsafe(reason: "owned native fixture storage", capabilities: [ffi, raw_ptr])
+extern fn rt_free(pointer: i64)
+@unsafe(reason: "initialize owned fixture descriptor once", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(pointer: i64, offset: i64, value: i64) -> i64
+@unsafe(reason: "actual native fixture allocation scope", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "retire actual fixture dictionary and children", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "prepaid fixture observation", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_observation_bound_v1() -> i64
+@unsafe(reason: "prepaid fixture observation", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_stamp_v1(control: i64, generation: i64, work: i64) -> i64
+@unsafe(reason: "prepaid fixture content observation", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_dict_get_v1(control: i64, generation: i64, epoch: i64,
+    dictionary: i64, key: i64, work: i64) -> i64
+
+@unsafe(reason: "prepaid registry-guarded fixture teardown", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_close_v1(control: i64, generation: i64, work: i64) -> i64
+@unsafe(reason: "prepaid registry-guarded fixture teardown", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_release_v1(control: i64, generation: i64, work: i64) -> i64
+
+class DictionaryFacadeFixtureV1:
+    account: MirLoopResourceAccountV1
+    context: SourceRegionContextV1
+    dictionary: i64
+    child: i64
+    other_child: i64
+    dict_descriptor: i64
+    dict_rows: i64
+    struct_descriptor: i64
+    struct_rows: i64
+
+@unsafe(reason: "owned stable native fixture descriptor", capabilities: [ffi, raw_ptr])
+fn dictionary_fixture_words_v1(words: [i64]) -> i64:
+    val pointer = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(words.len() * 8)
+    expect(pointer).to_be_greater_than(0)
+    for index in 0..words.len():
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i64(pointer, index * 8, words[index])
+    pointer
+
+@unsafe(reason: "real born dictionary/children without SOURCE admission", capabilities: [ffi, raw_ptr])
+fn dictionary_fixture_v1() -> DictionaryFacadeFixtureV1:
+    val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+    val context = source_region_create_v1(account).unwrap()
+    val sr = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([0, 8, 1, 0])
+    val sd = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([1, 1, 8, 1, sr, 1])
+    val dr = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([0, 8, 1, 0, 8, 8, 2, 1])
+    val dd = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([1, 4, 64, 2, dr, 1])
+    val started = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_begin()
+    expect(started).to_equal(true)
+    val child = source_region_alloc_v1(context, sd, 1).unwrap()
+    val other = source_region_alloc_v1(context, sd, 1).unwrap()
+    val before = account.snapshot()
+    val dictionary = unsafe(capabilities: [ffi, raw_ptr]): source_region_dict_new_v1(context, dd, 0).unwrap()
+    expect(account.snapshot().work_used - before.work_used).to_be_greater_than(6)
+    expect(account.snapshot().state_fields - before.state_fields).to_be_greater_than(0)
+    expect(account.snapshot().output_bytes - before.output_bytes).to_be_greater_than(0)
+    expect(context.account.snapshot().work_used).to_equal(account.snapshot().work_used)
+    DictionaryFacadeFixtureV1(account: account, context: context, dictionary: dictionary,
+        child: child, other_child: other, dict_descriptor: dd, dict_rows: dr,
+        struct_descriptor: sd, struct_rows: sr)
+
+@unsafe(reason: "retire real native fixture ownership", capabilities: [ffi, raw_ptr])
+fn dictionary_fixture_finish_v1(fixture: DictionaryFacadeFixtureV1):
+    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    expect(ended).to_equal(true)
+    # Ordinary fixture teardown uses charged registry-guarded operations.
+    source_region_close_v1(fixture.context).unwrap()
+    source_region_release_v1(fixture.context).unwrap()
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_free(fixture.dict_descriptor)
+        rt_free(fixture.dict_rows)
+        rt_free(fixture.struct_descriptor)
+        rt_free(fixture.struct_rows)
+
+describe "SOURCE dictionary shared-account facade":
+    it "charges the shared owner and preserves actual missing/insert/remove results":
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        val initial = fixture.account.snapshot()
+        val epoch = source_region_stamp_v1(fixture.context).unwrap()
+        source_region_reserve_v1(fixture.account, 1).unwrap()
+        val lookup_allowance = unsafe(capabilities: [ffi, raw_ptr]): rt_source_region_dict_observation_bound_v1()
+        expect(lookup_allowance).to_be_greater_than(0)
+        expect(lookup_allowance).to_be_less_than(3074457345618258602)
+        val before_get = fixture.account.snapshot()
+        val absent = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_get_v1(fixture.context, epoch, fixture.dictionary, 7).unwrap()
+        expect(absent).to_equal(None)
+        expect(fixture.account.snapshot().work_used - before_get.work_used).to_be_greater_than(4 + 3 * lookup_allowance)
+        val inserted = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(fixture.context, fixture.dictionary, 7, fixture.child).unwrap()
+        expect(inserted).to_equal(1)
+        val present_epoch = source_region_stamp_v1(fixture.context).unwrap()
+        val present = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_get_v1(fixture.context, present_epoch, fixture.dictionary, 7).unwrap()
+        expect(present).to_equal(Some(fixture.child))
+        expect(fixture.account.snapshot().work_used - initial.work_used).to_be_greater_than(9)
+        expect(fixture.context.account.snapshot().work_used).to_equal(fixture.account.snapshot().work_used)
+        fixture.context.account.reserve(11).unwrap()
+        val alias_view = fixture.context.account.snapshot().work_used
+        expect(fixture.account.snapshot().work_used).to_equal(alias_view)
+        val removed = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_remove_v1(fixture.context, fixture.dictionary, 7).unwrap()
+        expect(removed).to_equal(1)
+        val missing = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_remove_v1(fixture.context, fixture.dictionary, 7).unwrap()
+        expect(missing).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_finish_v1(fixture)
+
+    it "uses the supplied saved epoch rather than laundering a stale read":
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(fixture.context, fixture.dictionary, 3, fixture.child).unwrap()
+        val saved = source_region_stamp_v1(fixture.context).unwrap()
+        source_region_alias_write_v1(fixture.context, fixture.child, 0, 29).unwrap()
+        val stale = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_get_v1(fixture.context, saved, fixture.dictionary, 3)
+        expect(stale).to_equal(Err(SourceRegionErrorV1.Stale))
+        unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_finish_v1(fixture)
+
+    it "rejects a real foreign region context without changing the dictionary":
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        # The foreign control shares the SAME invocation account.
+        val foreign = source_region_create_v1(fixture.account).unwrap()
+        val before = source_region_stamp_v1(fixture.context).unwrap()
+        val refused = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(foreign, fixture.dictionary, 5, fixture.child)
+        expect(refused).to_equal(Err(SourceRegionErrorV1.ForeignOwner))
+        expect(source_region_stamp_v1(fixture.context).unwrap()).to_equal(before)
+        val absent = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_get_v1(fixture.context, before, fixture.dictionary, 5).unwrap()
+        expect(absent).to_equal(None)
+        source_region_close_v1(foreign).unwrap()
+        source_region_release_v1(foreign).unwrap()
+        unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_finish_v1(fixture)
+
+    it "refuses one unit below mutation observation cost with unchanged contents and epoch":
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(fixture.context, fixture.dictionary, 1, fixture.child).unwrap()
+        val saved = source_region_stamp_v1(fixture.context).unwrap()
+        # Reserve every later observation/teardown attempt on this same account
+        # BEFORE exhaustion. No replacement account or restored credit exists.
+        val stamp_work = source_region_prepare_v1(fixture.account, 4).unwrap()
+        source_region_reserve_v1(fixture.account, 1).unwrap()
+        val allowance = unsafe(capabilities: [ffi, raw_ptr]): rt_source_region_dict_observation_bound_v1()
+        expect(allowance).to_be_greater_than(0)
+        expect(allowance).to_be_less_than(3074457345618258603)
+        source_region_reserve_v1(fixture.account, 3 * allowance).unwrap()
+        val read_work = source_region_prepare_v1(fixture.account, 16, fixture.dictionary, allowance).unwrap()
+        val close_work = source_region_prepare_v1(fixture.account, 10).unwrap()
+        val release_work = source_region_prepare_v1(fixture.account, 11).unwrap()
+        val remaining = fixture.account.remaining(MirLoopResourceKindV1.Work)
+        expect(remaining).to_be_greater_than(2)
+        fixture.account.reserve(remaining - 2).unwrap()
+        val before = fixture.account.snapshot()
+        # The mutation's initial stamp requires three fixed bound requests.
+        val refused = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(fixture.context, fixture.dictionary, 1, fixture.other_child)
+        expect(refused).to_equal(Err(SourceRegionErrorV1.Capacity))
+        expect(fixture.account.snapshot().work_used).to_equal(before.work_used)
+        expect(fixture.context.account.snapshot().work_used).to_equal(before.work_used)
+        val observed_epoch = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_stamp_v1(fixture.context.native_control, fixture.context.generation, stamp_work)
+        expect(observed_epoch).to_equal(saved)
+        val observed_child = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_dict_get_v1(fixture.context.native_control, fixture.context.generation,
+                saved, fixture.dictionary, 1, read_work)
+        expect(observed_child).to_equal(fixture.child)
+        val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+        expect(ended).to_equal(true)
+        val closed = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_close_v1(fixture.context.native_control, fixture.context.generation, close_work)
+        expect(closed).to_equal(0)
+        val released = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_release_v1(fixture.context.native_control, fixture.context.generation, release_work)
+        expect(released).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_free(fixture.dict_descriptor)
+            rt_free(fixture.dict_rows)
+            rt_free(fixture.struct_descriptor)
+            rt_free(fixture.struct_rows)
