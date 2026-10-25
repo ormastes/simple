@@ -329,8 +329,15 @@ int64_t rt_source_region_dict_get_v1(int64_t c,int64_t g,int64_t e,int64_t d,int
 
 static void rt_core_source_dict_retire_locked_v1(RtCoreDict* d) {
     RtCoreSourceDictBackingV1* b=sd_backing(d);
+    if (b->abi!=1 || b->dictionary!=(uintptr_t)d) {
+        /* Registry erasure proved only this header belongs to the retiring
+         * native owner. An unclassified copied header cannot free or retire
+         * another dictionary's backing/pin. Safe clone/transport is unadmitted. */
+        d->entries=NULL;
+        return;
+    }
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (b->abi==1 && b->dictionary==(uintptr_t)d && b->control>0) {
+    if (b->control>0) {
         rt_source_region_native_owner_retire_v1(b->control,b->generation);
         b->control=0;
     }
