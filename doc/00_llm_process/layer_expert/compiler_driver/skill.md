@@ -38,6 +38,7 @@ failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
 
 ## Role
 - BSM P2: `CompilerDriver.compile()` opens a `BuildSession` (`ctx.session`, log `build-session: id=<S>`) before source loading; HIR lowering publishes flat HIR rows via `driver_publish_flat_hir_row_v1` (adopt-then-append with a session, legacy promote without).
+- BSM P6: `compile()` = begin -> `compile_in_session_v1()` -> `session.end(session_kept_values_v1(result))`. Callers reading `driver.ctx` products after compile (generate_headers, collection-plan explain, cold full-index) set `ctx.config["build-session-retain-products"]="1"`; any other post-compile ctx read points into freed session memory.
 
 Own source discovery, import closure, phase orchestration, execution-mode
 selection, and compiler-driver performance under `src/compiler/80.driver/`.
