@@ -1,0 +1,9 @@
+# Windows memory headroom provider returns three bytes
+
+The frozen Stage 3 PE at SHA256 `13d73267e690b2cdd46438315e2bfe6d4d6c0c37bcfc15591a921fc9728b270b` has `rt_host_memory_headroom_bytes_v1` machine code `mov eax, 3; ret`. In `windows_available_memory_headroom_v1`, that positive sentinel passes the success check, converts to zero available KiB, and reduces the inner worker pool to one. The outer RSS monitor remains enabled; the two controls measure different quantities.
+
+The source implementation previously lived in `runtime_native.c`, which is compiled in the canonical core-C runtime but excluded from the Rust058 runtime archive because it owns many other symbols. The correction moves that same `GlobalMemoryStatusEx` query into the narrow `runtime_memory_headroom.c` owner and registers it in both runtime source families, the core-C capsule, the public runtime header, and the source-list parity manifest. The query semantics remain `min(ullAvailPhys, ullAvailPageFile)`; failure remains zero so callers can use the existing fallback.
+
+`test/fixtures/bootstrap/memory_headroom_provider/native_probe.c` compares the linked provider against `GlobalMemoryStatusEx` sampled on both sides of the call. It rejects values at or below three and permits 256 MiB plus one-sixteenth of the observed headroom for host pressure. The exact launcher is `scripts/check/probe-windows-memory-headroom-provider.shs`; it links the retained Rust058 runtime archive with the new owner TU, then links the canonical core-C capsule archive. It does not rebuild the Rust executable.
+
+Status: source fix prepared and all known owner rosters inspected; automated checks and both native OS oracle probes remain unrun pending root review of the exact launcher. No Rust EXE was rebuilt. This source result does not qualify Phase 3.
