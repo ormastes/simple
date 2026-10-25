@@ -1,0 +1,114 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Transient promotion must see the caller's struct root, not a copy
+
+`rt_transient_heap_promote` retags the objects it reaches in place. A plain
+(non-`mut`) value-struct parameter gets the Bug #167 defensive copy in the
+callee prologue, so a generic wrapper `fn w<T>(value: T)` instantiated with a
+struct promoted only that fresh copy: the scope-owned original was freed by
+`rt_transient_array_scope_end` and `Some(event)` handed out a dangling pointer.
+Stage 3 SEGVed on hello world in SCV cold init (42,778 events whose memory
+had been reused by path strings).
+
+The wrappers take `mut value: T`, which binds by reference. The source
+contract below pins that; the round-trip example fails on a native build of
+an unfixed wrapper (fields read back as freed memory) and passes trivially on
+the interpreter, which has no transient arena.
+See doc/08_tracking/bug/transient_promote_struct_param_copy_dangles_2026-10-25.md
+"""
+
+# @tag: unit, compiler, mir, memory
+
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
+
+struct PromoteProbeEvent:
+    source: text
+    operation: text
+    identity: text
+    byte_count: i64
+
+fn promote_probe_build(index: i64) -> PromoteProbeEvent:
+    PromoteProbeEvent(source: "git-{index}", operation: "create-{index}",
+        identity: "src/probe/{index}.spl", byte_count: 1000 + index)
+
+fn promote_probe_churn() -> i64:
+    var keep: [text] = []
+    var i = 0
+    while i < 512:
+        keep = keep.push("examples/10_tooling/churn_{i}.spl")
+        i = i + 1
+    keep.len()
+
+fn promote_probe_mir_wrapper(index: i64) -> PromoteProbeEvent?:
+    if not transient_array_scope_begin_v1():
+        return nil
+    val event = promote_probe_build(index)
+    if not transient_array_scope_pause_v1():
+        transient_array_scope_end_v1()
+        return nil
+    val retained = transient_heap_promote_v1<PromoteProbeEvent>(event)
+    val ended = transient_array_scope_end_v1()
+    if not retained or not ended:
+        return nil
+    Some(event)
+
+fn promote_probe_lib_wrapper(index: i64) -> PromoteProbeEvent?:
+    if not transient_scope_begin():
+        return nil
+    val event = promote_probe_build(index)
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val retained = transient_promote<PromoteProbeEvent>(event)
+    val ended = transient_scope_end()
+    if not retained or not ended:
+        return nil
+    Some(event)
+
+fn promote_probe_intact(event: PromoteProbeEvent, index: i64) -> bool:
+    event.source == "git-{index}" and event.operation == "create-{index}" and
+        event.identity == "src/probe/{index}.spl" and event.byte_count == 1000 + index
+
+describe "transient promotion of a struct root":
+    it "keeps the caller's struct alive through the MIR owner wrapper":
+        var events: [PromoteProbeEvent] = []
+        var i = 0
+        while i < 8:
+            match promote_probe_mir_wrapper(i):
+                case Some(event): events = events.push(event)
+                case _: ()
+            promote_probe_churn()
+            i = i + 1
+        expect(events.len()).to_equal(8)
+        var intact = 0
+        var j = 0
+        for event in events:
+            if promote_probe_intact(event, j): intact = intact + 1
+            j = j + 1
+        expect(intact).to_equal(8)
+
+    it "keeps the caller's struct alive through the std sffi wrapper":
+        var events: [PromoteProbeEvent] = []
+        var i = 0
+        while i < 8:
+            match promote_probe_lib_wrapper(i):
+                case Some(event): events = events.push(event)
+                case _: ()
+            promote_probe_churn()
+            i = i + 1
+        expect(events.len()).to_equal(8)
+        var intact = 0
+        var j = 0
+        for event in events:
+            if promote_probe_intact(event, j): intact = intact + 1
+            j = j + 1
+        expect(intact).to_equal(8)
+
+    it "declares both identity-sensitive wrappers with a by-reference parameter":
+        val mir_source = file_read("src/compiler/50.mir/_MirLowering/transient_owner_sffi.spl")
+        val lib_source = file_read("src/lib/nogc_sync_mut/sffi/transient.spl")
+        expect(mir_source.contains("fn transient_heap_promote_v1<T>(mut value: T) -> bool:")).to_equal(true)
+        expect(lib_source.contains("fn transient_promote<T>(mut value: T) -> bool:")).to_equal(true)

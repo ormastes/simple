@@ -5,13 +5,19 @@ use std.nogc_sync_mut.service.daemon_base.{daemon_base_start_owned, daemon_base_
 use compiler.driver.cache.daemon.cache_daemon_lifecycle
 use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
     cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1}
-use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1, cache_eviction_plan_v1}
+use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1, cache_eviction_plan_v1,
+    cache_eviction_admit_entry_v1}
 use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
 use common.cache_host_authority_v1.{CacheRootAuthorityV1}
 use common.cache_daemon_host_authority_v1
 use compiler.driver.cache.daemon.package_daemon_session.{
     PackageDaemonSessionV1, PackageDaemonRequestV1, package_daemon_request_denied_v1
 }
+
+struct CacheDaemonArtifactAdmissionV1:
+    admitted: bool
+    evicted_paths: [text]    # caller deletes these files
+    unloaded_paths: [text]   # caller drops these from memory (files stay)
 
 struct CacheDaemonAdmission:
     admitted: bool
@@ -216,6 +222,58 @@ class CacheDaemonHost:
                 return true
             i = i + 1
         false
+
+    # Admit-before-plan: called before a production is scheduled. Rejects
+    # (ledger untouched) when the candidate cannot fit every budget; otherwise
+    # applies the plan -- evicted rows leave the ledger, unloaded rows drop
+    # their resident bytes -- and reserves the candidate's row so concurrent
+    # admissions see its budget. Pinned rows are never evicted or unloaded.
+    me admit_artifact(candidate: CacheEntryUseV1, artifact_path: text,
+            limits: CacheRetentionLimitsV1) -> CacheDaemonArtifactAdmissionV1:
+        val decision = cache_eviction_admit_entry_v1(self.artifact_usage, candidate, limits)
+        if not decision.admitted:
+            return CacheDaemonArtifactAdmissionV1(admitted: false, evicted_paths: [], unloaded_paths: [])
+        var evicted: [text] = []
+        var unloaded: [text] = []
+        var kept_usage: [CacheEntryUseV1] = []
+        var kept_paths: [text] = []
+        var i = 0
+        while i < self.artifact_usage.len():
+            if decision.plan.evict.contains(i):
+                evicted.push(self.artifact_paths[i])
+            else:
+                var row = self.artifact_usage[i]
+                if decision.plan.unload.contains(i):
+                    row.memory_bytes = 0
+                    unloaded.push(self.artifact_paths[i])
+                kept_usage.push(row)
+                kept_paths.push(self.artifact_paths[i])
+            i = i + 1
+        var reserved = candidate
+        if decision.plan.unload.contains(self.artifact_usage.len()):
+            reserved.memory_bytes = 0
+        self.artifact_usage = kept_usage
+        self.artifact_paths = kept_paths
+        self.note_artifact_use(reserved, artifact_path)
+        CacheDaemonArtifactAdmissionV1(admitted: true, evicted_paths: evicted, unloaded_paths: unloaded)
+
+    # join_artifact behind admission: only a would-be leader (no flight in
+    # progress for the key) is admitted first; a rejected leader schedules no
+    # work and gets role -1. Waiters join the existing, already-admitted flight.
+    me join_artifact_admitted(kind: text, digest: text, request_id: text, now_ms: i64,
+            candidate: CacheEntryUseV1, artifact_path: text,
+            limits: CacheRetentionLimitsV1) -> (i64, i64, CacheDaemonArtifactAdmissionV1):
+        val key = cache_single_flight_key_v1(kind, digest)
+        var admission = CacheDaemonArtifactAdmissionV1(admitted: true, evicted_paths: [], unloaded_paths: [])
+        # A closed daemon falls through to join_artifact's own refusal (-1)
+        # with no budget decision taken.
+        if not self.artifact_flights.flight_of.contains_key(key) and
+                self.package_admission_open and self.lifecycle.admission_open:
+            admission = self.admit_artifact(candidate, artifact_path, limits)
+            if not admission.admitted:
+                return (-1, 0, admission)
+        val (role, flight) = self.join_artifact(kind, digest, request_id, now_ms)
+        (role, flight, admission)
 
     # Apply the retention plan: drop evicted rows and return their artifact
     # paths (the caller deletes those files).

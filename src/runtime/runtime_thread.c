@@ -979,9 +979,16 @@ static int g_pool_blocked_workers = 0;
 static int64_t g_pool_submitted_tasks = 0;
 static int64_t g_pool_completed_tasks = 0;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RT_POOL_TLS __declspec(thread)
+#else
+/* clang targeting windows-gnu (llvm-mingw) ignores __declspec(thread) with a
+ * warning, silently making the variable process-global. */
+#define RT_POOL_TLS _Thread_local
+#endif
 #ifdef SPL_THREAD_WINDOWS
-__declspec(thread) static int g_pool_worker_tls = 0;
-__declspec(thread) static int g_pool_worker_blocked_tls = 0;
+static RT_POOL_TLS int g_pool_worker_tls = 0;
+static RT_POOL_TLS int g_pool_worker_blocked_tls = 0;
 #else
 static __thread int g_pool_worker_tls = 0;
 static __thread int g_pool_worker_blocked_tls = 0;

@@ -1,0 +1,166 @@
+# @req REQ-ENUM-PAYLOAD-UNIT-TUPLE-PARITY
+# @tag: unit, compiler, mir, parser
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types_expr.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal}
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn unit_parity_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn unit_parity_check_expression(expression: HirExpr, expected: HirType,
+        remembered: HirType?, storage: MirType, unsafe_depth: i64 = 0) -> bool:
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.unsafe_depth = unsafe_depth
+    var builder = lowering.builder
+    val local = builder.new_temp(storage)
+    lowering.builder = builder
+    if val remembered_type = remembered:
+        lowering.remember_local_hir_type(local.id, remembered_type, 0, 0)
+    lowering.enum_payload_local_compatible(expected, expression, local)
+
+fn unit_parity_check_local(expression_kind: HirExprKind, expected: HirType,
+        remembered: HirType?, source: HirType?, storage: MirType, unsafe_depth: i64 = 0) -> bool:
+    val expression = HirExpr(kind: expression_kind, has_type_: source.?,
+        type_: source ?? unit_parity_hir_type(HirTypeKind.Error), span: Span.empty())
+    unit_parity_check_expression(expression, expected, remembered, storage, unsafe_depth)
+
+describe "unit and empty tuple payload parity":
+    it "treats unit and only the empty tuple as symmetric HIR aliases recursively":
+        val symbols = SymbolTable.new()
+        val unit = unit_parity_hir_type(HirTypeKind.Unit)
+        val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val i64 = unit_parity_hir_type(HirTypeKind.Int(64, true))
+        val nested_unit = unit_parity_hir_type(HirTypeKind.Tuple([unit, i64]))
+        val nested_tuple = unit_parity_hir_type(HirTypeKind.Tuple([tuple0, i64]))
+        expect(enum_payload_types_alias_equal(unit, tuple0, symbols)).to_be(true)
+        expect(enum_payload_types_alias_equal(tuple0, unit, symbols)).to_be(true)
+        expect(enum_payload_types_alias_equal(nested_unit, nested_tuple, symbols)).to_be(true)
+        expect(enum_payload_types_alias_equal(nested_tuple, nested_unit, symbols)).to_be(true)
+        expect(enum_payload_types_alias_equal(unit,
+            unit_parity_hir_type(HirTypeKind.Tuple([i64])), symbols)).to_be(false)
+        expect(enum_payload_types_alias_equal(unit, i64, symbols)).to_be(false)
+        expect(enum_payload_types_alias_equal(unit, unit_parity_hir_type(HirTypeKind.Bool), symbols)).to_be(false)
+        expect(enum_payload_types_alias_equal(
+            unit_parity_hir_type(HirTypeKind.Tuple([unit, i64])),
+            unit_parity_hir_type(HirTypeKind.Tuple([tuple0, unit_parity_hir_type(HirTypeKind.Str)])), symbols)).to_be(false)
+        expect(enum_payload_types_alias_equal(
+            unit_parity_hir_type(HirTypeKind.Tuple([unit, i64])),
+            unit_parity_hir_type(HirTypeKind.Tuple([tuple0])), symbols)).to_be(false)
+
+    it "admits only unit or empty tuple MIR carriers and preserves nested shape":
+        val symbols = SymbolTable.new()
+        val owners: Dict<text, i64> = {}
+        val unit = unit_parity_hir_type(HirTypeKind.Unit)
+        val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val unit_mir = MirType.unit()
+        val tuple0_mir = MirType(kind: MirTypeKind.Tuple([]))
+        expect(enum_payload_hir_mir_alias_compatible(unit, unit_mir, symbols, owners)).to_be(true)
+        expect(enum_payload_hir_mir_alias_compatible(unit, tuple0_mir, symbols, owners)).to_be(true)
+        expect(enum_payload_hir_mir_alias_compatible(tuple0, unit_mir, symbols, owners)).to_be(false)
+        expect(enum_payload_hir_mir_alias_compatible(unit,
+            MirType(kind: MirTypeKind.Tuple([MirType.i64()])), symbols, owners)).to_be(false)
+        expect(enum_payload_hir_mir_alias_compatible(unit, MirType.i64(), symbols, owners)).to_be(false)
+        expect(enum_payload_hir_mir_alias_compatible(unit, MirType.bool(), symbols, owners)).to_be(false)
+        val nested_hir = unit_parity_hir_type(HirTypeKind.Tuple([unit, unit_parity_hir_type(HirTypeKind.Int(64, true))]))
+        val nested_mir = MirType(kind: MirTypeKind.Tuple([tuple0_mir, MirType.i64()]))
+        expect(enum_payload_hir_mir_alias_compatible(nested_hir, nested_mir, symbols, owners)).to_be(true)
+        expect(enum_payload_hir_mir_alias_compatible(nested_hir,
+            MirType(kind: MirTypeKind.Tuple([tuple0_mir, MirType.bool()])), symbols, owners)).to_be(false)
+        expect(enum_payload_hir_mir_alias_compatible(nested_hir,
+            MirType(kind: MirTypeKind.Tuple([tuple0_mir])), symbols, owners)).to_be(false)
+
+    it "rejects nil before remembered or source unit evidence":
+        val unit = unit_parity_hir_type(HirTypeKind.Unit)
+        val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        expect(unit_parity_check_local(HirExprKind.NilLit, unit, Some(unit), Some(unit), MirType.unit())).to_be(false)
+        expect(unit_parity_check_local(HirExprKind.NilLit, unit, Some(tuple0), Some(unit),
+            MirType(kind: MirTypeKind.Tuple([])))).to_be(false)
+        expect(unit_parity_check_local(HirExprKind.NilLit, unit, nil, Some(unit), MirType.unit())).to_be(false)
+        expect(unit_parity_check_local(HirExprKind.Error, unit, nil, nil, MirType.unit())).to_be(true)
+        expect(unit_parity_check_local(HirExprKind.Error, unit, nil, nil,
+            MirType(kind: MirTypeKind.Tuple([])))).to_be(true)
+        expect(unit_parity_check_local(HirExprKind.Error, unit, nil, nil,
+            MirType(kind: MirTypeKind.Tuple([MirType.i64()])))).to_be(false)
+
+    it "vetoes nested nil under whole-tuple unit metadata without widening acceptance":
+        val int_type = unit_parity_hir_type(HirTypeKind.Int(64, true))
+        val unit_type = unit_parity_hir_type(HirTypeKind.Unit)
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+            type_: unit_parity_hir_type(HirTypeKind.Error), span: Span.empty())
+        val int_expr = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: int_type, span: Span.empty())
+
+        val tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([unit_type, int_type]))
+        val tuple_nil = HirExpr(kind: HirExprKind.TupleLit([nil_expr, int_expr]),
+            has_type_: true, type_: tuple_type, span: Span.empty())
+        val tuple_storage = MirType(kind: MirTypeKind.Tuple([MirType.unit(), MirType.i64()]))
+        # Synthetic whole-tuple remembered and source types would otherwise
+        # provide positive evidence despite the nested source NilLit.
+        expect(unit_parity_check_expression(tuple_nil, tuple_type, Some(tuple_type), tuple_storage)).to_be(false)
+
+        val inner_tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([unit_type, int_type]))
+        val nested_type = unit_parity_hir_type(HirTypeKind.Tuple([inner_tuple_type, int_type]))
+        val nested_nil = HirExpr(kind: HirExprKind.TupleLit([
+            HirExpr(kind: HirExprKind.TupleLit([nil_expr, int_expr]), has_type_: true,
+                type_: inner_tuple_type, span: Span.empty()),
+            int_expr]), has_type_: true, type_: nested_type, span: Span.empty())
+        val nested_storage = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Tuple([MirType.unit(), MirType.i64()])), MirType.i64()]))
+        expect(unit_parity_check_expression(nested_nil, nested_type, Some(nested_type), nested_storage)).to_be(false)
+
+        val empty_tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val nested_empty_type = unit_parity_hir_type(HirTypeKind.Tuple([empty_tuple_type, int_type]))
+        val nested_empty = HirExpr(kind: HirExprKind.TupleLit([
+            HirExpr(kind: HirExprKind.TupleLit([]), has_type_: true,
+                type_: empty_tuple_type, span: Span.empty()),
+            int_expr]), has_type_: true, type_: nested_empty_type, span: Span.empty())
+        val nested_empty_storage = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Tuple([])), MirType.i64()]))
+        expect(unit_parity_check_expression(nested_empty, nested_empty_type,
+            Some(nested_empty_type), nested_empty_storage)).to_be(true)
+        # A declared Unit slot may use the actual empty-tuple source carrier.
+        expect(unit_parity_check_expression(nested_empty, tuple_type, Some(tuple_type),
+            nested_empty_storage)).to_be(true)
+
+        val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val nil_as_tuple0 = HirExpr(kind: HirExprKind.NilLit, has_type_: true,
+            type_: tuple0, span: Span.empty())
+        expect(unit_parity_check_expression(nil_as_tuple0, tuple0, Some(tuple0),
+            MirType(kind: MirTypeKind.Tuple([])))).to_be(false)
+
+        val optional_unit = unit_parity_hir_type(HirTypeKind.Optional(unit_type))
+        expect(unit_parity_check_local(HirExprKind.NilLit, optional_unit, Some(optional_unit),
+            Some(optional_unit), MirType.unit())).to_be(false)
+        expect(unit_parity_check_local(HirExprKind.NilLit, optional_unit, Some(optional_unit),
+            Some(optional_unit), MirType.unit(), 1)).to_be(true)
+
+    it "lowers synthetic while-val conditions as boolean literals":
+        val source = "enum LoopValue:\n    Some(i64)\n    None\n\nfn read(input: LoopValue) -> i64:\n    while val Some(value) = input:\n        return value\n    return 0\n"
+        val parsed = parse_full_frontend(source, "unit_tuple_while_val", "unit_tuple_while_val", Logger(level: 0))
+        val function_ = parsed.functions["read"] ?? panic("missing parsed function read")
+        match function_.body.stmts[0].kind:
+            case StmtKind.While(condition, body):
+                match condition.kind:
+                    case ExprKind.BoolLit(value): expect(value).to_be(true)
+                    case _: assert(false)
+                match body.stmts[0].kind:
+                    case StmtKind.Expr(match_expr):
+                        match match_expr.kind:
+                            case ExprKind.MatchCase(_, arms):
+                                expect(arms.len()).to_equal(2)
+                                expect(arms[1].body.stmts.len()).to_equal(1)
+                                match arms[1].body.stmts[0].kind:
+                                    case StmtKind.Break(_): ()
+                                    case _: assert(false)
+                            case _: assert(false)
+                    case _: assert(false)
+            case _: assert(false)

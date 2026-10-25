@@ -43,6 +43,14 @@ def windows_spelling(path, spelling):
     return "scripts\\resource\\process-tree-rss-watchdog.pl"
 
 
+def receipt_spelling(path, cwd, spelling):
+    value = str(path.resolve()).replace("\\", "/")
+    if spelling == "back": return value.replace("/", "\\")
+    if spelling == "mixed": return value.rsplit("/", 1)[0] + "\\" + path.name
+    if spelling == "relative": return os.path.relpath(path, cwd).replace("/", "\\")
+    return value
+
+
 def run_case(base, production, args, runners, children, spelling, spaces, outcome, before=False):
     label = spelling + ("-spaces" if spaces else "-plain") + "-" + outcome
     evidence = base / ("evidence-" + label)
@@ -57,16 +65,20 @@ def run_case(base, production, args, runners, children, spelling, spaces, outcom
         if key.startswith("SIMPLE_BOOTSTRAP_SESSION_") or key.startswith("SIMPLE_PROCESS_TREE_"):
             env.pop(key)
     env["CC"] = args.cc
+    cwd = runner.parent.parent.parent
+    original_sources = {p.relative_to(cwd).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in cwd.rglob("*") if p.is_file() and ".simple" not in p.relative_to(cwd).parts}
+    receipt_argument = receipt_spelling(receipt, cwd, spelling) if args.receipt_paths else receipt.as_posix()
     command = [args.perl, windows_spelling(runner, spelling), "--session-mode=new",
                "--rss-cap-mode=enforce", "--max-rss-kib=1048576", "--timeout-seconds=60",
-               "--term-grace-seconds=5", "--receipt=" + receipt.as_posix(), "--",
+               "--term-grace-seconds=5", "--receipt=" + receipt_argument, "--",
                children[37 if outcome != "zero" else 0].as_posix()]
-    result = subprocess.run(command, cwd=runner.parent.parent.parent, env=env,
+    result = subprocess.run(command, cwd=cwd, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
     (evidence / "stdout").write_bytes(result.stdout)
     (evidence / "stderr").write_bytes(result.stderr)
     actual = fields(receipt)
-    if missing or before:
+    if missing or (before and not args.receipt_paths):
         assert result.returncode == 89, (label, result.returncode, result.stderr)
         assert actual["status"] == "session-helper-install-failed", actual
         assert actual["root_pid"] == "0", actual
@@ -91,6 +103,23 @@ def run_case(base, production, args, runners, children, spelling, spaces, outcom
         digest = hashlib.sha256(binaries[0].read_bytes()).hexdigest()
         assert actual["session_helper_sha256"] == digest
         assert binaries[0].with_name(binaries[0].name + ".sha256").read_text().strip() == digest
+    if args.receipt_paths:
+        sessions = list(evidence.glob("simple-rss-session-*"))
+        misplaced = list(cwd.glob("simple-rss-session-*"))
+        if before:
+            assert not missing and not sessions and len(misplaced) == 1, (sessions, misplaced)
+            assert (misplaced[0] / "workload.spec").is_file()
+            assert fields(misplaced[0] / "workload.stats")["quiescent"] == "1"
+        else:
+            assert not misplaced, misplaced
+            current_sources = {p.relative_to(cwd).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in cwd.rglob("*") if p.is_file() and ".simple" not in p.relative_to(cwd).parts}
+            assert current_sources == original_sources, "watchdog changed source cwd"
+            assert len(sessions) == (0 if missing else 1), sessions
+            if not missing:
+                assert (sessions[0] / "workload.spec").is_file()
+                stats = fields(sessions[0] / "workload.stats")
+                assert stats["quiescent"] == "1" and int(stats["root_exit_raw"], 0) == int(expected), stats
     return label
 
 
@@ -101,6 +130,7 @@ def main():
     parser.add_argument("--cc", required=True)
     parser.add_argument("--pe-clang")
     parser.add_argument("--before-fix", action="store_true")
+    parser.add_argument("--receipt-paths", action="store_true", help="test receipt-parent custody instead of source-path discovery")
     args = parser.parse_args()
     if args.jobs < 1: parser.error("positive --jobs required")
     production = Path(__file__).resolve().parents[2] / "resource/process-tree-rss-watchdog.pl"
@@ -108,7 +138,9 @@ def main():
     print("evidence=" + str(base), flush=True)
     if os.name != "nt":
         runner = source_tree(base, production, "literal\\backslash root")
-        receipt = base / "posix.rss.env"
+        receipt_parent = base / "receipt\\literal backslash"
+        receipt_parent.mkdir()
+        receipt = receipt_parent / "posix.rss.env"
         env = os.environ.copy()
         env["CC"] = args.cc
         result = subprocess.run([args.perl, str(runner), "--session-mode=new", "--max-rss-kib=1048576",
@@ -119,7 +151,9 @@ def main():
         actual = fields(receipt)
         assert result.returncode == 37 and actual["exit_status"] == "37", (actual, result.stderr)
         assert actual["quiescent"] == "1" and actual["session_helper_integrity"] == "verified", actual
-        print("PASS: real POSIX helper preserves literal backslash directory")
+        assert len(list(receipt_parent.glob("simple-rss-session-*"))) == 1
+        assert not list(runner.parent.parent.parent.glob("simple-rss-session-*"))
+        print("PASS: real POSIX helper preserves literal backslash source and receipt directories")
         return
     if not args.pe_clang: parser.error("--pe-clang required on Windows")
     children = {}
@@ -150,7 +184,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = [pool.submit(run_case, base, production, args, runners, children, *case) for case in work]
         for future in futures: print("PASS " + future.result(), flush=True)
-    print("PASS: 24 real Windows watchdog controls; genuine helper and native PE exits; no compiler qualification")
+    print("PASS: 24 real Windows watchdog " + ("receipt-parent" if args.receipt_paths else "source-path") + " controls; genuine helper and native PE exits; no compiler qualification")
 
 
 if __name__ == "__main__": main()

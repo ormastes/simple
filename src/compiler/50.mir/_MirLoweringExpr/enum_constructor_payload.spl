@@ -37,6 +37,29 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
         case _:
             enum_payload_types_alias_equal(expected, actual, symbols)
 
+# Veto only source NilLit values that occupy declared Unit leaves. This
+# closes stale whole-tuple metadata without granting new payload acceptance.
+fn enum_payload_nested_unit_nil_veto_v1(expected: HirType, expression: HirExpr) -> bool:
+    match expected.kind:
+        case HirTypeKind.Unit:
+            match expression.kind:
+                case HirExprKind.NilLit: return true
+                case _: return false
+        case HirTypeKind.Tuple(expected_elements):
+            match expression.kind:
+                case HirExprKind.NilLit:
+                    return expected_elements.len() == 0
+                case HirExprKind.TupleLit(actual_elements):
+                    if expected_elements.len() != actual_elements.len(): return false
+                    var index = 0
+                    while index < expected_elements.len():
+                        if enum_payload_nested_unit_nil_veto_v1(expected_elements[index], actual_elements[index]):
+                            return true
+                        index = index + 1
+                    false
+                case _: return false
+        case _: return false
+
 # Cross-representation alias-aware comparison for the MIR-evidence fallback:
 # the expected side is a declared HIR payload type, the actual side is the
 # lowered local's MIR type (used only when the remembered-HIR-type registry
@@ -47,6 +70,11 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
 # existing MIR-evidence arms.
 fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, symbols: SymbolTable, canonical_owners: Dict<text, i64>) -> bool:
     match expected.kind:
+        case HirTypeKind.Unit:
+            match actual.kind:
+                case MirTypeKind.Unit: return true
+                case MirTypeKind.Tuple(elements): return elements.len() == 0
+                case _: return false
         case HirTypeKind.Dict(ek, ev):
             match actual.kind:
                 case MirTypeKind.Dict(ak, av):
@@ -270,6 +298,7 @@ impl MirLowering:
         self.lower_expr(expression)
 
     me enum_payload_local_compatible(expected: HirType, expression: HirExpr, local: LocalId) -> bool:
+        if enum_payload_nested_unit_nil_veto_v1(expected, expression): return false
         # Safe code spells absence `None`; `nil` is allowed only inside
         # `unsafe:` (MIR sees block-level unsafe only: `@unsafe` on a fn is
         # parser metadata). Both take their optional type from the declared
@@ -349,7 +378,7 @@ impl MirLowering:
                                 return actual_owner == mir_class_identity(declaration)
                             case _: ()
                 return false
-            case HirTypeKind.Dict(_, _) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_):
+            case HirTypeKind.Dict(_, _) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_) | HirTypeKind.Unit:
                 # Container payloads (the SdnValue.Dict/Array shape): the MIR
                 # word is a handle, so KIND-shape evidence plus alias-aware
                 # element comparison is sufficient — same rule as the

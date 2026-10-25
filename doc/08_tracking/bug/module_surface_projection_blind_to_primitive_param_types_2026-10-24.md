@@ -1,6 +1,6 @@
 # Surface semantic projection does not distinguish primitive parameter types
 
-Status: open. Found 2026-10-24 while adding the TLDR surface skeleton
+Status: Fixed (2026-10-25). Found 2026-10-24 while adding the TLDR surface skeleton
 (module_surface_skeleton_v1 / module_surface_canonical_digest_v1).
 
 ## Repro (Rust seed, `run`)
@@ -24,3 +24,16 @@ Check `ast_semantic_encode_type` for primitive kinds on the self-hosted binary;
 if it reproduces there, encode the primitive kind/name. Until fixed, the
 skeleton/full-parse equality (which uses this projection) cannot detect a
 type-only divergence.
+
+## Fix
+Root cause was not primitive-type collapse in `ast_semantic_encode_type`: the
+generated encoder updated a COPY of its SHA-256 stream (`val stream =
+state.stream; stream.update(...)`), so on the seed every type/expr/stmt digest
+was the empty-input hash. Fixed in `d289f5ee758` (stream written back);
+regression `test/01_unit/compiler/hir/module_surface_primitive_type_identity_spec.spl`.
+Skeleton/full equality incl. this fixture and a differential over five
+`src/lib/common` files: `test/01_unit/compiler/driver/worker_surface_differential_spec.spl`.
+With the blind spot gone, the HIR worker skeleton path is default ON
+(`SIMPLE_HIR_WORKER_SKELETON=0` opts out); see
+`worker_whole_closure_parse_2026-10-25.md`. Spec run on this Windows host is
+blocked by the known seed parse error in `windows_redirected_process.spl`.

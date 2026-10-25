@@ -1085,6 +1085,15 @@ stage4_provenance_helper_sha256_before=$(
 # to 0 bytes by the same class of race). Directory-based lock, stale-safe.
 bootstrap_lock_handle=
 rust_target_lock_handle=
+rust_shared_cache_lock_handle=
+rust_shared_cache_root=
+rust_shared_cache_common_dir=$(bootstrap_authority_git_common_dir "${repo_root}") || exit 1
+if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
+  rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
+    "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
+  rust_shared_cache_common_dir=$(bootstrap_authority_rust_cargo_cache_common_dir \
+    "${repo_root}" "${rust_shared_cache_root}") || exit 1
+fi
 portable_lock_canonical_output "${output_dir}" || {
   echo "error: invalid or inaccessible bootstrap output path: ${output_dir}" >&2
   exit 1
@@ -1125,13 +1134,13 @@ bootstrap_free_space_kb() {
   printf '%s\n' "${bfsk_line}"
 }
 bootstrap_check_disk_space() {
-  bcds_min_gb=${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-10}
+  bcds_min_gb=${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-${MIN_FREE_GB:-10}}
   case "${bcds_min_gb}" in ''|*[!0-9]*) bcds_min_gb=10 ;; esac
   [ "${bcds_min_gb}" -gt 0 ] || return 0
   bcds_min_kb=$((bcds_min_gb * 1024 * 1024))
   bcds_worst_kb=
   bcds_worst_path=
-  for bcds_probe_path in "${output_dir}" "${repo_root}"; do
+  for bcds_probe_path in "${output_dir}" "${repo_root}" "${rust_shared_cache_root}"; do
     bcds_probe_kb=$(bootstrap_free_space_kb "${bcds_probe_path}") || continue
     if [ -z "${bcds_worst_kb}" ] || [ "${bcds_probe_kb}" -lt "${bcds_worst_kb}" ]
     then
@@ -1145,7 +1154,7 @@ bootstrap_check_disk_space() {
     bcds_worst_gb=$((bcds_worst_kb / 1024 / 1024))
     bcds_short_gb=$(((bcds_min_kb - bcds_worst_kb + 1024 * 1024 - 1) / 1024 / 1024))
     echo "error: insufficient disk space to start a bootstrap: ${bcds_worst_gb} GB free on the filesystem holding ${bcds_worst_path}, need at least ${bcds_min_gb} GB (short by ~${bcds_short_gb} GB)" >&2
-    echo "error: a bootstrap that starts below this floor has previously died SILENTLY when disk filled mid-build; free space first (see rust-authority generation GC in scripts/bootstrap/bootstrap-authority-wiring.shs, and build/w/rust-authority-* / bootstrap.generations/ as the largest reclaimable consumers) or override with SIMPLE_BOOTSTRAP_MIN_FREE_GB=<n> if this host is intentionally tight" >&2
+    echo "error: a bootstrap that starts below this floor has previously died SILENTLY when disk filled mid-build; free space first (see rust-authority generation GC in scripts/bootstrap/bootstrap-authority-wiring.shs, and build/w/rust-authority-* / bootstrap.generations/ as the largest reclaimable consumers) or override with SIMPLE_BOOTSTRAP_MIN_FREE_GB=<n> (or MIN_FREE_GB=<n>) if this host is intentionally tight" >&2
     return 1
   fi
 }
@@ -1254,6 +1263,35 @@ bootstrap_step_mark() {
     printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >>"${progress_log}" 2>/dev/null || true
   fi
 }
+# Kill every non-detached descendant so a failed/terminated run leaves no
+# orphans (launcher, rustc, helpers, watcher) holding output ownership. The
+# session guard makes this shell the leader of its own group (PID == PGID), so
+# a group signal reaches exactly this run's tree. Windows has no reliable group
+# signal for native children: taskkill /T each tracked child instead.
+bootstrap_reap_descendants() {
+  [ "${bootstrap_session_pid:-}" = "$$" ] || return 0
+  trap '' HUP INT QUIT TERM
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      for bootstrap_reap_pid in $(jobs -p 2>/dev/null); do
+        bootstrap_reap_win=$(cat "/proc/${bootstrap_reap_pid}/winpid" 2>/dev/null || printf '%s' "${bootstrap_reap_pid}")
+        taskkill //T //F //PID "${bootstrap_reap_win}" >/dev/null 2>&1 || true
+      done
+      ;;
+  esac
+  kill -TERM -- "-$$" 2>/dev/null || true
+  bootstrap_reap_i=0
+  while [ "${bootstrap_reap_i}" -lt 3 ]; do
+    bootstrap_reap_left=
+    for bootstrap_reap_pid in $(pgrep -g "$$" 2>/dev/null); do
+      [ "${bootstrap_reap_pid}" = "$$" ] || bootstrap_reap_left="${bootstrap_reap_left} ${bootstrap_reap_pid}"
+    done
+    [ -n "${bootstrap_reap_left}" ] || return 0
+    sleep 1; bootstrap_reap_i=$((bootstrap_reap_i + 1))
+  done
+  # shellcheck disable=SC2086
+  kill -KILL ${bootstrap_reap_left} 2>/dev/null || true
+}
 bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
@@ -1291,10 +1329,17 @@ bootstrap_cleanup() {
       portable_lock_release "${rust_target_lock_handle}"
       rust_target_lock_handle=
     fi
+    if [ -n "${rust_shared_cache_lock_handle}" ]; then
+      portable_lock_release "${rust_shared_cache_lock_handle}"
+      rust_shared_cache_lock_handle=
+    fi
     if [ -n "${bootstrap_lock_handle}" ]; then
       portable_lock_release "${bootstrap_lock_handle}"
       bootstrap_lock_handle=
     fi
+  fi
+  if [ "${bootstrap_status}" -ne 0 ] || [ -n "${bootstrap_abnormal_signal:-}" ]; then
+    bootstrap_reap_descendants
   fi
   exit "${bootstrap_status}"
 }
@@ -1942,6 +1987,14 @@ ${cache_environment_payload}"
     cache_source_snapshot=${cache_context_base}/source-inputs-before.txt
     cache_runtime_snapshot=${cache_context_base}/runtime-admitted.txt
     cache_tool_snapshot=${cache_context_base}/tool-authority-before.txt
+  fi
+  # Stage 2 under the Rust seed: the lane is NOT keyed by the whole-tree
+  # source digest (it changed at every new tip and forced cold rebuilds).
+  # The seed's per-module keys decide reuse; a parent override (non-seed
+  # producer) keeps the fail-closed whole-source identity.
+  if [ "$1" = stage2 ] && [ -z "${bootstrap_stage2_parent_override}" ]; then
+    cache_source_snapshot="${log_dir}/stage2-content-keyed-source.txt"
+    bootstrap_cache_content_keyed_source "${cache_source_snapshot}" stage2 || return 1
   fi
   cache_input_payload=$(bootstrap_cache_phase_inputs "${repo_root}" "${PLATFORM}" "${backend}" \
     "${cache_build_mode:-${bootstrap_mode}}" "${cache_source_snapshot}" \
@@ -2750,6 +2803,26 @@ rust_authority_generation_root="${repo_root}/src/compiler_rust/target/bootstrap.
 rust_authority_current_marker="${repo_root}/src/compiler_rust/target/bootstrap.current.env"
 rust_authority_compatibility_path="${repo_root}/src/compiler_rust/target/bootstrap"
 
+# Shared Cargo caches may belong to a sibling linked worktree. Serialize
+# those callers before taking this worktree's publication lock. Cargo keeps
+# its own per-crate freshness checks; this lock grants no artifact admission.
+bootstrap_acquire_shared_rust_cargo_cache() {
+  if [ -n "${rust_shared_cache_root}" ]; then
+    rust_cache_common_now=$(bootstrap_authority_rust_cargo_cache_common_dir \
+      "${repo_root}" "${rust_shared_cache_root}") || return 1
+  else
+    rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
+  fi
+  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || return 1
+  if [ -n "${rust_shared_cache_lock_handle}" ]; then
+    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}"
+    return $?
+  fi
+  portable_lock_acquire "${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks" \
+    authority "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || return 1
+  rust_shared_cache_lock_handle=${PORTABLE_LOCK_HANDLE}
+}
+
 bootstrap_acquire_rust_authority() {
   if [ -n "${rust_target_lock_handle}" ]; then
     bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
@@ -3229,8 +3302,12 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   }
   rust_authority_target=$(bootstrap_authority_rust_cargo_target \
     "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
-    "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
+    "${rust_authority_root}" "${rust_authority_config_key}" \
+    "${rust_shared_cache_root}") || exit 1
   rust_authority_profile_dir="${rust_authority_target}/${PLATFORM_RUST_TRIPLE}/bootstrap"
+  echo "rust_cargo_cache_root=${rust_shared_cache_root:-default}"
+  echo "rust_cargo_config_key=${rust_authority_config_key}"
+  echo "rust_cargo_target_dir=${rust_authority_target}"
 fi
 bootstrap_step_mark rust-authority-target-key
 
@@ -3312,6 +3389,9 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
+  if [ "${rust_env_log}" = bootstrap-preflight ] && [ -n "${rust_shared_cache_root}" ]; then
+    set -- "SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT=${rust_shared_cache_root}" "$@"
+  fi
   # Preflight must capture the same materialized Windows authority dialect as
   # the parent before/after snapshots. env -i otherwise silently drops it.
   if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
@@ -3362,12 +3442,13 @@ run_rust_authority_cargo() {
 }
 
 run_rust_authority_command() {
+  bootstrap_acquire_shared_rust_cargo_cache || return 1
   # Cargo outputs are shared across output roots on Windows. Acquire the
   # existing authority lock before even preparing the workspace, and retain
   # it across every Cargo call, immutable snapshot, publication and runtime
   # normalization. Lock order stays output -> authority; later acquisitions
   # revalidate this same handle instead of trying to acquire a second lock.
-  if [ "${os}" = windows ]; then
+  if [ "${os}" = windows ] || [ -n "${rust_shared_cache_root}" ]; then
     bootstrap_acquire_rust_authority || return 1
   fi
   rust_authority_log=$1
@@ -3929,6 +4010,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: could not release Rust authority after private admission" >&2
     exit 1
   }
+  if [ -n "${rust_shared_cache_lock_handle}" ]; then
+    portable_lock_release "${rust_shared_cache_lock_handle}" || exit 1
+    rust_shared_cache_lock_handle=
+  fi
   bootstrap_authority_pin_stage4 \
     "$(absolute_path "${stage2_runtime_authority}")" \
     "simple${exe_suffix}" \
@@ -4254,12 +4339,39 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
     *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
   esac
+  # Lowering lane (2026-10-25). Per-file src->obj is the default: Stage 3
+  # lowers each module to its own object (per-module object cache under
+  # SIMPLE_NATIVE_BUILD_CACHE_DIR, SIMPLE_NATIVE_BUILD_THREADS = selfhost_jobs,
+  # i.e. host.sdn max_build_jobs) and links them. SIMPLE_BOOTSTRAP is passed
+  # EMPTY to the Stage 3 child on that lane: under SIMPLE_BOOTSTRAP=1 the HIR
+  # shard workers fail ("HIR cache identity unavailable for shard") and
+  # single-process HIR leaves cross-module imports unresolved, so scripts must
+  # not force the bootstrap_fixed shortcut. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+  # opts back into the single-instance whole-program lane (SIMPLE_BOOTSTRAP=1).
+  # Same knob in resume-stage3-from-admitted.sh; both values are hashed.
+  # Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
+  # (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
+  # set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
+  # the args receipt; unset adds nothing, so existing receipts stay resumable.
+  stage3_per_file_env= stage3_per_file_lane=
+  case "${SIMPLE_FILE_WORKERS:-}" in
+    '') ;;
+    0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
+         stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
+    *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
+  stage3_bootstrap_flag= stage3_whole_program_env=
+  case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
+    '') ;;
+    1) stage3_bootstrap_flag=1 stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+    *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
-      "SIMPLE_BOOTSTRAP=1" \
+      "SIMPLE_BOOTSTRAP=${stage3_bootstrap_flag}" ${stage3_whole_program_env} ${stage3_per_file_env} \
       "SIMPLE_BOOTSTRAP_STAGE3=1" \
       "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
       "SIMPLE_ABI_ADMISSION_RECEIPT=${stage2_admission_receipt_absolute}" \
@@ -5357,7 +5469,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     RUST_LOG="${stage_build_rust_log}" \
     LIBRARY_PATH="${bootstrap_link_library_path}" \
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_BOOTSTRAP="${stage3_bootstrap_flag}" ${stage3_whole_program_env} ${stage3_per_file_env} \
     SIMPLE_BOOTSTRAP_STAGE3=1 \
     SIMPLE_ABI_POLICY="${simple_abi_policy}" \
     SIMPLE_ABI_ADMISSION_RECEIPT="${stage2_admission_receipt_absolute}" \
@@ -5923,6 +6035,36 @@ stage4_verify_candidate_provenance \
     echo "error: Stage 4 candidate provenance did not re-verify" >&2
     exit 1
   }
+# Essential applications are required for every completed Stage 4 build.
+# Produce their runtime authorities before invoking the stage4-bound suites;
+# none of these rows may be skipped or deferred until after deployment.
+mkdir -p "${repo_root}/build/bootstrap-essential-apps"
+essential_apps_dir=$(mktemp -d "${repo_root}/build/bootstrap-essential-apps/run.XXXXXXXX") || exit 1
+essential_apps_dir=$(absolute_path "${essential_apps_dir}")
+run_logged stage4-essential-simple-core run_timeout_kill 1800 env \
+  SIMPLE_BINARY="${full_bin}" BUILD_DIR="${essential_apps_dir}/simple-core-smoke" \
+  SIMPLE_CORE_BUILD_DIR="${essential_apps_dir}/simple-core" \
+  SIMPLE_CORE_BACKEND="${backend}" TARGET="${platform}" \
+  SIMPLE_NATIVE_BUILD_THREADS="${jobs}" \
+  sh scripts/check/check-simple-core-runtime-smoke.shs
+run_logged stage4-essential-db-runtime run_timeout_kill 1800 \
+  sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+  --output "${essential_apps_dir}/db-runtime"
+run_logged stage4-essential-web-runtime run_timeout_kill 3600 env \
+  CARGO_BUILD_JOBS="${jobs}" \
+  sh scripts/check/build-host-gpu-runtime-capsule.shs \
+  --output "${essential_apps_dir}/web-runtime"
+run_logged stage4-essential-apps run_timeout_kill 7200 env \
+  SIMPLE_BINARY="${full_bin}" \
+  SIMPLE_NATIVE_BUILD_THREADS="${jobs}" \
+  SIMPLE_DB_RUNTIME_CAPSULE="${essential_apps_dir}/db-runtime" \
+  SIMPLE_WEB_RUNTIME_PATH="${essential_apps_dir}/web-runtime/cargo-target/bootstrap" \
+  SIMPLE_WEB_TLS_SUPPLEMENT_DIR="${essential_apps_dir}/web-runtime" \
+  sh scripts/check/check-bootstrap-essential-apps.shs \
+  "${full_bin}" "${stage4_provenance}" \
+  "${essential_apps_dir}/simple-core/libsimple_runtime.a" \
+  "${essential_apps_dir}/apps"
+
 stage3_acceptance_sanity=$(bootstrap_stage3_manifest_value \
   stage3_sanity_evidence_path "${stage3_provenance_manifest}") || {
   echo "error: Stage 3 acceptance lacks its sanity receipt" >&2
@@ -5953,6 +6095,9 @@ stage3_acceptance_tmp="${stage3_acceptance_receipt}.tmp.$$"
   echo "stage4_provenance_path=${stage4_provenance}"
   echo "stage4_provenance_sha256=$(bootstrap_stage3_hash_file "${stage4_provenance}")"
   echo "completed_gate=stage4-essential-tools-smoke"
+  echo "completed_gate=stage4-essential-apps"
+  echo "essential_apps_log_path=$(absolute_path "${log_dir}/stage4-essential-apps.log")"
+  echo "essential_apps_log_sha256=$(bootstrap_stage3_hash_file "${log_dir}/stage4-essential-apps.log")"
 } >"${stage3_acceptance_tmp}" || exit 1
 chmod 400 "${stage3_acceptance_tmp}" || exit 1
 mv "${stage3_acceptance_tmp}" "${stage3_acceptance_receipt}" || exit 1

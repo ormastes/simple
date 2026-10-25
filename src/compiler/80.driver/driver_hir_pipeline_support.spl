@@ -25,6 +25,8 @@ use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
 use std.nogc_sync_mut.io.env_ops.{env_get, env_get_opt}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.rt_criticality.{rt_bound_manifest_clear}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
 use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array, validate_rt_criticality_diagnostics_blobs}
 use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
     DriverHirGateLayoutReportV1, driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
@@ -37,6 +39,7 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 use compiler.driver.driver_log_helpers.{log_phase}
+use compiler.driver.hir_admission_order_v1.{hir_admission_path_order_v1, hir_admission_identity_key_v1, hir_admission_unadmitted_indices_v1, hir_admission_group_positions_v1}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
@@ -262,6 +265,22 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
             dropped = dropped.push(key)
     dropped
 
+pub fn driver_hir_validation_blob_encode_enabled_v1(env_value: text) -> bool:
+    """Per-module HIR validation blobs are opt-in (SIMPLE_HIR_VALIDATION_BLOBS=1).
+
+    The blob was encoded per module in the retained HIR loop (~292 ms each)
+    and decoded again by the RT validator (78 s on 1442 modules), while 85% of
+    blobs were codec-refused and the fallback array was validated anyway.
+    """
+    env_value == "1"
+
+pub fn driver_rt_criticality_policy_needed_v1(claim_count_now: i64, has_rt_hal_flags: [bool]) -> bool:
+    """RT policy runs only when a claim exists or some module has @rt/HAL."""
+    if claim_count_now > 0: return true
+    for flag in has_rt_hal_flags:
+        if flag: return true
+    false
+
 pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
         hir_module_array: [HirModule] = [], hir_module_blobs: [text] = [],
         hir_module_has_rt_hal: [bool] = [], hir_module_claim_counts: [i64] = []) -> [text]:
@@ -279,6 +298,15 @@ pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
     # the next cycle's log without a shim.
     if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
         eprint("[enum-reg] rt-criticality lane: dict_keys={modules.keys().len()} array={module_list.len()}")
+    # Cheap short-circuit before any blob decode or body walk. Only taken when
+    # the producer's scalar has_rt_hal flags cover EVERY module (the retained
+    # loop pushes one per module); otherwise (streaming lane, dict fallback)
+    # the full validator decides. Mirrors the validator's own empty-policy
+    # return: clear the bound manifest, publish nothing.
+    if hir_module_has_rt_hal.len() == module_list.len() and
+            not driver_rt_criticality_policy_needed_v1(rt_criticality_claim_keys().len(), hir_module_has_rt_hal):
+        rt_bound_manifest_clear()
+        return []
     val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics_blobs(
             hir_module_blobs, module_list, hir_module_has_rt_hal, hir_module_claim_counts))
     driver_hir_gate_publish_warnings_v1(report.warnings)
@@ -325,6 +353,11 @@ fn driver_nogc_param_effect_admission_round_v1(
     var errors: [text] = []
     var fatal_errors: [text] = []
     var admitted: [HirModule] = []
+    # Index surfaces by canonical path once (was a full scan per module);
+    # groups keep original surface order for the conflict check.
+    var surface_paths: [text] = []
+    for surface in surfaces: surface_paths.push(surface.canonical_path)
+    val surfaces_by_path = hir_admission_group_positions_v1(surface_paths)
     for raw_actual in actual_modules:
         var actual: HirModule = raw_actual
         actual.nogc_param_effects_checked = false
@@ -338,8 +371,10 @@ fn driver_nogc_param_effect_admission_round_v1(
         var strict = false
         var matched = false
         var conflicting = false
-        for surface in surfaces:
-            if surface.canonical_path == actual_path:
+        if surfaces_by_path.contains_key(actual_path):
+            val surface_positions: [i64] = surfaces_by_path[actual_path]
+            for surface_position in surface_positions:
+                val surface = surfaces[surface_position]
                 if matched and strict != surface.nogc_strict: conflicting = true
                 strict = surface.nogc_strict
                 matched = true
@@ -417,21 +452,15 @@ fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
             initial.push(actual)
     # Canonical physical order removes dependence on Dict iteration and
     # shard completion order. Proofs become visible only next round.
-    var selected: {i64: bool} = {}
-    while pending.len() < initial.len():
-        var best = -1
-        var best_path = ""
-        var index = 0
-        while index < initial.len():
-            if not selected.contains_key(index):
-                val path = module_surface_canonical_path(initial[index].path)
-                if best < 0 or path < best_path:
-                    best = index
-                    best_path = path
-            index = index + 1
-        if best < 0: break
-        selected[best] = true
-        pending.push(initial[best])
+    # A full CLI contains thousands of modules. Selection-sorting this set
+    # normalized each remaining path again on every round (4,241,328 path
+    # allocations/resolutions for 2,912 modules). Cache the canonical keys
+    # once and use a stable O(n log n) index merge with O(n) scratch space.
+    var canonical_paths: [text] = []
+    for actual in initial:
+        canonical_paths.push(module_surface_canonical_path(actual.path))
+    for index in hir_admission_path_order_v1(canonical_paths):
+        pending.push(initial[index])
     var providers: [HirModule] = []
     var round = 0
     while pending.len() > 0 and round <= initial.len():
@@ -442,13 +471,13 @@ fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
             # No new proof can resolve the remaining dependency component.
             # Unknown providers and cycles retain their actual diagnostics.
             return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
+        var pending_keys: [text] = []
+        for actual in pending: pending_keys.push(hir_admission_identity_key_v1(actual.name, actual.path))
+        var admitted_keys: [text] = []
+        for checked in receipt.modules: admitted_keys.push(hir_admission_identity_key_v1(checked.name, checked.path))
         var next: [HirModule] = []
-        for actual in pending:
-            var admitted = false
-            for checked in receipt.modules:
-                if actual.name == checked.name and actual.path == checked.path:
-                    admitted = true
-            if not admitted: next.push(actual)
+        for pending_index in hir_admission_unadmitted_indices_v1(pending_keys, admitted_keys):
+            next.push(pending[pending_index])
         for checked in receipt.modules: providers.push(checked)
         pending = next
         round = round + 1
@@ -461,22 +490,35 @@ pub fn driver_nogc_param_effect_errors_v1(modules: Dict<text, HirModule>,
     driver_nogc_param_effect_admission_v1(modules, module_array, surfaces).errors
 
 pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [ModuleSurface]):
+    log_phase("phase3:hir:ownership_admission:start")
     val admission = driver_nogc_param_effect_admission_v1(ctx.hir_modules, ctx.validation_module_array, surfaces)
     for error in admission.errors: ctx.add_error(error)
     # Admission is transactional. No stale/partial report is published after
     # one module fails, and downstream MIR never consumes error-bearing HIR.
-    if admission.errors.len() != 0: return
+    if admission.errors.len() != 0:
+        log_phase("phase3:hir:ownership_admission:failed")
+        return
     var modules: Dict<text, HirModule> = ctx.hir_modules
+    # Map identity -> every dict key (aliases) once, instead of rescanning
+    # all keys per admitted module.
+    val module_keys: [text] = modules.keys()
+    var identities: [text] = []
+    for key in module_keys:
+        val previous: HirModule = modules[key]
+        identities.push(hir_admission_identity_key_v1(previous.name, previous.path))
+    val keys_by_identity = hir_admission_group_positions_v1(identities)
     for actual in admission.modules:
-        for key in modules.keys():
-            val previous: HirModule = modules[key]
-            if previous.name == actual.name and previous.path == actual.path:
-                modules[key] = actual
+        val identity = hir_admission_identity_key_v1(actual.name, actual.path)
+        if keys_by_identity.contains_key(identity):
+            val positions: [i64] = keys_by_identity[identity]
+            for position in positions:
+                modules[module_keys[position]] = actual
         if val entry = ctx.bootstrap_entry_hir:
             if entry.name == actual.name and entry.path == actual.path:
                 ctx.bootstrap_entry_hir = actual
     ctx.hir_modules = modules
     ctx.validation_module_array = admission.modules
+    log_phase("phase3:hir:ownership_admission:done")
 
 # Bug native_build_hir_phase_scopes_2026_10_24: the closure-wide validators
 # below walk every module with no transient scope, so their scratch stays

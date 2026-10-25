@@ -1,0 +1,325 @@
+# Worker surface closure (true_per_file_pipeline_v1.md P5).
+#
+# A HIR shard worker (--hir-shard, and the HIR children a --file-worker
+# drives) used to build a ModuleSurface for EVERY module of the closure in
+# phase 2: ~1453 parses per worker. It only lowers the modules it claims, and
+# lowering reads only the surfaces of the claimed module's transitive import
+# closure. Here a worker:
+#   1. seeds its static hash slice of the inventory (the same split
+#      driver_parse_shard_hash gives every shard kind),
+#   2. follows `use` / `export use` targets from those seeds (facades are
+#      followed through their own imports) -- worker_surface_closure_v1,
+#   3. builds real surfaces only for that closure, from the module SKELETON
+#      text: the fresh `.tldr` v6 `surface` section, else a fresh `.surface`
+#      sidecar, else module_surface_skeleton_v1 (published by temp file +
+#      atomic rename); one set-once TldrTableV1 entry per content key makes
+#      the work single-flight inside the process,
+#   4. gives every other module an empty-text PLACEHOLDER surface. Identity
+#      fields (path, content hash/length, names) still come from the source,
+#      so hir_cache_closure_digest -- the HIR cache key -- is unchanged,
+#   5. after freeze, claims only modules whose whole resolved import/export
+#      route closure (the real resolver's import_target_indices) is built
+#      (worker_surface_ready_v1). A module that is not ready is left
+#      unclaimed; another worker or the parent lowers it. The text closure
+#      in (2) is a heuristic; (5) is what makes it safe.
+#
+# Default ON for HIR shard children; SIMPLE_HIR_WORKER_SKELETON=0 opts out.
+# MIR children under module-scoped mono (per-file lane, not whole-program, +
+# SIMPLE_MIR_SHARD_ONLY_PATHS, the file-worker P4 lane, which a file worker's
+# MIR child always is) seed the closure from their admitted target paths and
+# additionally load HIR only for the targets plus their FROZEN import closure
+# (worker_hir_*_v1 below). A target whose closure is not fully built fails
+# closed (MONO-PENDING). MIR shards that run GLOBAL mono are unchanged: they
+# still build every surface and load every HIR module.
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_sections_v1}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1, mono_module_scoped_selected_v1}
+
+val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v1"
+
+var _ws_surfaces_built: i64 = 0
+var _ws_surfaces_loaded: i64 = 0
+var _ws_skeleton_parses: i64 = 0
+var _ws_restricted: bool = false
+var _ws_allowed: Dict<text, bool> = {}
+var _ws_table_ready: bool = false
+var _ws_table: TldrTableV1 = TldrTableV1.create()
+var _ws_hir_restricted: bool = false
+var _ws_hir_allowed: Dict<text, bool> = {}
+var _ws_hir_loaded: i64 = 0
+var _ws_hir_skipped: i64 = 0
+
+pub fn worker_surface_closure_selected_v1(hir_shard_spec: text, flag: text) -> bool:
+    hir_shard_spec != "" and flag != "0"
+
+# Static slice of a `i/n` spec. A malformed spec seeds everything (fail closed
+# to the old whole-closure behaviour, never to an empty worker).
+pub fn worker_surface_seed_v1(spec: text, path: text) -> bool:
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return true
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    if count <= 0 or index < 0 or index >= count:
+        return true
+    (driver_parse_shard_hash(path) % count) == index
+
+# Module ids a source names in `use` / `export use` / `pub use` lines: the
+# path itself and, for a `{...}` group, each member as a possible submodule.
+pub fn worker_surface_import_ids_v1(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.replace("\r\n", "\n").split("\n"):
+        val t = line.trim()
+        var rest = ""
+        if t.starts_with("use "): rest = t.substring(4)
+        elif t.starts_with("export use "): rest = t.substring(11)
+        elif t.starts_with("pub use "): rest = t.substring(8)
+        if rest == "":
+            continue
+        rest = rest.trim()
+        val as_at = rest.index_of(" as ")
+        if as_at > 0: rest = rest.substring(0, as_at)
+        val brace = rest.index_of(".{")
+        var base = if brace > 0: rest.substring(0, brace) else: rest
+        if base.ends_with(".*"): base = base.substring(0, base.len() - 2)
+        if base != "" and not out.contains(base): out.push(base)
+        if brace > 0:
+            val close = rest.index_of("}")
+            val inner = if close > brace: rest.substring(brace + 2, close) else: rest.substring(brace + 2)
+            for item in inner.split(","):
+                var name = item.trim()
+                val item_as = name.index_of(" as ")
+                if item_as > 0: name = name.substring(0, item_as).trim()
+                if name != "" and name != "*":
+                    val sub = base + "." + name
+                    if not out.contains(sub): out.push(sub)
+    out
+
+# Closure over the inventory: seeds plus every module reachable through import
+# ids that resolve (resolve_module_path) to an inventory canonical path.
+# Unresolved ids are dropped; the post-freeze readiness check covers them.
+pub fn worker_surface_closure_v1(paths: [text], canonical_paths: [text], contents: [text],
+        seeds: [bool]) -> [bool]:
+    var by_canonical: Dict<text, i64> = {}
+    var i = 0
+    while i < canonical_paths.len():
+        if not by_canonical.contains_key(canonical_paths[i]):
+            by_canonical[canonical_paths[i]] = i
+        i = i + 1
+    var needed: [bool] = []
+    var queue: [i64] = []
+    i = 0
+    while i < paths.len():
+        val seeded = i < seeds.len() and seeds[i]
+        needed.push(seeded)
+        if seeded: queue.push(i)
+        i = i + 1
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for id in worker_surface_import_ids_v1(contents[at]):
+            val resolved = resolve_module_path(id, paths[at])
+            if resolved == "":
+                continue
+            val key = _ws_canonical_key_v1(resolved, canonical_paths, by_canonical)
+            if key >= 0 and not needed[key]:
+                needed[key] = true
+                queue.push(key)
+    needed
+
+# The resolver may answer with a differently-rooted spelling of an inventory
+# path; match exactly first, then by unique path suffix.
+fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: Dict<text, i64>) -> i64:
+    val norm = resolved.replace("\\", "/")
+    if by_canonical.contains_key(norm):
+        return by_canonical[norm]
+    var j = 0
+    while j < canonical_paths.len():
+        val c = canonical_paths[j]
+        if c.ends_with("/" + norm) or norm.ends_with("/" + c):
+            return j
+        j = j + 1
+    -1
+
+# ready[i]: built[i] and every edge target (>= 0) of i is ready, transitively.
+# edges are the frozen surface's import_target_indices + export route targets.
+pub fn worker_surface_ready_v1(built: [bool], edges: [[i64]]) -> [bool]:
+    var ready: [bool] = []
+    for b in built:
+        ready.push(b)
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i < ready.len():
+            if ready[i] and i < edges.len():
+                for t in edges[i]:
+                    if t >= 0 and (t >= ready.len() or not ready[t]):
+                        ready[i] = false
+                        changed = true
+                        break
+            i = i + 1
+    ready
+
+# Restrict this worker's claims to `paths` (the ready modules' sources).
+pub fn worker_surface_restrict_claims_v1(paths: [text]):
+    _ws_restricted = true
+    _ws_allowed = {}
+    for p in paths:
+        _ws_allowed[p] = true
+
+pub fn worker_surface_claim_allowed_v1(path: text) -> bool:
+    not _ws_restricted or _ws_allowed.contains_key(path)
+
+# ===== MIR-child scoping (P-A) =====
+
+# Admitted targets of a module-scoped MIR child, or [] when this child must
+# keep the whole-closure behaviour (whole-program lane, skeleton opt-out, or no
+# targets). Mono scoping is decided by the ONE predicate
+# mono_module_scoped_selected_v1 (also used by the mono pass and the HIR deps
+# record) so the three cannot drift. `whole_program` is
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM, `flag` is SIMPLE_HIR_WORKER_SKELETON.
+pub fn worker_mir_scoped_targets_v1(whole_program: text, only_paths: text, flag: text) -> [text]:
+    val targets = native_file_worker_only_paths_parse_v1(only_paths)
+    if flag == "0" or not mono_module_scoped_selected_v1(whole_program, targets.len() > 0):
+        return []
+    targets
+
+# AOP advice is collected from EVERY loaded HIR module at weave time, and an
+# aspect module is normally not imported by its join points, so it is not in
+# the import closure. A module that may declare `on pc{...}` advice is loaded
+# too. Text superset of the parser's rule (current_ident_is_on_advice_decl:
+# `on`, inline ws, then `pc{`): every real advice decl contains "pc{".
+pub fn worker_source_may_declare_advice_v1(source: text) -> bool:
+    source.contains("pc{")
+
+# Source path for each canonical path (first wins), built once.
+pub fn source_path_by_canonical_map_v1(canonical_paths: [text], source_paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    var i = 0
+    while i < canonical_paths.len() and i < source_paths.len():
+        if not out.contains_key(canonical_paths[i]):
+            out[canonical_paths[i]] = source_paths[i]
+        i = i + 1
+    out
+
+# Transitive closure (targets included) over frozen surface edges.
+pub fn worker_surface_import_closure_v1(targets: [i64], edges: [[i64]]) -> [bool]:
+    var needed: [bool] = []
+    for _e in edges:
+        needed.push(false)
+    var queue: [i64] = []
+    for t in targets:
+        if t >= 0 and t < needed.len() and not needed[t]:
+            needed[t] = true
+            queue.push(t)
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for t in edges[at]:
+            if t >= 0 and t < needed.len() and not needed[t]:
+                needed[t] = true
+                queue.push(t)
+    needed
+
+# Restrict this MIR child's HIR loads (cache hit or local lowering) to `paths`.
+# Set once per process: the first restriction wins (lazy set-once ref).
+pub fn worker_hir_restrict_loads_v1(paths: [text]):
+    if _ws_hir_restricted:
+        return
+    _ws_hir_restricted = true
+    for p in paths:
+        _ws_hir_allowed[p] = true
+
+# Counted gate the HIR stage asks before loading a module.
+pub fn worker_hir_load_allowed_v1(path: text) -> bool:
+    if not _ws_hir_restricted or _ws_hir_allowed.contains_key(path):
+        _ws_hir_loaded = _ws_hir_loaded + 1
+        return true
+    _ws_hir_skipped = _ws_hir_skipped + 1
+    false
+
+pub fn worker_hir_counters_v1() -> text:
+    "hir_loaded={_ws_hir_loaded} hir_skipped={_ws_hir_skipped}"
+
+fn _ws_sidecar_path_v1(root: text, source_path: text) -> text:
+    val tldr = module_tldr_companion_path_v1(root, source_path)
+    tldr.substring(0, tldr.len() - 5) + ".surface"
+
+fn _ws_tldr_surface_v1(root: text, source_path: text, source: text) -> text:
+    val path = module_tldr_companion_path_v1(root, source_path)
+    if not file_exists(path):
+        return ""
+    for entry in module_tldr_companion_sections_v1(file_read(path), source):
+        if entry.starts_with("surface|"):
+            return entry.substring(8)
+    ""
+
+fn _ws_sidecar_surface_v1(path: text, digest: text) -> text:
+    if not file_exists(path):
+        return ""
+    val prefix = WORKER_SURFACE_SIDECAR_HEADER_V1 + "\nsource-sha256: " + digest + "\n"
+    val content = file_read(path)
+    if content.starts_with(prefix): content.substring(prefix.len()) else: ""
+
+fn _ws_publish_sidecar_v1(path: text, digest: text, skeleton: text) -> bool:
+    val slash = path.rfind("/")
+    if slash > 0 and not dir_create_all(path.substring(0, slash)):
+        return false
+    val content = WORKER_SURFACE_SIDECAR_HEADER_V1 + "\nsource-sha256: " + digest + "\n" + skeleton
+    val temp = "{path}.{getpid()}.{sha256_text(content).substring(0, 16)}.tmp"
+    if not file_write(temp, content):
+        val _w = file_delete(temp)
+        return false
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return false
+    true
+
+# Surface text for one closure module: table hit, fresh .tldr `surface`
+# section, fresh sidecar, else a new skeleton published for the next process.
+# `tldr_root` "" disables the on-disk layers.
+pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) -> text:
+    if not _ws_table_ready:
+        _ws_table = TldrTableV1.create()
+        _ws_table_ready = true
+    _ws_skeleton_parses = _ws_skeleton_parses + 1
+    val digest = sha256_text(source)
+    if _ws_table.is_loaded(digest):
+        _ws_surfaces_loaded = _ws_surfaces_loaded + 1
+        return _ws_table.entries[digest]
+    var text = ""
+    if tldr_root != "":
+        text = _ws_tldr_surface_v1(tldr_root, source_path, source)
+        if text == "":
+            text = _ws_sidecar_surface_v1(_ws_sidecar_path_v1(tldr_root, source_path), digest)
+    if text != "":
+        _ws_surfaces_loaded = _ws_surfaces_loaded + 1
+    else:
+        text = module_surface_skeleton_v1(source)
+        _ws_surfaces_built = _ws_surfaces_built + 1
+        if tldr_root != "":
+            val _published = _ws_publish_sidecar_v1(_ws_sidecar_path_v1(tldr_root, source_path), digest, text)
+    if text != "":
+        val _stored = _ws_table.publish(digest, text)
+    text
+
+pub fn worker_surface_counters_v1() -> text:
+    "surfaces_built={_ws_surfaces_built} surfaces_loaded={_ws_surfaces_loaded} skeleton_parses={_ws_skeleton_parses}"
+
+export worker_surface_closure_selected_v1, worker_surface_seed_v1, worker_surface_import_ids_v1
+export worker_surface_closure_v1, worker_surface_ready_v1
+export worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1
+export worker_surface_text_v1, worker_surface_counters_v1
+export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
+export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
+export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1

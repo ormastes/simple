@@ -4233,6 +4233,51 @@ void rt_passenger_owned(void) { }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn test_stage4_rust_runtime_projection_preserves_thread_packing_callback() {
+    let temp = tempfile::tempdir().unwrap();
+    let rust_runtime = build_compiler_backfill_test_archive(temp.path(), "packing_owner", &[
+        // No root references the callback: the projection must explicitly
+        // extract its separate archive member and keep the symbol global.
+        "int rt_projected_root(void) { return 7; }\n",
+        "void simple_note_user_threads_started(void) {}\nvoid rt_typed_words_i64_set(void) {}\n",
+    ]);
+    let projected = build_stage4_rust_runtime_projection_archive(&rust_runtime,
+        &["rt_projected_root".to_string()], &[], &temp.path().join("projection")).unwrap();
+    let (defined, _) = super::tools::archive_global_symbols(&projected).unwrap();
+    let canonical: std::collections::BTreeMap<_, _> = defined.into_iter()
+        .map(|(name, count)| (name.trim_start_matches('_').to_string(), count)).collect();
+    assert_eq!(canonical, std::collections::BTreeMap::from([
+        ("rt_projected_root".to_string(), 1),
+        ("simple_note_user_threads_started".to_string(), 1),
+    ]));
+    let source = temp.path().join("mixed.c");
+    let executable = temp.path().join("mixed");
+    std::fs::write(&source, r#"
+extern int rt_projected_root(void);
+extern void simple_note_user_threads_started(void) __attribute__((weak));
+int main(void) {
+    if (!simple_note_user_threads_started || rt_projected_root() != 7) return 1;
+    simple_note_user_threads_started();
+    return 0;
+}
+"#).unwrap();
+    let linked = std::process::Command::new(find_c_compiler())
+        .arg(&source).arg(&projected).arg("-o").arg(&executable).output().unwrap();
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+    assert!(std::process::Command::new(&executable).status().unwrap().success());
+
+    let incomplete = build_compiler_backfill_test_archive(temp.path(), "missing_packing_hook", &[
+        "int rt_projected_root(void) { return 7; }\nvoid rt_typed_words_i64_push(void) {}\n",
+    ]);
+    let rejected = temp.path().join("rejected");
+    let error = build_stage4_rust_runtime_projection_archive(&incomplete,
+        &["rt_projected_root".to_string()], &[], &rejected).unwrap_err();
+    assert!(error.contains("requires exactly one simple_note_user_threads_started definition; found 0"));
+    assert!(!rejected.join("libsimple_stage4_rust_runtime.a").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");

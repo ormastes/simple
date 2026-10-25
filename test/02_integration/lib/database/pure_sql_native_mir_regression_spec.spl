@@ -1,0 +1,57 @@
+"""
+# PureDatabase paths reworked for native MIR keep their semantics
+
+Regression for doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md.
+The INSERT / INSERT OR REPLACE primary-key reads, the LIKE prefix helpers and
+the bitmap-reducer slot were rewritten so the module lowers natively; these
+cases pin the observable SQL behaviour of those exact paths.
+"""
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue}
+
+fn text_of(value: DbValue) -> text:
+    match value:
+        case Text(inner): inner
+        case _: "<non-text>"
+
+fn int_of(value: DbValue) -> i64:
+    match value:
+        case Integer(inner): inner
+        case _: -1
+
+fn main() -> ():
+    describe("PureDatabase native-MIR regression paths", fn() -> ():
+        it("assigns the next rowid to an omitted INTEGER PRIMARY KEY", fn() -> ():
+            val db = PureDatabase.memory().unwrap()
+            expect(db.exec_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)").is_ok()).to_equal(true)
+            expect(db.exec("INSERT INTO t (v) VALUES ('first')", []).is_ok()).to_equal(true)
+            expect(db.exec("INSERT INTO t (id, v) VALUES (?, ?)", [DbValue.Null, DbValue.Text(value: "second")]).is_ok()).to_equal(true)
+            val rows = db.query("SELECT id, v FROM t", []).unwrap()
+            expect(rows.len()).to_equal(2)
+            expect(int_of(rows[0].values[0])).to_equal(1)
+            expect(int_of(rows[1].values[0])).to_equal(2)
+            val found = db.query("SELECT v FROM t WHERE id = ?", [DbValue.Integer(value: 2)]).unwrap()
+            expect(found.len()).to_equal(1)
+            expect(text_of(found[0].values[0])).to_equal("second")
+        )
+        it("replaces the row with the same primary key on INSERT OR REPLACE", fn() -> ():
+            val db = PureDatabase.memory().unwrap()
+            expect(db.exec_sql("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)").is_ok()).to_equal(true)
+            expect(db.exec("INSERT INTO kv (k, v) VALUES ('a', 'old')", []).is_ok()).to_equal(true)
+            expect(db.exec("INSERT OR REPLACE INTO kv (k, v) VALUES ('a', 'new')", []).is_ok()).to_equal(true)
+            val rows = db.query("SELECT v FROM kv WHERE k = 'a'", []).unwrap()
+            expect(rows.len()).to_equal(1)
+            expect(text_of(rows[0].values[0])).to_equal("new")
+        )
+        it("matches quoted LIKE prefix and suffix patterns", fn() -> ():
+            val db = PureDatabase.memory().unwrap()
+            expect(db.exec_sql("CREATE TABLE w (id TEXT PRIMARY KEY, v TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO w (id, v) VALUES ('a1', 'alpha')").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO w (id, v) VALUES ('b1', 'beta')").is_ok()).to_equal(true)
+            expect(db.query("SELECT v FROM w WHERE v LIKE 'al%'", []).unwrap().len()).to_equal(1)
+            expect(db.query("SELECT v FROM w WHERE v LIKE '%a'", []).unwrap().len()).to_equal(2)
+            expect(db.query("SELECT v FROM w WHERE v LIKE 'zz%'", []).unwrap().len()).to_equal(0)
+        )
+    )

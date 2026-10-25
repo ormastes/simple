@@ -46,7 +46,7 @@ pub fn llvm_native_link_orchestrator_publish_runtime_provider_v1(
 use compiler.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_sqlite_demand_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.llvm_native_link_hosted_support.{llvm_apply_explicit_link_options}
-use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1, llvm_runtime_owner_compile_owner_v1, llvm_runtime_owner_c_archive_v1}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1, llvm_runtime_owner_compile_owner_v1, llvm_runtime_owner_c_archive_v1, llvm_runtime_owner_coff_flavor_v1, llvm_runtime_owner_c_gnu_archive_v1}
 use compiler.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
 use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provider_manifest_v1}
@@ -88,13 +88,15 @@ fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
         return archive
     ""
 
-fn _llvm_runtime_owner_native_all(coff_native_all: bool, runtime_owner: text,
-        native_all: text, runtime_objects: [text]) -> Result<text, text>:
+fn _llvm_runtime_owner_native_all(coff_flavor: text, runtime_owner: text,
+        native_all: text, runtime_objects: [text], target: text) -> Result<text, text>:
     """The native_all archive this link takes under the selected owner."""
-    if not coff_native_all or runtime_owner != "c":
+    if coff_flavor == "" or native_all == "" or runtime_owner != "c":
         return Ok(native_all)
     val owner_cache = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     val owner_root = if owner_cache == "": "build/native_cache" else: owner_cache
+    if coff_flavor == "windows-gnu":
+        return llvm_runtime_owner_c_gnu_archive_v1(native_all, runtime_objects, owner_root, target)
     llvm_runtime_owner_c_archive_v1(native_all, runtime_objects, owner_root)
 
 fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
@@ -258,7 +260,13 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     val runtime_owner = llvm_runtime_owner_v1()?
     if runtime_bundle == "core-c-alloc-observer-v1" and runtime_owner != "c":
         return Err("allocation observer v1 requires canonical C runtime owners")
-    val coff_native_all = bootstrap_native_all != "" and hosted_os == "windows" and not _is_mingw()
+    # Normalize the native default using the actual host architecture/driver;
+    # explicit targets keep their ABI even when the ambient host differs.
+    val runtime_owner_target = if (hosted_target == "" or hosted_target == "host") and hosted_os == "windows":
+        hosted_arch + "-pc-windows-" + (if _is_mingw(): "gnu" else: "msvc")
+    else: hosted_target
+    val coff_flavor = llvm_runtime_owner_coff_flavor_v1(hosted_os, runtime_owner_target, _is_mingw())
+    val coff_native_all = bootstrap_native_all != "" and coff_flavor != ""
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
@@ -304,7 +312,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # owner=c: the Rust archive cedes every name these C objects define.
     # Bound straight-line (no nested-branch writeback), like runtime_objects.
     val linked_native_all: text = match _llvm_runtime_owner_native_all(
-            coff_native_all, runtime_owner, bootstrap_native_all, runtime_objects):
+            coff_flavor, runtime_owner, bootstrap_native_all, runtime_objects, runtime_owner_target):
         case Ok(path):
             path
         case Err(err):

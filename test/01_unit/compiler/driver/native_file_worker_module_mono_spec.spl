@@ -1,0 +1,128 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# File worker + module-scoped mono: dependency readiness and fallback
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/per_file_pipeline_phase_barriers_2026-10-25.md
+
+## Purpose and Audience
+
+In the per-file lane a file worker admits MIR(F) as soon as
+HIR(F) and the HIR of F's direct imports are PASS, instead of waiting for the
+whole HIR ledger. These specs pin the pure decisions: the gate, the readiness
+predicate over a tiny import graph, the deps record, the E-MONO-040 widen /
+MONO-PENDING fallback, and the overlap proof over two-module receipts.
+
+## Expected Outcome
+
+The gate selects scoped mono for every active file worker unless SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; readiness waits on
+running imports and refuses a failed one; an unresolved template widens once
+and then fails closed; module A's object finishing before module B's HIR start
+proves overlap.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    NativeFileWorkerReceiptV1, mono_module_scoped_selected_v1,
+    native_file_worker_deps_ready_v1, native_file_worker_deps_encode_v1,
+    native_file_worker_deps_parse_v1, native_file_worker_transitive_deps_v1,
+    native_file_worker_mono_fallback_v1, native_file_worker_only_paths_parse_v1,
+    native_file_worker_receipt_encode_v1, native_file_worker_receipt_parse_v1,
+    file_worker_overlap_proven_v1}
+
+fn r(module: text, hs: i64, hd: i64, dr: i64, md: i64, od: i64, status: text) -> NativeFileWorkerReceiptV1:
+    NativeFileWorkerReceiptV1(module: module, hir_start_ms: hs, hir_done_ms: hd, deps_ready_ms: dr,
+        mir_done_ms: md, obj_done_ms: od, status: status, object: if status == "PASS" and od >= 0: "o/{module}.o" else: "")
+
+describe "module-scoped mono gate":
+    it "is always scoped in the per-file lane unless whole-program":
+        assert_true(mono_module_scoped_selected_v1("", true))
+        assert_true(mono_module_scoped_selected_v1("0", true))
+        assert_false(mono_module_scoped_selected_v1("1", true))
+        assert_false(mono_module_scoped_selected_v1("", false))
+
+    it "parses the admitted path list":
+        val paths = native_file_worker_only_paths_parse_v1("src/a.spl\n\nsrc/b.spl\nsrc/a.spl\n")
+        assert_equal(paths.len(), 2)
+        assert_equal(paths[0], "src/a.spl")
+        assert_equal(paths[1], "src/b.spl")
+        assert_equal(native_file_worker_only_paths_parse_v1("").len(), 0)
+
+describe "dependency readiness":
+    # Graph: main -> util -> base ; main -> base
+    it "is ready when the module and its direct imports are PASS":
+        var states: Dict<text, text> = {}
+        states["main"] = "PASS"
+        states["util"] = "PASS"
+        states["base"] = "PASS"
+        assert_equal(native_file_worker_deps_ready_v1("main", ["util", "base"], states), 1)
+
+    it "waits while an import has no terminal yet":
+        var states: Dict<text, text> = {}
+        states["main"] = "PASS"
+        states["base"] = "PASS"
+        assert_equal(native_file_worker_deps_ready_v1("main", ["util", "base"], states), 0)
+
+    it "does not wait on unrelated modules":
+        var states: Dict<text, text> = {}
+        states["base"] = "PASS"
+        states["main"] = ""
+        assert_equal(native_file_worker_deps_ready_v1("base", [], states), 1)
+
+    it "refuses when an import failed":
+        var states: Dict<text, text> = {}
+        states["main"] = "PASS"
+        states["util"] = "FAILED"
+        states["base"] = "PASS"
+        assert_equal(native_file_worker_deps_ready_v1("main", ["util", "base"], states), -1)
+
+    it "round-trips the deps record and drops self and duplicates":
+        val encoded = native_file_worker_deps_encode_v1("main", ["util", "main", "base", "util"])
+        val parsed = native_file_worker_deps_parse_v1("main", encoded)
+        assert_true(parsed.is_ok())
+        val deps = parsed.unwrap()
+        assert_equal(deps.len(), 2)
+        assert_equal(deps[0], "util")
+        assert_equal(deps[1], "base")
+        assert_false(native_file_worker_deps_parse_v1("other", encoded).is_ok())
+
+    it "computes the transitive closure for widening":
+        var edges: Dict<text, [text]> = {}
+        edges["main"] = ["util"]
+        edges["util"] = ["base"]
+        edges["base"] = []
+        val closure = native_file_worker_transitive_deps_v1("main", edges)
+        assert_equal(closure.len(), 2)
+        assert_true(closure.contains("util"))
+        assert_true(closure.contains("base"))
+
+describe "MONO-PENDING fallback":
+    it "accepts output with no missing template":
+        assert_equal(native_file_worker_mono_fallback_v1(["E-MONO-034: x"], false), "ok")
+        assert_equal(native_file_worker_mono_fallback_v1([], true), "ok")
+
+    it "widens once, then fails closed":
+        val diags = ["E-MONO-040: template id not visible to module main"]
+        assert_equal(native_file_worker_mono_fallback_v1(diags, false), "widen")
+        assert_equal(native_file_worker_mono_fallback_v1(diags, true), "MONO-PENDING")
+
+describe "two-module overlap receipts":
+    it "round-trips deps_ready_ms and accepts receipts without it":
+        val back = native_file_worker_receipt_parse_v1(native_file_worker_receipt_encode_v1(r("base", 0, 10, 12, 20, 25, "PASS")))
+        assert_true(back.is_ok())
+        assert_equal(back.unwrap().deps_ready_ms, 12)
+        assert_equal(back.unwrap().mir_done_ms, 20)
+        val old = native_file_worker_receipt_parse_v1("module=m\nhir_start_ms=1\nhir_done_ms=2\nmir_done_ms=-1\nobj_done_ms=-1\nstatus=MONO-PENDING\nobject=\n")
+        assert_true(old.is_ok())
+        assert_equal(old.unwrap().deps_ready_ms, -1)
+
+    it "proves overlap when base's object precedes main's HIR start":
+        # base has no imports: its MIR starts right after its own HIR.
+        val receipts = [r("base", 0, 10, 11, 20, 25, "PASS"), r("main", 30, 40, -1, -1, -1, "PASS")]
+        assert_true(file_worker_overlap_proven_v1(receipts))
+
+    it "does not prove overlap under the old whole-ledger wait":
+        val receipts = [r("base", 0, 10, 45, 50, 55, "PASS"), r("main", 30, 40, 45, 50, 60, "PASS")]
+        assert_false(file_worker_overlap_proven_v1(receipts))

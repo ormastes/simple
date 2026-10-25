@@ -187,10 +187,13 @@ full 128-bit key; align the constants before the first caller lands.
 3. Freshness is content: source sha256 in the `.tldr`; xxh3_128 keys for caches;
    target/compiler identity in the key (`native_build_environment_identity.spl`).
 
-Status: 1 — **partial** (TLDR regenerate on stale: implemented; pointcut set:
-planned — `pointcut` appears only in `cache/schema/cache_protocol.sdn`);
-2 — **planned** (no object-hash-equal link skip in `native_build_main.spl` or
-`incremental.spl`).
+Status: 1 — **planner implemented, uncalled** (TLDR regenerate on stale:
+implemented; changed-src + imported-iface-digest + AOP pointcut-affected set:
+`cache/incremental_rebuild_plan_v1.spl` `incremental_rebuild_plan_v1`, using the
+directory AOP match shards whose facts key carries the GuardIdV1 guard root);
+2 — **decision implemented, uncalled** (`incremental_link_decision_v1`: relink only
+on a changed object hash; otherwise place the cached output). Not yet wired into
+`native_build_main.spl` / `incremental.spl`.
 
 ## 12. Cache limits
 

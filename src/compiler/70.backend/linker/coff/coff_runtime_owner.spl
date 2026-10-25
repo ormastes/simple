@@ -118,6 +118,21 @@ fn _owner_layout(data: [u8], base: i64, size: i64) -> CoffOwnerLayoutV1:
         string_table: string_table, section_count: section_count,
         section_headers: section_headers)
 
+fn _owner_member_machine(data: [u8], base: i64, size: i64) -> i64:
+    if size < 20: return 0
+    val machine = _owner_u16(data, base)
+    if machine == 0 and _owner_u16(data, base + 2) == 65535:
+        # Both bigobj and short import headers carry Machine at offset 6.
+        return _owner_u16(data, base + 6)
+    if machine == 34404 or machine == 43620 or machine == 332 or machine == 452 or machine == 42561 or machine == 42574:
+        return machine
+    0
+
+pub fn runtime_owner_object_machine_v1(data: [u8]) -> i64:
+    """Only a structurally readable COFF object can supply C-owned symbols."""
+    if not _owner_layout(data, 0, data.len()).ok: return 0
+    _owner_member_machine(data, 0, data.len())
+
 fn _owner_section_number(data: [u8], record: i64, bigobj: bool) -> i64:
     if bigobj:
         val raw = _owner_u32(data, record + 12)
@@ -193,6 +208,16 @@ fn _owner_is_metadata_member(data: [u8], header: i64) -> bool:
     first == 47 and (second == 32 or second == 47)
 
 pub fn runtime_owner_cede_archive_file_v1(archive_path: text, owned: {text: bool}) -> Result<RuntimeOwnerCedeResultV1, text>:
+    # Preserve the native two-word call shape for existing/cached callers.
+    _runtime_owner_cede_archive_file_impl_v1(archive_path, owned, 0)
+
+pub fn runtime_owner_cede_archive_file_for_machine_v1(archive_path: text,
+        owned: {text: bool}, expected_machine: i64) -> Result<RuntimeOwnerCedeResultV1, text>:
+    if expected_machine != COFF_OWNER_MACHINE_AMD64 and expected_machine != COFF_OWNER_MACHINE_ARM64:
+        return Err("runtime owner: unsupported expected COFF machine {expected_machine}")
+    _runtime_owner_cede_archive_file_impl_v1(archive_path, owned, expected_machine)
+
+fn _runtime_owner_cede_archive_file_impl_v1(archive_path: text, owned: {text: bool}, expected_machine: i64) -> Result<RuntimeOwnerCedeResultV1, text>:
     """Make every `owned` definition in an MSVC archive an undefined reference.
 
     One buffer is rewritten in place (no per-member copies): Rust archives are
@@ -215,6 +240,10 @@ pub fn runtime_owner_cede_archive_file_v1(archive_path: text, owned: {text: bool
         val size = _owner_decimal(bytes, offset + 48, 10)
         val base = offset + 60
         if base + size > bytes.len(): return Err("runtime owner: archive member overruns the archive")
+        if expected_machine != 0 and not _owner_is_metadata_member(bytes, offset):
+            val machine = _owner_member_machine(bytes, base, size)
+            if machine != 0 and machine != expected_machine:
+                return Err("runtime owner: archive COFF machine {machine} differs from target {expected_machine}")
         val layout = _owner_layout(bytes, base, size)
         if layout.ok and not _owner_is_metadata_member(bytes, offset):
             parsed = parsed + 1
@@ -279,4 +308,6 @@ pub fn runtime_owner_write_bytes_v1(path: text, bytes: [u8]) -> bool:
 
 export RuntimeOwnerCedeResultV1, runtime_owner_select_v1
 export runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1
+export runtime_owner_cede_archive_file_for_machine_v1
 export runtime_owner_write_bytes_v1
+export runtime_owner_object_machine_v1

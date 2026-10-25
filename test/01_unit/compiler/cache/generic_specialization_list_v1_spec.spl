@@ -1,0 +1,238 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Per-file generic specialization list, `.rr` producer reads, planner (P-G2)
+
+Each module's TLDR records the concrete instances it needs (ConcreteTldrKey
+rows in a `generic-spec` section, keyed by the same derivation the P-G1 reader
+looks instances up with); the rows become forward reads of family
+`generic-specialization`, and the incremental planner uses the `.rr` reverse
+projection to recompile exactly the consumers of a changed template's
+instances. Any doubt (non-textual/inferred generic use, ambiguous name,
+incomplete family, missing `.rr`) falls back to the interface-digest rule.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.mono.model.generic_subst_model.{mt_con, mt_key_type}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    semantic_query_read_manifest_valid_v1, semantic_query_key_canonical_v1}
+use compiler.driver.cache.generic_tldr_view_table_v1.{generic_tldr_view_table_new,
+    concrete_tldr_key_for_v1}
+use compiler.driver.cache.reader.concrete_instance_reader_v1.{ConcreteInstanceReaderV1,
+    concrete_instance_reader_new_v1, reader_concrete_instance_v1}
+use compiler.driver.cache.generic_specialization_list_v1.*
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_sealed_manifest_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_generic_spec_section_v1}
+use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2,
+    reverse_reference_project_generation_v2}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1}
+use compiler.driver.cache.incremental_rebuild_plan_v1.*
+
+fn guard() -> ActiveGuardRootV1:
+    active_guard_root_empty_v1("profile:default")
+
+fn pair_entry() -> GenericTemplateEntryV1:
+    val d = GenericDeclInputV1(module_path: "pkg_a", name: "Pair", params: ["A", "B"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [GenericFieldInputV1(name: "first", type_text: "A"),
+            GenericFieldInputV1(name: "second", type_text: "B")],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:pair")
+    project_generic_template_v1(d).unwrap()
+
+fn box_entry() -> GenericTemplateEntryV1:
+    val d = GenericDeclInputV1(module_path: "pkg_b", name: "Box", params: ["T"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE],
+        fields: [GenericFieldInputV1(name: "value", type_text: "T")],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:box")
+    project_generic_template_v1(d).unwrap()
+
+fn ctx_with(names: [text], unknown: bool) -> GenericSpecContextV1:
+    GenericSpecContextV1(profile_digest: "profile:default", guard_root: guard(),
+        generic_import_names: names, generic_imports_unknown: unknown)
+
+fn specs_of(source: text) -> GenericSpecializationListV1:
+    generic_specializations_of_source_v1(source, "app", [pair_entry(), box_entry()], ctx_with([], false))
+
+fn prim_key(name: text) -> text:
+    generic_type_text_key_v1(GenericDeclInputV1(module_path: "app", name: "", params: [],
+        param_kinds: [], fields: [], visibility_root: "", active_guard_root: "",
+        source_digest: ""), name).unwrap()
+
+fn empty_rr() -> ReverseReferenceReceiptReadV1:
+    ReverseReferenceReceiptReadV1(false, "none", nil)
+
+fn rr_of(modules: [text], sources: [text]) -> ReverseReferenceReceiptReadV1:
+    var manifests: [SealedForwardManifestV2] = []
+    var i = 0
+    while i < modules.len():
+        manifests.push(generic_spec_sealed_manifest_v1(modules[i], Some(specs_of(sources[i]))))
+        i = i + 1
+    val build = reverse_reference_project_generation_v2("gen:1", "root:1", manifests, empty_rr())
+    ReverseReferenceReceiptReadV1(build.ok, build.reason, build.receipt)
+
+fn module(path: text, imports: [text], iface_changed: bool) -> IncrementalModuleV1:
+    IncrementalModuleV1(path: path, old_source_digest: "s:" + path, new_source_digest: "s:" + path,
+        imports: imports, old_iface_digest: "i:" + path,
+        new_iface_digest: if iface_changed: "j:" + path else: "i:" + path)
+
+fn pair_change() -> [GenericTemplateChangeV1]:
+    [GenericTemplateChangeV1(module_path: "pkg_a.spl", template_symbol: "pkg_a.Pair")]
+
+describe "generic-spec list: extraction":
+    it "records one ConcreteTldrKey per distinct concrete instance":
+        val t = specs_of("fn f(p: Pair<i64, f64>) -> Pair<i64, f64>:\n    val b: Box<text> = z\n")
+        expect(t.complete).to_equal(true)
+        expect(t.specs.len()).to_equal(2)
+        val want = required_specialization_v1(pair_entry(), [prim_key("i64"), prim_key("f64")],
+            "profile:default", guard())
+        var found = false
+        for s in t.specs:
+            if s.concrete_key == want.concrete_key: found = true
+        expect(found).to_equal(true)
+
+    it "distinguishes reversed arguments and records nested instances":
+        val a = specs_of("val x: Pair<i64, f64> = y\n")
+        val b = specs_of("val x: Pair<f64, i64> = y\n")
+        expect(a.specs[0].concrete_key == b.specs[0].concrete_key).to_equal(false)
+        val n = specs_of("val x: Pair<Box<i64>, i64> = y\n")
+        expect(n.specs.len()).to_equal(2)
+
+    it "skips template-internal references to enclosing binders and declaration headers":
+        val l = specs_of("struct Wrap<T>:\n    inner: Box<T>\n\nfn g<U>(x: Pair<U, i64>) -> i64:\n    0\n")
+        expect(l.specs.len()).to_equal(0)
+
+    it "marks the list incomplete on arity mismatch":
+        expect(specs_of("val x: Pair<i64> = y\n").complete).to_equal(false)
+
+    it "ignores comparisons":
+        val l = specs_of("val ok = a < b and c > d\n")
+        expect(l.complete).to_equal(true)
+        expect(l.specs.len()).to_equal(0)
+
+describe "generic-spec list: inferred uses fail closed":
+    it "an inferred instantiation through an imported generic fn is incomplete":
+        val l = generic_specializations_of_source_v1("val p = make_pair(1, 2.0)\n", "app",
+            [pair_entry()], ctx_with(["make_pair", "Pair"], false))
+        expect(l.complete).to_equal(false)
+
+    it "a bare imported template mention is incomplete":
+        expect(specs_of("val p = Pair(first: 1, second: 2.0)\n").complete).to_equal(false)
+
+    it "a wildcard/aliased generic-bearing import is incomplete":
+        val l = generic_specializations_of_source_v1("val n = 1\n", "app", [pair_entry()],
+            ctx_with([], true))
+        expect(l.complete).to_equal(false)
+
+    it "import lines themselves are not uses":
+        val l = generic_specializations_of_source_v1("use pkg_a.{Pair,\n    make_pair}\nval x: Pair<i64, f64> = y\n",
+            "app", [pair_entry()], ctx_with(["make_pair", "Pair"], false))
+        expect(l.complete).to_equal(true)
+        expect(l.specs.len()).to_equal(1)
+
+describe "generic-spec list: shared key with the P-G1 reader":
+    it "row arg keys + derivation equal the reader's mt_key_type derivation":
+        val l = specs_of("val x: Pair<i64, f64> = y\n")
+        val reader_key = concrete_tldr_key_for_v1(pair_entry(), [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+            [mt_key_type(mt_con("i64")), mt_key_type(mt_con("f64"))], "profile:default", guard())
+        expect(l.specs[0].concrete_key).to_equal(reader_key)
+
+    it "a recorded row is exactly the instance key the reader serves":
+        var r = concrete_instance_reader_new_v1(generic_tldr_view_table_new(), "snap:1",
+            "profile:default", guard())
+        r.register_module("pkg_a", build_generic_template_section_v1([pair_entry()]))
+        val served = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [mt_con("i64"), mt_con("f64")])
+        expect(served.found).to_equal(true)
+        val row = required_specialization_v1(pair_entry(), [prim_key("i64"), prim_key("f64")],
+            "profile:default", guard())
+        expect(row.concrete_key).to_equal(served.instance[0].instance_key)
+
+describe "generic-spec list: TLDR section":
+    it "round-trips through the section codec":
+        val l = specs_of("val x: Pair<i64, f64> = y\nval b: Box<text> = z\n")
+        val decoded = generic_specialization_section_decode_v1(generic_specialization_section_encode_v1(l))
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.list.specs.len()).to_equal(2)
+        expect(decoded.list.specs[0].concrete_key).to_equal(l.specs[0].concrete_key)
+        expect(decoded.list.specs[1].arg_keys).to_equal(l.specs[1].arg_keys)
+
+    it "fails closed on a bad header":
+        expect(generic_specialization_section_decode_v1("generic-spec/v0\t1").ok).to_equal(false)
+
+    it "is produced from the module's own generic-template section":
+        val own = "generic-template|" + generic_template_section_encode_v1(
+            build_generic_template_section_v1([pair_entry()]))
+        val section = module_tldr_generic_spec_section_v1("val x: Pair<i64, f64> = y\n", "pkg_a",
+            [own], [], "pkg_a.spl", "", guard())
+        expect(section.starts_with("generic-spec|")).to_equal(true)
+        val decoded = generic_specialization_section_decode_v1(section.substring(13))
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.list.specs.len()).to_equal(1)
+        expect(module_tldr_generic_spec_section_v1("val n = 1\n", "pkg_a", [own], [], "pkg_a.spl", "",
+            guard())).to_equal("")
+
+describe "generic-spec list: .rr forward reads":
+    it "emits one valid tldr.concrete read per instance under the template prefix":
+        val m = generic_spec_forward_manifest_v1("app/a.spl", specs_of("val x: Pair<i64, f64> = y\n"))
+        expect(semantic_query_read_manifest_valid_v1(m)).to_equal(true)
+        expect(m.ordered_reads.len()).to_equal(1)
+        expect(m.ordered_reads[0].producer.kind).to_equal("tldr.concrete")
+        val subject = semantic_query_key_canonical_v1(m.ordered_reads[0].producer)
+        val prefix = generic_spec_template_subject_prefix_v1("pkg_a.Pair")
+        expect(prefix == "").to_equal(false)
+        expect(subject.starts_with(prefix)).to_equal(true)
+
+    it "an incomplete empty list still emits a conservative read":
+        val m = generic_spec_forward_manifest_v1("app/a.spl", specs_of("val x: Pair<i64> = y\n"))
+        expect(m.ordered_reads.len()).to_equal(1)
+        expect(m.ordered_reads[0].completeness == SemanticCoverageV1.Conservative).to_equal(true)
+
+describe "incremental planner: exact generic-instance invalidation":
+    it "recompiles only .rr consumers of a changed template's instances":
+        val rr = rr_of(["user_pair.spl", "user_box.spl", "user_none.spl"],
+            ["val x: Pair<i64, f64> = y\n", "val b: Box<i64> = z\n", "val n = 1\n"])
+        val mods = [module("pkg_a.spl", [], true), module("user_pair.spl", ["pkg_a.spl"], false),
+            module("user_box.spl", ["pkg_a.spl"], false), module("user_none.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: rr))
+        expect(out.exact).to_equal(true)
+        expect(out.plan.recompile).to_equal(["user_pair.spl"])
+        expect(out.invalidated_instances.len()).to_equal(1)
+        # The plain v1 plan recompiles every importer.
+        expect(incremental_rebuild_plan_v1(mods, []).recompile.len()).to_equal(3)
+
+    it "falls back to the interface rule when .rr is unavailable":
+        val mods = [module("pkg_a.spl", [], true), module("user_none.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: empty_rr()))
+        expect(out.exact).to_equal(false)
+        expect(out.plan.recompile).to_equal(["user_none.spl"])
+
+    it "falls back when an importer uses the template only through inference":
+        var manifests: [SealedForwardManifestV2] = []
+        manifests.push(generic_spec_sealed_manifest_v1("user_infer.spl", Some(
+            generic_specializations_of_source_v1("val p = make_pair(1, 2.0)\n", "user_infer",
+                [pair_entry()], ctx_with(["make_pair"], false)))))
+        val build = reverse_reference_project_generation_v2("gen:1", "root:1", manifests, empty_rr())
+        val rr = ReverseReferenceReceiptReadV1(build.ok, build.reason, build.receipt)
+        val mods = [module("pkg_a.spl", [], true), module("user_infer.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: rr))
+        expect(out.exact).to_equal(false)
+        expect(out.plan.recompile).to_equal(["user_infer.spl"])
+
+    it "falls back when a producer's list was incomplete":
+        val rr = rr_of(["user_bad.spl", "user_none.spl"], ["val x: Pair<i64> = y\n", "val n = 1\n"])
+        val mods = [module("pkg_a.spl", [], true), module("user_none.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: rr))
+        expect(out.exact).to_equal(false)
+        expect(out.plan.recompile).to_equal(["user_none.spl"])

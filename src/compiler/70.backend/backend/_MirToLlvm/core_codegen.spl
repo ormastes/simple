@@ -418,7 +418,9 @@ impl MirTextCodegen for MirToLlvm:
         self.module_qualified_symbol_names = {}
         if not is_entry_module and module.name != "":
             for fn_qualify in mir_module_functions_sorted(module):
-                if not fn_qualify.name.contains("."):
+                # A COMDAT instance keeps its bare mangled name: every object
+                # that instantiated it must spell the same symbol to dedupe.
+                if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
         for fn_owner in mir_module_functions_sorted(module):
             if mir_runtime_owned_call_name(fn_owner.name):
@@ -438,6 +440,9 @@ impl MirTextCodegen for MirToLlvm:
             # body is emitted -- llvm_function_symbol_name consults fn_global
             # at call sites, and translate_function reads the rest on the
             # `define` line / at the terminator.
+            if fn_owner.is_comdat:
+                self.fn_comdat[fn_owner.name] = true
+                self.fn_comdat[self.llvm_function_symbol_name(fn_owner.name)] = true
             if fn_owner.is_global:
                 self.fn_global[fn_owner.name] = true
             if fn_owner.is_naked or fn_owner.section != "" or fn_owner.align > 0:
@@ -904,7 +909,21 @@ impl MirTextCodegen for MirToLlvm:
             placement_suffix = placement_suffix + " section \"" + self.fn_section[name] + "\""
         if self.fn_align.has(name):
             placement_suffix = placement_suffix + " align {self.fn_align[name]}"
-        val placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        var placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        # Module-scoped mono instance: every requesting object defines its own
+        # copy as `linkonce_odr` in a same-named `any` comdat; the linker
+        # keeps one (ELF group / COFF IMAGE_COMDAT_SELECT_ANY / Mach-O weak).
+        if self.fn_comdat.has(name):
+            placement_prefix = "define linkonce_odr"
+            placement_suffix = " comdat" + placement_suffix
+            val comdat_decl = "$" + fn_name + " = comdat any"
+            if ir_handle >= 0:
+                if _sffi_string_builder_len(ir_handle) > 0:
+                    val comdat_newline = "\n"
+                    _sffi_string_builder_push(ir_handle, comdat_newline)
+                _sffi_string_builder_push(ir_handle, comdat_decl)
+            else:
+                self.builder.emit(comdat_decl)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var attrs = " nounwind" + placement_attrs

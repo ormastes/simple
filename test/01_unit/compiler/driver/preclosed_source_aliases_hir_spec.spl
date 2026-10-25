@@ -1,0 +1,183 @@
+# Verify admitted import aliases through HIR and canonical provider identity.
+use std.spec.{describe, it, expect}
+use app.io.env_ops.{env_set}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_remove_process}
+use std.nogc_async_mut.sosix.environment.{sosix_cwd}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_dirname, _driver_collect_frozen_compiler_source_v1,
+    _driver_unique_physical_sources}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn fresh_root(label: text) -> text:
+    val root = sosix_cwd() + "/build/test_tmp/preclosed-alias-{label}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    expect(rt_dir_create(root, true)).to_equal(true)
+    root
+
+fn admitted(root: text, relative: text, content: text) -> [SourceFile]:
+    val path = root + "/" + relative
+    expect(rt_dir_create(_driver_entry_import_dirname(path), true)).to_equal(true)
+    expect(rt_file_write_text(path, content)).to_equal(true)
+    val loaded = _driver_collect_frozen_compiler_source_v1(path, sha256_text(content), content.len())
+    expect(loaded.is_ok()).to_equal(true)
+    loaded.unwrap()
+
+fn replay_in_snapshot(sources: [SourceFile], roots: [text], root: text) -> Result<[SourceFile], text>:
+    val before_length = sources.len()
+    var before_paths: [text] = []
+    var before_names: [text] = []
+    var before_contents: [text] = []
+    for source in sources:
+        before_paths = before_paths.push(source.path)
+        before_names = before_names.push(source.module_name)
+        before_contents = before_contents.push(source.content)
+    val previous = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+    expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_equal(true)
+    val replay = driver_preclosed_source_aliases_v1(sources, roots, root)
+    val restored = if previous != nil:
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous!)
+    else: env_remove_process("SIMPLE_SCV_SNAPSHOT_ROOT")
+    # Restore process authority before inspecting either the successful or error result.
+    expect(restored).to_equal(true)
+    expect(sources.len()).to_equal(before_length)
+    var index = 0
+    while index < before_length:
+        expect(sources[index].path).to_equal(before_paths[index])
+        expect(sources[index].module_name).to_equal(before_names[index])
+        expect(sources[index].content).to_equal(before_contents[index])
+        index = index + 1
+    replay
+
+fn named_path(sources: [SourceFile], name: text) -> text:
+    for source in sources:
+        if source.module_name == name: return source.path
+    ""
+
+fn alias_count(sources: [SourceFile], name: text) -> i64:
+    var count = 0
+    for source in sources:
+        if source.module_name == name: count = count + 1
+    count
+
+fn expect_originals(before: [SourceFile], after: [SourceFile]):
+    expect(_driver_unique_physical_sources(after).len()).to_equal(
+        _driver_unique_physical_sources(before).len())
+    var index = 0
+    while index < before.len():
+        expect(after[index].path).to_equal(before[index].path)
+        expect(after[index].content).to_equal(before[index].content)
+        expect(after[index].module_name).to_equal(before[index].module_name)
+        index = index + 1
+
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+fn enum_count(symbols: SymbolTable, owner: text, name: text) -> i64:
+    var count = 0
+    for declaration in symbols.symbols.values():
+        if declaration.kind == SymbolKind.Enum and declaration.name == name and
+                hir_symbol_owner_module(declaration.defining_module ?? "") == owner:
+            count = count + 1
+    count
+
+fn show_parser_imports(parsed: ParserModule):
+    for imported in parsed.imports:
+        print "[discriminator-parser] module={imported.module} items={imported.items.len()}"
+        for item in imported.items:
+            print "[discriminator-parser-item] name={item.name} has_alias={item.has_alias} alias={item.alias}"
+
+fn show_targets(registry: ModuleSurfacesByName, entry_name: text):
+    val entry = registry.surfaces[registry.index_by_name[entry_name]]
+    var index = 0
+    while index < entry.import_target_names.len():
+        val name = entry.import_target_names[index]
+        val target = entry.import_target_indices[index]
+        print "[discriminator-target] name={name} index={target}"
+        if target >= 0 and target < registry.surfaces.len():
+            print "[discriminator-target-path] path={registry.surfaces[target].canonical_path}"
+        index = index + 1
+
+fn show_errors(lowering: HirLowering):
+    for error in lowering.errors:
+        print "[discriminator-hir-error] {error.message}"
+
+fn enum_import_case(label: text, import_line: text):
+    val root = fresh_root(label)
+    val provider = admitted(root, "src/app/severity.spl", "enum Severity:\n    Error\n    Warning\n")
+    val content = import_line + "\nstruct Diagnostic:\n    severity: Severity\nfn make() -> Severity:\n    Severity.Error\n"
+    val entry = admitted(root, "src/app/main.spl", content)
+    val replay = replay_in_snapshot(entry + provider, [root + "/src/app"], root)
+    if replay.is_err(): print "[discriminator-replay-error] {replay.unwrap_err()}"
+    expect(replay.is_ok()).to_equal(true)
+    val sources = replay.unwrap()
+    var modules: Dict<text, ParserModule> = {}
+    for source in sources:
+        modules[source.module_name] = parse_and_build_module(source.content, source.path)
+    val parsed_entry = modules[entry[0].module_name]
+    show_parser_imports(parsed_entry)
+    val frozen = module_surfaces_from_modules(modules, sources)
+    if frozen.is_err(): print "[discriminator-surface-error] {frozen.unwrap_err()}"
+    expect(frozen.is_ok()).to_equal(true)
+    val registry = frozen.unwrap()
+    show_targets(registry, entry[0].module_name)
+    val consumer = registry.surfaces[registry.index_by_name[entry[0].module_name]]
+    expect(consumer.import_target_indices[0]).to_equal(registry.index_by_name[provider[0].module_name])
+    expect(registry.surfaces[consumer.import_target_indices[0]].canonical_path).to_equal(provider[0].path)
+    var lowering = hirlowering_for_module(entry[0].module_name, registry)
+    val hir = lowering.lower_module(parsed_entry)
+    show_errors(lowering)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.symbols.lookup_or_invalid("Severity").is_valid()).to_equal(true)
+    expect(enum_count(hir.symbols, provider[0].module_name, "Severity")).to_equal(1)
+
+describe "dotted item and complete module HIR import discrimination":
+    it "binds the braced Severity item to the provider enum declaration":
+        enum_import_case("severity-braced", "use severity.\{Severity\}")
+
+    it "binds the observed unbraced Severity item to the same provider enum declaration":
+        enum_import_case("severity-unbraced", "use severity.Severity")
+
+    it "prefers an admitted complete module over the parent enum item":
+        val root = fresh_root("severity-complete")
+        val parent = admitted(root, "src/app/severity.spl", "pub enum Severity:\n    Error\n    Warning\n")
+        val nested = admitted(root, "src/app/severity/Severity.spl", "pub fn orig(x: i64) -> i64:\n    x + 7\n")
+        val entry = admitted(root, "src/app/main.spl", "use severity.Severity as p\nfn main() -> i64:\n    p.orig(1)\n")
+        val replay = replay_in_snapshot(entry + parent + nested, [root + "/src/app"], root)
+        if replay.is_err(): print "[discriminator-replay-error] {replay.unwrap_err()}"
+        expect(replay.is_ok()).to_equal(true)
+        val sources = replay.unwrap()
+        var modules: Dict<text, ParserModule> = {}
+        for source in sources:
+            modules[source.module_name] = parse_and_build_module(source.content, source.path)
+        val parsed_entry = modules[entry[0].module_name]
+        show_parser_imports(parsed_entry)
+        val frozen = module_surfaces_from_modules(modules, sources)
+        if frozen.is_err(): print "[discriminator-surface-error] {frozen.unwrap_err()}"
+        expect(frozen.is_ok()).to_equal(true)
+        val registry = frozen.unwrap()
+        show_targets(registry, entry[0].module_name)
+        val consumer = registry.surfaces[registry.index_by_name[entry[0].module_name]]
+        val target_index = consumer.import_target_indices[0]
+        expect(target_index >= 0).to_equal(true)
+        expect(registry.surfaces[target_index].canonical_path).to_equal(nested[0].path)
+        expect(target_index == registry.index_by_name[parent[0].module_name]).to_equal(false)
+        var lowering = hirlowering_for_module(entry[0].module_name, registry)
+        val hir = lowering.lower_module(parsed_entry)
+        show_errors(lowering)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup_or_invalid("p").is_valid()).to_equal(true)
+        expect(hir.symbols.lookup_or_invalid("p.orig").is_valid()).to_equal(true)
+        expect(hir.symbols.lookup_or_invalid("orig").is_valid()).to_equal(false)

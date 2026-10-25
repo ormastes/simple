@@ -77,6 +77,15 @@ val CL_LINKAGE_EXPORT: i64 = 0
 val CL_LINKAGE_IMPORT: i64 = 1
 val CL_LINKAGE_LOCAL: i64 = 2
 val CL_LINKAGE_HIDDEN: i64 = 3
+# Module-scoped mono instance (`MirFunction.is_comdat`): every requesting object
+# carries its own copy and the linker keeps one -- the cranelift analogue of the
+# `linkonce_odr` + `comdat any` MirToLlvm emits. The SFFI places it in a
+# COMDAT(any) group (ELF: weak in a group; COFF: IMAGE_COMDAT_SELECT_ANY) or,
+# on Mach-O, marks it N_WEAK_DEF. See comdat_instance_linkage in cranelift_sffi.rs.
+val CL_LINKAGE_COMDAT: i64 = 4
+
+fn cranelift_function_linkage(func: MirFunction) -> i64:
+    if func.is_comdat: CL_LINKAGE_COMDAT else: CL_LINKAGE_EXPORT
 val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
 
 # Takes the MirStatic (both callers pass one): the original signature took a
@@ -180,7 +189,7 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         val emit_name = cl_function_emit_name(func.name)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
-        val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
+        val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
         func_handles[func.name] = handle
 
     for func in module.functions.values():
@@ -241,7 +250,7 @@ impl Codegen for CraneliftCodegenAdapter:
         for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
             val emit_name = cl_function_emit_name(func.name)
-            val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
+            val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
             func_handles[func.name] = handle
 
         # Second pass: compile each function

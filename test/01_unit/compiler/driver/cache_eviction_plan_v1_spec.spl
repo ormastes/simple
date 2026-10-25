@@ -2,7 +2,7 @@ use std.spec
 use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1, cache_retention_limits_load_v1}
 use std.io_runtime.{env_set}
 use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1, cache_eviction_plan_v1,
-    cache_eviction_admit_write_v1}
+    cache_eviction_admit_write_v1, cache_eviction_admit_entry_v1}
 
 fn e(branch: text, source: text, version: text, disk: i64, mem: i64, used: i64) -> CacheEntryUseV1:
     CacheEntryUseV1(branch: branch, source: source, version_key: version, disk_bytes: disk,
@@ -98,3 +98,36 @@ describe "reference-aware eviction (T-EV1)":
         val plan = cache_eviction_plan_v1([object, tldr], limits(1000, 5, 4, 3))
         expect(plan.evict.contains(0)).to_equal(true)
         expect(plan.evict.contains(1)).to_equal(true)
+
+describe "per-source entry-count budgets":
+    it "caps stored and resident entries per (branch, source) by count, newest first":
+        val entries = [e("main", "a.spl", "v1", 1, 1, 1), e("main", "a.spl", "v2", 1, 1, 2),
+            e("main", "a.spl", "v3", 1, 1, 3), e("dev", "a.spl", "v1", 1, 1, 1)]
+        val l = CacheRetentionLimitsV1(memory_max_bytes: 1000, storage_max_bytes: 1000, max_branches: 4,
+            kept_branches: ["main"], versions_per_source: 10, per_source_max_disk_bytes: 1000,
+            per_source_max_memory_bytes: 1000, per_source_max_disk_entries: 2,
+            per_source_max_memory_entries: 1)
+        val plan = cache_eviction_plan_v1(entries, l)
+        expect(plan.evict).to_equal([0])
+        expect(plan.unload).to_equal([1])
+
+describe "admit before plan":
+    it "admits a candidate that fits after evicting LRU entries":
+        val entries = [e("main", "a.spl", "v1", 60, 0, 1), e("main", "b.spl", "v1", 30, 0, 2)]
+        val decision = cache_eviction_admit_entry_v1(entries, e("main", "c.spl", "v1", 40, 0, 3),
+            limits(1000, 100, 4, 3))
+        expect(decision.admitted).to_equal(true)
+        expect(decision.plan.evict).to_equal([0])
+
+    it "rejects a candidate when only pinned entries could make room":
+        val pinned = CacheEntryUseV1(branch: "main", source: "a.spl", version_key: "v1", disk_bytes: 90,
+            memory_bytes: 0, last_used_ms: 1, live_views: 1)
+        val decision = cache_eviction_admit_entry_v1([pinned], e("main", "b.spl", "v1", 20, 0, 2),
+            limits(1000, 100, 4, 3))
+        expect(decision.admitted).to_equal(false)
+        expect(decision.plan.evict.contains(0)).to_equal(false)
+
+    it "rejects a candidate over its own per-source budget":
+        val decision = cache_eviction_admit_entry_v1([], e("main", "a.spl", "v1", 2000000, 0, 1),
+            limits(1000, 100000000, 4, 3))
+        expect(decision.admitted).to_equal(false)
