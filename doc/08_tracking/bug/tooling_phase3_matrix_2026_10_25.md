@@ -93,3 +93,44 @@ the log-mode spec. Manuals must not describe these as passing until execution.
 
 STATUS: FAIL — protocol transport improves on LLVM; functional and suite gates
 remain incomplete. No PR merged, no release qualification claimed.
+
+## Subsequent independent repairs and inventory recovery
+
+MCP build attempt 3 uses `app.protocol.wire_stdout`, a checked UTF-8 byte-output
+owner, instead of the Windows-rejecting SOSIX ordinary console gate. Its actual
+LLVM binary passed these distinct native criteria:
+
+- JSONL initialize/initialized-notification/tools-list: exactly two replies,
+  preserved IDs, 176 real tools, exit 0, empty stderr (31 ms whole exchange).
+- `simple_read`: actual multilingual Markdown file contents returned, exit 0,
+  empty stderr (15 ms whole exchange).
+- Content-Type-first framed initialize/notification/read: valid byte lengths,
+  Unicode ID preserved, no notification reply, actual contents returned, exit 0,
+  empty stderr (94 ms whole exchange).
+
+Artifacts: `mcp.wirefix.native.log`, `build/tooling-check/mcp_wirefix.exe`, and
+`mcp.wirefix.*`, `mcp.read.*`, `mcp.framed-read.*` captures under that directory.
+These are small-fixture observations, not full startup/request/RSS qualification.
+The earlier failed MCP binary/console evidence above remains historical evidence.
+
+Nested repositories were initialized in this isolated checkout at exactly the
+parent's pinned commits, without changing the shared checkout's nested work:
+`.spipe/spipe` at `0a00354eeea87ab7a74ef6e1aa3b8d5756bc1b75` and the CUDA
+example at `7126ab5d530fb30d712998b0086193483783a5af`. Canonical discovery and
+summary now succeed. `phase3-test-inventory.summary` reports 4121 planned library
+rows, 527 tool rows, 6 nested rows, and 2 docs rows. These 4656 planned rows are
+NOT executed tests or passing examples. Full phase object/link execution is
+still incomplete.
+
+Independent T32 audit found a current-source resolver gap, not solely a stale
+producer. Physical fallbacks now cover `app.mcp_t32` and `app.cmm_lsp` after
+ordinary probes, preserving prefix boundaries and closure alias registration.
+The existing resolver spec now checks actual session-state/type/parser owners
+and similarly named negative prefixes. Source and tests are statically reviewed,
+UNRUN. Actual T32 consumers need a rebuilt compiler producer and real Hello
+compile/run sanity first. CMM receiver ambiguity remains a separate failure.
+
+Windows resource-owner work reached six attempts and is recorded in
+`windows_owned_scope_admission_2026_10_25.md`. TEMP lookup and recursive directory
+creation advanced, but native child admission still rejects environment data.
+Do not repeat blocked suites or claim examples passed from infrastructure counts.
