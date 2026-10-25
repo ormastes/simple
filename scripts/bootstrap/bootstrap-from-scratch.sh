@@ -1085,6 +1085,15 @@ stage4_provenance_helper_sha256_before=$(
 # to 0 bytes by the same class of race). Directory-based lock, stale-safe.
 bootstrap_lock_handle=
 rust_target_lock_handle=
+rust_shared_cache_lock_handle=
+rust_shared_cache_root=
+rust_shared_cache_common_dir=$(bootstrap_authority_git_common_dir "${repo_root}") || exit 1
+if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
+  rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
+    "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
+  rust_shared_cache_common_dir=$(bootstrap_authority_rust_cargo_cache_common_dir \
+    "${repo_root}" "${rust_shared_cache_root}") || exit 1
+fi
 portable_lock_canonical_output "${output_dir}" || {
   echo "error: invalid or inaccessible bootstrap output path: ${output_dir}" >&2
   exit 1
@@ -1131,7 +1140,7 @@ bootstrap_check_disk_space() {
   bcds_min_kb=$((bcds_min_gb * 1024 * 1024))
   bcds_worst_kb=
   bcds_worst_path=
-  for bcds_probe_path in "${output_dir}" "${repo_root}"; do
+  for bcds_probe_path in "${output_dir}" "${repo_root}" "${rust_shared_cache_root}"; do
     bcds_probe_kb=$(bootstrap_free_space_kb "${bcds_probe_path}") || continue
     if [ -z "${bcds_worst_kb}" ] || [ "${bcds_probe_kb}" -lt "${bcds_worst_kb}" ]
     then
@@ -1290,6 +1299,10 @@ bootstrap_cleanup() {
     if [ -n "${rust_target_lock_handle}" ]; then
       portable_lock_release "${rust_target_lock_handle}"
       rust_target_lock_handle=
+    fi
+    if [ -n "${rust_shared_cache_lock_handle}" ]; then
+      portable_lock_release "${rust_shared_cache_lock_handle}"
+      rust_shared_cache_lock_handle=
     fi
     if [ -n "${bootstrap_lock_handle}" ]; then
       portable_lock_release "${bootstrap_lock_handle}"
@@ -2750,6 +2763,26 @@ rust_authority_generation_root="${repo_root}/src/compiler_rust/target/bootstrap.
 rust_authority_current_marker="${repo_root}/src/compiler_rust/target/bootstrap.current.env"
 rust_authority_compatibility_path="${repo_root}/src/compiler_rust/target/bootstrap"
 
+# Shared Cargo caches may belong to a sibling linked worktree. Serialize
+# those callers before taking this worktree's publication lock. Cargo keeps
+# its own per-crate freshness checks; this lock grants no artifact admission.
+bootstrap_acquire_shared_rust_cargo_cache() {
+  if [ -n "${rust_shared_cache_root}" ]; then
+    rust_cache_common_now=$(bootstrap_authority_rust_cargo_cache_common_dir \
+      "${repo_root}" "${rust_shared_cache_root}") || return 1
+  else
+    rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
+  fi
+  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || return 1
+  if [ -n "${rust_shared_cache_lock_handle}" ]; then
+    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}"
+    return $?
+  fi
+  portable_lock_acquire "${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks" \
+    authority "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || return 1
+  rust_shared_cache_lock_handle=${PORTABLE_LOCK_HANDLE}
+}
+
 bootstrap_acquire_rust_authority() {
   if [ -n "${rust_target_lock_handle}" ]; then
     bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
@@ -3229,8 +3262,12 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   }
   rust_authority_target=$(bootstrap_authority_rust_cargo_target \
     "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
-    "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
+    "${rust_authority_root}" "${rust_authority_config_key}" \
+    "${rust_shared_cache_root}") || exit 1
   rust_authority_profile_dir="${rust_authority_target}/${PLATFORM_RUST_TRIPLE}/bootstrap"
+  echo "rust_cargo_cache_root=${rust_shared_cache_root:-default}"
+  echo "rust_cargo_config_key=${rust_authority_config_key}"
+  echo "rust_cargo_target_dir=${rust_authority_target}"
 fi
 bootstrap_step_mark rust-authority-target-key
 
@@ -3312,6 +3349,9 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
+  if [ "${rust_env_log}" = bootstrap-preflight ] && [ -n "${rust_shared_cache_root}" ]; then
+    set -- "SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT=${rust_shared_cache_root}" "$@"
+  fi
   # Preflight must capture the same materialized Windows authority dialect as
   # the parent before/after snapshots. env -i otherwise silently drops it.
   if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
@@ -3362,12 +3402,13 @@ run_rust_authority_cargo() {
 }
 
 run_rust_authority_command() {
+  bootstrap_acquire_shared_rust_cargo_cache || return 1
   # Cargo outputs are shared across output roots on Windows. Acquire the
   # existing authority lock before even preparing the workspace, and retain
   # it across every Cargo call, immutable snapshot, publication and runtime
   # normalization. Lock order stays output -> authority; later acquisitions
   # revalidate this same handle instead of trying to acquire a second lock.
-  if [ "${os}" = windows ]; then
+  if [ "${os}" = windows ] || [ -n "${rust_shared_cache_root}" ]; then
     bootstrap_acquire_rust_authority || return 1
   fi
   rust_authority_log=$1
@@ -3929,6 +3970,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: could not release Rust authority after private admission" >&2
     exit 1
   }
+  if [ -n "${rust_shared_cache_lock_handle}" ]; then
+    portable_lock_release "${rust_shared_cache_lock_handle}" || exit 1
+    rust_shared_cache_lock_handle=
+  fi
   bootstrap_authority_pin_stage4 \
     "$(absolute_path "${stage2_runtime_authority}")" \
     "simple${exe_suffix}" \

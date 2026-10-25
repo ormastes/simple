@@ -25,6 +25,23 @@ PostgreSQL-mimic executable. Application and GUI semantic tests do not establish
 live window/input/capture acceptance; those results remain separately required
 for GUI qualification.
 
+## Reusing a Rust Cargo cache with a fresh output directory
+
+On macOS and Linux, set `SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT` to an existing,
+canonical cache parent directory in this Git worktree or a linked worktree of
+the same repository. The selected target remains
+`<cache-root>/rust-cargo-target-<computed-build-configuration-key>`; the caller
+cannot supply or override that key. Windows keeps its existing short-path
+cache layout and rejects this override.
+
+Use a fresh `--output` directory for new logs and authority receipts while
+retaining the existing cache parent. The script validates repository identity,
+checks free space on the cache filesystem, and serializes canonical Cargo writers with
+a lock in the common Git directory before taking the worktree's publication
+lock. Cargo still decides which crates are fresh. Source fingerprints,
+immutable generation publication, and admission checks remain required.
+No cache copy, move, symlink, or forced producer stamp is involved.
+
 ## Stage 3 and the sanctioned script
 
 - The sanctioned bootstrap is `scripts/bootstrap/bootstrap-from-scratch.sh`
