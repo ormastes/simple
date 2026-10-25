@@ -4,8 +4,17 @@ use os.apps.smux.contract.{MuxSession}
 use os.apps.smux.service.{ServiceState}
 use std.common.text_bytes.{text_to_bytes}
 
-fn session_rebuild(st: ServiceState, session_id: text, renamed: text, remove: bool) -> ServiceState:
+fn session_rebuild(st: ServiceState, session_id: text, renamed: text, remove: bool, removed_window: text = "") -> ServiceState:
     var out = ServiceState.empty().with_next_id(st.next_id).with_metrics(st.metrics)
+    var replacement = ""
+    val removed_index = st.find_window_idx(removed_window)
+    if removed_index >= 0 and st.get_window(removed_index).is_active:
+        var candidate = 0
+        while candidate < st.window_count and replacement == "":
+            val window = st.get_window(candidate)
+            if window.session_id == session_id and window.id != removed_window:
+                replacement = window.id
+            candidate = candidate + 1
     var i = 0
     while i < st.session_count:
         val session = st.get_session(i)
@@ -18,13 +27,16 @@ fn session_rebuild(st: ServiceState, session_id: text, renamed: text, remove: bo
     i = 0
     while i < st.window_count:
         val window = st.get_window(i)
-        if not remove or window.session_id != session_id:
-            out = out.add_window(window)
+        if (not remove or window.session_id != session_id) and window.id != removed_window:
+            if replacement != "" and window.session_id == session_id:
+                out = out.add_window(window.with_active(window.id == replacement))
+            else:
+                out = out.add_window(window)
         i = i + 1
     i = 0
     while i < st.pane_count:
         val pane = st.get_pane(i)
-        if not remove or pane.pane.session_id != session_id:
+        if (not remove or pane.pane.session_id != session_id) and pane.pane.window_id != removed_window:
             out = out.add_pane(pane)
         i = i + 1
     i = 0
@@ -70,3 +82,27 @@ pub fn remove_session_state(st: ServiceState, session_id: text) -> Result<Servic
             return Err("session cleanup pending or failed: " + session_id)
         i = i + 1
     return Ok(session_rebuild(st, session_id, "", true))
+
+# A final window owns the session's lifetime; callers must perform the same
+# attachment/lease/notice cleanup as full session removal on that path.
+pub fn remove_window_state(st: ServiceState, session_id: text, window_id: text) -> Result<ServiceState, text>:
+    val si = st.find_session_idx(session_id)
+    val wi = st.find_window_idx(window_id)
+    if si < 0 or wi < 0:
+        return Err("unknown session or window")
+    if st.get_window(wi).session_id != session_id:
+        return Err("window does not belong to session")
+    var i = 0
+    var windows = 0
+    while i < st.window_count:
+        if st.get_window(i).session_id == session_id: windows = windows + 1
+        i = i + 1
+    if windows == 1:
+        return remove_session_state(st, session_id)
+    i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if pane.pane.session_id == session_id and pane.pane.window_id == window_id and (pane.pty_fd >= 0 or pane.child_pid > 0):
+            return Err("window cleanup pending or failed: " + window_id)
+        i = i + 1
+    return Ok(session_rebuild(st, session_id, st.get_session(si).name, false, window_id))

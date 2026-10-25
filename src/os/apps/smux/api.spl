@@ -22,7 +22,8 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
-use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state}
+use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, remove_window_state}
+use os.apps.smux.child_lifecycle.{close_owned_children}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
 use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new,
     smux_lease_admit, smux_lease_heartbeat, smux_lease_check, smux_lease_expiry_candidates,
@@ -71,6 +72,7 @@ var _client_leases: ClientLeaseState = ClientLeaseState(owner_nonce: "",
     next_generation: 1, last_now_ms: 0, leases: [])
 var _split_checkpoints: [SplitCheckpoint] = []
 var _closing_sessions: [text] = []
+var _closing_windows: [text] = []
 
 # =========================================================================
 # Test support
@@ -82,6 +84,7 @@ pub fn smux_reset_for_test():
     _client_leases = ClientLeaseState(owner_nonce: "", next_generation: 1, last_now_ms: 0, leases: [])
     _split_checkpoints = []
     _closing_sessions = []
+    _closing_windows = []
     # Reap every attached child first: a reset must not leak processes.
     var i = 0
     while i < _svc.pane_count:
@@ -200,7 +203,7 @@ fn _clean_output(raw: text) -> text:
 # queries share the bounded input queue; one provider write follows each drain.
 # A child waiting on that answer can resume after the provider delivers it.
 fn _flush_input(pr0: PaneRecord) -> PaneRecord:
-    if smux_session_closing(pr0.pane.session_id):
+    if smux_window_closing(pr0.pane.session_id, pr0.pane.window_id):
         return pr0
     if pr0.input.error != "" or not _has_child(pr0):
         return pr0
@@ -230,7 +233,7 @@ fn _drain_bounded(pr0: PaneRecord, limit: int) -> PaneRecord:
 fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int) -> PaneRecord:
     # Pending close owns the native token. Captures may inspect the retained
     # snapshot but must not query, write to, or resurrect that closing owner.
-    if smux_session_closing(pr0.pane.session_id):
+    if smux_window_closing(pr0.pane.session_id, pr0.pane.window_id):
         return pr0
     var pr = pr0
     var raw = ""
@@ -349,24 +352,12 @@ pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
         return Err("unknown session: " + session_id)
     if not smux_session_closing(session_id):
         _closing_sessions.push(session_id)
-    var st = _svc
-    var i = 0
-    while i < st.pane_count:
-        val pane = st.get_pane(i)
-        if pane.pane.session_id == session_id:
-            var closed = true
-            if _is_pty(pane):
-                closed = pty_close(pane.pty_fd as i32)
-            elif _has_child(pane):
-                closed = process_close_piped(pane.child_pid)
-            if closed:
-                st = st.replace_pane(i, pane.with_pty(-1, -1))
-        i = i + 1
+    val st = close_owned_children(_svc, session_id)
     val removed = remove_session_state(st, session_id)
     if removed.is_err():
         _svc = st
         return Err("partial session cleanup pending or failed; retry kill: " + session_id)
-    i = 0
+    var i = 0
     while i < st.client_count:
         val client = st.get_client(i)
         if client.session_id == session_id:
@@ -382,6 +373,12 @@ pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
             pending.push(closing)
     _split_checkpoints = checkpoints
     _closing_sessions = pending
+    var windows: [text] = []
+    for closing in _closing_windows:
+        val wi = st.find_window_idx(closing)
+        if wi >= 0 and st.get_window(wi).session_id != session_id:
+            windows.push(closing)
+    _closing_windows = windows
     _client_leases = smux_lease_forget_session(_client_leases, session_id)
     _svc = removed.unwrap()
     return Ok(true)
@@ -539,6 +536,40 @@ pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
 # Window management
 # =========================================================================
 
+pub fn smux_window_closing(session_id: text, window_id: text) -> bool:
+    if smux_session_closing(session_id): return true
+    for closing in _closing_windows:
+        if closing == window_id: return true
+    return false
+
+pub fn smux_kill_window(session_id: text, window_id: text) -> Result<bool, text>:
+    if _window_idx(_svc, session_id, window_id) < 0:
+        return Err("unknown window in session: " + window_id)
+    # Delegate before taking a snapshot: session kill owns its sole commit and
+    # attachment/lease teardown. This also covers an earlier partial close
+    # whose window became the final survivor between retry attempts.
+    if smux_list_windows(session_id).len() == 1:
+        return smux_kill_session(session_id)
+    if smux_session_closing(session_id):
+        return Err("session is closing; retry kill-session: " + session_id)
+    if not smux_window_closing(session_id, window_id):
+        _closing_windows.push(window_id)
+    val st = close_owned_children(_svc, session_id, window_id)
+    val removed = remove_window_state(st, session_id, window_id)
+    if removed.is_err():
+        _svc = st
+        return Err("partial window cleanup pending or failed; retry kill-window: " + window_id)
+    var checkpoints: [SplitCheckpoint] = []
+    for saved in _split_checkpoints:
+        if saved.before.id != window_id: checkpoints.push(saved)
+    var pending: [text] = []
+    for closing in _closing_windows:
+        if closing != window_id: pending.push(closing)
+    _split_checkpoints = checkpoints
+    _closing_windows = pending
+    _svc = removed.unwrap()
+    return Ok(true)
+
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
     if (smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0 or
             _svc.window_count >= SMUX_CAPACITY or _svc.pane_count >= SMUX_CAPACITY):
@@ -562,7 +593,7 @@ pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
     return result
 
 pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
-    if smux_session_closing(session_id): return false
+    if smux_window_closing(session_id, window_id): return false
     if _window_idx(_svc, session_id, window_id) < 0:
         return false
     var st = _svc
@@ -597,7 +628,7 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     return result
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -656,7 +687,7 @@ pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, directi
 # service-owned checkpoint compares IDs, child handles and complete geometry;
 # callers cannot supply replacement state or resurrect a removed child.
 pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: text) -> Result<bool, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     var match_index = -1
     var i = 0
     while i < _split_checkpoints.len():
@@ -682,7 +713,7 @@ pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: tex
 # Remove the pane and request child teardown. The native provider retains any
 # cancellation/tree cleanup until its cleanup_pending sweep proves completion.
 pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool:
-    if smux_session_closing(session_id): return false
+    if smux_window_closing(session_id, window_id): return false
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return false
@@ -700,7 +731,7 @@ pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool
     return true
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
-    if smux_session_closing(session_id): return false
+    if smux_window_closing(session_id, window_id): return false
     if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
         return false
     var st = _svc
@@ -725,7 +756,7 @@ pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, t
 # Native provider resizing precedes the corresponding VT/service commit.
 # Providers without a resize capability retain their documented grid-only path.
 pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -776,7 +807,7 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
 
 # Attaches a piped child (no controlling terminal). Returns its pid.
 pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> Result<i64, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -795,7 +826,7 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
 # `command_line` is handed to the platform launcher as one line (a shell path
 # on POSIX, a CreateProcess command line on Windows). Returns its pid.
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -849,7 +880,7 @@ pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> 
 # prefix to its provider. A pane without a child refuses input. Delivery may
 # remain pending after acceptance; smux_input_status reports progress/errors.
 pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> Result<text, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -867,7 +898,7 @@ pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_inp
     return Ok("accepted")
 
 pub fn smux_input_status(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -939,7 +970,7 @@ pub fn smux_pane_bracketed_paste(session_id: text, window_id: text, pane_id: tex
 # enabled bracketed paste, so it is taken as one paste (newlines included)
 # rather than typed keys; sent as-is otherwise. Does not submit.
 pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: text) -> Result<text, text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -1023,7 +1054,7 @@ pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
 # rollback before any service metadata is committed. Legacy providers remain
 # explicitly grid-only. Actual child geometry still requires runtime evidence.
 pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<[MuxRect], text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     if not mux_layout_known(name):
         return Err("invalid layout: " + name)
     val planned = _arrange_window(_svc, session_id, window_id, name, cols, rows)
@@ -1037,7 +1068,7 @@ pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: i
 # Reflow the existing plan, including manual nested splits. Never select an
 # unrelated named layout because a window has manual geometry.
 pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: int) -> Result<[MuxRect], text>:
-    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val planned = _arrange_window(_svc, session_id, window_id, "", cols, rows)
     if planned.is_err():
         return Err(planned.unwrap_err())

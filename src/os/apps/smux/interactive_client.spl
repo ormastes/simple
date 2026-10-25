@@ -15,6 +15,7 @@ use os.apps.smux.client_input.{ClientInputState, ClientInputAction,
 use os.apps.smux.client_copy_input.{ClientCopyInput, client_copy_new, client_copy_feed}
 use os.apps.smux.notification_client.{notification_reply_decode, notification_overlay}
 use os.apps.smux.client_leases.{client_lease_token_valid, SMUX_CLIENT_HEARTBEAT_MS}
+use os.apps.smux.lifecycle_reply.{smux_missing_window_reply, smux_missing_session_reply}
 use os.apps.smux.client_view.{client_input_hex, client_reply_ids,
     client_frame_body, client_next_id, client_copy_frame}
 
@@ -73,6 +74,31 @@ fn arrange(client: TerminalClient) -> Result<bool, text>:
         selected + " " + client.cols.to_text() + " " + client.rows.to_text())
     if reply.is_err(): return Err(reply.unwrap_err())
     return Ok(true)
+
+# Recover view metadata only. Never replay the input/action which addressed a
+# removed window against a different child. Every request retains its lease.
+fn recover_removed_window(client: TerminalClient) -> Result<TerminalClient, text>:
+    val ids = windows(client)
+    if ids.is_err(): return Err(ids.unwrap_err())
+    if ids.unwrap().len() == 0: return Err("session has no windows")
+    var next = client
+    next.window = ids.unwrap()[0]
+    val selected = select_pane(next)
+    if selected.is_err(): return Err(selected.unwrap_err())
+    next = selected.unwrap()
+    val frame = request(next, "frame " + next.session + " " + next.window + " " + next.pane)
+    if frame.is_err(): return Err(frame.unwrap_err())
+    val validated = client_frame_body(frame.unwrap(), next.cols, next.rows)
+    if validated.is_err(): return Err(validated.unwrap_err())
+    # Commit replacement local selection only after a current frame validates.
+    next.copy = false
+    next.history = []
+    next.offset = 0
+    next.mark = -1
+    next.copy_input = client_copy_new()
+    next.copy_deadline = 0
+    next.layout = -1
+    return Ok(next)
 
 fn copy_move(client: TerminalClient, delta: i64) -> TerminalClient:
     var next = client
@@ -340,6 +366,23 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
                         if acknowledged.is_err(): error = acknowledged.unwrap_err()
                         else: notification_ack = 0
             refresh = now + 50
+        if error == smux_missing_window_reply(client.window):
+            val recovered = recover_removed_window(client)
+            if recovered.is_err(): error = recovered.unwrap_err()
+            else:
+                client = recovered.unwrap()
+                input_state = client_input_new()
+                error = ""
+                last_frame = ""
+                last_header = ""
+                refresh = 0
+        # This exact reply comes from the authenticated owner for the stable
+        # session ID, before lease validation. Other lease/transport errors
+        # remain errors. A removed session has already cleared its attachment.
+        if error == smux_missing_session_reply(client.session):
+            error = ""
+            attached = false
+            done = true
         if error == "" and not done:
             thread_sleep_ms(10)
     if attached:
