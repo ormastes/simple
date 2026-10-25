@@ -214,7 +214,12 @@ fn transient_scope_end_batch_handles_closures_and_generic_boxes() {
 /// after the last chunk, so the address cannot be recycled in between.
 /// Chunks are per registry shard, so the filler is drawn from the target's
 /// shard only (other allocations are freed again) to really span two chunks.
+/// Ignored by default: it holds ~4.2M tuples (~300 MB) to fill one shard past a
+/// 64K chunk, and that alloc/free storm races the process-global
+/// `rt_heap_registry_count()` assertions in sibling tests. Run it alone:
+/// `cargo test -p simple-runtime --lib transient_scope_end_batch_erases_cross_chunk_duplicate_once -- --ignored`
 #[test]
+#[ignore = "heavy (~4.2M tuples); run alone with --ignored"]
 fn transient_scope_end_batch_erases_cross_chunk_duplicate_once() {
     use super::super::heap::{
         heap_registry_shard_index, is_registered_heap_ptr, unregister_heap_ptrs_batch, HEAP_UNREGISTER_BATCH_CHUNK,
