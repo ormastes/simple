@@ -80,12 +80,31 @@ fn delta_unjournaled_writes() -> [text]:
     val lines = (rt_file_read_text("src/compiler/50.mir/mir_data.spl") ?? "").split("\n")
     var missing: [text] = []
     var in_reset = false
+    var in_snapshot_import = false
+    var snapshot_promoted = false
+    var snapshot_closed = false
     var line_index = 0
     while line_index < lines.len():
         val line = lines[line_index]
         val trimmed = line.trim()
         if line.starts_with("fn "):
             in_reset = line.starts_with("fn _bootstrap_fn_delta_reset")
+            in_snapshot_import = line.starts_with("fn bootstrap_fn_registry_snapshot_import_v1(")
+            snapshot_promoted = false
+            snapshot_closed = false
+        if in_snapshot_import:
+            if trimmed.starts_with("if not _promote_bootstrap_registry(prepared): return Err("):
+                snapshot_promoted = true
+            if trimmed.starts_with("if not transient_array_scope_end_v1(): return Err("):
+                snapshot_closed = true
+            # A whole owner is already promoted and its arena is closed.
+            # Recognize only those exact state-field stores; an earlier store
+            # or any unrelated replacement still fails the normal ratchet.
+            if delta_is_registry_name(trimmed) and trimmed.contains(" = state."):
+                if not snapshot_promoted or not snapshot_closed:
+                    missing.push("unpromoted-snapshot:{line_index + 1}:{trimmed}")
+                line_index = line_index + 1
+                continue
         if not in_reset and delta_is_registry_name(trimmed):
             if trimmed.contains("] = "):
                 val key = trimmed.split("[")[1].split("]")[0]

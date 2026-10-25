@@ -14,8 +14,19 @@
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
 use compiler.hir.hir_types.{SymbolId, SymbolTable, HirType, hir_type_metadata_symbol_free}
-use compiler.mir.bootstrap_fn_registration_origin_v1.{BootstrapFnRegistrationOriginV1}
-use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirFunctionDeclarationV1}
+use compiler.mir.bootstrap_fn_registration_origin_v1.{BootstrapFnRegistrationOriginV1, bootstrap_fn_registration_storage_key_v1}
+use compiler.mir.bootstrap_fn_registry_state_v1.{BootstrapFnRegistryStateV1}
+use compiler.mir.bootstrap_fn_registry_snapshot_v1.{bootstrap_fn_registry_snapshot_encode_budgeted_v1,
+    bootstrap_fn_registry_snapshot_prepare_v1}
+use compiler.mir.bootstrap_owner_snapshot_v1.{BootstrapOwnerSnapshotV1, BootstrapOwnerBudgetV1}
+use compiler.mir.bootstrap_fn_reference_resolver_v1.{BootstrapFnReferenceResolverV1, BootstrapFnResolvedReferenceV1}
+use compiler.mir.bootstrap_fn_reference_values_v1.{bootstrap_fn_str_mir_value_v1,
+    bootstrap_fn_params_match_v1, bootstrap_fn_symbol_digest_v1, bootstrap_fn_globals_match_v1}
+use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
+use std.common.sdn.value.{SdnValue}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1,
+    transient_array_scope_pause_v1, transient_array_scope_end_v1}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirFunctionDeclarationV1, MirHirDeclarationRepositoryV1}
 use compiler.mir.hir_declaration_binding_contract_v1.{mir_hir_callable_record_binding_valid_v1}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.common.encoding.utf8.{text_byte_len}
@@ -2408,7 +2419,7 @@ val BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
 val BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1: i64 = 1000000
 
 fn _bootstrap_fn_origin_key_v1(registry: text, name: text) -> text:
-    "{registry.len()}:{registry}{name.len()}:{name}"
+    bootstrap_fn_registration_storage_key_v1(registry, name)
 
 fn _bootstrap_fn_delta_registration_origin_v1(value: BootstrapFnRegistrationOriginV1):
     if _bootstrap_fn_registration_available_v1 and _bootstrap_fn_delta_live():
@@ -2417,6 +2428,9 @@ fn _bootstrap_fn_delta_registration_origin_v1(value: BootstrapFnRegistrationOrig
 
 fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFnRegistrationOriginV1?):
     if not _bootstrap_fn_registration_available_v1: return
+    if _bootstrap_fn_registration_pending_v1 and transient_array_scope_state_v1() == 0:
+        _bootstrap_fn_registration_available_v1 = false
+        return
     # The ordinary unbound route pays no new metadata allocation while no
     # checked declaration has supplied an origin to revoke.
     if origin == nil and _bootstrap_fn_registration_rows_v1 == 0: return
@@ -2424,8 +2438,8 @@ fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFn
     # Prepay the key, record, dictionary growth and journal reference before
     # allocation. This conservative lifetime ledger never silently resets;
     # exhaustion revokes provenance availability, not ordinary row semantics.
-    if text_bytes > (BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - 1024) / 4 or
-            _bootstrap_fn_registration_event_v1 >= BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1:
+    if (text_bytes > (BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - 1024) / 4 or
+            _bootstrap_fn_registration_event_v1 >= BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1):
         _bootstrap_fn_registration_available_v1 = false
         return
     val charge = 1024 + text_bytes * 4
@@ -2461,9 +2475,9 @@ fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFn
 fn _bootstrap_fn_declaration_origin_v1(module: MirHirModuleDeclarationsV1,
         function: MirHirFunctionDeclarationV1, selector: text) -> BootstrapFnRegistrationOriginV1?:
     if not _bootstrap_fn_registration_available_v1: return nil
-    if module.source_binding == nil or not sha256_lower_hex_valid(module.final_repository_authority) or
+    if (module.source_binding == nil or not sha256_lower_hex_valid(module.final_repository_authority) or
             not sha256_lower_hex_valid(module.declaration_digest) or
-            not sha256_lower_hex_valid(function.complete_function_digest):
+            not sha256_lower_hex_valid(function.complete_function_digest)):
         return nil
     if not mir_hir_callable_record_binding_valid_v1(module, function): return nil
     val source = module.source_binding.unwrap()
@@ -2474,8 +2488,9 @@ fn _bootstrap_fn_declaration_origin_v1(module: MirHirModuleDeclarationsV1,
         function_symbol: function.symbol.id, selector: selector, write_event: 0))
 
 fn bootstrap_fn_registry_origin_v1(registry: text, name: text) -> BootstrapFnRegistrationOriginV1?:
-    if not _bootstrap_fn_registration_available_v1: return nil
-    val present = match registry:
+    if (not _bootstrap_fn_registration_available_v1 or
+            (_bootstrap_fn_registration_pending_v1 and transient_array_scope_state_v1() == 0): return nil
+    val present = match registry):
         case "return_mir": _bootstrap_fn_ret_types.has(name)
         case "return_hir": _bootstrap_fn_ret_hir_types.has(name) and not _bootstrap_fn_ret_hir_ambig.has(name)
         case "parameter_hir": _bootstrap_fn_param_hir_types.has(name) and not _bootstrap_fn_param_hir_rejected.has(name) and not _bootstrap_fn_ret_hir_ambig.has(name)
@@ -2562,11 +2577,15 @@ fn _bootstrap_fn_delta_reset():
     _bootstrap_fn_replaced_default_rows = false
 
 fn bootstrap_fn_ret_type_register(name: text, ty: MirType):
+    _bootstrap_fn_ret_type_register_origin_v1(name, ty, nil)
+
+fn _bootstrap_fn_ret_type_register_origin_v1(name: text, ty: MirType,
+        origin: BootstrapFnRegistrationOriginV1?):
     # An update keeps the stored key; only a new key enters the journal.
     if not _bootstrap_fn_ret_types.contains_key(name):
         _bootstrap_fn_delta_text(name)
     _bootstrap_fn_ret_types[name] = ty
-    _bootstrap_fn_origin_write_v1("return_mir", name, nil)
+    _bootstrap_fn_origin_write_v1("return_mir", name, origin)
     _bootstrap_fn_delta_mir_type(ty)
 
 fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
@@ -2910,23 +2929,27 @@ var _bootstrap_default_provider_symbols: Dict<text, SymbolTable> = {}
 var _bootstrap_default_provider_globals: Dict<text, [HirConst]> = {}
 
 fn bootstrap_default_provider_register(owner: text, symbols: SymbolTable, globals: [HirConst]):
+    _bootstrap_default_provider_register_origin_v1(owner, symbols, globals, nil, nil)
+
+fn _bootstrap_default_provider_register_origin_v1(owner: text, symbols: SymbolTable, globals: [HirConst],
+        symbols_origin: BootstrapFnRegistrationOriginV1?, globals_origin: BootstrapFnRegistrationOriginV1?):
     # Re-registered for every consumer once providers are passed: the owner's
     # table and constants come from the same driver HIR module each time, so
     # the first registration is kept. Re-storing it per consumer would journal
     # (and, under the memory-owner runtime, re-walk) a whole provider graph
     # per module. `bootstrap_fn_param_defaults_detach_for_archive_v1` clears
     # these rows when a new declaration owner is installed.
-    if _bootstrap_default_provider_symbols.contains_key(owner) and
-            _bootstrap_default_provider_globals.contains_key(owner):
+    if (_bootstrap_default_provider_symbols.contains_key(owner) and
+            _bootstrap_default_provider_globals.contains_key(owner)):
         return
     _bootstrap_default_provider_symbols[owner] = symbols
     _bootstrap_fn_delta_text(owner)
     _bootstrap_fn_delta_symbol_table(symbols)
-    _bootstrap_fn_origin_write_v1("provider_symbols", owner, nil)
+    _bootstrap_fn_origin_write_v1("provider_symbols", owner, symbols_origin)
     _bootstrap_default_provider_globals[owner] = globals
     _bootstrap_fn_delta_text(owner)
     _bootstrap_fn_delta_consts(globals)
-    _bootstrap_fn_origin_write_v1("provider_globals", owner, nil)
+    _bootstrap_fn_origin_write_v1("provider_globals", owner, globals_origin)
 
 fn bootstrap_default_provider_symbols(owner: text) -> SymbolTable?:
     _bootstrap_default_provider_symbols.get(owner)
@@ -2944,6 +2967,10 @@ fn _fn_param_defaults_shape(params: [HirParam]) -> text:
     shape
 
 fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: text = ""):
+    _bootstrap_fn_param_defaults_register_origin_v1(name, params, owner, nil)
+
+fn _bootstrap_fn_param_defaults_register_origin_v1(name: text, params: [HirParam], owner: text,
+        origin: BootstrapFnRegistrationOriginV1?):
     if name == "" or _bootstrap_fn_param_defaults_ambig.contains_key(name):
         return
     # Equal arity/default flags do not prove equal declarations. In particular,
@@ -2997,7 +3024,7 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
             _bootstrap_fn_replaced_param_defaults = _bootstrap_fn_replaced_param_defaults or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_param_defaults[name] = params
-    _bootstrap_fn_origin_write_v1("parameter_defaults", name, nil)
+    _bootstrap_fn_origin_write_v1("parameter_defaults", name, origin)
     _bootstrap_fn_delta_text(name)
     _bootstrap_fn_delta_params(params)
 
@@ -3183,3 +3210,209 @@ export bootstrap_fn_ret_err_shape_register, bootstrap_fn_ret_err_shape_lookup
 
 export bootstrap_fn_registry_origin_v1
 export bootstrap_fn_ret_hir_type_register_declaration_v1, bootstrap_fn_param_hir_types_register_declaration_v1
+
+# Snapshot publication is a cold owner boundary. It does not alter ordinary
+# registration policy, worker eligibility or the portable codec gate.
+fn _bootstrap_fn_snapshot_live_state_v1() -> BootstrapFnRegistryStateV1:
+    BootstrapFnRegistryStateV1(
+        fn_ret_types: _bootstrap_fn_ret_types,
+        fn_ret_hir_types: _bootstrap_fn_ret_hir_types,
+        fn_ret_hir_ambig: _bootstrap_fn_ret_hir_ambig,
+        fn_ret_shapes: _bootstrap_fn_ret_shapes,
+        fn_ret_shape_ambig: _bootstrap_fn_ret_shape_ambig,
+        fn_ret_array_element_shapes: _bootstrap_fn_ret_array_element_shapes,
+        fn_ret_array_element_identities: _bootstrap_fn_ret_array_element_identities,
+        fn_ret_array_element_shape_ambig: _bootstrap_fn_ret_array_element_shape_ambig,
+        fn_ret_ok_shapes: _bootstrap_fn_ret_ok_shapes,
+        fn_ret_ok_shape_ambig: _bootstrap_fn_ret_ok_shape_ambig,
+        fn_ret_err_shapes: _bootstrap_fn_ret_err_shapes,
+        fn_ret_opt_shapes: _bootstrap_fn_ret_opt_shapes,
+        fn_ret_opt_shape_ambig: _bootstrap_fn_ret_opt_shape_ambig,
+        fn_param_hir_types: _bootstrap_fn_param_hir_types,
+        fn_param_hir_rejected: _bootstrap_fn_param_hir_rejected,
+        fn_param_defaults: _bootstrap_fn_param_defaults,
+        fn_param_defaults_ambig: _bootstrap_fn_param_defaults_ambig,
+        fn_param_default_owners: _bootstrap_fn_param_default_owners,
+        default_provider_symbols: _bootstrap_default_provider_symbols,
+        default_provider_globals: _bootstrap_default_provider_globals,
+        origins: _bootstrap_fn_registration_origins_v1)
+
+fn bootstrap_fn_registry_snapshot_export_v1(repository: MirHirDeclarationRepositoryV1) -> Result<BootstrapOwnerSnapshotV1, text>:
+    if (not _bootstrap_fn_registration_available_v1 or
+            (_bootstrap_fn_registration_pending_v1 and transient_array_scope_state_v1() == 0)):
+        return Err("bootstrap function provenance is revoked or its scope was abandoned")
+    val budget = BootstrapOwnerBudgetV1.create()
+    if not budget.reserve(1024): return Err("bootstrap snapshot root allocation bound")
+    val state = _bootstrap_fn_snapshot_live_state_v1()
+    bootstrap_fn_registry_snapshot_encode_budgeted_v1(state, repository, budget)
+
+fn _bootstrap_fn_snapshot_scope_cleanup_v1():
+    if transient_array_scope_state_v1() != 0:
+        transient_array_scope_end_v1()
+
+fn bootstrap_fn_registry_snapshot_import_v1(blob: text, expected_digest: text,
+        repository: MirHirDeclarationRepositoryV1) -> Result<BootstrapOwnerSnapshotV1, text>:
+    # No replacement of a live owner, no nested scope and no guessed native
+    # dictionary extent. Failed import leaves all twenty input maps unchanged.
+    if (transient_array_scope_state_v1() != 0 or not _bootstrap_fn_registration_available_v1 or
+            _bootstrap_fn_registration_pending_v1 or _bootstrap_fn_registration_rows_v1 != 0):
+        return Err("bootstrap function import requires a fresh unrevoked owner")
+    if _bootstrap_fn_ret_types.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_hir_types.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_hir_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_shapes.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_shape_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_array_element_shapes.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_array_element_identities.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_array_element_shape_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_ok_shapes.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_ok_shape_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_err_shapes.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_opt_shapes.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_ret_opt_shape_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_param_hir_types.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_param_hir_rejected.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_param_defaults.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_param_defaults_ambig.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_fn_param_default_owners.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_default_provider_symbols.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if _bootstrap_default_provider_globals.len() != 0: return Err("bootstrap function import owner is occupied or extent unavailable")
+    if not transient_array_scope_begin_v1(): return Err("bootstrap private import scope refused")
+    defer _bootstrap_fn_snapshot_scope_cleanup_v1()
+    val decoded = bootstrap_fn_registry_snapshot_prepare_v1(blob, expected_digest, repository)
+    if decoded.is_err(): return Err(decoded.unwrap_err())
+    val prepared = decoded.unwrap()
+    if (prepared.origin_bytes > BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 or
+            prepared.maximum_event > BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1):
+        return Err("bootstrap imported provenance budget refused")
+    # End all fallible work before the first live-owner assignment. Promotion
+    # covers dictionaries, origins, decoded defaults and the derived receipt.
+    if not transient_array_scope_pause_v1(): return Err("bootstrap import pause refused")
+    if not _promote_bootstrap_registry(prepared): return Err("bootstrap import promotion refused")
+    if not transient_array_scope_end_v1(): return Err("bootstrap import scope end refused")
+    val state = prepared.state
+    _bootstrap_fn_ret_types = state.fn_ret_types
+    _bootstrap_fn_ret_hir_types = state.fn_ret_hir_types
+    _bootstrap_fn_ret_hir_ambig = state.fn_ret_hir_ambig
+    _bootstrap_fn_ret_shapes = state.fn_ret_shapes
+    _bootstrap_fn_ret_shape_ambig = state.fn_ret_shape_ambig
+    _bootstrap_fn_ret_array_element_shapes = state.fn_ret_array_element_shapes
+    _bootstrap_fn_ret_array_element_identities = state.fn_ret_array_element_identities
+    _bootstrap_fn_ret_array_element_shape_ambig = state.fn_ret_array_element_shape_ambig
+    _bootstrap_fn_ret_ok_shapes = state.fn_ret_ok_shapes
+    _bootstrap_fn_ret_ok_shape_ambig = state.fn_ret_ok_shape_ambig
+    _bootstrap_fn_ret_err_shapes = state.fn_ret_err_shapes
+    _bootstrap_fn_ret_opt_shapes = state.fn_ret_opt_shapes
+    _bootstrap_fn_ret_opt_shape_ambig = state.fn_ret_opt_shape_ambig
+    _bootstrap_fn_param_hir_types = state.fn_param_hir_types
+    _bootstrap_fn_param_hir_rejected = state.fn_param_hir_rejected
+    _bootstrap_fn_param_defaults = state.fn_param_defaults
+    _bootstrap_fn_param_defaults_ambig = state.fn_param_defaults_ambig
+    _bootstrap_fn_param_default_owners = state.fn_param_default_owners
+    _bootstrap_default_provider_symbols = state.default_provider_symbols
+    _bootstrap_default_provider_globals = state.default_provider_globals
+    _bootstrap_fn_registration_origins_v1 = state.origins
+    _bootstrap_fn_registration_rows_v1 = prepared.origin_rows
+    _bootstrap_fn_registration_event_v1 = prepared.maximum_event
+    _bootstrap_fn_registration_bytes_v1 = prepared.origin_bytes
+    _bootstrap_fn_registration_pending_v1 = false
+    _bootstrap_fn_registries_adopted = true
+    _bootstrap_fn_delta_reset()
+    Ok(prepared.snapshot)
+
+export bootstrap_fn_registry_snapshot_export_v1, bootstrap_fn_registry_snapshot_import_v1
+
+# Checked registration factories for the remaining four typed owners. Batch
+# aliases share one value proof before writes; every actual write still gets
+# its own event, and idempotent legacy winners remain untouched.
+fn _bootstrap_fn_origin_batch_fits_v1(registry: text, names: [text], multiplier: i64) -> bool:
+    if (not _bootstrap_fn_registration_available_v1 or names.len() > 1000000 or
+            (_bootstrap_fn_registration_pending_v1 and transient_array_scope_state_v1() == 0): return false
+    var bytes: i64 = 0
+    for name in names):
+        val size = text_byte_len(registry) + text_byte_len(name)
+        if size > (BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - 1024) / 4: return false
+        val charge = (1024 + size * 4) * multiplier
+        if charge > BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - bytes: return false
+        bytes = bytes + charge
+    (bytes <= BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - _bootstrap_fn_registration_bytes_v1 and
+        names.len() * multiplier <= BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1 - _bootstrap_fn_registration_event_v1)
+
+fn bootstrap_fn_ret_type_register_declaration_v1(names: [text], module: MirHirModuleDeclarationsV1,
+        function_index: i64) -> Result<bool, text>:
+    if function_index < 0 or function_index >= module.functions.len(): return Err("bootstrap callable index invalid")
+    if not _bootstrap_fn_origin_batch_fits_v1("return_mir", names, 1): return Err("bootstrap origin batch bound")
+    val function: MirHirFunctionDeclarationV1 = module.functions[function_index]
+    val origin = _bootstrap_fn_declaration_origin_v1(module, function, "return_str_mir")
+    if origin == nil: return Err("bootstrap declared MIR return origin missing")
+    val reference = BootstrapFnResolvedReferenceV1(module: module, function: Some(function), event: 0, items: [])
+    val value = bootstrap_fn_str_mir_value_v1(reference)
+    if value.is_err(): return Err(value.unwrap_err())
+    for name in names:
+        _bootstrap_fn_ret_type_register_origin_v1(name, value.unwrap(), origin)
+    Ok(true)
+
+fn bootstrap_fn_param_defaults_register_declaration_v1(names: [text], module: MirHirModuleDeclarationsV1,
+        function_index: i64, actual: [HirParam]) -> Result<bool, text>:
+    if function_index < 0 or function_index >= module.functions.len(): return Err("bootstrap callable index invalid")
+    if not _bootstrap_fn_origin_batch_fits_v1("parameter_defaults", names, 1): return Err("bootstrap origin batch bound")
+    val function: MirHirFunctionDeclarationV1 = module.functions[function_index]
+    val origin = _bootstrap_fn_declaration_origin_v1(module, function, "parameter_defaults")
+    if origin == nil: return Err("bootstrap declared defaults origin missing")
+    val budget = BootstrapOwnerBudgetV1.create()
+    val reference = BootstrapFnResolvedReferenceV1(module: module, function: Some(function), event: 0, items: [])
+    if not bootstrap_fn_params_match_v1(actual, reference, budget):
+        return Err("bootstrap actual defaults differ from sealed declaration fields")
+    val owner = _hir_symbol_owner_module(module.name)
+    for name in names:
+        _bootstrap_fn_param_defaults_register_origin_v1(name, actual, owner, origin)
+    Ok(true)
+
+fn _bootstrap_fn_provider_origin_v1(module: MirHirModuleDeclarationsV1, selector: text) -> BootstrapFnRegistrationOriginV1?:
+    if (not _bootstrap_fn_registration_available_v1 or module.source_binding == nil or
+            not sha256_lower_hex_valid(module.final_repository_authority) or
+            not sha256_lower_hex_valid(module.declaration_digest): return nil
+    val source = module.source_binding.unwrap()
+    if source.logical_key == "" or source.physical_path != module.path: return nil
+    Some(BootstrapFnRegistrationOriginV1(bound: true, registry: "", row_name: "",
+        repository_authority: module.final_repository_authority, module_key: source.logical_key,
+        declaration_digest: module.declaration_digest, function_digest: "", function_symbol: -1,
+        selector: selector, write_event: 0))
+
+fn bootstrap_default_provider_register_declaration_v1(repository: MirHirDeclarationRepositoryV1,
+        module_key: text, actual_symbols: SymbolTable, actual_globals: [HirConst]) -> Result<bool, text>):
+    if not repository.modules.has(module_key): return Err("bootstrap provider module missing")
+    val module: MirHirModuleDeclarationsV1 = repository.modules[module_key]
+    val owner = _hir_symbol_owner_module(module.name)
+    # Preserve the existing first-provider winner without rehashing it on
+    # every later consumer's prescan. Export rechecks that winner's own seal.
+    if _bootstrap_default_provider_symbols.has(owner) and _bootstrap_default_provider_globals.has(owner): return Ok(false)
+    if not _bootstrap_fn_origin_batch_fits_v1("provider_symbols", [owner], 2): return Err("bootstrap origin batch bound")
+    val symbols_origin = _bootstrap_fn_provider_origin_v1(module, "symbols")
+    val globals_origin = _bootstrap_fn_provider_origin_v1(module, "globals")
+    if symbols_origin == nil or globals_origin == nil: return Err("bootstrap provider origin missing")
+    val budget = BootstrapOwnerBudgetV1.create()
+    val created = BootstrapFnReferenceResolverV1.create(repository, budget)
+    if created.is_err(): return Err(created.unwrap_err())
+    val resolver = created.unwrap()
+    val checked = resolver.checked_module(module_key)
+    if checked.is_err(): return Err(checked.unwrap_err())
+    val actual_digest = bootstrap_fn_symbol_digest_v1(actual_symbols, budget)
+    if actual_digest.is_err(): return Err(actual_digest.unwrap_err())
+    val expected_digest = bootstrap_fn_symbol_digest_v1(module.symbols, budget)
+    if expected_digest.is_err() or actual_digest.unwrap() != expected_digest.unwrap():
+        return Err("bootstrap provider symbols differ from sealed declaration")
+    if actual_globals.len() > 65536 or not budget.reserve(actual_globals.len() * 128 + 1024):
+        return Err("bootstrap provider globals selector bound")
+    var items: [SdnValue] = []
+    for global in actual_globals:
+        if global == nil: return Err("bootstrap provider global is nil")
+        items.push(SdnValue.Int(global.symbol.id))
+    val reference = BootstrapFnResolvedReferenceV1(module: module, function: nil, event: 0, items: items)
+    if not bootstrap_fn_globals_match_v1(actual_globals, reference, resolver):
+        return Err("bootstrap provider globals differ from sealed declarations")
+    _bootstrap_default_provider_register_origin_v1(owner, actual_symbols, actual_globals, symbols_origin, globals_origin)
+    Ok(true)
+
+export bootstrap_fn_ret_type_register_declaration_v1, bootstrap_fn_param_defaults_register_declaration_v1
+export bootstrap_default_provider_register_declaration_v1

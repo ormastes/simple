@@ -1,0 +1,157 @@
+# Exact references into a caller-admitted immutable declaration repository.
+# Recheck each used module seal once; never infer a winner by bare name.
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir.hir_declaration_codec_v1.{mir_hir_write_module_declarations_v1}
+use compiler.mir.hir_declaration_reference_key_v1.{mir_hir_reference_module_key_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.mir.bootstrap_owner_snapshot_v1.{BootstrapOwnerBudgetV1, bootstrap_owner_field_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.encoding.utf8.{text_byte_len}
+use compiler.hir.hir_definitions.{HirParam, HirConst}
+
+class BootstrapFnResolvedReferenceV1:
+    module: MirHirModuleDeclarationsV1
+    function: MirHirFunctionDeclarationV1?
+    event: i64
+    items: [SdnValue]
+
+fn bootstrap_fn_reference_selector_v1(registry: text) -> text:
+    match registry:
+        case "fn_ret_types": "return_str_mir"
+        case "fn_ret_hir_types": "return_type"
+        case "fn_param_hir_types": "parameter_types"
+        case "fn_param_defaults": "parameter_defaults"
+        case "default_provider_symbols": "symbols"
+        case "default_provider_globals": "globals"
+        case _: ""
+
+fn bootstrap_fn_origin_registry_v1(registry: text) -> text:
+    match registry:
+        case "fn_ret_types": "return_mir"
+        case "fn_ret_hir_types": "return_hir"
+        case "fn_param_hir_types": "parameter_hir"
+        case "fn_param_defaults": "parameter_defaults"
+        case "default_provider_symbols": "provider_symbols"
+        case "default_provider_globals": "provider_globals"
+        case _: ""
+
+class BootstrapFnReferenceResolverV1:
+    repository: MirHirDeclarationRepositoryV1
+    budget: BootstrapOwnerBudgetV1
+    var checked: Dict<text, bool>
+    var positions: Dict<text, i64>
+    var global_positions: Dict<text, i64>
+    var indexed: i64
+    var parameter_cache: Dict<text, [HirParam]>
+    var globals_cache: Dict<text, [HirConst]>
+
+    static fn create(repository: MirHirDeclarationRepositoryV1,
+            budget: BootstrapOwnerBudgetV1) -> Result<BootstrapFnReferenceResolverV1, text>:
+        if (not sha256_lower_hex_valid(repository.authority) or
+                not sha256_lower_hex_valid(repository.final_repository_authority)):
+            return Err("bootstrap registry repository identity invalid")
+        # Repository admission and ordered physical/source binding remain
+        # owned by the retained-input caller, not by a caller-created receipt.
+        if not budget.reserve(4096): return Err("bootstrap resolver allocation bound")
+        Ok(BootstrapFnReferenceResolverV1(repository: repository, budget: budget,
+            checked: {}, positions: {}, global_positions: {}, indexed: 0, parameter_cache: {}, globals_cache: {}))
+
+    me checked_module(key: text) -> Result<MirHirModuleDeclarationsV1, text>:
+        if not self.repository.modules.has(key): return Err("bootstrap registry module missing")
+        val module: MirHirModuleDeclarationsV1 = self.repository.modules[key]
+        if self.checked.has(key): return Ok(module)
+        if (module.source_binding == nil or module.stage != "mir-hir-module-declarations-v1" or
+                module.final_repository_authority != self.repository.final_repository_authority or
+                mir_hir_reference_module_key_v1(module) != key or
+                not sha256_lower_hex_valid(module.declaration_digest)):
+            return Err("bootstrap registry module authority differs")
+        # Reuse the existing local declaration byte grammar. This neither
+        # enables nor substitutes for the portable canonical-codec gate.
+        val allowance = self.budget.remaining
+        if allowance < 8 * 1024 * 1024 or not self.budget.reserve(allowance):
+            return Err("bootstrap module seal allocation bound")
+        var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024,
+            allowance, 1000000)
+        writer.canonical = false
+        mir_hir_write_module_declarations_v1(writer, module)
+        val bytes = writer.finish()
+        if not writer.ok or sha256_text(bytes) != module.declaration_digest:
+            return Err("bootstrap registry module seal differs")
+        self.budget.release_unused(allowance - writer.charged_allocation_bytes)
+        if not self.budget.ok: return Err("bootstrap module seal accounting refused")
+        var position: i64 = 0
+        for raw in module.functions:
+            val function: MirHirFunctionDeclarationV1 = raw
+            if self.indexed >= 1000000 or not sha256_lower_hex_valid(function.complete_function_digest):
+                return Err("bootstrap function inventory bound or identity invalid")
+            if not self.budget.reserve(1024 + text_byte_len(key) * 4):
+                return Err("bootstrap function index allocation bound")
+            val identity = "{key.len()}:{key}:{function.symbol.id}:{function.complete_function_digest}"
+            if self.positions.has(identity): return Err("bootstrap duplicate declaration reference")
+            self.positions[identity] = position
+            self.indexed = self.indexed + 1
+            position = position + 1
+        position = 0
+        for raw in module.globals:
+            val global: MirHirGlobalDeclarationV1 = raw
+            if self.indexed >= 1000000 or not self.budget.reserve(1024 + text_byte_len(key) * 4):
+                return Err("bootstrap global index allocation bound")
+            val identity = "{key.len()}:{key}:{global.symbol.id}"
+            if self.global_positions.has(identity): return Err("bootstrap duplicate global reference")
+            self.global_positions[identity] = position
+            self.indexed = self.indexed + 1
+            position = position + 1
+        if not self.budget.reserve(128): return Err("bootstrap module index allocation bound")
+        self.checked[key] = true
+        Ok(module)
+
+    me resolve(registry: text, value: SdnValue) -> Result<BootstrapFnResolvedReferenceV1, text>:
+        match value:
+            case SdnValue.Dict(fields):
+                if fields.keys().len() != 8: return Err("bootstrap reference shape")
+                for key in ["module", "declaration", "function", "symbol", "selector", "event", "items", "repository"]:
+                    if not fields.has(key): return Err("bootstrap reference field missing")
+                for key in ["module", "declaration", "function", "selector", "repository"]:
+                    match fields[key]:
+                        case SdnValue.String(_): ()
+                        case _: return Err("bootstrap reference text field type")
+                for key in ["symbol", "event"]:
+                    match fields[key]:
+                        case SdnValue.Int(_): ()
+                        case _: return Err("bootstrap reference integer field type")
+            case _: return Err("bootstrap reference is not a dictionary")
+        val key = bootstrap_owner_field_v1(value, "module").as_str() ?? ""
+        val declaration = bootstrap_owner_field_v1(value, "declaration").as_str() ?? ""
+        val digest = bootstrap_owner_field_v1(value, "function").as_str() ?? ""
+        val symbol = bootstrap_owner_field_v1(value, "symbol").as_i64() ?? -2
+        val selector = bootstrap_owner_field_v1(value, "selector").as_str() ?? ""
+        val event = bootstrap_owner_field_v1(value, "event").as_i64() ?? -1
+        val repository = bootstrap_owner_field_v1(value, "repository").as_str() ?? ""
+        val selector_expected = bootstrap_fn_reference_selector_v1(registry)
+        if (selector_expected == "" or selector != selector_expected or event <= 0 or
+                event > 1000000 or repository != self.repository.authority):
+            return Err("bootstrap reference selector, event or repository differs")
+        val loaded = self.checked_module(key)
+        if loaded.is_err(): return Err(loaded.unwrap_err())
+        val module = loaded.unwrap()
+        if declaration != module.declaration_digest: return Err("bootstrap reference declaration differs")
+        var items: [SdnValue] = []
+        match bootstrap_owner_field_v1(value, "items"):
+            case SdnValue.Array(values): items = values
+            case _: return Err("bootstrap reference items malformed")
+        if registry == "default_provider_symbols" or registry == "default_provider_globals":
+            if digest != "" or symbol != -1: return Err("bootstrap provider reference has a function")
+            if registry == "default_provider_symbols" and items.len() != 0:
+                return Err("bootstrap symbol reference has item selectors")
+            return Ok(BootstrapFnResolvedReferenceV1(module: module, function: nil, event: event, items: items))
+        if items.len() != 0 or not sha256_lower_hex_valid(digest) or symbol < 0:
+            return Err("bootstrap callable reference malformed")
+        val identity = "{key.len()}:{key}:{symbol}:{digest}"
+        if not self.positions.has(identity): return Err("bootstrap callable reference missing")
+        val function: MirHirFunctionDeclarationV1 = module.functions[self.positions[identity]]
+        Ok(BootstrapFnResolvedReferenceV1(module: module, function: Some(function), event: event, items: items))
+
+export BootstrapFnReferenceResolverV1, BootstrapFnResolvedReferenceV1
+export bootstrap_fn_reference_selector_v1, bootstrap_fn_origin_registry_v1

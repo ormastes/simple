@@ -1,0 +1,86 @@
+# Actual retained-reference reconstruction, not bootstrap/SOURCE admission.
+use std.spec.*
+use test.helpers.bootstrap_fn_snapshot_fixture_v1.*
+use compiler.mir.bootstrap_fn_registry_snapshot_v1.{bootstrap_fn_registry_snapshot_encode_v1,
+    bootstrap_fn_registry_snapshot_prepare_v1, bootstrap_fn_registry_snapshot_prepare_budgeted_v1}
+use compiler.mir.bootstrap_owner_snapshot_v1.{BootstrapOwnerBudgetV1}
+use compiler.mir.bootstrap_fn_registration_origin_v1.{BootstrapFnRegistrationOriginV1, bootstrap_fn_registration_storage_key_v1}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1,
+    transient_array_scope_end_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+fn snapshot_duplicate_first_row_v1(body: text) -> text:
+    val lines = body.split("\n")
+    var changed = false
+    var duplicate_next = false
+    var parts: [text] = []
+    for line in lines:
+        if line == "\"@map\", fn_ret_types, 1":
+            parts.push("\"@map\", fn_ret_types, 2")
+            duplicate_next = true
+            changed = true
+        else:
+            parts.push(line)
+            if duplicate_next:
+                parts.push(line)
+                duplicate_next = false
+    expect(changed).to_equal(true)
+    parts.join("\n")
+
+describe "private bootstrap function-registry snapshots":
+    it "reconstructs all twenty actual maps and rejects invalid inputs without changing the source":
+        val fixture = bootstrap_fn_snapshot_fixture_v1("actual-default-owner")
+        defer dir_remove(fixture.directory, true)
+        val foreign = bootstrap_fn_snapshot_fixture_v1("different-actual-owner")
+        defer dir_remove(foreign.directory, true)
+        val original = bootstrap_fn_snapshot_fixture_state_v1(fixture)
+        val encoded = bootstrap_fn_registry_snapshot_encode_v1(original, fixture.repository)
+        expect(encoded.is_ok()).to_equal(true)
+        val baseline = encoded.unwrap()
+        expect(baseline.rows).to_equal(20)
+        expect(baseline.bytes > 0).to_equal(true)
+        if not transient_array_scope_begin_v1(): panic("snapshot test scope refused")
+        defer transient_array_scope_end_v1()
+        val decoded = bootstrap_fn_registry_snapshot_prepare_v1(baseline.body, baseline.digest, fixture.repository)
+        expect(decoded.is_ok()).to_equal(true)
+        val prepared = decoded.unwrap()
+        expect(prepared.snapshot.body).to_equal(baseline.body)
+        expect(prepared.snapshot.rows).to_equal(20)
+        expect(prepared.origin_rows).to_equal(6)
+        expect(prepared.maximum_event).to_equal(6)
+        val restored = prepared.state
+        expect(restored.fn_ret_shapes["unit.shape"]).to_equal(original.fn_ret_shapes["unit.shape"])
+        expect(restored.fn_ret_array_element_identities["unit.array"]).to_equal(original.fn_ret_array_element_identities["unit.array"])
+        expect(restored.fn_ret_ok_shapes["unit.ok"]).to_equal(original.fn_ret_ok_shapes["unit.ok"])
+        expect(restored.fn_ret_err_shapes["unit.err"]).to_equal(original.fn_ret_err_shapes["unit.err"])
+        expect(restored.fn_ret_opt_shapes["unit.opt"]).to_equal(original.fn_ret_opt_shapes["unit.opt"])
+        expect(restored.fn_param_defaults_ambig["unit.row"]).to_equal(true)
+        expect(restored.fn_param_defaults["unit.row"][0].has_default).to_equal(true)
+        expect(restored.fn_param_hir_rejected["unit.rejected"]).to_equal(true)
+        expect(restored.fn_ret_hir_ambig["unit.masked_return"]).to_equal(true)
+        expect(restored.fn_ret_shape_ambig["unit.masked_shape"]).to_equal(true)
+        expect(restored.fn_ret_array_element_shape_ambig["unit.masked_array"]).to_equal(true)
+        expect(restored.fn_ret_ok_shape_ambig["unit.masked_ok"]).to_equal(true)
+        expect(restored.fn_ret_opt_shape_ambig["unit.masked_opt"]).to_equal(true)
+        # A complete re-export verifies every typed value/default/provider,
+        # not merely the primitive examples inspected above.
+        expect(bootstrap_fn_registry_snapshot_encode_v1(restored, fixture.repository).unwrap().body).to_equal(baseline.body)
+        expect(bootstrap_fn_registry_snapshot_prepare_v1(baseline.body, baseline.digest, foreign.repository).is_err()).to_equal(true)
+        val missing_origin = bootstrap_fn_snapshot_fixture_state_v1(fixture)
+        var kept_origins: Dict<text, BootstrapFnRegistrationOriginV1> = {}
+        val removed = bootstrap_fn_registration_storage_key_v1("return_hir", "unit.row")
+        for key in missing_origin.origins.keys():
+            if key != removed: kept_origins[key] = missing_origin.origins[key]
+        missing_origin.origins = kept_origins
+        expect(bootstrap_fn_registry_snapshot_encode_v1(missing_origin, fixture.repository).is_err()).to_equal(true)
+        val malformed = baseline.body.replace("selector: return_type", "selector: unknown_field")
+        expect(malformed != baseline.body).to_equal(true)
+        expect(bootstrap_fn_registry_snapshot_prepare_v1(malformed, sha256_text(malformed), fixture.repository).is_err()).to_equal(true)
+        val duplicate = snapshot_duplicate_first_row_v1(baseline.body)
+        expect(bootstrap_fn_registry_snapshot_prepare_v1(duplicate, sha256_text(duplicate), fixture.repository).is_err()).to_equal(true)
+        expect(bootstrap_fn_registry_snapshot_prepare_v1(baseline.body, sha256_text("wrong snapshot"), fixture.repository).is_err()).to_equal(true)
+        val tiny = BootstrapOwnerBudgetV1.create_bounded(1)
+        expect(bootstrap_fn_registry_snapshot_prepare_budgeted_v1(baseline.body, baseline.digest,
+            fixture.repository, tiny).is_err()).to_equal(true)
+        expect(bootstrap_fn_registry_snapshot_encode_v1(original, fixture.repository).unwrap().body).to_equal(baseline.body)

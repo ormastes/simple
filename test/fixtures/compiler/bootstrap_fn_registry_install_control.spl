@@ -1,0 +1,47 @@
+# Link/run as an existing native fixture in a fresh process. Interpreting this
+# inside a compiler that already lowered other modules is not a fresh owner.
+# All fixture source/artifacts are real; no SOURCE or compiler admission token
+# is manufactured. The test uses the ordinary exact owner import API.
+use test.helpers.bootstrap_fn_snapshot_fixture_v1.*
+use compiler.mir.bootstrap_fn_registry_snapshot_v1.{bootstrap_fn_registry_snapshot_encode_v1}
+use compiler.mir.mir_data.{bootstrap_fn_registry_snapshot_import_v1,
+    bootstrap_fn_registry_snapshot_export_v1, bootstrap_fn_ret_hir_type_lookup,
+    bootstrap_fn_param_defaults_lookup, bootstrap_fn_param_default_owner,
+    bootstrap_default_provider_symbols, bootstrap_default_provider_globals,
+    bootstrap_fn_registry_origin_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+fn main() -> i64:
+    val fixture = bootstrap_fn_snapshot_fixture_v1("actual-native-install")
+    defer dir_remove(fixture.directory, true)
+    val source = bootstrap_fn_snapshot_fixture_state_v1(fixture)
+    val encoded = bootstrap_fn_registry_snapshot_encode_v1(source, fixture.repository)
+    if encoded.is_err(): panic(encoded.unwrap_err())
+    val expected = encoded.unwrap()
+    if expected.rows != 20: panic("source fixture did not contain all twenty owner maps")
+    if bootstrap_fn_ret_hir_type_lookup("unit.row") != nil: panic("install fixture did not start with a fresh owner")
+    val failed = bootstrap_fn_registry_snapshot_import_v1(expected.body, sha256_text("wrong digest"), fixture.repository)
+    if failed.is_ok(): panic("wrong snapshot digest was accepted")
+    if bootstrap_fn_ret_hir_type_lookup("unit.row") != nil: panic("failed import partially published a typed row")
+    val imported = bootstrap_fn_registry_snapshot_import_v1(expected.body, expected.digest, fixture.repository)
+    if imported.is_err(): panic(imported.unwrap_err())
+    val receipt = imported.unwrap()
+    if receipt.digest != expected.digest or receipt.rows != 20: panic("installed owner receipt differs")
+    val readback = bootstrap_fn_registry_snapshot_export_v1(fixture.repository)
+    if readback.is_err(): panic(readback.unwrap_err())
+    if readback.unwrap().body != expected.body: panic("installed twenty-map state differs from the private reconstruction")
+    if bootstrap_fn_ret_hir_type_lookup("unit.row") == nil: panic("typed return was not installed")
+    # The old default row survives privately, but ambiguity still hides its lookup.
+    if bootstrap_fn_param_defaults_lookup("unit.row") != nil: panic("import changed the ordinary ambiguity winner")
+    val owner = bootstrap_fn_param_default_owner("unit.row")
+    if owner == "": panic("default owner disappeared")
+    if bootstrap_default_provider_symbols(owner) == nil: panic("default provider symbols disappeared")
+    if bootstrap_default_provider_globals(owner) == nil: panic("default provider globals disappeared")
+    if bootstrap_fn_registry_origin_v1("return_hir", "unit.row") == nil: panic("installed actual registration origin disappeared")
+    val refused = bootstrap_fn_registry_snapshot_import_v1(expected.body, expected.digest, fixture.repository)
+    if refused.is_ok(): panic("occupied live owner was replaced")
+    val preserved = bootstrap_fn_registry_snapshot_export_v1(fixture.repository)
+    if preserved.is_err() or preserved.unwrap().body != expected.body: panic("refused replacement changed the input owner")
+    print "bootstrap-fn-registry-install-control: PASS"
+    0
