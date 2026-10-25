@@ -2892,6 +2892,28 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
         return 1;
     }
 #endif
+    /* @workaround bug=transient_promote_misses_raw_text_data_pointer_2026-10-25
+     * Stage-2-compiled code decodes a text read out of an array/dict to its
+     * raw char* buffer (rt_interp_cstr) and stores THAT in struct fields, so a
+     * retained ParserModule holds untagged pointers to RtCoreString data.
+     * Without this the owning transient string classified as "not heap", was
+     * skipped by promotion, and was freed at scope end (Stage 3 hello world:
+     * "unresolved name: <reused bytes>"). Membership is checked before any
+     * dereference, so an arbitrary aligned word is never read. */
+    if (!rt_core_is_heap(value) && (((uint64_t)value) & RT_VALUE_TAG_MASK) == 0 &&
+            (uint64_t)value > 0x10000 + offsetof(RtCoreString, data)) {
+        RtCoreString* raw_text = (RtCoreString*)(uintptr_t)(
+            (uint64_t)value - offsetof(RtCoreString, data));
+        if (rt_core_is_registered_immortal_ptr(raw_text) &&
+                rt_core_registered_object_kind(raw_text) == RT_VALUE_HEAP_STRING) {
+            if ((raw_text->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                    (raw_text->reserved & RT_CORE_STRING_FLAG_SHARED) == 0) {
+                *node = (RtCoreTransientNode){raw_text, RT_CORE_TRANSIENT_STRING, 0};
+                return 1;
+            }
+            return 0;
+        }
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
