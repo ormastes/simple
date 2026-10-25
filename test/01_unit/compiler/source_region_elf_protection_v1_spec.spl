@@ -1,0 +1,129 @@
+# These exercise physical ELF checks, not SOURCE authority issuance. Positive
+# authority additionally requires actual backend emission/retained input seals.
+use std.spec.{describe, it, expect}
+use compiler.backend.linker.source_region_elf_protection_v1.*
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open}
+use std.io_runtime.{file_write_bytes, file_delete, getpid}
+
+fn source_region_elf_test_account_v1() -> MirLoopResourceAccountV1:
+    match MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()):
+        case Ok(account): account
+        case Err(_):
+            assert(false)
+            nil
+
+fn source_region_elf_negative_fixture_v1(label: text, bytes: [u8]) -> Result<[SourceRegionElfLoadV1], text>:
+    val path = "/tmp/source-region-elf-{getpid()}-{label}.elf"
+    if not file_write_bytes(path, bytes): return Err("fixture write failed")
+    val opened = retained_file_open(path, bytes.len() as u64)
+    match opened:
+        case Ok(file):
+            val result = source_region_elf_loads_v1(file, source_region_elf_test_account_v1())
+            val closed = file.close()
+            val removed = file_delete(path)
+            if not closed or not removed: return Err("fixture cleanup failed")
+            result
+        case Err(reason):
+            val _removed = file_delete(path)
+            Err(reason)
+
+fn source_region_elf_fixture_header_v1() -> [u8]:
+    var bytes = elf_u8_zeros(120)
+    bytes[0] = 127u8
+    bytes[1] = 69u8
+    bytes[2] = 76u8
+    bytes[3] = 70u8
+    bytes[4] = 2u8
+    bytes[5] = 1u8
+    bytes[6] = 1u8
+    bytes[16] = 2u8
+    bytes[20] = 1u8
+    bytes[32] = 64u8
+    bytes[52] = 64u8
+    bytes[54] = 56u8
+    bytes[56] = 1u8
+    bytes
+
+describe "SOURCE final ELF physical protection checks":
+    it "maps a complete readonly file-backed descriptor span":
+        val load = SourceRegionElfLoadV1(type_: 1u64, flags: 4u64, offset: 4096u64,
+            address: 4096u64, file_bytes: 4096u64, memory_bytes: 4096u64)
+        match source_region_elf_protected_offset_v1([load], 4160u64, 48u64, 4096u64):
+            case Ok(offset): expect(offset).to_equal(4160u64)
+            case Err(_): assert(false)
+
+    it "refuses a writable span regardless of section naming":
+        val load = SourceRegionElfLoadV1(type_: 1u64, flags: 6u64, offset: 0u64,
+            address: 4096u64, file_bytes: 4096u64, memory_bytes: 4096u64)
+        match source_region_elf_protected_offset_v1([load], 4160u64, 48u64, 4096u64):
+            case Err(message): expect(message).to_contain("WRITABLE")
+            case Ok(_): assert(false)
+
+    it "requires the full table span to lie inside loader-rounded RELRO":
+        val load = SourceRegionElfLoadV1(type_: 1u64, flags: 6u64, offset: 0u64,
+            address: 4096u64, file_bytes: 8192u64, memory_bytes: 8192u64)
+        val relro = SourceRegionElfLoadV1(type_: 1685382482u64, flags: 4u64, offset: 0u64,
+            address: 4096u64, file_bytes: 4096u64, memory_bytes: 4096u64)
+        match source_region_elf_protected_offset_v1([load, relro], 8176u64, 32u64, 4096u64):
+            case Err(message): expect(message).to_contain("WRITABLE")
+            case Ok(_): assert(false)
+
+    it "does not treat an unprotected final partial page as RELRO":
+        val load = SourceRegionElfLoadV1(type_: 1u64, flags: 6u64, offset: 0u64,
+            address: 4096u64, file_bytes: 8192u64, memory_bytes: 8192u64)
+        val relro = SourceRegionElfLoadV1(type_: 1685382482u64, flags: 4u64, offset: 0u64,
+            address: 4096u64, file_bytes: 6144u64, memory_bytes: 6144u64)
+        match source_region_elf_protected_offset_v1([load, relro], 9000u64, 48u64, 4096u64):
+            case Err(message): expect(message).to_contain("WRITABLE")
+            case Ok(_): assert(false)
+
+    it "rejects a writable BSS mapping overlapping a readonly mapping":
+        val read_only = SourceRegionElfLoadV1(type_: 1u64, flags: 4u64, offset: 0u64,
+            address: 4096u64, file_bytes: 4096u64, memory_bytes: 4096u64)
+        val alias = SourceRegionElfLoadV1(type_: 1u64, flags: 6u64, offset: 64u64,
+            address: 4160u64, file_bytes: 0u64, memory_bytes: 4096u64)
+        match source_region_elf_protected_offset_v1([read_only, alias], 4160u64, 48u64, 4096u64):
+            case Err(message): expect(message).to_contain("OVERLAPPING")
+            case Ok(_): assert(false)
+
+    it "rejects a writable mapping sharing only the descriptor page":
+        val read_only = SourceRegionElfLoadV1(type_: 1u64, flags: 4u64, offset: 0u64,
+            address: 4096u64, file_bytes: 2048u64, memory_bytes: 2048u64)
+        val alias = SourceRegionElfLoadV1(type_: 1u64, flags: 6u64, offset: 2048u64,
+            address: 6144u64, file_bytes: 2048u64, memory_bytes: 2048u64)
+        match source_region_elf_protected_offset_v1([read_only, alias], 4160u64, 48u64, 4096u64):
+            case Err(message): expect(message).to_contain("OVERLAPPING")
+            case Ok(_): assert(false)
+
+    it "rejects a descriptor extending into zero-filled storage":
+        val load = SourceRegionElfLoadV1(type_: 1u64, flags: 4u64, offset: 0u64,
+            address: 4096u64, file_bytes: 32u64, memory_bytes: 4096u64)
+        match source_region_elf_protected_offset_v1([load], 4096u64, 48u64, 4096u64):
+            case Err(message): expect(message).to_contain("FILE-BACKED")
+            case Ok(_): assert(false)
+
+    it "rejects PIE bytes rather than guessing the runtime table relocation":
+        var bytes = source_region_elf_fixture_header_v1()
+        bytes[16] = 3u8
+        match source_region_elf_negative_fixture_v1("pie", bytes):
+            case Err(message): expect(message).to_contain("PIE-INCOMPLETE")
+            case Ok(_): assert(false)
+
+    it "rejects a forged program-header extent before reading it":
+        var bytes = source_region_elf_fixture_header_v1()
+        bytes[56] = 2u8
+        match source_region_elf_negative_fixture_v1("phdr", bytes):
+            case Err(message): expect(message).to_contain("PHDR-BOUNDS")
+            case Ok(_): assert(false)
+
+    it "rejects a segment extent outside the retained ELF file":
+        var bytes = source_region_elf_fixture_header_v1()
+        bytes[64] = 1u8
+        bytes[72] = 121u8
+        bytes[96] = 1u8
+        bytes[104] = 1u8
+        match source_region_elf_negative_fixture_v1("segment", bytes):
+            case Err(message): expect(message).to_contain("SEGMENT-BOUNDS")
+            case Ok(_): assert(false)

@@ -1,0 +1,73 @@
+# Explicit in-process SOURCE artifact route. No filesystem receipt, cache
+# restore, path-only worker result or raw SFFI output can substitute for the
+# emission manifest carried by the actual backend result.
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.backend.backend_helpers.{compile_module_with_backend}
+use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
+use compiler.backend.linker.source_region_link_types_v1.*
+use compiler.backend.linker.source_region_link_gate_v1.{source_region_admit_emitted_object_v1}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1}
+use compiler.backend.linker._LinkerWrapper.native_linking.{link_to_native_with_engine}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+
+fn _finish_selected_module_compile_admitted_v1(compiled: Result<CompiledModule, CompileError>,
+    path: text, account: MirLoopResourceAccountV1) -> Result<SourceRegionAdmittedObjectV1, text>:
+    match compiled:
+        case Err(error): return Err(error.to_text())
+        case Ok(module):
+            if val emission = module.source_region_emission_v1:
+                if val bytes = module.object_code:
+                    if bytes.len() > 9223372036854775743:
+                        return Err("SOURCE-OBJECT-OUTPUT-OVERFLOW")
+                    match account.reserve(work: bytes.len() + 64, output_bytes: bytes.len()):
+                        case Err(_): return Err("SOURCE-OBJECT-OUTPUT-CAPACITY")
+                        case Ok(_): ()
+                    # Exclusive creation is the actual output-owner boundary.
+                    val writer = retained_file_open(path, bytes.len() as u64, true)?
+                    val written = writer.write(bytes)
+                    val closed = writer.close()
+                    if written.is_err() or not closed:
+                        file_delete(path)
+                        return Err("SOURCE-OBJECT-OUTPUT-WRITE")
+                    match source_region_admit_emitted_object_v1(path, emission, account):
+                        case Ok(object): return Ok(object)
+                        case Err(reason):
+                            file_delete(path)
+                            return Err(reason)
+                return Err("SOURCE-OBJECT-EMISSION-WITHOUT-BYTES")
+            return Err("SOURCE-OBJECT-BACKEND-EMISSION-SEAL-MISSING")
+
+fn source_region_compile_admitted_object_v1(module: MirModule, backend: text,
+    is_release: bool, opt_level: i64, path: text,
+    account: MirLoopResourceAccountV1) -> Result<SourceRegionAdmittedObjectV1, text>:
+    if module.source_region_closure_digest_v1 == "":
+        return Err("SOURCE-OBJECT-PRODUCER-CLOSURE-MISSING")
+    if backend != "llvm" and backend != "cranelift":
+        return Err("SOURCE-OBJECT-BACKEND-SEAL-INCOMPLETE")
+    _finish_selected_module_compile_admitted_v1(
+        compile_module_with_backend(backend, module, is_release, opt_level), path, account)
+
+fn source_region_link_admitted_objects_v1(objects: [SourceRegionAdmittedObjectV1],
+    output: text, config: NativeLinkConfig,
+    account: MirLoopResourceAccountV1) -> Result<NativeLinkSuccessV1, text>:
+    if objects.len() == 0 or config.source_region_objects_v1.len() != 0 or config.source_region_account_v1.?:
+        return Err("SOURCE-LINK-ADMITTED-INPUT-OWNERSHIP")
+    var paths: [text] = []
+    var seals: [SourceRegionObjectSealV1] = []
+    for object in objects:
+        if object.path != object.seal.path: return Err("SOURCE-LINK-OBJECT-PATH-MISMATCH")
+        paths.push(object.path)
+        seals.push(object.seal)
+    var admitted_config = config
+    admitted_config.source_region_objects_v1 = seals
+    admitted_config.source_region_account_v1 = Some(account)
+    link_to_native_with_engine(paths, output, admitted_config)
+
+fn source_region_close_admitted_object_v1(object: SourceRegionAdmittedObjectV1) -> bool:
+    object.seal.file.close()
+
+fn source_region_close_link_seal_v1(seal: SourceRegionFinalLinkSealV1) -> bool:
+    seal.file.close()

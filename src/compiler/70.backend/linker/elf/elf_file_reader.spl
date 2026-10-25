@@ -94,7 +94,8 @@ pub fn elf_file_section_v1(object: ElfFileObjectV1, index: i64) -> Result<ElfFil
     Ok(section)
 
 fn _elf_file_decode(file: RetainedFile, base: u64, extent: u64, owns_file: bool,
-        metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
+        metadata_table_byte_limit: u64, max_window_bytes: i64,
+        linked_image: bool = false) -> Result<ElfFileObjectV1, text>:
     if extent < 64u64 or base > file.size or extent > file.size - base:
         return Err("ELF object extent bounds")
     val bytes = _elf_file_exact(file, base, 64)?
@@ -102,11 +103,14 @@ fn _elf_file_decode(file: RetainedFile, base: u64, extent: u64, owns_file: bool,
         return Err("ELF file magic invalid")
     if bytes[4] != 2u8 or bytes[5] != 1u8 or bytes[6] != 1u8:
         return Err("ELF file requires ELF64 little-endian version 1")
-    if _elf_file_field(bytes, 16, 2) != 1u64 or _elf_file_field(bytes, 20, 4) != 1u64:
-        return Err("ELF file requires version 1 relocatable object")
+    val file_type = _elf_file_field(bytes, 16, 2)
+    if _elf_file_field(bytes, 20, 4) != 1u64:
+        return Err("ELF file requires version 1")
+    if (not linked_image and file_type != 1u64) or (linked_image and file_type != 2u64 and file_type != 3u64):
+        return Err("ELF file type does not match retained view")
     if _elf_file_field(bytes, 52, 2) != 64u64 or _elf_file_field(bytes, 58, 2) != 64u64:
         return Err("ELF file header sizes unsupported")
-    if _elf_file_field(bytes, 56, 2) != 0u64:
+    if not linked_image and _elf_file_field(bytes, 56, 2) != 0u64:
         return Err("ELF relocatable program headers unsupported")
     val offset = _elf_file_field(bytes, 40, 8)
     val count = _elf_file_field(bytes, 60, 2) as i64
@@ -145,6 +149,15 @@ pub fn elf_file_view_v1(file: RetainedFile, base: u64, extent: u64,
         metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
     if max_window_bytes < 1 or max_window_bytes > 1048576: return Err("ELF payload window invalid")
     _elf_file_decode(file, base, extent, false, metadata_table_byte_limit, max_window_bytes)
+
+# A linked-image view shares the caller's retained owner; it is not a link
+# admission or an immutability certificate. SOURCE performs its separate LOAD,
+# relocation, descriptor and RELRO checks before publishing a link receipt.
+pub fn elf_file_linked_view_v1(file: RetainedFile,
+        metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
+    if max_window_bytes < 1 or max_window_bytes > 1048576: return Err("ELF payload window invalid")
+    _elf_file_decode(file, 0u64, file.size, false,
+        metadata_table_byte_limit, max_window_bytes, true)
 
 pub fn elf_file_section_window_v1(object: ElfFileObjectV1, index: i64,
         offset: u64, length: i64) -> Result<[u8], text>:

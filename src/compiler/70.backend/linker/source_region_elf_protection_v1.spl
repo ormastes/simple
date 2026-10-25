@@ -1,0 +1,288 @@
+# Link-construction verification, never a query-time graph walk. The caller
+# owns the retained file and closes it on every error. Facts from this module
+# are consumed only by the actual emitted-object/link owner.
+use compiler.backend.linker.source_region_link_types_v1.*
+use compiler.backend.linker.elf.elf_file_reader.{ElfFileObjectV1, ElfFileSymbolV1, elf_file_section_v1}
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_read_at, retained_file_identity_unchanged}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_u8_fast_hex}
+
+struct SourceRegionElfLoadV1:
+    type_: u64
+    flags: u64
+    offset: u64
+    address: u64
+    file_bytes: u64
+    memory_bytes: u64
+
+struct SourceRegionElfSpanV1:
+    address: u64
+    bytes: u64
+
+fn source_region_link_charge_v1(account: MirLoopResourceAccountV1, work: i64,
+    fields: i64 = 0, bytes: i64 = 0) -> Result<bool, text>:
+    match account.reserve(work: work, state_fields: fields, output_bytes: bytes):
+        case Ok(_): Ok(true)
+        case Err(_): Err("SOURCE-LINK-CAPACITY")
+
+fn source_region_elf_field_v1(bytes: [u8], offset: i64, width: i64) -> u64:
+    var value = 0u64
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn source_region_elf_exact_v1(file: RetainedFile, offset: u64, count: i64,
+    account: MirLoopResourceAccountV1) -> Result<[u8], text>:
+    if count < 1 or count > 1048576 or offset > file.size or count as u64 > file.size - offset:
+        return Err("SOURCE-LINK-READ-BOUNDS")
+    source_region_link_charge_v1(account, count + 8, bytes: count)?
+    val bytes = retained_file_read_at(file, offset, count)?
+    if bytes.len() != count: return Err("SOURCE-LINK-SHORT-READ")
+    Ok(bytes)
+
+fn source_region_retained_digest_v1(file: RetainedFile, account: MirLoopResourceAccountV1) -> Result<text, text>:
+    source_region_link_charge_v1(account, 224, fields: 224)?
+    var hash = sha256_stream_v1_new()
+    var offset = 0u64
+    while offset < file.size:
+        val remaining = file.size - offset
+        val count = if remaining > 32768u64: 32768 else: remaining as i64
+        val bytes = source_region_elf_exact_v1(file, offset, count, account)?
+        source_region_link_charge_v1(account, ((count + 63) / 64) * 80)?
+        if not hash.update(bytes): return Err("SOURCE-LINK-HASH")
+        offset = offset + count as u64
+    retained_file_identity_unchanged(file)?
+    if val digest = hash.finish_hex(): return Ok(digest)
+    Err("SOURCE-LINK-HASH-FINAL")
+
+fn source_region_elf_find_symbol_v1(view: ElfFileObjectV1, name: text,
+    account: MirLoopResourceAccountV1) -> Result<ElfFileSymbolV1, text>:
+    val wanted = base_encoding_text_to_bytes(name)
+    if wanted.len() == 0 or wanted.len() >= 1048576: return Err("SOURCE-LINK-BINDING")
+    var result: ElfFileSymbolV1? = nil
+    for index in 0..view.section_count:
+        source_region_link_charge_v1(account, 72)?
+        val table = elf_file_section_v1(view, index)?
+        if table.section_type != 2u64: continue
+        if table.entry_size != 24u64 or table.size % 24u64 != 0u64:
+            return Err("SOURCE-LINK-SYMTAB")
+        val strings = elf_file_section_v1(view, table.link)?
+        if strings.section_type != 3u64: return Err("SOURCE-LINK-STRTAB")
+        var ordinal = 0u64
+        while ordinal < table.size / 24u64:
+            val row = source_region_elf_exact_v1(view.file, table.file_offset + ordinal * 24u64, 24, account)?
+            val name_offset = source_region_elf_field_v1(row, 0, 4)
+            if name_offset > strings.size: return Err("SOURCE-LINK-SYMBOL-NAME")
+            if wanted.len() as u64 < strings.size - name_offset:
+                val actual = source_region_elf_exact_v1(view.file, strings.file_offset + name_offset, wanted.len() + 1, account)?
+                var same = actual[wanted.len()] == 0u8
+                for byte in 0..wanted.len():
+                    if actual[byte] != wanted[byte]: same = false
+                if same:
+                    if result.?: return Err("SOURCE-LINK-AMBIGUOUS-BINDING")
+                    val section = source_region_elf_field_v1(row, 6, 2) as i64
+                    if section <= 0 or section >= view.section_count: return Err("SOURCE-LINK-BINDING-SECTION")
+                    result = Some(ElfFileSymbolV1(name_bytes: wanted,
+                        binding: (row[4] >> 4) as i64, symbol_type: (row[4] & 15u8) as i64,
+                        visibility: (row[5] & 3u8) as i64, section_index: section,
+                        value: source_region_elf_field_v1(row, 8, 8), size: source_region_elf_field_v1(row, 16, 8)))
+            ordinal = ordinal + 1u64
+    if val symbol = result: return Ok(symbol)
+    Err("SOURCE-LINK-BINDING-LOST-OR-STRIPPED")
+
+fn source_region_span_contains_v1(start: u64, size: u64, address: u64, count: u64) -> bool:
+    address >= start and address - start <= size and count <= size - (address - start)
+
+fn source_region_elf_loads_v1(file: RetainedFile, account: MirLoopResourceAccountV1) -> Result<[SourceRegionElfLoadV1], text>:
+    val header = source_region_elf_exact_v1(file, 0u64, 64, account)?
+    if header[0] != 127u8 or header[1] != 69u8 or header[2] != 76u8 or header[3] != 70u8 or header[4] != 2u8 or header[5] != 1u8 or header[6] != 1u8:
+        return Err("SOURCE-LINK-ELF64-LE-REQUIRED")
+    if source_region_elf_field_v1(header, 20, 4) != 1u64 or source_region_elf_field_v1(header, 52, 2) != 64u64:
+        return Err("SOURCE-LINK-ELF-HEADER-VERSION")
+    if (header[7] != 0u8 and header[7] != 3u8) or header[8] != 0u8 or source_region_elf_field_v1(header, 48, 4) != 0u64:
+        return Err("SOURCE-LINK-NATIVE-ELF-ABI-INCOMPLETE")
+    if source_region_elf_field_v1(header, 16, 2) != 2u64:
+        return Err("SOURCE-LINK-ET-EXEC-REQUIRED-PIE-INCOMPLETE")
+    val offset = source_region_elf_field_v1(header, 32, 8)
+    val width = source_region_elf_field_v1(header, 54, 2)
+    val count = source_region_elf_field_v1(header, 56, 2)
+    if width != 56u64 or count == 0u64 or count == 65535u64 or offset > file.size or count > (file.size - offset) / 56u64:
+        return Err("SOURCE-LINK-PHDR-BOUNDS")
+    source_region_link_charge_v1(account, count as i64 * 8, fields: count as i64 * 6)?
+    var loads: [SourceRegionElfLoadV1] = []
+    var index = 0u64
+    while index < count:
+        val row = source_region_elf_exact_v1(file, offset + index * 56u64, 56, account)?
+        val file_offset = source_region_elf_field_v1(row, 8, 8)
+        val address = source_region_elf_field_v1(row, 16, 8)
+        val file_bytes = source_region_elf_field_v1(row, 32, 8)
+        val memory_bytes = source_region_elf_field_v1(row, 40, 8)
+        if file_offset > file.size or file_bytes > file.size - file_offset or file_bytes > memory_bytes or memory_bytes > 18446744073709551615u64 - address:
+            return Err("SOURCE-LINK-SEGMENT-BOUNDS")
+        loads = loads.push(SourceRegionElfLoadV1(type_: source_region_elf_field_v1(row, 0, 4),
+            flags: source_region_elf_field_v1(row, 4, 4), offset: file_offset,
+            address: address, file_bytes: file_bytes, memory_bytes: memory_bytes))
+        index = index + 1u64
+    Ok(loads)
+
+fn source_region_elf_protected_offset_v1(loads: [SourceRegionElfLoadV1], address: u64,
+    count: u64, page_size: u64) -> Result<u64, text>:
+    if count == 0u64 or page_size == 0u64 or (page_size & (page_size - 1u64)) != 0u64:
+        return Err("SOURCE-LINK-PAGE-PROVIDER")
+    if count > 18446744073709551615u64 - address: return Err("SOURCE-LINK-SPAN-OVERFLOW")
+    var intersections = 0
+    for load in loads:
+        if load.type_ != 1u64 or load.memory_bytes == 0u64: continue
+        if load.address % page_size != load.offset % page_size:
+            return Err("SOURCE-LINK-LOAD-PAGE-CONGRUENCE")
+        val start = load.address - load.address % page_size
+        val end = load.address + load.memory_bytes
+        if end > 18446744073709551615u64 - (page_size - 1u64):
+            return Err("SOURCE-LINK-LOAD-PAGE-OVERFLOW")
+        val rounded_end = ((end + page_size - 1u64) / page_size) * page_size
+        if address < rounded_end and start < address + count: intersections = intersections + 1
+    if intersections != 1: return Err("SOURCE-LINK-OVERLAPPING-LOAD")
+    var mapping: u64? = nil
+    for load in loads:
+        if load.type_ != 1u64 or not source_region_span_contains_v1(load.address, load.file_bytes, address, count): continue
+        if mapping.?: return Err("SOURCE-LINK-OVERLAPPING-LOAD")
+        if (load.flags & 4u64) == 0u64: return Err("SOURCE-LINK-NONREADABLE-SPAN")
+        var protected = (load.flags & 2u64) == 0u64
+        if not protected:
+            for relro in loads:
+                if relro.type_ != 1685382482u64: continue
+                val start = relro.address - relro.address % page_size
+                val end = relro.address + relro.memory_bytes
+                val rounded_end = end - end % page_size
+                if rounded_end >= start and source_region_span_contains_v1(start, rounded_end - start, address, count): protected = true
+        if not protected: return Err("SOURCE-LINK-WRITABLE-DESCRIPTOR-SPAN")
+        mapping = Some(load.offset + (address - load.address))
+    if val offset = mapping: return Ok(offset)
+    Err("SOURCE-LINK-DESCRIPTOR-NOT-FILE-BACKED")
+
+fn source_region_elf_virtual_offset_v1(loads: [SourceRegionElfLoadV1], address: u64, count: u64) -> Result<u64, text>:
+    var offset: u64? = nil
+    for load in loads:
+        if load.type_ == 1u64 and source_region_span_contains_v1(load.address, load.file_bytes, address, count):
+            if offset.?: return Err("SOURCE-LINK-AMBIGUOUS-VIRTUAL-RANGE")
+            offset = Some(load.offset + address - load.address)
+    if val actual = offset: return Ok(actual)
+    Err("SOURCE-LINK-VIRTUAL-RANGE")
+
+fn source_region_elf_relocations_v1(file: RetainedFile, loads: [SourceRegionElfLoadV1],
+    address: u64, bytes: u64, machine: i64, spans: [SourceRegionElfSpanV1],
+    account: MirLoopResourceAccountV1) -> Result<bool, text>:
+    if bytes == 0u64: return Ok(true)
+    if bytes % 24u64 != 0u64: return Err("SOURCE-LINK-RELA-SIZE")
+    val offset = source_region_elf_virtual_offset_v1(loads, address, bytes)?
+    var index = 0u64
+    while index < bytes:
+        val row = source_region_elf_exact_v1(file, offset + index, 24, account)?
+        val target = source_region_elf_field_v1(row, 0, 8)
+        val kind = source_region_elf_field_v1(row, 8, 8) & 4294967295u64
+        var width = 0u64
+        if kind != 0u64:
+            if machine == 62 and (kind == 1u64 or kind == 6u64 or kind == 7u64 or kind == 8u64): width = 8u64
+            elif machine == 183 and (kind == 257u64 or kind == 1025u64 or kind == 1026u64 or kind == 1027u64): width = 8u64
+            else: return Err("SOURCE-LINK-UNCLASSIFIED-DYNAMIC-RELOCATION")
+        if width > 18446744073709551615u64 - target: return Err("SOURCE-LINK-RELOCATION-OVERFLOW")
+        if width != 0u64:
+            for span in spans:
+                if target < span.address + span.bytes and span.address < target + width:
+                    return Err("SOURCE-LINK-DESCRIPTOR-RELOCATED-AFTER-PROOF")
+        index = index + 24u64
+    Ok(true)
+
+fn source_region_elf_dynamic_v1(file: RetainedFile, loads: [SourceRegionElfLoadV1],
+    machine: i64, spans: [SourceRegionElfSpanV1], account: MirLoopResourceAccountV1) -> Result<bool, text>:
+    var found = false
+    var eager = false
+    var rela = 0u64
+    var rela_bytes = 0u64
+    var rela_width = 0u64
+    var plt = 0u64
+    var plt_bytes = 0u64
+    var plt_kind = 0u64
+    var seen: Dict<u64, bool> = {}
+    for load in loads:
+        if load.type_ != 2u64: continue
+        if found: return Err("SOURCE-LINK-MULTIPLE-DYNAMIC-SEGMENTS")
+        found = true
+        if load.file_bytes % 16u64 != 0u64: return Err("SOURCE-LINK-DYNAMIC-SIZE")
+        var terminated = false
+        var index = 0u64
+        while index < load.file_bytes:
+            val row = source_region_elf_exact_v1(file, load.offset + index, 16, account)?
+            val tag = source_region_elf_field_v1(row, 0, 8)
+            val value = source_region_elf_field_v1(row, 8, 8)
+            if tag == 0u64:
+                terminated = true
+                break
+            if tag == 2u64 or tag == 7u64 or tag == 8u64 or tag == 9u64 or tag == 20u64 or tag == 23u64 or tag == 24u64 or tag == 30u64 or tag == 1879048187u64:
+                if seen.has(tag): return Err("SOURCE-LINK-DUPLICATE-DYNAMIC-TAG")
+                source_region_link_charge_v1(account, 2, fields: 2)?
+                seen[tag] = true
+            if tag == 24u64: eager = true
+            elif tag == 30u64:
+                if (value & 4u64) != 0u64: return Err("SOURCE-LINK-TEXT-RELOCATIONS")
+                if (value & 8u64) != 0u64: eager = true
+            elif tag == 1879048187u64:
+                if (value & 1u64) != 0u64: eager = true
+            elif tag == 7u64: rela = value
+            elif tag == 8u64: rela_bytes = value
+            elif tag == 9u64: rela_width = value
+            elif tag == 23u64: plt = value
+            elif tag == 2u64: plt_bytes = value
+            elif tag == 20u64: plt_kind = value
+            elif (tag == 17u64 or tag == 18u64 or tag == 19u64 or tag == 35u64 or tag == 36u64 or tag == 37u64) and value != 0u64:
+                return Err("SOURCE-LINK-REL-OR-RELR-INCOMPLETE")
+            index = index + 16u64
+        if not terminated: return Err("SOURCE-LINK-DYNAMIC-NOT-TERMINATED")
+    if not found or not eager: return Err("SOURCE-LINK-EAGER-BINDING-REQUIRED")
+    if rela_bytes != 0u64 and rela_width != 24u64: return Err("SOURCE-LINK-RELA-WIDTH")
+    if plt_bytes != 0u64 and plt_kind != 7u64: return Err("SOURCE-LINK-PLT-RELA-REQUIRED")
+    source_region_elf_relocations_v1(file, loads, rela, rela_bytes, machine, spans, account)?
+    source_region_elf_relocations_v1(file, loads, plt, plt_bytes, machine, spans, account)?
+    Ok(true)
+
+fn source_region_elf_descriptor_spans_v1(view: ElfFileObjectV1,
+    loads: [SourceRegionElfLoadV1], record: SourceRegionDescriptorObjectV1,
+    page_size: u64, account: MirLoopResourceAccountV1) -> Result<[SourceRegionElfSpanV1], text>:
+    if record.slot_count <= 0 or record.slot_count > 288230376151711743 or record.table_bytes != record.slot_count as u64 * 32u64:
+        return Err("SOURCE-LINK-EXPECTED-SLOT-BOUNDS")
+    val header_symbol = source_region_elf_find_symbol_v1(view, record.binding, account)?
+    val table_symbol = source_region_elf_find_symbol_v1(view, record.table_binding, account)?
+    if header_symbol.size != 48u64 or table_symbol.size != record.table_bytes:
+        return Err("SOURCE-LINK-BINDING-EXTENT")
+    val header_offset = source_region_elf_protected_offset_v1(loads, header_symbol.value, 48u64, page_size)?
+    val table_offset = source_region_elf_protected_offset_v1(loads, table_symbol.value, record.table_bytes, page_size)?
+    val header = source_region_elf_exact_v1(view.file, header_offset, 48, account)?
+    if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != 1u64 or
+            source_region_elf_field_v1(header, 16, 8) != record.allocation_bytes or
+            source_region_elf_field_v1(header, 24, 8) != record.slot_count as u64 or
+            source_region_elf_field_v1(header, 32, 8) != table_symbol.value or
+            source_region_elf_field_v1(header, 40, 8) != 1u64):
+        return Err("SOURCE-LINK-DESCRIPTOR-CONTENT")
+    source_region_link_charge_v1(account, 224, fields: 224)?
+    var hash = sha256_stream_v1_new()
+    var index = 0i64
+    while index < record.slot_count:
+        val row = source_region_elf_exact_v1(view.file, table_offset + index as u64 * 32u64, 32, account)?
+        val offset = source_region_elf_field_v1(row, 0, 8)
+        val width = source_region_elf_field_v1(row, 8, 8)
+        val kind = source_region_elf_field_v1(row, 16, 8)
+        val representation = source_region_elf_field_v1(row, 24, 8)
+        if offset != index as u64 * 8u64 or width != 8u64 or record.allocation_bytes / 8u64 != record.slot_count as u64 or record.allocation_bytes % 8u64 != 0u64:
+            return Err("SOURCE-LINK-SLOT-LAYOUT")
+        if kind == 1u64:
+            if representation != 0u64: return Err("SOURCE-LINK-SCALAR-REPRESENTATION")
+        elif kind == 2u64 or kind == 3u64:
+            if representation != 1u64 and representation != 2u64: return Err("SOURCE-LINK-POINTER-REPRESENTATION")
+        else: return Err("SOURCE-LINK-SLOT-CLASSIFICATION")
+        if not hash.update(row): return Err("SOURCE-LINK-SLOT-HASH")
+        index = index + 1
+    val observed = hash.finish_hex() ?? ""
+    if observed == "" or observed != record.table_digest: return Err("SOURCE-LINK-SLOT-DIGEST")
+    Ok([SourceRegionElfSpanV1(address: header_symbol.value, bytes: 48u64),
+        SourceRegionElfSpanV1(address: table_symbol.value, bytes: record.table_bytes)])
