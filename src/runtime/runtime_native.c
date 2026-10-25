@@ -69,6 +69,10 @@ typedef SSIZE_T ssize_t;
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/statvfs.h>
+#define RT_HAVE_STATVFS 1
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -330,6 +334,22 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
  * safe to set purely internally in rt_tuple_new. */
 #define RT_CORE_ARRAY_FLAG_TUPLE 0x01U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
+#define RT_CORE_BYTE_ARRAY_MAX_CAP 1073741824LL
+
+/* Packed bytes have a bounded byte budget, not the tagged-slot element budget.
+ * Keep allocation, header admission, concat and growth on the same contract. */
+static int64_t rt_core_array_capacity_limit(uint8_t flags) {
+    return (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? RT_CORE_BYTE_ARRAY_MAX_CAP : RT_CORE_ARRAY_MAX_CAP;
+}
+
+static int rt_core_array_capacity_valid(int64_t cap, uint8_t flags) {
+    size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? sizeof(uint8_t) : sizeof(int64_t);
+    return cap >= 0 && cap <= rt_core_array_capacity_limit(flags) &&
+        cap <= INT64_MAX / (int64_t)elem_size &&
+        (uint64_t)cap <= SIZE_MAX / elem_size;
+}
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
 #define RT_HOST_GPU_PHASE_BEGIN 1
@@ -2184,8 +2204,116 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     }
 }
 
+/* Fork-child overlay (twin of HeapRegistry in
+ * src/compiler_rust/runtime/src/value/heap.rs). A copy-on-write fork child
+ * inherits the parent's whole table; writing it privatizes it page by page and
+ * its first growth allocates a fresh 2x table per child. After
+ * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
+ * read-only: the child's objects use the (now empty) live table and an erase
+ * of an inherited pointer is recorded in the erased set. Bug:
+ * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
+static uintptr_t* rt_core_immortal_frozen = NULL;
+static size_t rt_core_immortal_frozen_cap = 0;
+static uintptr_t* rt_core_immortal_erased = NULL;
+static size_t rt_core_immortal_erased_cap = 0;
+static size_t rt_core_immortal_erased_len = 0;
+static size_t rt_core_immortal_erased_tombs = 0;
+
+static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
+    if (cap == 0) return 0;
+    size_t mask = cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = table[i];
+        if (e == 0) return 0;
+        if (e == p) return 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(uintptr_t p) {
+    return core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap, p) &&
+        (rt_core_immortal_erased_len == 0 ||
+         !core_ptr_table_has(rt_core_immortal_erased, rt_core_immortal_erased_cap, p));
+}
+
+/* caller holds the lock; p is not in the erased set */
+static int core_immortal_erased_add(uintptr_t p) {
+    if ((rt_core_immortal_erased_len + rt_core_immortal_erased_tombs + 1) * 10
+            >= rt_core_immortal_erased_cap * 7) {
+        size_t new_cap = rt_core_immortal_erased_cap == 0 ? 64 : rt_core_immortal_erased_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
+        if (!fresh) return 0;
+        for (size_t k = 0; k < rt_core_immortal_erased_cap; k++) {
+            uintptr_t e = rt_core_immortal_erased[k];
+            if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+            size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+            while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
+            fresh[j] = e;
+        }
+        free(rt_core_immortal_erased);
+        rt_core_immortal_erased = fresh;
+        rt_core_immortal_erased_cap = new_cap;
+        rt_core_immortal_erased_tombs = 0;
+    }
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (rt_core_immortal_erased[i] != 0 && rt_core_immortal_erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+        i = (i + 1) & mask;
+    }
+    if (rt_core_immortal_erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) rt_core_immortal_erased_tombs--;
+    rt_core_immortal_erased[i] = p;
+    rt_core_immortal_erased_len++;
+    return 1;
+}
+
+/* caller holds the lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(uintptr_t p) {
+    if (rt_core_immortal_erased_cap == 0) return 0;
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = rt_core_immortal_erased[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            rt_core_immortal_erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            rt_core_immortal_erased_len--;
+            rt_core_immortal_erased_tombs++;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* Called in the child right after fork() (single-threaded there). A nested
+ * fork keeps the first frozen layer and inherits the small live table. */
+void spl_immortal_registry_freeze_for_fork_child_v1(void) {
+    rt_core_immortal_registry_acquire();
+    if (!rt_core_immortal_frozen) {
+        rt_core_immortal_frozen = rt_core_immortal_registry;
+        rt_core_immortal_frozen_cap = rt_core_immortal_registry_cap;
+        rt_core_immortal_registry = NULL;
+        rt_core_immortal_registry_cap = 0;
+        rt_core_immortal_registry_len = 0;
+        rt_core_immortal_registry_tombs = 0;
+    }
+    rt_core_immortal_registry_release();
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p);
+
 /* caller holds the lock; returns 1 if an entry was erased */
 static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
+    if (core_immortal_live_erase_raw(p)) return 1;
+    if (!rt_core_immortal_frozen || !core_immortal_frozen_live(p)) return 0;
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    return core_immortal_erased_add(p);
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p) {
     if (rt_core_immortal_registry_cap == 0) return 0;
     size_t mask = rt_core_immortal_registry_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
@@ -2225,6 +2353,16 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_immortal_registry_acquire();
+    if (rt_core_immortal_frozen &&
+            core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap,
+                (uintptr_t)ptr)) {
+        /* Inherited address: present, or re-registered after its erase. */
+        if (core_immortal_erased_drop((uintptr_t)ptr)) {
+            atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        }
+        rt_core_immortal_registry_release();
+        return 1;
+    }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
     if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
@@ -2265,6 +2403,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
             i = (i + 1) & mask;
         }
     }
+    if (!found && rt_core_immortal_frozen) found = core_immortal_frozen_live((uintptr_t)ptr);
     rt_core_immortal_registry_release();
     return found;
 }
@@ -2713,7 +2852,8 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
         return NULL;
     }
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
-    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
+    if (a->len < 0 || a->len > a->cap ||
+        !rt_core_array_capacity_valid(a->cap, a->flags)) return NULL;
     return a;
 }
 
@@ -2871,6 +3011,28 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
         return 1;
     }
 #endif
+    /* @workaround bug=transient_promote_misses_raw_text_data_pointer_2026-10-25
+     * Stage-2-compiled code decodes a text read out of an array/dict to its
+     * raw char* buffer (rt_interp_cstr) and stores THAT in struct fields, so a
+     * retained ParserModule holds untagged pointers to RtCoreString data.
+     * Without this the owning transient string classified as "not heap", was
+     * skipped by promotion, and was freed at scope end (Stage 3 hello world:
+     * "unresolved name: <reused bytes>"). Membership is checked before any
+     * dereference, so an arbitrary aligned word is never read. */
+    if (!rt_core_is_heap(value) && (((uint64_t)value) & RT_VALUE_TAG_MASK) == 0 &&
+            (uint64_t)value > 0x10000 + offsetof(RtCoreString, data)) {
+        RtCoreString* raw_text = (RtCoreString*)(uintptr_t)(
+            (uint64_t)value - offsetof(RtCoreString, data));
+        if (rt_core_is_registered_immortal_ptr(raw_text) &&
+                rt_core_registered_object_kind(raw_text) == RT_VALUE_HEAP_STRING) {
+            if ((raw_text->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                    (raw_text->reserved & RT_CORE_STRING_FLAG_SHARED) == 0) {
+                *node = (RtCoreTransientNode){raw_text, RT_CORE_TRANSIENT_STRING, 0};
+                return 1;
+            }
+            return 0;
+        }
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -3337,6 +3499,14 @@ void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor
 #endif
 #endif /* _WIN32 */
 
+/* Shared read opens use the Windows long-path helper on Windows and stdio on
+ * other platforms. Keep this selector outside the Windows-only setup block. */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
@@ -3714,28 +3884,6 @@ int64_t rt_host_commit_headroom_bytes_v1(void) {
     if (headroom_pages > (uint64_t)INT64_MAX / page_size) return 0;
     return (int64_t)(headroom_pages * page_size);
 #else
-    return 0;
-#endif
-}
-
-/* Available bytes on the volume holding `path` (Simple text value) via
- * GetDiskFreeSpaceExW. Same interpreter-first rationale as
- * rt_host_memory_headroom_bytes_v1. Returns 0 when unavailable; callers
- * keep the extern path as fallback. */
-int64_t rt_host_disk_headroom_bytes_v1(int64_t path_value) {
-#if defined(_WIN32)
-    RtCoreString* path = rt_core_as_string(path_value);
-    if (!path || path->len == 0 || path->len >= 4096) return 0;
-    WCHAR wide[4096];
-    int converted = MultiByteToWideChar(CP_UTF8, 0, (LPCCH)path->data, (int)path->len, wide, 4095);
-    if (converted <= 0) return 0;
-    wide[converted] = L'\0';
-    ULARGE_INTEGER free_for_caller = {0};
-    if (!GetDiskFreeSpaceExW(wide, &free_for_caller, NULL, NULL)) return 0;
-    if (free_for_caller.QuadPart > (uint64_t)INT64_MAX) return 0;
-    return (int64_t)free_for_caller.QuadPart;
-#else
-    (void)path_value;
     return 0;
 #endif
 }
@@ -8292,8 +8440,7 @@ int64_t rt_strcmp(const char* a, const char* b) {
 
 static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
-    if (actual_cap < 0 || actual_cap > RT_CORE_ARRAY_MAX_CAP ||
-        actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+    if (!rt_core_array_capacity_valid(actual_cap, flags)) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)rt_observed_calloc_v1(1, sizeof(RtCoreArray));
@@ -9577,9 +9724,10 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     if (!left || !right || left->len > INT64_MAX - right->len) return NULL;
 
     int64_t total = left->len + right->len;
-    if (total > RT_CORE_ARRAY_MAX_CAP) return NULL;
     int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    if (!rt_core_array_capacity_valid(total,
+            left_bytes && right_bytes ? RT_CORE_ARRAY_FLAG_BYTES : 0)) return NULL;
     int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     if (left_u64 != right_u64) return NULL;
@@ -9983,12 +10131,14 @@ int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len) {
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
+    if (!rt_core_array_capacity_valid(min_cap, array->flags)) return 0;
     if (array->cap >= min_cap) return 1;
     int64_t new_cap = array->cap > 0 ? array->cap : 4;
+    int64_t limit = rt_core_array_capacity_limit(array->flags);
     while (new_cap < min_cap) {
-        if (new_cap > INT64_MAX / 2) return 0;
-        new_cap *= 2;
+        new_cap = new_cap > limit / 2 ? limit : new_cap * 2;
     }
+    if (!rt_core_array_capacity_valid(new_cap, array->flags)) return 0;
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
     void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
@@ -12217,7 +12367,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (end < (uint64_t)offset) return 0;
 #if defined(_WIN32)
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER file_size;
@@ -12264,6 +12414,39 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 #endif
 }
 
+
+/* ---- file_ops.rs: rt_mmap_create ------------------------------------------ */
+/* WRITER-side twin of rt_mmap: create (or truncate) `path`, set its length to
+ * exactly `size` bytes, and return a read-write shared mapping of the whole
+ * file (0 on any failure). The caller fills the view, rt_msync + rt_munmap,
+ * then publishes with an atomic rename (temp+rename). */
+int64_t rt_mmap_create(int64_t path_value, int64_t size) {
+    if (size <= 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER want;
+    want.QuadPart = size;
+    BOOL sized = SetFilePointerEx(file, want, NULL, FILE_BEGIN) && SetEndOfFile(file);
+    CloseHandle(file);
+    if (!sized) return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return 0;
+    int sized = ftruncate(fd, (off_t)size) == 0;
+    close(fd);
+    if (!sized) return 0;
+#endif
+    return rt_mmap(path_value, size, 0, 0);
+}
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
@@ -12803,7 +12986,7 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
          * ungated dump of the fopen failure on the candidate's actual read path. */
@@ -12931,7 +13114,7 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 4;
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) return 4;
@@ -13060,7 +13243,7 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_nil;
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
     size_t cap = 4096;
@@ -14868,7 +15051,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14909,7 +15092,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -15793,15 +15976,16 @@ int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
 
-int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
+/* LLVM-lane tuple facades. Since the pure-Simple MIR registers the process
+ * owners in text_arg_indices (text_extern_abi.spl), cmd reaches every backend
+ * already split into (ptr, len) -- the same words the C owners take -- so the
+ * facades only re-pack the result into the rt_alloc'd 3-word block the LLVM
+ * Tuple destructure loads. */
+int64_t* rt_process_run_tuple(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return rt_process_result_to_tuple(rt_process_run_array(cmd, cmd_len, args));
 }
 
-int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_timeout_tuple(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
     // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
     // rt_process_run{,_timeout}"); it still returns an SplArray* handle
@@ -15811,7 +15995,7 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // compile -- which broke the LLVM native-link step of EVERY native-build,
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd, cmd_len, args, timeout_ms));
 }
 
 /* Same (ptr, len) vs single-text-value ABI split as the facades above, for
@@ -15827,11 +16011,9 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
  * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
  * here so both backends keep their own destructure contract. */
-int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                                    int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+int64_t* rt_process_run_owned_observed_bounded_text(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                    int64_t timeout_ms, int64_t max_output_bytes) {
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd, cmd_len, args,
                                                                   timeout_ms, max_output_bytes);
     if (!handle) return NULL;
     int64_t tuple_value = (int64_t)(uintptr_t)handle;
@@ -15844,12 +16026,20 @@ int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args,
     return block;
 }
 
-int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                      int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                      int64_t timeout_ms, int64_t max_output_bytes) {
     return rt_process_result_to_tuple(rt_process_run_bounded(
-        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
@@ -15859,7 +16049,7 @@ int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) {
@@ -16165,11 +16355,6 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * and the AOT diagnostic lane stages per worker process; the slot makes the
  * pair safe under any caller). set_parent/make is a single logical
  * operation: make always consumes the slot, success or failure. */
-static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
-static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
-static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
-static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
-
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
@@ -16249,45 +16434,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * generic extern crossing every seed and both pure-Simple backends already
  * emit, so the split API needs no table row at all. See
  * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
-static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
-    int64_t len = rt_string_len(value);
-    if (len <= 0) return 0;
-    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
-}
-
-int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
-    if (!rt_secure_temp_dir_slot_from_value(parent_value,
-                             rt_secure_temp_dir_parent_slot,
-                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
-    rt_secure_temp_dir_parent_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
-    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
-                             rt_secure_temp_dir_prefix_slot,
-                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
-    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
-        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
-        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
-    rt_secure_temp_dir_prefix_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_make(void) {
-    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
-        rt_secure_temp_dir_parent_ready = 0;
-        rt_secure_temp_dir_prefix_ready = 0;
-        return rt_string_new(NULL, 0);
-    }
-    char parent[RT_TEXT_PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
-    rt_secure_temp_dir_parent_ready = 0;
-    rt_secure_temp_dir_prefix_ready = 0;
-    return rt_secure_temp_dir_core(parent,
-        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
-        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
-}
+#include "runtime_secure_temp_split_private.h"
 
 #if defined(_WIN32)
 /* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
@@ -18264,6 +18411,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     return tuple;
 }
 
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
+}
+
 int64_t rt_xgetbv(int32_t index) {
 #if defined(__x86_64__) || defined(_M_X64)
 #  if defined(_MSC_VER)
@@ -19240,7 +19401,21 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     n = rt_array_len(a);
     buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
-    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    /* rt_array_get returns the RAW byte for byte-packed arrays but a TAGGED
+     * value (n << 3 | TAG_INT) for boxed-element arrays; masking the tagged
+     * word wrote 0x53 as 0x98. Untag boxed ints, refuse non-ints (Rust twin:
+     * byte_array_bytes). */
+    {
+        int packed = rt_array_is_byte_packed(a);
+        for (i = 0; i < n; i++) {
+            int64_t v = rt_array_get(a, i);
+            if (!packed) {
+                if (!rt_core_is_int(v)) { free(buf); return 0; }
+                v = rt_core_as_int(v);
+            }
+            buf[i] = (unsigned char)(v & 0xFF);
+        }
+    }
     {
         char* cpath = rt_core_string_to_cpath(path);
         if (cpath == NULL) { free(buf); return 0; }

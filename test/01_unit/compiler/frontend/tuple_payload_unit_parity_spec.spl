@@ -1,0 +1,85 @@
+"""
+## Purpose and audience
+Purpose: guard parser and FlatAst parity for positional tuple payloads and unit expressions.
+Audience: compiler frontend maintainers.
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types.{Variant, VariantKind}
+use compiler.frontend.parser_types_expr.{TypeKind, ExprKind, StmtKind}
+
+fn tuple_unit_find_variant(variants: [Variant], name: text) -> Variant:
+    for variant in variants:
+        if variant.name == name:
+            return variant
+    panic("missing enum variant " + name)
+
+describe "tuple payload and unit expression frontend parity":
+    it "retains positional tuple children, neighboring payload metadata, and unit-versus-nil kinds":
+        step("Parse positional tuple, named and array payload neighbors, plus unit and nil")
+        val source = "enum PayloadParity:\n" +
+            "    Nested((i64, text))\n" +
+            "    Named(value: i64)\n" +
+            "    Array([i64])\n" +
+            "\n" +
+            "fn unit_value() -> ():\n    ()\n" +
+            "\n" +
+            "fn nil_value() -> nil:\n    nil\n"
+        val parsed = parse_full_frontend(source, "tuple_unit_parity.spl", "tuple_unit_parity", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.enums.contains_key("PayloadParity")).to_equal(true)
+        val variants = parsed.enums["PayloadParity"].variants
+
+        val nested = tuple_unit_find_variant(variants, "Nested")
+        match nested.kind:
+            case VariantKind.Tuple(payload_types):
+                expect(payload_types.len()).to_equal(1)
+                match payload_types[0].kind:
+                    case TypeKind.Tuple(elements):
+                        expect(elements.len()).to_equal(2)
+                    case _:
+                        fail("positional tuple payload was not retained as one tuple type")
+            case _:
+                fail("positional tuple payload was not represented as a tuple variant")
+
+        val named = tuple_unit_find_variant(variants, "Named")
+        match named.kind:
+            case VariantKind.Struct(fields):
+                expect(fields.len()).to_equal(1)
+                expect(fields[0].name).to_equal("value")
+            case _:
+                fail("named payload neighbor changed representation")
+
+        val array = tuple_unit_find_variant(variants, "Array")
+        match array.kind:
+            case VariantKind.Tuple(payload_types):
+                expect(payload_types.len()).to_equal(1)
+                match payload_types[0].kind:
+                    case TypeKind.Array(_, _): pass
+                    case _: fail("array payload neighbor lost its array type")
+            case _:
+                fail("array payload neighbor changed representation")
+
+        val unit_fn = parsed.functions["unit_value"] ?? panic("missing unit_value")
+        expect(unit_fn.body.stmts.len()).to_equal(1)
+        match unit_fn.body.stmts[0].kind:
+            case StmtKind.Expr(expression):
+                match expression.kind:
+                    case ExprKind.TupleLit(elements): expect(elements.len()).to_equal(0)
+                    case _: fail("source () was not bridged as an empty tuple expression")
+            case _: fail("unit expression statement shape changed")
+
+        val nil_fn = parsed.functions["nil_value"] ?? panic("missing nil_value")
+        expect(nil_fn.body.stmts.len()).to_equal(1)
+        match nil_fn.body.stmts[0].kind:
+            case StmtKind.Expr(expression):
+                match expression.kind:
+                    case ExprKind.NilLit: pass
+                    case _: fail("source nil was not retained as a nil literal")
+            case _: fail("nil expression statement shape changed")

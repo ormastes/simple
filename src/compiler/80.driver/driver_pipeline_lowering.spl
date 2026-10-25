@@ -18,14 +18,18 @@ use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.hir.hir_types.{SymbolTable}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
 use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
-use driver_types.{CompileContext}
+use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_aot_pipeline.*  # CompilerDriver.native_staged_codegen_flush_v1 lives in this impl block
 use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNATTRIBUTED_V1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
-    native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+    native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1,
+    native_mir_shard_publish_pass_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1}
+use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1, file_worker_inc_reuse_lookup_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_excluded}
+use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_at_claim_loop_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -357,17 +361,25 @@ impl CompilerDriver:
     # MIR Lowering
     # --------------------------------------------------------------------------
 
-    me go_to_end_record_mir_failure_v1(name: text, lowering_errors: [MirError],
+    me go_to_end_record_mir_failure_v1(name: text, source_path: text, lowering_errors: [MirError],
             lowering_start: i64, ctx_start: i64):
         """go-to-end (driver_build/go_to_end.spl): record one module whose MIR
         lowering failed, with the fatal errors IT produced, and keep it out of
-        ctx.mir_modules so codegen only sees modules that lowered."""
+        ctx.mir_modules so codegen only sees modules that lowered. The module
+        also gets one ICE receipt row (phase mir_lower) carrying its errors:
+        a MIR shard child's go-to-end ledger dies with the child, and the
+        receipt parts are the cross-process channel the owner merges."""
         var recorded = 0
+        var first_message = ""
+        var already_in_receipt = false
         var index = lowering_start
         while index >= 0 and index < lowering_errors.len():
             val err: MirError = lowering_errors[index]
             if driver_mir_error_is_fatal_v1(err):
-                self.go_to_end.record("mir", name, _format_mir_error(err))
+                val formatted = _format_mir_error(err)
+                self.go_to_end.record("mir", name, formatted)
+                if recorded == 0:
+                    first_message = formatted
                 recorded = recorded + 1
             index = index + 1
         var ctx_index = ctx_start
@@ -375,10 +387,19 @@ impl CompilerDriver:
             val message = self.ctx.error_message_at(ctx_index)
             if message != "":
                 self.go_to_end.record("mir", name, message)
+                # _driver_mir_ice_continue already wrote this module's row.
+                if message.starts_with("ICE["):
+                    already_in_receipt = true
+                if recorded == 0:
+                    first_message = message
                 recorded = recorded + 1
             ctx_index = ctx_index + 1
         if recorded == 0:
-            self.go_to_end.record("mir", name, "MIR lowering failed")
+            first_message = "MIR lowering failed"
+            self.go_to_end.record("mir", name, first_message)
+        if not already_in_receipt:
+            val receipt_message = if recorded > 1: "{first_message} (+{recorded - 1} more MIR error(s))" else: first_message
+            val _ice_line = ice_boundary_fail(name, source_path, "mir_lower", "", receipt_message)
         self.go_to_end.exclude(name)
         log_phase("aot:lower_to_mir:go_to_end_failed module={name} errors={recorded}")
 
@@ -986,7 +1007,13 @@ impl CompilerDriver:
             if self.ctx.sources[bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
                 bootstrap_entry_requested = true
             bootstrap_entry_idx = bootstrap_entry_idx + 1
-        if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        # Per-module is the default (src -> MIR -> object per module, feeding
+        # the per-module object cache in driver_aot_native_output.spl). The
+        # single-instance whole-program fixed-entry lane below is opt-out only:
+        # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1. driver_aot_pipeline.spl's flat-pass
+        # skip and context dispatch read the same variable; move them together.
+        val bootstrap_whole_program = (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1"
+        if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and bootstrap_whole_program and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -1006,6 +1033,19 @@ impl CompilerDriver:
                 driver_source_entry_closure_enabled(self.ctx),
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
+            # Match the direct lane's declaration prepass order before any
+            # bootstrap-flat module body is lowered: struct field identities
+            # first, then enum and composite inventories.
+            log_phase("aot:bootstrap_fixed:struct_prescan:start")
+            var bootstrap_prescan_idx = 0
+            while bootstrap_prescan_idx < self.ctx.sources.len():
+                val bootstrap_prescan_key: text = self.ctx.sources[bootstrap_prescan_idx].module_name
+                bootstrap_lowering.prescan_module_struct_names(
+                    self.ctx.hir_modules, bootstrap_prescan_key)
+                bootstrap_prescan_idx = bootstrap_prescan_idx + 1
+                if bootstrap_prescan_idx % 64 == 0:
+                    log_phase("aot:bootstrap_fixed:struct_prescan visited={bootstrap_prescan_idx} total={self.ctx.sources.len()}")
+            log_phase("aot:bootstrap_fixed:struct_prescan:done")
             # lower_module's bootstrap-flat branch returns before the
             # non-bootstrap tail, so on this fresh lowering instance NO enum
             # registration exists: not the entry's own module.enums, not the
@@ -1021,10 +1061,11 @@ impl CompilerDriver:
             var bootstrap_enum_idx = 0
             while bootstrap_enum_idx < self.ctx.sources.len():
                 val bootstrap_enum_hir = self.ctx.hir_modules[self.ctx.sources[bootstrap_enum_idx].module_name]
-                if bootstrap_enum_hir != nil:
-                    bootstrap_enum_modules = bootstrap_enum_modules.push(bootstrap_enum_hir)
+                if val present_bootstrap_enum_hir = bootstrap_enum_hir:
+                    bootstrap_enum_modules = bootstrap_enum_modules.push(present_bootstrap_enum_hir)
                 bootstrap_enum_idx = bootstrap_enum_idx + 1
             bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
+            bootstrap_lowering.register_module_composite_inventory_v1(bootstrap_enum_modules)
             # Emission coverage (site-19, emission divergence 2026-10-17): this
             # lane previously lowered ONLY the entry, so the per-module
             # collection emission iterated just the replayed modules (~40
@@ -1069,7 +1110,9 @@ impl CompilerDriver:
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir, self.ctx.mir_feed_modules)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
-            self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+            bootstrap_mir.name = "app.cli.bootstrap_main"
+            self.ctx.mir_modules["app.cli.bootstrap_main"] = bootstrap_mir
+            self.ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             driver_collect_mir_advisories(self.ctx, bootstrap_lowering.mir_advisories)
             if val archived_devirt = post_mono_archive_admission_v1(
@@ -1126,6 +1169,7 @@ impl CompilerDriver:
             # CompileContext lives in the fenced driver_types.spl. All three
             # sites must move together.
             if self.ctx.runtime_std_full_inventory_selection != nil or
+                    not bootstrap_whole_program or
                     not (allow_bootstrap_shortcuts and bootstrap_entry_requested):
                 direct_lowering.use_explicit_semantic_policy()
             direct_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
@@ -1253,13 +1297,30 @@ impl CompilerDriver:
             # MIR shard worker (driver_build/native_mir_shard.spl): publish the
             # schedule as the ledger inventory, then lower only claimed modules.
             val mir_shard_queue = self.native_staged_codegen.shard_queue
+            # File-worker P4 (SIMPLE_MIR_SHARD_ONLY_PATHS): claim only the modules
+            # the worker admitted (HIR of F and its imports PASS). Empty = all.
+            val mir_shard_only_paths: [text] = if mir_shard_queue != "": native_file_worker_only_paths_from_env_v1() else: []
             val mir_shard_key = self.ctx.native_sources_fingerprint
-            val mir_shard_cap = native_mir_shard_claim_cap_v1(
+            var mir_shard_cap = native_mir_shard_claim_cap_v1(
                 native_mir_shard_spec_v1(), staged_source_names.len())
             if mir_shard_queue != "":
                 if mir_shard_key == "" or not hir_shard_recovery_inventory(
                         mir_shard_queue, mir_shard_key, staged_source_names):
                     self.ctx.add_error("MIR shard ledger inventory refused for this worker")
+                    return false
+                # Excluded rows are never claimed; tell recovery so an exhausted
+                # root is not counted unfinished (and the frontend not rerun).
+                var mir_excluded_names: [text] = []
+                if go_to_end_enabled_v1():
+                    for excl_idx in mir_source_indices:
+                        if self.go_to_end.is_excluded(self.ctx.sources[excl_idx].module_name):
+                            val excl_lookup = self.ctx.sources[excl_idx].module_name
+                            var excl_name = excl_lookup
+                            if mir_physical_ownership_active and self.ctx.hir_modules.has(excl_lookup):
+                                excl_name = mir_layout_canonical_module_name(self.ctx.hir_modules[excl_lookup].name)
+                            mir_excluded_names = mir_excluded_names.push(excl_name)
+                if not hir_shard_recovery_excluded(mir_shard_queue, mir_shard_key, mir_excluded_names):
+                    self.ctx.add_error("MIR shard ledger exclusion record refused for this worker")
                     return false
             # Shard workers walk the schedule largest-first (source byte
             # length, canonical-name tie-break) so the slowest modules start
@@ -1328,6 +1389,22 @@ impl CompilerDriver:
                                 self.ctx.set_bootstrap_entry_mir(prelower_skip_name, prelower_skip_mir)
                         if not self.publish_runtime_std_mir_emissions_v1(): return false
                         return self.ctx.error_count_value == 0
+            # EXPERIMENTAL SIMPLE_MIR_FORK_WORKERS fork point (armed only by
+            # aot_compile_mir_shard_v1; driver_build/native_mir_fork_v1.spl).
+            # Everything above is identical for every shard and has run once,
+            # in the root: warm names, feed, enum/composite inventories, MIR
+            # schedule, ledger inventory + exclusion publication, LPT order.
+            # The root forks here, reaps, re-forks from here, and exits. A child
+            # recomputes only its claim cap (the cap above came from the root's
+            # 0/1 spec) and runs the claim loop below.
+            if mir_shard_queue != "":
+                val (fork_role, fork_code) = native_mir_fork_at_claim_loop_v1()
+                if fork_role == "root":
+                    native_mir_fork_exit_v1(fork_code)
+                    return false
+                if fork_role == "child":
+                    mir_shard_cap = native_mir_shard_claim_cap_v1(
+                        native_mir_shard_spec_v1(), staged_source_names.len())
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()
@@ -1351,6 +1428,9 @@ impl CompilerDriver:
                     mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
                 else:
                     source_lookup_name
+                if mir_shard_only_paths.len() > 0 and not mir_shard_only_paths.contains(src_direct.path):
+                    direct_pos = direct_pos + 1
+                    continue
                 if mir_shard_queue != "":
                     # Another worker owns it, or this worker's share is full:
                     # not lowered here. direct_pos still advances; the entry
@@ -1364,6 +1444,16 @@ impl CompilerDriver:
                             return false
                         mir_shard_owned = mir_shard_claim == 1
                     if not mir_shard_owned:
+                        direct_pos = direct_pos + 1
+                        continue
+                    # File-worker P-E: the planner kept this module; publish its
+                    # cached object as the PASS instead of lowering it.
+                    if val reused = file_worker_inc_reuse_lookup_v1(
+                            sosix_env_get_nullable(FILE_WORKER_REUSE_ENV_V1) ?? "", name_direct):
+                        if not native_mir_shard_publish_pass_v1(mir_shard_queue, name_direct,
+                                reused.cached_object, reused.functions, reused.statics, reused.capsule):
+                            self.ctx.add_error("MIR shard ledger refused cached object for {name_direct}")
+                            return false
                         direct_pos = direct_pos + 1
                         continue
                     self.native_staged_codegen.shard_claimed_names =
@@ -1453,7 +1543,7 @@ impl CompilerDriver:
                 if go_to_end_active and module_mir_failed:
                     # go-to-end: record the module with its own errors and never
                     # publish its (broken) MIR, so codegen sees only good modules.
-                    self.go_to_end_record_mir_failure_v1(name_direct,
+                    self.go_to_end_record_mir_failure_v1(name_direct, src_direct.path,
                         direct_lowering.errors, module_lowering_errors_before,
                         module_context_errors_before)
                 else:

@@ -1,0 +1,229 @@
+"""P4 AOP directory match cache: A-01..A-04 acceptance (contract level).
+
+Plan: generic_aop_macro_cache_plan_2026-10-24 sections 5, 7, 11 (A-01..A-04).
+"""
+
+use std.spec.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{
+    JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1, AdviceFacetsV1,
+    PointcutMatchCacheV1, WeavePlanDeltaV1,
+    directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1,
+    pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1,
+    advice_apply_key_v1, aspect_weave_plan_delta_v1, aspect_advice_mode_cacheable_v1,
+    aspect_match_forward_reads_v1, pointcut_match_shard_compute_v1,
+    pointcut_match_universe_v1, aop_digest_known_v1, aop_digest_tables_match_v1}
+
+fn jp(file: text, sym: text, attrs: [text], body: text) -> JoinPointFactV1:
+    JoinPointFactV1(id: "{file}::{sym}", kind: "forward", symbol: sym, attrs: attrs,
+        owner_file: file, base_body_digest: body)
+
+fn dir_a(extra: [JoinPointFactV1]) -> DirectoryJoinPointFactsV1:
+    var points = [jp("a/x.spl", "foo_open", ["logged"], "b1"),
+        jp("a/x.spl", "bar_close", [], "b2"),
+        jp("a/y.spl", "foo_read", [], "b3")]
+    for p in extra:
+        points.push(p)
+    directory_join_point_facts_v1("a", ["a/x.spl", "a/y.spl"], points, [], true)
+
+fn dir_b() -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1("b", ["b/z.spl"],
+        [jp("b/z.spl", "bar_open", ["logged"], "b4")], [], true)
+
+fn advice(body: text) -> AdviceFacetsV1:
+    AdviceFacetsV1(advice_fn: "log_before", mode: "before", activation: "static",
+        signature_digest: "sig1", effects_digest: "eff1", body_digest: body, order: 0)
+
+fn apply_keys(cache: PointcutMatchCacheV1, key: text, adv: AdviceFacetsV1,
+        facts: DirectoryJoinPointFactsV1) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    val shard = cache.shards[key]
+    for id in shard.sorted_matching_ids:
+        for p in facts.sorted_join_points:
+            if p.id == id:
+                out[id] = advice_apply_key_v1(shard.match_digest, adv, p.base_body_digest)
+    out
+
+describe "DirectoryJoinPointFactsV1":
+    it "sorts join points, records a completeness witness and a stable key":
+        val f = dir_a([])
+        expect(f.sorted_join_points[0].id).to_equal("a/x.spl::bar_close")
+        expect(f.sorted_join_points[2].id).to_equal("a/y.spl::foo_read")
+        expect(f.complete).to_equal(true)
+        expect(f.facts_key).to_equal(directory_facts_key_v1(dir_a([])))
+        expect(f.facts_key.len()).to_equal(71)
+        expect(f.facts_key.starts_with("sha256:")).to_equal(true)
+
+describe "A-01 advice body edit":
+    it "reuses the match shard and dirties only matched join points":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        expect(sel.supported).to_equal(true)
+        val facts = dir_a([])
+        val c0 = pointcut_match_cache_new_v1()
+        val r1 = pointcut_match_cache_acquire_v1(c0, sel, facts)
+        expect(r1.hit).to_equal(false)
+        expect(r1.shard.sorted_matching_ids).to_equal(["a/x.spl::foo_open"])
+        val old_keys = apply_keys(r1.cache, r1.key, advice("body_v1"), facts)
+        # Advice body edit: selector and facts unchanged -> shard hit, zero recompute.
+        val r2 = pointcut_match_cache_acquire_v1(r1.cache, sel, facts)
+        expect(r2.hit).to_equal(true)
+        expect(r2.cache.computations).to_equal(1)
+        val new_keys = apply_keys(r2.cache, r2.key, advice("body_v2"), facts)
+        val d = aspect_weave_plan_delta_v1(r1.shard, old_keys, r2.shard, new_keys)
+        expect(d.reweave).to_equal(["a/x.spl::foo_open"])
+        expect(d.weave.len()).to_equal(0)
+        expect(d.unweave.len()).to_equal(0)
+        expect(d.reuse.len()).to_equal(0)
+    it "keeps every woven object when advice facets are unchanged":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val facts = dir_a([])
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, facts)
+        val k = apply_keys(r1.cache, r1.key, advice("body_v1"), facts)
+        val d = aspect_weave_plan_delta_v1(r1.shard, k, r1.shard, k)
+        expect(d.reuse).to_equal(["a/x.spl::foo_open"])
+        expect(d.reweave.len()).to_equal(0)
+    it "selector digest excludes advice body while apply key includes it":
+        val a = advice_apply_key_v1("m", advice("x"), "b1")
+        val b = advice_apply_key_v1("m", advice("y"), "b1")
+        val c = advice_apply_key_v1("m", advice("x"), "b9")
+        expect(a == b).to_equal(false)
+        expect(a == c).to_equal(false)
+
+describe "A-02 selector change":
+    it "unweaves old-only and weaves new-only join points":
+        val facts = dir_a([])
+        val s_old = pointcut_selector_parse_v1("execution(foo*)")
+        val s_new = pointcut_selector_parse_v1("execution(bar*)")
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), s_old, facts)
+        expect(r1.shard.sorted_matching_ids).to_equal(["a/x.spl::foo_open", "a/y.spl::foo_read"])
+        val r2 = pointcut_match_cache_acquire_v1(r1.cache, s_new, facts)
+        expect(r2.hit).to_equal(false)
+        val d = aspect_weave_plan_delta_v1(r1.shard, apply_keys(r1.cache, r1.key, advice("v"), facts),
+            r2.shard, apply_keys(r2.cache, r2.key, advice("v"), facts))
+        expect(d.unweave).to_equal(["a/x.spl::foo_open", "a/y.spl::foo_read"])
+        expect(d.weave).to_equal(["a/x.spl::bar_close"])
+    it "exact-name selector keeps the existing forward-selector semantics":
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("bar_close"), dir_a([]))
+        expect(r.shard.sorted_matching_ids).to_equal(["a/x.spl::bar_close"])
+
+describe "A-03 add/rename function with attr":
+    it "changes the owning directory facts key and misses only that shard":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val r_a = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, dir_a([]))
+        val r_b = pointcut_match_cache_acquire_v1(r_a.cache, sel, dir_b())
+        val grown = dir_a([jp("a/y.spl", "foo_write", ["logged"], "b5")])
+        expect(grown.facts_key == dir_a([]).facts_key).to_equal(false)
+        val r_a2 = pointcut_match_cache_acquire_v1(r_b.cache, sel, grown)
+        expect(r_a2.hit).to_equal(false)
+        expect(r_a2.shard.sorted_matching_ids).to_equal(["a/x.spl::foo_open", "a/y.spl::foo_write"])
+        val r_b2 = pointcut_match_cache_acquire_v1(r_a2.cache, sel, dir_b())
+        expect(r_b2.hit).to_equal(true)
+    it "a rename invalidates the negative root (old id unwoven, new id woven)":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val before = dir_a([])
+        val renamed = directory_join_point_facts_v1("a", ["a/x.spl", "a/y.spl"],
+            [jp("a/x.spl", "foo_opened", ["logged"], "b1"), jp("a/x.spl", "bar_close", [], "b2"),
+             jp("a/y.spl", "foo_read", [], "b3")], [], true)
+        expect(renamed.negative_root == before.negative_root).to_equal(false)
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, before)
+        val r2 = pointcut_match_cache_acquire_v1(r1.cache, sel, renamed)
+        val d = aspect_weave_plan_delta_v1(r1.shard, apply_keys(r1.cache, r1.key, advice("v"), before),
+            r2.shard, apply_keys(r2.cache, r2.key, advice("v"), renamed))
+        expect(d.unweave).to_equal(["a/x.spl::foo_open"])
+        expect(d.weave).to_equal(["a/x.spl::foo_opened"])
+    it "child directory root change changes the parent facts key":
+        val p1 = directory_join_point_facts_v1("p", [], [], [dir_a([]).facts_key], true)
+        val p2 = directory_join_point_facts_v1("p", [], [],
+            [dir_a([jp("a/y.spl", "z", [], "b")]).facts_key], true)
+        expect(p1.facts_key == p2.facts_key).to_equal(false)
+
+describe "A-04 conservative fallback":
+    it "rejects unsupported selectors and incomplete inventories as non-cacheable":
+        expect(pointcut_selector_parse_v1("call(foo)").supported).to_equal(false)
+        expect(pointcut_selector_parse_v1("attr(x) &").supported).to_equal(false)
+        expect(pointcut_selector_parse_v1("within(a*)").supported).to_equal(false)
+        val inc = directory_join_point_facts_v1("a", ["a/x.spl"], [], [], false)
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("attr(logged)"), inc)
+        expect(r.cacheable).to_equal(false)
+        expect(r.cache.shards.len()).to_equal(0)
+    it "only static before/after advice is cacheable":
+        expect(aspect_advice_mode_cacheable_v1("before", "static")).to_equal(true)
+        expect(aspect_advice_mode_cacheable_v1("after", "static")).to_equal(true)
+        expect(aspect_advice_mode_cacheable_v1("around", "static")).to_equal(false)
+        expect(aspect_advice_mode_cacheable_v1("before", "dynload")).to_equal(false)
+
+describe ".rr schema v2 forward reads":
+    it "emits directory-membership and match reads keyed by facts and match digests":
+        val f = dir_a([])
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val rs = aspect_match_forward_reads_v1(sel, f, pointcut_match_shard_compute_v1(sel, f), f.facts_key)
+        expect(rs.len()).to_equal(2)
+        expect(rs[0].producer.kind).to_equal("aop.directory_facts")
+        expect(rs[0].consumer.kind).to_equal("aop.match")
+        expect(rs[0].facet).to_equal("membership:join-points")
+        expect("sha256:" + rs[0].witness_digest).to_equal(f.negative_root)
+        expect(rs[1].consumer.kind).to_equal("aop.weave")
+
+describe "A-04 selector algebra":
+    it "evaluates ! & | and parentheses over a complete directory":
+        val f = dir_a([])
+        val r1 = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("!attr(logged)"), f)
+        expect(r1.sorted_matching_ids).to_equal(["a/x.spl::bar_close", "a/y.spl::foo_read"])
+        val r2 = pointcut_match_shard_compute_v1(
+            pointcut_selector_parse_v1("execution(foo*) & !attr(logged)"), f)
+        expect(r2.sorted_matching_ids).to_equal(["a/y.spl::foo_read"])
+        val r3 = pointcut_match_shard_compute_v1(
+            pointcut_selector_parse_v1("(bar_close | attr(logged)) & within(a)"), f)
+        expect(r3.sorted_matching_ids).to_equal(["a/x.spl::bar_close", "a/x.spl::foo_open"])
+    it "selector digest is canonical over whitespace and distinguishes operators":
+        val a = pointcut_selector_parse_v1("attr(x)&!foo")
+        val b = pointcut_selector_parse_v1(" attr( x ) & ! foo ")
+        val c = pointcut_selector_parse_v1("attr(x)|!foo")
+        expect(a.selector_digest).to_equal(b.selector_digest)
+        expect(a.selector_digest == c.selector_digest).to_equal(false)
+    it "negation over an incomplete directory is not cacheable":
+        val inc = directory_join_point_facts_v1("a", ["a/x.spl"],
+            [jp("a/x.spl", "foo_open", [], "b1")], [], false)
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(),
+            pointcut_selector_parse_v1("!attr(test)"), inc)
+        expect(r.cacheable).to_equal(false)
+    it "cross-directory within/negation needs a proven complete universe":
+        val sel = pointcut_selector_parse_v1("within(b.*) | !attr(logged)")
+        expect(sel.needs_universe).to_equal(true)
+        val partial = pointcut_match_universe_v1(sel, [dir_a([]), dir_b()], false)
+        expect(partial.complete).to_equal(false)
+        expect(partial.reason).to_equal("universe-incomplete")
+        val full = pointcut_match_universe_v1(sel, [dir_a([]), dir_b()], true)
+        expect(full.complete).to_equal(true)
+        expect(full.sorted_matching_ids).to_equal(
+            ["a/x.spl::bar_close", "a/y.spl::foo_read", "b/z.spl::bar_open"])
+    it "positive-only selectors are complete without a universe proof":
+        val r = pointcut_match_universe_v1(pointcut_selector_parse_v1("attr(logged)"),
+            [dir_a([]), dir_b()], false)
+        expect(r.complete).to_equal(true)
+        expect(r.sorted_matching_ids).to_equal(["a/x.spl::foo_open", "b/z.spl::bar_open"])
+
+describe "hash agility":
+    it "tags every digest with its algorithm and rejects unknown/fast algorithms":
+        val f = dir_a([])
+        expect(aop_digest_known_v1(f.facts_key)).to_equal(true)
+        val hex = f.facts_key.slice(7, f.facts_key.len())
+        expect(aop_digest_known_v1("xxh3-128:" + hex)).to_equal(false)
+        expect(aop_digest_known_v1("md5:" + hex)).to_equal(false)
+        expect(aop_digest_known_v1(hex)).to_equal(false)
+    it "an unknown-algorithm facts key is a miss and never admitted":
+        val f = dir_a([])
+        val forged = DirectoryJoinPointFactsV1(..f, facts_key: "xxh3-128:" + f.facts_key.slice(7, f.facts_key.len()))
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, forged)
+        expect(r1.cacheable).to_equal(false)
+        expect(r1.cache.shards.len()).to_equal(0)
+    it "negotiates over up to three digests; unknown entries are absent":
+        val s = dir_a([]).facts_key
+        val other = dir_b().facts_key
+        val bl = "blake3:" + other.slice(7, other.len())
+        expect(aop_digest_tables_match_v1([s], [bl, s])).to_equal(true)
+        expect(aop_digest_tables_match_v1([s], [other])).to_equal(false)
+        expect(aop_digest_tables_match_v1(["xxh3-128:" + s.slice(7, s.len())], [s])).to_equal(false)
+        expect(aop_digest_tables_match_v1([s, bl, s, s], [s])).to_equal(false)

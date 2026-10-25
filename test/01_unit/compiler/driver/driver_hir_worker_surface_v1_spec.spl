@@ -1,0 +1,35 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1,
+    driver_surface_parse_text_v1}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# packed_binary_ast_v1.md step 3: a HIR shard worker builds surfaces from the
+# skeleton by default (opt-out SIMPLE_HIR_WORKER_SKELETON=0); everyone else
+# keeps the full source.
+val SAMPLE: text = "src/compiler/80.driver/driver_hir_worker_surface_v1.spl"
+
+describe "HIR worker surface pass (lazy restore)":
+    it "selects the skeleton by default in a HIR shard worker, opt-out with 0":
+        expect(driver_hir_worker_skeleton_selected_v1("0/4", "1")).to_equal(true)
+        expect(driver_hir_worker_skeleton_selected_v1("", "1")).to_equal(false)
+        expect(driver_hir_worker_skeleton_selected_v1("0/4", "")).to_equal(true)
+        expect(driver_hir_worker_skeleton_selected_v1("0/4", "0")).to_equal(false)
+
+    it "passes the full source through outside a worker":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        expect(driver_surface_parse_text_v1(source, "", "1")).to_equal(source)
+        expect(driver_surface_parse_text_v1(source, "1/2", "0")).to_equal(source)
+
+    it "gives a worker a skeleton with the same lines and the same surface digest":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val text = driver_surface_parse_text_v1(source, "1/2", "1")
+        expect(text).to_equal(module_surface_skeleton_v1(source))
+        expect(text.split("\n").len()).to_equal(source.split("\n").len())
+        val full = parse_full_frontend(source, SAMPLE, "m", Logger(level: 0))
+        val skel = parse_full_frontend(text, SAMPLE, "m", Logger(level: 0))
+        expect(module_surface_canonical_digest_v1(skel)).to_equal(module_surface_canonical_digest_v1(full))

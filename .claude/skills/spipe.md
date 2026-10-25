@@ -19,6 +19,9 @@ Keep tagged workarounds separate from permanent fixes; create a reproducing
 scenario and similar prevention scenarios, with authored tests clearly marked
 unexecuted until the real runner executes them.
 
+Stage 2 native miscompile classes seen in Phase 3 (symptoms, workarounds, status):
+[catalog](../../doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md).
+
 For bootstrap build/test sweeps, continue independent scenarios after failures
 and collect terminal results. A usable artifact plus minimum sanity permits
 diagnostic continuation; failed qualification still prevents admission and

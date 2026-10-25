@@ -1,0 +1,121 @@
+# Fiber IO reactor (v1) — async file reads for scheduler fibers.
+# Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3 (IO).
+#
+# A fiber submits a read through the reactor, gets an op id, and parks on it
+# (`fiber_step_park(op)`); the worker keeps stepping other fibers. Between
+# steps the worker calls `fiber_io_pump`, which drains completions from the
+# platform completion driver (io_uring on Linux, IOCP in the native C lane,
+# the synchronous reference driver elsewhere), records each result, and wakes
+# the fibers parked on those op ids. Results are recorded even when no fiber is
+# parked yet, so a completion that arrives before the park is never lost: a
+# fiber checks `fiber_io_ready(r, op)` before parking.
+#
+# Op ids are the driver's operation ids (> 0), so they are valid park tokens.
+
+use std.nogc_async_mut.io.native_driver.{native_driver_create, native_driver_destroy, native_driver_submit_open, native_driver_submit_read, native_driver_submit_close, native_driver_flush, native_driver_poll, native_driver_poll_id, native_driver_poll_result, native_driver_poll_data, native_driver_backend_name}
+use std.common.task_runner.fiber_scheduler.{FiberSchedV1, fiber_sched_wake}
+
+struct FiberIoReactorV1:
+    handle: i64
+    in_flight: i64
+    done_ops: [i64]
+    done_results: [i64]
+    done_data: [text]
+    error: text
+
+fn fiber_io_new(queue_depth: i64) -> FiberIoReactorV1:
+    val h = native_driver_create(if queue_depth > 0: queue_depth else: 64)
+    FiberIoReactorV1(handle: h, in_flight: 0, done_ops: [], done_results: [], done_data: [],
+                     error: if h < 0: "driver create failed ({h})" else: "")
+
+fn fiber_io_backend(r: FiberIoReactorV1) -> text:
+    native_driver_backend_name(r.handle)
+
+fn fiber_io_close(r: FiberIoReactorV1):
+    native_driver_destroy(r.handle)
+
+struct FiberIoSubmitV1:
+    reactor: FiberIoReactorV1
+    op: i64
+
+fn _fio_submitted(r: FiberIoReactorV1, op: i64) -> FiberIoSubmitV1:
+    var t = r
+    if op > 0:
+        t.in_flight = t.in_flight + 1
+        native_driver_flush(t.handle)
+    FiberIoSubmitV1(reactor: t, op: op)
+
+fn fiber_io_submit_open(r: FiberIoReactorV1, path: text) -> FiberIoSubmitV1:
+    """Open `path` read-only; the completion result is the fd (< 0 = -errno)."""
+    _fio_submitted(r, native_driver_submit_open(r.handle, path, 0, 0))
+
+fn fiber_io_submit_read(r: FiberIoReactorV1, fd: i64, length: i64, offset: i64) -> FiberIoSubmitV1:
+    """Positioned read; the completion result is the byte count, data via `fiber_io_take_data`."""
+    _fio_submitted(r, native_driver_submit_read(r.handle, fd, length, offset))
+
+fn fiber_io_submit_close(r: FiberIoReactorV1, fd: i64) -> FiberIoSubmitV1:
+    _fio_submitted(r, native_driver_submit_close(r.handle, fd))
+
+fn _fio_index(r: FiberIoReactorV1, op: i64) -> i64:
+    for i in 0..r.done_ops.len():
+        if r.done_ops[i] == op: return i
+    -1
+
+fn fiber_io_ready(r: FiberIoReactorV1, op: i64) -> bool:
+    _fio_index(r, op) >= 0
+
+fn fiber_io_result(r: FiberIoReactorV1, op: i64) -> i64:
+    """Completion result of `op` (fd / byte count / 0, or -errno); -9999 if not complete."""
+    val i = _fio_index(r, op)
+    if i < 0: return -9999
+    r.done_results[i]
+
+fn fiber_io_data(r: FiberIoReactorV1, op: i64) -> text:
+    val i = _fio_index(r, op)
+    if i < 0: return ""
+    r.done_data[i]
+
+fn fiber_io_forget(r: FiberIoReactorV1, op: i64) -> FiberIoReactorV1:
+    """Drop a consumed completion record."""
+    var t = r
+    var ops: [i64] = []
+    var res: [i64] = []
+    var dat: [text] = []
+    for i in 0..t.done_ops.len():
+        if t.done_ops[i] != op:
+            ops = ops.push(t.done_ops[i])
+            res = res.push(t.done_results[i])
+            dat = dat.push(t.done_data[i])
+    t.done_ops = ops
+    t.done_results = res
+    t.done_data = dat
+    t
+
+struct FiberIoPumpV1:
+    reactor: FiberIoReactorV1
+    sched: FiberSchedV1
+    completed: i64
+
+fn fiber_io_pump(r: FiberIoReactorV1, s: FiberSchedV1, timeout_ms: i64) -> FiberIoPumpV1:
+    """Drain available completions (wait at most `timeout_ms` for the first) and
+    wake the fibers parked on them. timeout 0 = never block."""
+    var t = r
+    var sched = s
+    var n = 0
+    var wait = timeout_ms
+    while t.in_flight > 0:
+        if native_driver_poll(t.handle, wait) <= 0: break
+        val op = native_driver_poll_id(t.handle)
+        t.done_ops = t.done_ops.push(op)
+        t.done_results = t.done_results.push(native_driver_poll_result(t.handle))
+        t.done_data = t.done_data.push(native_driver_poll_data(t.handle))
+        t.in_flight = t.in_flight - 1
+        sched = fiber_sched_wake(sched, op)
+        n = n + 1
+        wait = 0
+    FiberIoPumpV1(reactor: t, sched: sched, completed: n)
+
+export FiberIoReactorV1, FiberIoSubmitV1, FiberIoPumpV1
+export fiber_io_new, fiber_io_backend, fiber_io_close
+export fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close
+export fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump

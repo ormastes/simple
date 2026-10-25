@@ -1,0 +1,92 @@
+# @req: REQ-HIR-PATTERN-PRESENCE-001
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_definitions.{HirPattern, HirPatternKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_pattern, hc_dec_hir_pattern}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_pattern}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use compiler.hir.hir_lowering._Expressions.match_desugaring.*
+
+fn pattern_presence_count(node: HirWalkNode, count: i64) -> i64:
+    count + 1
+
+fn pattern_presence_roundtrip(pattern: HirPattern) -> HirPattern:
+    var writer = HirCodecWriter.create()
+    hc_enc_hir_pattern(writer, pattern)
+    expect(writer.ok).to_equal(true)
+    val wire = writer.finish()
+    var reader = FlatPoolReader.new(wire)
+    val decoded = hc_dec_hir_pattern(reader)
+    expect(reader.ok).to_equal(true)
+    var repeated = HirCodecWriter.create()
+    hc_enc_hir_pattern(repeated, decoded)
+    expect(repeated.ok).to_equal(true)
+    expect(repeated.finish()).to_equal(wire)
+    decoded
+
+describe "HIR pattern annotation presence":
+    it "defaults omitted annotation presence to the Boolean false":
+        step("Construct an untyped wildcard with the schema default")
+        val pattern = HirPattern(kind: HirPatternKind.Wildcard,
+            type_: nil, span: Span.empty())
+        expect(pattern.has_type_).to_equal(false)
+        expect(walk_hir_pattern(pattern, 0, pattern_presence_count)).to_equal(1)
+
+    it "lowers untyped wildcard binding and tuple patterns with an absent annotation":
+        step("Exercise the production lower_pattern constructors")
+        var hir = HirLowering.with_filename("pattern_presence.spl")
+        val span = Span.empty()
+        val wildcard = Pattern(kind: PatternKind.Wildcard, span: span)
+        val binding = Pattern(kind: PatternKind.Binding("value", false), span: span)
+        val tuple = Pattern(kind: PatternKind.Tuple([wildcard, binding]), span: span)
+        for input in [wildcard, binding]:
+            val lowered = hir.lower_pattern(input)
+            expect(lowered.has_type_).to_equal(false)
+            expect(walk_hir_pattern(lowered, 0, pattern_presence_count)).to_equal(1)
+        val lowered_tuple = hir.lower_pattern(tuple)
+        expect(lowered_tuple.has_type_).to_equal(false)
+        expect(walk_hir_pattern(lowered_tuple, 0, pattern_presence_count)).to_equal(3)
+        expect(hir.errors.len()).to_equal(0)
+
+    it "keeps synthesized wildcard and optional-wrapper annotations absent":
+        step("Exercise desugaring helpers that previously omitted the presence field")
+        var hir = HirLowering.with_filename("pattern_presence.spl")
+        val wildcard = hir.hir_wildcard_pattern(Span.empty())
+        expect(wildcard.has_type_).to_equal(false)
+        val wrapper = hir.wrapper_pattern("Some", wildcard, Span.empty())
+        expect(wrapper.has_type_).to_equal(false)
+        # Wrapper + required enum owner type + its wildcard child.
+        expect(walk_hir_pattern(wrapper, 0, pattern_presence_count)).to_equal(3)
+
+    it "retains false absence through cache encoding and decoding":
+        step("Round-trip a wildcard without an annotation and walk the decoded value")
+        val source = HirPattern(kind: HirPatternKind.Wildcard,
+            has_type_: false, type_: nil, span: Span.empty())
+        val decoded = pattern_presence_roundtrip(source)
+        expect(decoded.has_type_).to_equal(false)
+        expect(walk_hir_pattern(decoded, 0, pattern_presence_count)).to_equal(1)
+
+    it "retains present annotations and visits their nested types exactly once":
+        step("Round-trip a pattern carrying a nested Optional type")
+        val span = Span.empty()
+        val annotation = HirType(kind: HirTypeKind.Optional(
+            HirType(kind: HirTypeKind.Bool, span: span)), span: span)
+        val source = HirPattern(kind: HirPatternKind.Wildcard,
+            has_type_: true, type_: annotation, span: span)
+        val decoded = pattern_presence_roundtrip(source)
+        expect(decoded.has_type_).to_equal(true)
+        expect(walk_hir_pattern(source, 0, pattern_presence_count)).to_equal(3)
+        expect(walk_hir_pattern(decoded, 0, pattern_presence_count)).to_equal(3)
+
+    it "does not visit a stale payload when its annotation is absent":
+        step("Keep the presence bit authoritative even when an unused payload is malformed")
+        val span = Span.empty()
+        val source = HirPattern(kind: HirPatternKind.Wildcard, has_type_: false,
+            type_: HirType(kind: nil, span: span), span: span)
+        expect(walk_hir_pattern(source, 0, pattern_presence_count)).to_equal(1)

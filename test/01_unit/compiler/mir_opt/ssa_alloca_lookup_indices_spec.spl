@@ -1,0 +1,136 @@
+# Regression for indexed SSA lookups and ordered alloca rewriting.
+use std.spec
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir_opt.var_reassign_ssa.{ssa_local_first_indices, ssa_local_type_lookup, ssa_local_id_value, ssa_alloca_rewrite_operand, ssa_alloca_rewrite_term, ssa_alloca_transform_blocks}
+
+fn lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn copied(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(lid(id)))
+
+fn moved(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Move(lid(id)))
+
+fn declared(id: i64, type_: MirType, kind: LocalKind = LocalKind.Var) -> MirLocal:
+    MirLocal(id: lid(id), name: nil, type_: type_, kind: kind, is_ghost: false)
+
+# The independent old query is intentionally retained only in this spec.
+fn linear_declared_type(locals: [MirLocal], id: i64) -> MirType:
+    for local in locals:
+        if ssa_local_id_value(local.id) == id:
+            return local.type_
+    MirType.i64()
+
+fn load(dest: i64, slot: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Load(lid(dest), copied(slot)), span: nil)
+
+fn stored(slot: i64, value: MirOperand) -> MirInst:
+    MirInst(kind: MirInstKind.Store(copied(slot), value), span: nil)
+
+describe "SSA alloca lookup indexing preserves ordered MIR":
+    it "matches the old first-declaration query for dense sparse zero negative duplicate and missing ids":
+        val locals = [declared(0, MirType.bool()), declared(1, MirType.i64()),
+            declared(-8, MirType.bool()), declared(900001, MirType.bool()),
+            declared(0, MirType.i64()), declared(-8, MirType.i64())]
+        val indices = ssa_local_first_indices(locals)
+        expect(indices[0]).to_equal(0)
+        expect(indices[-8]).to_equal(2)
+        expect(indices[900001]).to_equal(3)
+        for id in [0, 1, -8, 900001, 2, -99, 900002]:
+            expect(ssa_local_type_lookup(locals, indices, id)).to_equal(linear_declared_type(locals, id))
+        val empty: [MirLocal] = []
+        expect(ssa_local_type_lookup(empty, ssa_local_first_indices(empty), 0)).to_equal(MirType.i64())
+
+    it "leaves original local short provenance unchanged across indexed lookups":
+        val original = MirLocal(id: lid(0), name: Some("borrowed"), type_: MirType.i64(),
+            kind: LocalKind.Arg(0), is_ghost: false, short_borrow: true, short_mutable: true, short_boundary: 17)
+        val locals = [original, declared(0, MirType.bool())]
+        val indices = ssa_local_first_indices(locals)
+        expect(ssa_local_type_lookup(locals, indices, 0)).to_equal(original.type_)
+        expect(locals[0]).to_equal(original)
+        expect(locals[0].short_borrow).to_equal(true)
+        expect(locals[0].short_mutable).to_equal(true)
+        expect(locals[0].short_boundary).to_equal(17)
+
+    it "preserves copy move absence and exact next temporary behavior":
+        val indices: Dict<i64, i64> = {0: 0, 900001: 1}
+        for id in [0, 900001, -9, 27]:
+            val present = id == 0 or id == 900001
+            val slot = if id == 0: 40 else: 41
+            val copy_step = ssa_alloca_rewrite_operand(copied(id), indices, [40, 41], 100)
+            val move_step = ssa_alloca_rewrite_operand(moved(id), indices, [40, 41], 100)
+            if present:
+                expect(copy_step[0]).to_equal(copied(100))
+                expect(move_step[0]).to_equal(moved(100))
+                expect(copy_step[1]).to_equal([load(100, slot)])
+                expect(move_step[1]).to_equal([load(100, slot)])
+                expect(copy_step[2]).to_equal(101)
+                expect(move_step[2]).to_equal(101)
+            else:
+                expect(copy_step[0]).to_equal(copied(id))
+                expect(move_step[0]).to_equal(moved(id))
+                expect(copy_step[1]).to_equal([])
+                expect(move_step[1]).to_equal([])
+                expect(copy_step[2]).to_equal(100)
+                expect(move_step[2]).to_equal(100)
+
+    it "preserves full cross-block single-definition output and source spans":
+        val source_span = Some(Span.new(10, 17, 2, 3))
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: [
+                MirInst(kind: MirInstKind.Const(lid(5), MirConstValue.Bool(true), MirType.bool()), span: source_span)
+            ], terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(1), label: Some("tail"), instructions: [], terminator: MirTerminator.Ret(Some(copied(5))))]
+        val result = ssa_alloca_transform_blocks(blocks, [declared(5, MirType.bool())], BlockId.new(0))
+        val expected = [
+            MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: [
+                MirInst(kind: MirInstKind.Alloc(lid(6), MirType.bool()), span: nil),
+                MirInst(kind: MirInstKind.Const(lid(7), MirConstValue.Bool(true), MirType.bool()), span: source_span),
+                stored(6, copied(7))], terminator: MirTerminator.Goto(BlockId.new(1))),
+            MirBlock(id: BlockId.new(1), label: Some("tail"), instructions: [load(8, 6)], terminator: MirTerminator.Ret(Some(copied(8))))]
+        expect(result.applied).to_equal(true)
+        expect(result.blocks).to_equal(expected)
+        expect(result.renamed_count).to_equal(1)
+        expect(result.next_local_id).to_equal(9)
+        expect(result.phi_required_count).to_equal(0)
+        expect(result.phi_required_locals).to_equal([])
+
+    it "seeds a reassigned zero-id parameter before stores and loads":
+        val source_span = Some(Span.new(20, 25, 3, 4))
+        val block = MirBlock(id: BlockId.new(0), label: nil, instructions: [
+            MirInst(kind: MirInstKind.Const(lid(0), MirConstValue.Int(42), MirType.i64()), span: source_span)
+        ], terminator: MirTerminator.Ret(Some(moved(0))))
+        val result = ssa_alloca_transform_blocks([block], [declared(0, MirType.i64(), LocalKind.Arg(0))], BlockId.new(0))
+        val expected = MirBlock(id: BlockId.new(0), label: nil, instructions: [
+            MirInst(kind: MirInstKind.Alloc(lid(1), MirType.i64()), span: nil),
+            stored(1, copied(0)),
+            MirInst(kind: MirInstKind.Const(lid(2), MirConstValue.Int(42), MirType.i64()), span: source_span),
+            stored(1, copied(2)), load(3, 1)
+        ], terminator: MirTerminator.Ret(Some(moved(3))))
+        expect(result.applied).to_equal(true)
+        expect(result.blocks).to_equal([expected])
+        expect(result.next_local_id).to_equal(4)
+
+    it "preserves Switch and Resume load ordering and temporary sequencing":
+        val indices: Dict<i64, i64> = {0: 0, 900001: 1}
+        val switch = ssa_alloca_rewrite_term(MirTerminator.Switch(moved(0), [], BlockId.new(2)), indices, [40, 41], 100)
+        expect(switch[0]).to_equal([load(100, 40)])
+        expect(switch[1]).to_equal(MirTerminator.Switch(moved(100), [], BlockId.new(2)))
+        expect(switch[2]).to_equal(101)
+        val resume = ssa_alloca_rewrite_term(MirTerminator.Resume(moved(0), copied(900001)), indices, [40, 41], 100)
+        expect(resume[0]).to_equal([load(100, 40), load(101, 41)])
+        expect(resume[1]).to_equal(MirTerminator.Resume(moved(100), copied(101)))
+        expect(resume[2]).to_equal(102)
+
+    it "rewrites recoverable call destinations using all three slot lookups":
+        val indices: Dict<i64, i64> = {0: 0, 900001: 1, 27: 2}
+        val term = MirTerminator.CallTerminator(Some(lid(0)), copied(0), [moved(900001)],
+            BlockId.new(1), Some(BlockId.new(2)), Some(lid(900001)), Some(lid(27)))
+        val result = ssa_alloca_rewrite_term(term, indices, [40, 41, 42], 100)
+        expect(result[0]).to_equal([load(100, 40), load(101, 41)])
+        expect(result[1]).to_equal(MirTerminator.CallTerminator(Some(lid(40)), copied(100), [moved(101)],
+            BlockId.new(1), Some(BlockId.new(2)), Some(lid(41)), Some(lid(42))))
+        expect(result[2]).to_equal(102)

@@ -1,0 +1,150 @@
+# File-worker consumption of the generic instance build plan (P-G6).
+#
+# The coordinator reads every module's TLDR `generic-spec` list through
+# generic_instance_build_plan_v1 (P-G5) and turns each needed ConcreteTldrKey
+# into a claimable job in the file-worker instance ledger:
+#   - single flight: a key is claimed once (exclusive mkdir of its claim
+#     directory in the instance ledger -- atomic on every host, no file lock);
+#     a second claimant joins and only verifies the published object;
+#   - receipted: every claim gets a PASS/FAILED terminal record;
+#   - compiled once into an instance object published under the producer-keyed,
+#     header-verified cache (generic_instance_cache_publish_v1);
+#   - unchanged keys place the cached object, added keys build, removed keys
+#     drop their object and force a relink (P-E removed-module rule).
+#
+# Fail closed: an incomplete plan (any module's list missing, stale or
+# incomplete) runs no instance job and attaches no instance object -- every
+# using object keeps instantiating per module, as today. COMDAT copies in
+# using objects are retired only when the plan is complete, every needed key
+# has a verified object, and the instance objects carry the same COMDAT/weak
+# linkage (P-D); otherwise no instance object is linked, so an instance never
+# has two strong definitions.
+#
+# No global barrier: the plan only reads TLDR lists and cache headers; module
+# objects do not wait for it.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_create, dir_create_all, getpid}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
+use compiler.driver.cache.generic_instance_build_plan_v1.{GenericInstanceBuildPlanV1, generic_instance_build_plan_v1,
+    generic_instance_needed_v1, generic_instance_object_path_v1, generic_instance_cached_v1,
+    generic_instance_cache_publish_v1, generic_instance_build_plan_of_tldr_v1}
+
+pub struct FileWorkerInstanceRunV1:
+    complete: bool
+    built: [text]          # keys this claimant compiled and published
+    reused: [text]         # keys whose cached object verified
+    joined: [text]         # keys another claimant built (single flight)
+    dropped: [text]        # keys no list needs any more; object deleted
+    failed: [text]         # keys with no verified object after the run
+    link_objects: [text]   # instance objects to link ([] unless retire_comdat)
+    retire_comdat: bool    # using objects may drop their COMDAT copies
+    relink: bool           # an instance was built or dropped
+
+fn _producer_dir_v1(cache_root: text, producer: text) -> text:
+    if cache_root == "" or producer == "":
+        return ""
+    cache_root + "/generic_instances/" + sha256_text(producer)
+
+# Keys the last complete plan needed ([] when unknown).
+pub fn file_worker_instances_previous_v1(cache_root: text, producer: text) -> [text]:
+    val dir = _producer_dir_v1(cache_root, producer)
+    if dir == "" or not file_exists(dir + "/needed"):
+        return []
+    var out: [text] = []
+    for line in file_read(dir + "/needed").split("\n"):
+        if line != "":
+            out.push(line)
+    out
+
+fn _publish_text_v1(path: text, content: text) -> bool:
+    val tmp = path + "." + "{getpid()}" + ".tmp"
+    file_write(tmp, content) and file_rename(tmp, path)
+
+fn _record_needed_v1(cache_root: text, producer: text, keys: [text]) -> bool:
+    val dir = _producer_dir_v1(cache_root, producer)
+    if dir == "" or not dir_create_all(dir):
+        return false
+    _publish_text_v1(dir + "/needed", keys.join("\n") + "\n")
+
+fn _job_base_v1(ledger: text, key: text) -> text:
+    ledger + "/" + sha256_text(key)
+
+# Exclusive claim: only the first mkdir of the key's claim directory wins.
+fn _claim_v1(ledger: text, owner: text, key: text) -> bool:
+    val base = _job_base_v1(ledger, key)
+    if not dir_create(base + ".claim", false):
+        return false
+    _publish_text_v1(base + ".claim/owner", owner + "\n" + key + "\n")
+
+# Plan from in-memory lists against the on-disk cache and previous needed set.
+pub fn file_worker_instances_plan_v1(lists: [GenericSpecializationListV1?], cache_root: text,
+        producer: text) -> GenericInstanceBuildPlanV1:
+    val (needed, _complete) = generic_instance_needed_v1(lists)
+    var cached: [text] = []
+    for s in needed:
+        if generic_instance_cached_v1(cache_root, producer, s.concrete_key):
+            cached.push(s.concrete_key)
+    generic_instance_build_plan_v1(file_worker_instances_previous_v1(cache_root, producer), lists, cached)
+
+# Coordinator entry: every module's fresh TLDR list (P-G5 loader).
+pub fn file_worker_instances_plan_of_tldr_v1(module_paths: [text], tldr_root: text, cache_root: text,
+        producer: text) -> GenericInstanceBuildPlanV1:
+    generic_instance_build_plan_of_tldr_v1(module_paths, tldr_root, cache_root, producer,
+        file_worker_instances_previous_v1(cache_root, producer))
+
+# Run the plan's instance jobs. `build` returns the instance object bytes or
+# "" on failure; `instance_comdat` states that the builder emits instances
+# with COMDAT/weak linkage (P-D).
+pub fn file_worker_instances_run_v1(plan: GenericInstanceBuildPlanV1, cache_root: text, producer: text,
+        ledger: text, owner: text, instance_comdat: bool,
+        build: fn(RequiredSpecializationV1) -> text) -> FileWorkerInstanceRunV1:
+    var built: [text] = []
+    var joined: [text] = []
+    var dropped: [text] = []
+    var failed: [text] = []
+    if not plan.complete or ledger == "" or not dir_create_all(ledger):
+        return FileWorkerInstanceRunV1(complete: false, built: [], reused: [], joined: [], dropped: [],
+            failed: [], link_objects: [], retire_comdat: false, relink: false)
+    for s in plan.needed:
+        val key = s.concrete_key
+        if not plan.build.contains(key):
+            continue
+        if _claim_v1(ledger, owner, key):
+            val bytes = build(s)
+            val ok = bytes != "" and generic_instance_cache_publish_v1(cache_root, producer, key, bytes)
+            val _receipt = _publish_text_v1(_job_base_v1(ledger, key) + ".terminal",
+                (if ok: "PASS" else: "FAILED") + "\n" + owner + "\n" + key + "\n")
+            if ok:
+                built.push(key)
+            else:
+                failed.push(key)
+        elif generic_instance_cached_v1(cache_root, producer, key):
+            joined.push(key)
+        else:
+            failed.push(key)
+    for key in plan.drop:
+        val path = generic_instance_object_path_v1(cache_root, producer, key)
+        if path != "" and file_exists(path):
+            val _gone = file_delete(path)
+        dropped.push(key)
+    var keys: [text] = []
+    var objects: [text] = []
+    for s in plan.needed:
+        keys.push(s.concrete_key)
+        if not failed.contains(s.concrete_key):
+            objects.push(generic_instance_object_path_v1(cache_root, producer, s.concrete_key))
+    val _recorded = _record_needed_v1(cache_root, producer, keys)
+    val retire = instance_comdat and failed.len() == 0
+    FileWorkerInstanceRunV1(complete: true, built: built, reused: plan.reuse, joined: joined,
+        dropped: dropped, failed: failed, link_objects: if retire: objects else: [],
+        retire_comdat: retire, relink: built.len() > 0 or dropped.len() > 0)
+
+pub fn file_worker_instances_receipt_line_v1(r: FileWorkerInstanceRunV1) -> text:
+    "[file-worker] instances complete={r.complete} built={r.built.len()} reused={r.reused.len()} " +
+        "joined={r.joined.len()} dropped={r.dropped.len()} failed={r.failed.len()} " +
+        "retire_comdat={r.retire_comdat} relink={r.relink}"
+
+export FileWorkerInstanceRunV1
+export file_worker_instances_previous_v1, file_worker_instances_plan_v1, file_worker_instances_plan_of_tldr_v1
+export file_worker_instances_run_v1, file_worker_instances_receipt_line_v1

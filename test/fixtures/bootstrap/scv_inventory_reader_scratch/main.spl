@@ -1,0 +1,168 @@
+use app.io.cli_ops.{get_args}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.io_runtime.{file_write}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.host.{heap_registry_count}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+# Existing pure value-formation probe. This does NOT establish allocation
+# membership or liveness: raw seed-AOT rt_alloc records are not registered by
+# rt_struct_alloc. Lifetime evidence is churn plus exact retained-field checks.
+extern fn rt_heap_ref_wellformed<T>(receiver: T) -> bool
+
+var assertions = 0
+
+fn checked(condition: bool, label: text):
+    if not condition:
+        print "scv-reader-scratch failed ordinal={assertions + 1} check={label}"
+    assert(condition)
+    assertions = assertions + 1
+
+fn same_record(actual: CompileSourceInventoryReadV1, expected: CompileSourceInventoryReadV1):
+    checked(rt_heap_ref_wellformed(actual), "ReadV1 root has reference formation only")
+    checked(actual.valid and expected.valid, "both inventories admitted")
+    checked(actual.reason == expected.reason, "reason")
+    checked(actual.digest == expected.digest, "authenticated digest")
+    checked(actual.inventory != nil and expected.inventory != nil, "optional inventory present")
+    val a = actual.inventory!
+    val e = expected.inventory!
+    checked(rt_heap_ref_wellformed(a), "inventory has reference formation only")
+    checked(a.schema_version == e.schema_version, "schema")
+    checked(a.generation == e.generation, "generation")
+    checked(a.entries.len() == e.entries.len(), "entry count")
+    for index in 0..e.entries.len():
+        val left = a.entries[index]
+        val right = e.entries[index]
+        checked(rt_heap_ref_wellformed(left), "row has reference formation only")
+        checked(left.source_identity == right.source_identity, "source identity")
+        checked(left.content_digest == right.content_digest, "content digest")
+        checked(left.semantic_digest == right.semantic_digest, "semantic digest")
+        checked(left.export_digest == right.export_digest, "export digest")
+        checked(left.initializer_digest == right.initializer_digest, "initializer digest")
+        checked(left.provider_digest == right.provider_digest, "provider digest")
+        checked(left.byte_count == right.byte_count, "byte count")
+
+fn allocation_churn():
+    val salt = assertions
+    var checksum = 0
+    for index in 0..256:
+        # Distinct 64-byte texts and all three actual result record shapes
+        # exercise reuse of freed field/record allocations, not just arrays.
+        val content = sha256_text("churn-content-{salt}-{index}")
+        val semantic = sha256_text("churn-semantic-{salt}-{index}")
+        val exports = sha256_text("churn-export-{salt}-{index}")
+        val initializer = sha256_text("churn-initializer-{salt}-{index}")
+        val provider = sha256_text("churn-provider-{salt}-{index}")
+        val row = CompileSourceInventoryEntryV1(
+            "src/churn/replacement-{salt}-{index}.spl", content, semantic,
+            exports, initializer, provider, 900000 + index)
+        val inventory = CompileSourceInventoryV1(1, 800000 + index, [row])
+        val read = CompileSourceInventoryReadV1(
+            true, "churn-{salt}-{index}", content, Some(inventory))
+        val selected = read.inventory!
+        val item = selected.entries[0]
+        checksum = checksum + selected.generation + selected.schema_version
+        checksum = checksum + item.byte_count + item.source_identity.len()
+        checksum = checksum + item.content_digest.len() + item.semantic_digest.len()
+        checksum = checksum + item.export_digest.len() + item.initializer_digest.len()
+        checksum = checksum + item.provider_digest.len() + read.digest.len() + read.reason.len()
+        if item.content_digest.starts_with("a"): checksum = checksum + 17
+        if item.semantic_digest.starts_with("b"): checksum = checksum + 19
+        if item.export_digest.starts_with("c"): checksum = checksum + 23
+        if item.initializer_digest.starts_with("d"): checksum = checksum + 29
+        if item.provider_digest.starts_with("e"): checksum = checksum + 31
+    checked(checksum > 0, "record and 64-byte-text allocation churn executed")
+    print "scv-reader-scratch churn_records=256 digest_fields=1280 checksum={checksum}"
+
+fn real_scope_witness():
+    checked(transient_array_scope_state_v1() == 0, "initial scope state0")
+    val before = heap_registry_count()
+    checked(transient_scope_begin(), "witness begin")
+    val discarded = "runtime-dynamic-witness-{before}|first|second|third".split("|")
+    val length = discarded.len()
+    val allocated = heap_registry_count()
+    val paused = transient_scope_pause()
+    val ended = transient_scope_end()
+    val retired = heap_registry_count()
+    checked(length == 4 and paused and ended, "witness allocated and retired")
+    checked(allocated > before, "actual provider tracks scoped heap allocation")
+    checked(retired < allocated, "actual provider reclaimed unpromoted heap objects")
+    checked(transient_array_scope_state_v1() == 0, "witness scope ended")
+    print "scv-reader-scratch registry_before={before} allocated={allocated} retired={retired}"
+
+fn rejected(root: text, pointer: text, reason: text):
+    val result = compile_source_inventory_read_at_pointer_v1(root, pointer)
+    checked(not result.valid, "invalid inventory rejected")
+    checked(result.reason == reason, "original rejection reason")
+    checked(result.inventory == nil and result.digest == "", "invalid result carries no inventory")
+    checked(transient_array_scope_state_v1() == 0, "invalid read retires owned scope")
+
+fn main() -> i64:
+    val args = get_args()
+    checked(args.len() >= 3, "private cache root and captured digest arguments")
+    val root = args[args.len() - 2]
+    val expected_digest = args[args.len() - 1]
+    # This must be the first reader/hash/decoder use: catch cold initialization
+    # storing a scoped pointer into a process-wide lazy cache.
+    val first = compile_source_inventory_read_at_pointer_v1(root, expected_digest)
+    val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+    checked(pointer == expected_digest, "captured immutable inventory pointer")
+    val raw = match file_read_regular_no_follow_bounded("{root}/source-inventory/generations/{pointer}.inventory", 256 * 1024 * 1024):
+        Ok(content): content
+        Err(reason):
+            print "scv-reader-scratch independent read failed reason={reason}"
+            return 1
+    checked(sha256_text(raw) == expected_digest, "independent original bytes authenticate")
+    # Public pure decoder runs outside the new reader scope: independent graph.
+    val expected = compile_source_inventory_decode_v1(raw)
+    checked(expected.valid and expected.inventory != nil, "baseline inventory decoded")
+    checked(expected.inventory!.entries.len() > 1, "genuine multirow corpus")
+    checked(expected.digest == expected_digest, "external captured digest")
+    allocation_churn()
+    same_record(first, expected)
+    real_scope_witness()
+    for iteration in 0..8:
+        val result = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        checked(transient_array_scope_state_v1() == 0, "reader leaves no owned scope")
+        allocation_churn()
+        same_record(result, expected)
+    checked(transient_scope_begin(), "caller begins active scope")
+    val active = compile_source_inventory_read_at_pointer_v1(root, pointer)
+    val active_state = transient_array_scope_state_v1()
+    val nested_begin = transient_scope_begin()
+    val active_paused = transient_scope_pause()
+    val active_retained = transient_promote(active)
+    val active_ended = transient_scope_end()
+    checked(active_state == 1 and not nested_begin, "reader preserves active caller and refused nested begin")
+    checked(active_paused and active_retained and active_ended, "caller retains its own result")
+    allocation_churn()
+    same_record(active, expected)
+    checked(transient_scope_begin(), "caller begins paused case")
+    checked(transient_scope_pause(), "caller pauses its scope")
+    val paused = compile_source_inventory_read_at_pointer_v1(root, pointer)
+    val paused_state = transient_array_scope_state_v1()
+    val paused_begin = transient_scope_begin()
+    val paused_ended = transient_scope_end()
+    checked(paused_state == 2 and not paused_begin and paused_ended, "reader preserves paused caller and refused nested begin")
+    allocation_churn()
+    same_record(paused, expected)
+    # One canonical encode/hash after all lifetime checks; repeated unscoped
+    # sort/encode scratch must not dominate the reader-only RSS comparison.
+    checked(sha256_text(compile_source_inventory_encode_v1(first.inventory!)) == expected_digest, "complete retained bytes authenticate after churn")
+    rejected(root, "invalid", "inventory-pointer-invalid")
+    val missing = sha256_text("absent immutable generation")
+    rejected(root, missing, "inventory-generation-invalid")
+    # Malformed blobs use their real byte hash. No admission key is forged.
+    val header = "simple-compile-source-inventory-v1\ngeneration=1\ncount=1\n"
+    val d = sha256_text("facet")
+    for invalid in ["bad-header", header + "only|two", header + "src/../alias.spl|{d}|{d}|{d}|{d}|{d}|7"]:
+        val digest = sha256_text(invalid)
+        checked(file_write("{root}/source-inventory/generations/{digest}.inventory", invalid), "write private malformed generation")
+        val expected_reason = if invalid == "bad-header": "inventory-header-invalid" else: if invalid == header + "only|two": "inventory-row-invalid" else: "inventory-noncanonical"
+        rejected(root, digest, expected_reason)
+    checked(transient_scope_begin(), "scope reusable after every rejection")
+    checked(transient_scope_end(), "final scope ended")
+    print "scv-reader-scratch rows={expected.inventory!.entries.len()} assertions={assertions}"
+    0

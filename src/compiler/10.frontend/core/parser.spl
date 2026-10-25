@@ -122,6 +122,15 @@ fn parser_lexical_has_new_value() -> bool:
 var par_errors: [text] = []
 var par_warnings: [text] = []
 var par_struct_names: [text] = []
+
+# Owner write path for struct names registered outside this file
+# (parser_decls_types.spl bitfields). Cross-module `par_struct_names.push`
+# was silently dropped by the seed (it mutates a copy); this routes the
+# write to the owner, which is the intended behaviour.
+fn parser_note_struct_name(name: text):
+    if par_struct_names == nil:
+        par_struct_names = []
+    par_struct_names.push(name)
 var par_had_error: bool = false
 # True once this file has a `use` that may bring a `List` type into scope
 # (explicit `List` item or alias, `use m.List`, or any wildcard). The
@@ -141,7 +150,15 @@ var par_imported_type_names: [text] = []
 # module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
 # node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
 var par_fixed_array_elem: i64 = 0
-pub var par_fixed_array_size: i64 = -1
+var par_fixed_array_size: i64 = -1
+
+# Stage-2 accessors (parse_context_per_context_state.md): the fixed-array
+# side channel is read only through these, so its storage stays private.
+fn parser_fixed_array_elem() -> i64:
+    par_fixed_array_elem
+
+fn parser_fixed_array_size() -> i64:
+    par_fixed_array_size
 var par_diagnostics_suppressed: bool = false
 var par_diagnostic_emit_count: i64 = 0
 var par_kind_slot: [i64] = [0]
@@ -973,6 +990,9 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     if kind == 6:
         var type_name_end = lex_token_end_get()
         parser_advance()
+        if type_name == "__any":
+            parser_error("`__any` is reserved for internal type erasure; use an explicit type or an authorized `unsafe(capabilities: [type_erasure])` boundary")
+            return TYPE_VOID
         # G35: absorb dotted path segments: json.Value  or  json::Value
         for _gi35 in 0..20:
             val seg_kind = par_kind_get()
@@ -1121,6 +1141,12 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 opt_result = TYPE_OPTION_TEXT
             elif type_name == "bool":
                 opt_result = TYPE_OPTION_BOOL
+            elif parser_fixed_width_int_tag(type_name) >= 0:
+                # `u32?` / `u7?`: keep the fixed-width payload (it used to
+                # collapse to bare TYPE_OPTION = Optional(Any)).
+                val fw_opt_tag = option_generic_type_register(parser_fixed_width_int_tag(type_name))
+                if fw_opt_tag >= 0:
+                    opt_result = fw_opt_tag
             else:
                 # `Drv2?` is the shorthand spelling of `Option<Drv2>`; keep the
                 # class identity via the inner-type registry rather than
@@ -1204,25 +1230,9 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # Represent them with dedicated fixed-width tags so the bit width and
         # signedness survive into the AST bridge -> HIR Int(bits, signed) -> MIR
         # -> backend type mappers (e.g. VHDL unsigned/signed(W-1 downto 0)).
-        if type_name == "u8":
-            return TYPE_U8
-        if type_name == "u16":
-            return TYPE_U16
-        if type_name == "u32":
-            return TYPE_U32
-        if type_name == "u64":
-            return TYPE_U64
-        if type_name == "i8":
-            return TYPE_I8
-        if type_name == "i16":
-            return TYPE_I16
-        if type_name == "i32":
-            return TYPE_I32
-        # Non-standard widths (u7, u3, ...) have no dedicated tag; keep the i64
-        # register lane. Callers needing the exact width re-derive it from the
-        # type name text via primitive_integer_bit_width_from_name.
-        if primitive_integer_bit_width_from_name(type_name) > 0:
-            return TYPE_I64
+        val fixed_width_tag = parser_fixed_width_int_tag(type_name)
+        if fixed_width_tag >= 0:
+            return fixed_width_tag
         # Preserve a written sibling/forward type name through the flat tag.
         # named_type_register is idempotent, so a later local declaration
         # fills this placeholder instead of creating a duplicate type id.
@@ -1474,8 +1484,8 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 # ===== Exports =====
 
 # Parser state (needed by split modules and external consumers)
-export par_errors, par_warnings, par_struct_names
-export par_fixed_array_elem, par_fixed_array_size
+export parser_note_struct_name
+export parser_fixed_array_elem, parser_fixed_array_size
 export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix, parser_new_paren_sigil_kind
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_note_use_import
@@ -1584,3 +1594,96 @@ pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
     r.ok
 
 export flat_parser_state_dump, flat_parser_state_restore
+
+# Fixed-width integer annotation -> type tag, or -1 when `type_name` is not
+# an integer width name. Standard widths have dedicated tags. Non-standard
+# widths (u7, i3, ...) used to collapse to TYPE_I64, silently dropping the
+# declared width; they now keep their written name as a named type, which the
+# AST bridge/HIR re-derive with primitive_integer_bit_width_from_name.
+fn parser_fixed_width_int_tag(type_name: text) -> i64:
+    if type_name == "u8": return TYPE_U8
+    if type_name == "u16": return TYPE_U16
+    if type_name == "u32": return TYPE_U32
+    if type_name == "u64": return TYPE_U64
+    if type_name == "i8": return TYPE_I8
+    if type_name == "i16": return TYPE_I16
+    if type_name == "i32": return TYPE_I32
+    if type_name == "i64": return TYPE_I64
+    if primitive_integer_bit_width_from_name(type_name) > 0:
+        return TYPE_NAMED_BASE + named_type_register(type_name, [], [])
+    -1
+
+# ===== ParserState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct ParserState:
+    par_lexical_bindings: ParserLexicalBindings
+    par_errors: [text]
+    par_warnings: [text]
+    par_struct_names: [text]
+    par_had_error: bool
+    par_list_type_import_seen: bool
+    par_imported_type_names: [text]
+    par_fixed_array_elem: i64
+    par_fixed_array_size: i64
+    par_diagnostics_suppressed: bool
+    par_diagnostic_emit_count: i64
+    par_kind_slot: [i64]
+    par_text_slot: [text]
+    par_line_slot: [i64]
+    par_col_slot: [i64]
+
+pub fn parser_state_take() -> ParserState:
+    val s = ParserState(
+        par_lexical_bindings: par_lexical_bindings,
+        par_errors: par_errors,
+        par_warnings: par_warnings,
+        par_struct_names: par_struct_names,
+        par_had_error: par_had_error,
+        par_list_type_import_seen: par_list_type_import_seen,
+        par_imported_type_names: par_imported_type_names,
+        par_fixed_array_elem: par_fixed_array_elem,
+        par_fixed_array_size: par_fixed_array_size,
+        par_diagnostics_suppressed: par_diagnostics_suppressed,
+        par_diagnostic_emit_count: par_diagnostic_emit_count,
+        par_kind_slot: par_kind_slot,
+        par_text_slot: par_text_slot,
+        par_line_slot: par_line_slot,
+        par_col_slot: par_col_slot
+    )
+    par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
+    par_errors = []
+    par_warnings = []
+    par_struct_names = []
+    par_had_error = false
+    par_list_type_import_seen = false
+    par_imported_type_names = []
+    par_fixed_array_elem = 0
+    par_fixed_array_size = -1
+    par_diagnostics_suppressed = false
+    par_diagnostic_emit_count = 0
+    par_kind_slot = [0]
+    par_text_slot = [""]
+    par_line_slot = [0]
+    par_col_slot = [0]
+    s
+
+pub fn parser_state_install(s: ParserState):
+    par_lexical_bindings = s.par_lexical_bindings
+    par_errors = s.par_errors
+    par_warnings = s.par_warnings
+    par_struct_names = s.par_struct_names
+    par_had_error = s.par_had_error
+    par_list_type_import_seen = s.par_list_type_import_seen
+    par_imported_type_names = s.par_imported_type_names
+    par_fixed_array_elem = s.par_fixed_array_elem
+    par_fixed_array_size = s.par_fixed_array_size
+    par_diagnostics_suppressed = s.par_diagnostics_suppressed
+    par_diagnostic_emit_count = s.par_diagnostic_emit_count
+    par_kind_slot = s.par_kind_slot
+    par_text_slot = s.par_text_slot
+    par_line_slot = s.par_line_slot
+    par_col_slot = s.par_col_slot
+
+export ParserState, parser_state_take, parser_state_install

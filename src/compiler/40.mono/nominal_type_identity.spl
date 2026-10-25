@@ -67,4 +67,97 @@ fn mono_owned_type_key(type_: HirType, symbols: SymbolTable?, module: text) -> t
             "dyn<{identity}>"
         case _: mangle_type(type_)
 
+# P-G5: one concrete generic type use, in source spelling (`Pair<i64, f64>`
+# -> name "Pair", arg_texts ["i64", "f64"]), for the TLDR `generic-spec` list.
+pub struct MonoObservedGenericUseV1:
+    owner: text       # declaring module (HIR defining_module), "" when unknown
+    name: text
+    arg_texts: [text]
+
+fn _mono_nominal_name_v1(sym: SymbolId, symbols: SymbolTable?) -> text:
+    if val table = symbols:
+        if val info = table.get_symbol_raw(sym.id):
+            return info.name
+    ""
+
+fn _mono_nominal_owner_v1(sym: SymbolId, symbols: SymbolTable?) -> text:
+    if val table = symbols:
+        if val info = table.get_symbol_raw(sym.id):
+            return info.defining_module ?? ""
+    ""
+
+# Source spelling of a concrete type, or "" when it has none the TLDR key
+# parser can be asked about (callers then fail closed).
+fn mono_type_source_text_v1(type_: HirType, symbols: SymbolTable?) -> text:
+    if type_ == nil: return ""
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Optional(inner):
+            val s = mono_type_source_text_v1(inner, symbols)
+            if s == "": "" else: s + "?"
+        case HirTypeKind.Slice(elem):
+            val s = mono_type_source_text_v1(elem, symbols)
+            if s == "": "" else: "[" + s + "]"
+        case HirTypeKind.Named(sym, args):
+            val name = _mono_nominal_name_v1(sym, symbols)
+            if name == "": return ""
+            if args.len() == 0: return name
+            var parts: [text] = []
+            for a in args:
+                val s = mono_type_source_text_v1(a, symbols)
+                if s == "": return ""
+                parts.push(s)
+            name + "<" + parts.join(", ") + ">"
+        case _: ""
+
+fn _mono_children_v1(type_: HirType) -> [HirType]:
+    match type_.kind:
+        case HirTypeKind.Named(_sym, args): args
+        case HirTypeKind.Array(elem, _): [elem]
+        case HirTypeKind.Slice(elem): [elem]
+        case HirTypeKind.Optional(inner): [inner]
+        case HirTypeKind.Ref(inner, _): [inner]
+        case HirTypeKind.Ptr(inner, _): [inner]
+        case HirTypeKind.Dict(k, v): [k, v]
+        case HirTypeKind.Result(ok, err): [ok, err]
+        case HirTypeKind.Tuple(elems): elems
+        case HirTypeKind.Union(members): members
+        case HirTypeKind.Function(params, ret, _):
+            var out: [HirType] = []
+            for p in params: out.push(p)
+            out.push(ret)
+            out
+        case _: []
+
+# Every `Name<args>` occurring in `type_` (nested ones included); ok=false
+# when a generic use's arguments have no source spelling.
+fn mono_generic_uses_of_type_v1(type_: HirType, symbols: SymbolTable?) -> ([MonoObservedGenericUseV1], bool):
+    var uses: [MonoObservedGenericUseV1] = []
+    var ok = true
+    if type_ == nil: return (uses, ok)
+    match type_.kind:
+        case HirTypeKind.Named(sym, args):
+            if args.len() > 0:
+                val name = _mono_nominal_name_v1(sym, symbols)
+                var texts: [text] = []
+                for a in args:
+                    val s = mono_type_source_text_v1(a, symbols)
+                    if s == "": ok = false
+                    texts.push(s)
+                if name == "": ok = false
+                if ok: uses.push(MonoObservedGenericUseV1(owner: _mono_nominal_owner_v1(sym, symbols),
+                    name: name, arg_texts: texts))
+        case _: ()
+    for child in _mono_children_v1(type_):
+        val (inner, inner_ok) = mono_generic_uses_of_type_v1(child, symbols)
+        if not inner_ok: ok = false
+        for u in inner: uses.push(u)
+    (uses, ok)
+
 export mono_owned_type_key, mono_owned_type_keys
+export MonoObservedGenericUseV1, mono_type_source_text_v1, mono_generic_uses_of_type_v1

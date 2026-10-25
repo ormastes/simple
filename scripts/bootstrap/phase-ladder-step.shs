@@ -25,6 +25,27 @@
 # early rungs spend their time climbing.
 set -eu
 platform=${1:?platform} in_dir=${2:?in-dir} out_dir=${3:?out-dir} threads=${4:-4}
+evidence_root=$(pwd)/build/ladder/evidence
+cache_root=$(pwd)/build/ladder/cache
+producer_root=$(pwd)/build/ladder/producer
+mkdir -p "$evidence_root" "$cache_root" "$producer_root"
+source_revision=$(git rev-parse HEAD 2>/dev/null || printf unknown)
+attempt_role=planning
+record_ladder_exit() {
+  ladder_exit=$?
+  trap - 0
+  set +e
+  {
+    printf 'schema: phase-ladder-attempt-v1\nsource_revision: %s\nplatform: %s\n' "$source_revision" "$platform"
+    printf 'role: %s\nexit_status: %s\nseed_threads: %s\n' "$attempt_role" "$ladder_exit" "$threads"
+    printf 'native_file_timing: %s\nadmission: none\ncontinuation_validation: pending-owner\nargv_binding: diagnostic-display-only\n' "${SIMPLE_NATIVE_FILE_TIMING:-0}"
+  } > "$evidence_root/attempt.sdn"
+  if [ "$ladder_exit" -ne 0 ] && [ "$attempt_role" = seed-native ]; then
+    cp "$evidence_root/attempt.sdn" "$evidence_root/seed-native-failure.sdn"
+  fi
+  exit "$ladder_exit"
+}
+trap record_ladder_exit 0
 exe=
 case $platform in windows-*) exe=.exe ;; esac
 
@@ -43,6 +64,10 @@ best_handoff() {
 chmod +x "$in_dir"/*/simple* 2>/dev/null || :
 set -- $(best_handoff "$platform")
 have=$1 have_dir=${2:-}
+# A pure-Simple compiler needs far more memory per thread than the Rust
+# seed: hosted runners were OOM-killed at the seed thread count (run
+# 40075571655, phase 2). Builds by a handed-over phase use this count.
+selfhost_threads=${PHASE_LADDER_SELFHOST_THREADS:-2}
 emit() { # <phase> <binary> <climbed>
   dest=$out_dir/$platform-p$1
   mkdir -p "$dest"
@@ -55,7 +80,8 @@ emit() { # <phase> <binary> <climbed>
 
 # <compiler> <handoff-dir>: build the essential binaries with that compiler.
 build_essentials() {
-  ess=$2/essentials
+  mkdir -p "$2"
+  ess=$(cd "$2" && pwd)/essentials
   mkdir -p "$ess"
   : > "$ess/STATUS"
   ok=0 total=0
@@ -71,7 +97,7 @@ build_essentials() {
     rc=0
     RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
       "$1" native-build --source src/compositions/kernel_llvm_cranelift --source src \
-      --entry-closure --entry "$entry" --mode dynload --threads "$threads" \
+      --entry-closure --entry "$entry" --mode dynload --threads "$selfhost_threads" \
       --output "$out" > "$ess/$name.log" 2>&1 || rc=$?
     result=failed
     if [ "$rc" -eq 0 ] && [ -s "$out" ] && [ -x "$out" ]; then
@@ -106,10 +132,18 @@ if [ "$platform" = linux-riscv64 ]; then
       emit "$have" "$have_dir/simple" false
       exit 0
     fi
-    sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 \
+    SIMPLE_CROSS_THREADS=${SIMPLE_CROSS_THREADS:-$selfhost_threads} \
+      SIMPLE_CROSS_FILE_TIMEOUT=${SIMPLE_CROSS_FILE_TIMEOUT:-10800} \
+      sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 \
       --compiler "$host_dir/simple" --phase "$next" --sanity
   else
     # First rung: newest proven linux-x86_64 compiler (RC), else the seed.
+    for resume_platform in "$platform" linux-x86_64; do
+      if [ -e "$in_dir/.resume-evidence/$resume_platform.incomplete.sdn" ]; then
+        echo "phase-ladder: $resume_platform discovery incomplete; refusing automatic cold compiler selection" >&2
+        exit 1
+      fi
+    done
     sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --compiler auto --sanity
   fi
   next=$(cat build/cross/linux-riscv64/PHASE)
@@ -128,21 +162,65 @@ if [ "$have" -gt 0 ]; then
   cp "$have_dir/simple$exe" "build/bootstrap/stage$have/simple$exe"
   chmod +x "build/bootstrap/stage$have/simple$exe"
 fi
-if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$threads"; then
+next_threads=$threads
+[ "$have" -gt 0 ] && next_threads=$selfhost_threads
+if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$next_threads"; then
+  if [ -e "$in_dir/.resume-evidence/$platform.incomplete.sdn" ]; then
+    echo "phase-ladder: $platform parent attempt failed after incomplete discovery; refusing cold seed fallback" >&2
+    exit 1
+  fi
   # Nothing to climb from: phase 1 comes from the Rust seed (as release.yml).
   [ "$have" -eq 0 ] || { echo "phase-ladder: phase $((have + 1)) build failed" >&2; exit 1; }
+  # An earlier rung's failed seed is not a qualified input. Do not cold-repeat
+  # it merely because always() scheduled another rung. Retained keyed objects
+  # stay diagnostic until a real owner admits an exact-producer continuation.
+  prior_diagnostics=${PHASE_LADDER_PRIOR_DIAGNOSTICS_ROOT:-build/ladder/diagnostics}
+  for prior_failure in "$prior_diagnostics"/*/seed-native-failure.sdn; do
+    [ -f "$prior_failure" ] || continue
+    if grep -Fxq "source_revision: $source_revision" "$prior_failure" &&
+       grep -Fxq "platform: $platform" "$prior_failure" &&
+       grep -Fxq "seed_threads: $threads" "$prior_failure"; then
+      attempt_role=blocked-unchanged-seed
+      echo "phase-ladder: unchanged failed seed blocked; retained cache requires actual owner continuation admission" >&2
+      exit 86
+    fi
+  done
   echo "phase-ladder: no qualified compiler; building phase 1 with the Rust seed"
   unset_dyld=
   case $platform in darwin-*) unset_dyld="-u DYLD_LIBRARY_PATH" ;; esac
   (cd src/compiler_rust &&
     env $unset_dyld cargo build --profile bootstrap -p simple-driver &&
     env $unset_dyld cargo build --profile bootstrap -p simple-native-all --features driver-compat)
+  # Freeze actual bootstrap-only producer bytes beside the diagnostic cache.
+  cp "src/compiler_rust/target/bootstrap/simple$exe" "$producer_root/simple$exe"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$producer_root/simple$exe" > "$producer_root/producer.sha256"
+  else
+    sha256 -q "$producer_root/simple$exe" > "$producer_root/producer.sha256"
+  fi
+  case "$platform:${SIMPLE_WINDOWS_ABI:-gnu}" in
+    windows-*:gnu)
+      sh scripts/bootstrap/lib/retain-ladder-seed-runtime.shs "$(pwd)" \
+        src/compiler_rust/target/bootstrap "$producer_root"
+      ;;
+  esac
+  git rev-parse HEAD > "$evidence_root/source-revision.txt"
+  git show HEAD:config/bootstrap.sdn > "$evidence_root/bootstrap.sdn"
   mkdir -p build/bootstrap/stage1
+  attempt_role=seed-native
+  # Per-file limit: the 300 s default is at the edge for the biggest files
+  # (run 40155634904: hir_codec.spl >300 s on linux-x86_64,
+  # driver_aot_native_output.spl on darwin-arm64), and one timeout stops
+  # every remaining file (NOT_ATTEMPTED). Bug:
+  # doc/08_tracking/bug/seed_native_file_timeout_largest_files_2026-10-25.md
+  seed_file_timeout=${PHASE_LADDER_SEED_FILE_TIMEOUT:-1200}
+  printf '%s\n' "native-build --source src/compositions/kernel_llvm_cranelift --source src --entry-closure --entry src/app/cli/bootstrap_main.spl --mode dynload --threads $threads --cache-dir $cache_root/seed-phase1 --timeout $seed_file_timeout --verbose --output build/bootstrap/stage1/simple$exe" > "$evidence_root/seed-argv-display.txt"
   RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
     "src/compiler_rust/target/bootstrap/simple$exe" native-build \
     --source src/compositions/kernel_llvm_cranelift --source src \
     --entry-closure --entry src/app/cli/bootstrap_main.spl \
-    --mode dynload --threads "$threads" --output "build/bootstrap/stage1/simple$exe"
+    --mode dynload --threads "$threads" --cache-dir "$cache_root/seed-phase1" --timeout "$seed_file_timeout" --verbose \
+    --output "build/bootstrap/stage1/simple$exe"
 fi
 next=0
 for p in 4 3 2 1; do
@@ -153,7 +231,17 @@ bin=build/bootstrap/stage$next/simple$exe
 
 # Sanity: --version is not enough (see resolve-bootstrap-compiler.shs);
 # the new phase must build and run a hello world.
-probe=build/ladder-sanity
+# Absolute paths: Windows hello builds fail with "diagnostic staging
+# unavailable" only under harnesses; a relative output parent is that bug's
+# open hypothesis (stage2_sanity_diagnostic_staging_unavailable_2026-09-12).
+probe=$evidence_root/hello
+retain_rejected_candidate() {
+  rejected=$evidence_root/rejected/$platform-rejected-p$next
+  mkdir -p "$rejected"
+  cp "./$bin" "$rejected/simple$exe"
+  printf 'schema: phase-ladder-rejected-candidate-v1\nplatform: %s\nphase: %s\nadmission: none\nreason: %s\n' \
+    "$platform" "$next" "$1" > "$rejected/REJECTED.sdn"
+}
 rm -rf "$probe" && mkdir -p "$probe"
 printf 'fn main():\n    print "phase-ladder-%s-ok"\n' "$next" > "$probe/hello.spl"
 "./$bin" --version
@@ -167,12 +255,90 @@ if ! "./$bin" native-build "$probe/hello.spl" -o "$probe/hello$exe"; then
   fi
   # Keep the rejected compiler for offline analysis; no PHASE file, so no
   # later rung climbs from it.
-  mkdir -p "$out_dir/$platform-rejected-p$next"
-  cp "./$bin" "$out_dir/$platform-rejected-p$next/"
+  retain_rejected_candidate hello-build-failed
   echo "phase-ladder: phase $next hello build failed" >&2
   exit 1
 fi
-"$probe/hello$exe" | grep -q "phase-ladder-$next-ok"
+# POSIX sh has no pipefail: piping Hello to grep would hide its native exit
+# status and admit a program which prints the marker before failing. Preserve
+# the run independently and accept only the complete expected line.
+hello_status=0
+hello_output=$probe/stdout
+case $platform in
+  windows-*)
+    # Git Bash truncates some nonzero DWORD exits (256, 512, 0x80000000)
+    # to zero. Launch the native PE directly through the existing Job Object
+    # collector and require its untruncated GetExitCodeProcess receipt too.
+    # Its log honestly combines native stdout and stderr; either stream must
+    # therefore contain only the expected Hello line. Launcher streams remain
+    # separate diagnostics, never mislabeled as native program output.
+    hello_status=125
+    hello_output=$probe/combined-stdout-stderr.log
+    hello_receipt=$probe/native-exit.env
+    hello_helper=$(pwd)/scripts/bootstrap/run-process-group-bounded-log-windows.py
+    hello_python=
+    for hello_python_name in python python3; do
+      if hello_python_candidate=$(command -v "$hello_python_name") &&
+         "$hello_python_candidate" -c 'import ctypes, os, sys; sys.exit(0 if os.name == "nt" and hasattr(ctypes.WinDLL("kernel32"), "GetExitCodeProcess") else 1)' \
+         >> "$probe/python-provider.log" 2>&1; then
+        hello_python=$hello_python_candidate
+        break
+      fi
+    done
+    if [ -n "$hello_python" ] &&
+       [ -f "$hello_helper" ] && [ ! -L "$hello_helper" ] &&
+       hello_helper_sha=$(sha256sum "$hello_helper") &&
+       hello_parent_native=$(cygpath -am "$probe") &&
+       hello_program_native=$(cygpath -am "$probe/hello$exe"); then
+      hello_helper_sha=${hello_helper_sha%% *}
+      hello_collector_status=0
+      "$hello_python" "$hello_helper" --output-parent="$hello_parent_native" \
+        --log-leaf=combined-stdout-stderr.log --receipt-leaf=native-exit.env \
+        --helper-sha256="$hello_helper_sha" --max-bytes=1048576 \
+        --timeout-seconds=60 --term-grace-seconds=5 --root-exit-policy=wait-job \
+        -- "$hello_program_native" > "$probe/collector-launch.stdout" \
+        2> "$probe/collector-launch.stderr" || hello_collector_status=$?
+      printf '%s\n' "$hello_collector_status" > "$probe/collector-exit-status"
+      hello_helper_after=$(sha256sum "$hello_helper")
+      hello_helper_after=${hello_helper_after%% *}
+      if [ "$hello_collector_status" -eq 0 ] && [ -f "$hello_receipt" ] &&
+         [ ! -L "$hello_receipt" ] && [ -f "$hello_output" ] &&
+         [ ! -L "$hello_output" ] &&
+         [ "$hello_helper_after" = "$hello_helper_sha" ] &&
+         awk -F= 'NF < 2 || seen[$1]++ {bad=1} END {exit bad}' "$hello_receipt"; then
+        hello_status=0
+        hello_log_sha=$(sha256sum "$hello_output")
+        hello_log_sha=${hello_log_sha%% *}
+        hello_log_bytes=$(wc -c < "$hello_output" | tr -d '[:space:]')
+        for hello_field in schema=simple-bounded-process-log-v1 status=complete \
+          reason=child-exit raw_status=0 native_exit_status=0 \
+          cleanup_status=not-needed cleanup_wait_code=not-observed cleanup_last_error=not-observed \
+          bound_raw_status=not-observed process_group=windows-job termination=job-terminate \
+          combined_stream=stdout-stderr artifact_limit=none root_exit_policy=wait-job \
+          job_remnants_terminated=no log_leaf=combined-stdout-stderr.log \
+          max_bytes=1048576 timeout_seconds=60 term_grace_seconds=5 \
+          "helper_sha256=$hello_helper_sha" "log_sha256=$hello_log_sha" \
+          "bytes_captured=$hello_log_bytes"; do
+          grep -Fxq "$hello_field" "$hello_receipt" || hello_status=125
+        done
+      fi
+    fi
+    ;;
+  *)
+    "$probe/hello$exe" > "$probe/stdout" 2> "$probe/stderr" || hello_status=$?
+    printf '%s\n' "$hello_status" > "$probe/exit-status"
+    ;;
+esac
+printf 'phase-ladder-%s-ok\n' "$next" > "$probe/expected-lf.stdout"
+printf 'phase-ladder-%s-ok\r\n' "$next" > "$probe/expected-crlf.stdout"
+if [ "$hello_status" -ne 0 ] || {
+  ! cmp -s "$hello_output" "$probe/expected-lf.stdout" &&
+  ! cmp -s "$hello_output" "$probe/expected-crlf.stdout"
+}; then
+  retain_rejected_candidate hello-run-failed
+  echo "phase-ladder: phase $next hello run failed (exit=$hello_status; evidence=$probe)" >&2
+  exit 1
+fi
 emit "$next" "$bin" true
 if [ "$next" -ge "${PHASE_LADDER_ESSENTIALS_FROM:-3}" ]; then
   build_essentials "$(pwd)/$bin" "$out_dir/$platform-p$next"

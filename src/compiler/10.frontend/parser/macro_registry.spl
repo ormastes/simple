@@ -267,3 +267,75 @@ fn expand_name_pattern(pattern: text, ctx: ConstEvalContext) -> text:
             break
         idx = result.find("{")
     result
+
+# ============================================================================
+# Cache facts (plan 2026-10-24 §6, P5): canonical contract text and the
+# public names a macro's contract introduces. Consumed by
+# compiler.frontend.cache_artifact.macro_reference_projector.
+# ============================================================================
+
+fn _macro_anchor_tag(anchor: InjectionAnchor) -> text:
+    match anchor:
+        case Head: "head"
+        case Tail: "tail"
+        case Here: "here"
+
+fn _macro_code_kind_tag(kind: InjectionCodeKind) -> text:
+    match kind:
+        case Stmt: "stmt"
+        case Block: "block"
+
+fn _macro_sorted_unique(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = 0
+        var dup = false
+        while i < out.len():
+            if out[i] == v:
+                dup = true
+                break
+            if v < out[i]:
+                break
+            i = i + 1
+        if not dup:
+            # Keep the typed array carrier explicit for native MIR lowering.
+            var tail = out.len()
+            out.push(v)
+            while tail > i:
+                out[tail] = out[tail - 1]
+                tail = tail - 1
+            out[i] = v
+    out
+
+fn macro_def_contract_canonical_text(macro_def: MacroDef) -> text:
+    """Length-framed canonical text of a macro's parameters and contract.
+    Order-preserving for params; intros/injects keep declaration order."""
+    var out = "macro-contract/v1|{macro_def.params.len()}["
+    for p in macro_def.params:
+        out = out + "{p.len()}:{p}"
+    out = out + "]{macro_def.contract_intros.len()}["
+    for intro in macro_def.contract_intros:
+        val ty = intro.type_pattern ?? ""
+        out = out + "{intro.kind.len()}:{intro.kind}{intro.name_pattern.len()}:{intro.name_pattern}{ty.len()}:{ty}"
+    out = out + "]{macro_def.contract_injects.len()}["
+    for inj in macro_def.contract_injects:
+        val anchor = _macro_anchor_tag(inj.anchor)
+        val kind = _macro_code_kind_tag(inj.code_kind)
+        out = out + "{inj.label.len()}:{inj.label}{anchor}/{kind};"
+    out + "]"
+
+fn macro_def_generated_public_names(macro_def: MacroDef) -> [text]:
+    """Sorted, de-duplicated names introduced by the macro contract (patterns
+    are kept unexpanded: `{name}_handler` stays symbolic until invocation)."""
+    var names: [text] = []
+    for intro in macro_def.contract_intros:
+        names.push(intro.name_pattern)
+    _macro_sorted_unique(names)
+
+fn macro_registry_resolution_witness(registry: MacroRegistry, name: text) -> text:
+    """Positive (`hit:`) or negative (`miss:`) lookup fact for a macro name.
+    A miss is recorded so a later definition of the name invalidates it."""
+    if registry.macros.has(name):
+        "hit:{name}"
+    else:
+        "miss:{name}"

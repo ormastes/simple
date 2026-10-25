@@ -1,0 +1,71 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, flat_pool_capture_take_refs, parse_and_build_module_scoped,
+    flat_pools_clear_chunks_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_refs_v1, flat_packed_view_v1,
+    flat_packed_decode_lines_v1, SpabDigestV1, SPAB_SECTION_XREF, SPAB_SECTION_CLEARED}
+extern fn rt_file_read_text(path: text) -> text
+
+# packed_binary_ast_v1.md §2.6/§2.7 and §1.4: the cross-module reference table
+# (0x0104) is saved UNFILLED, the set-once map (0x0900) marks every reference
+# row fillable once at runtime, and custom_primitive_symbol_ids is never stored.
+val SAMPLE: text = "src/compiler/10.frontend/frontend_spab_cache_v1.spl"
+
+fn ids(source: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 16, hex: xxh3_128_text(source)),
+     SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+
+describe "packed .spab references and set-once map":
+    it "stores every imported name as an unfilled reference row":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val _m = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val refs = flat_pool_capture_take_refs()
+        expect(refs.len() > 5).to_equal(true)
+        val packed = flat_packed_encode_refs_v1(blob, trace, refs, ids(source), xxh3_128_text(SAMPLE))
+        val view = flat_packed_view_v1(packed)
+        expect(view.valid).to_equal(true)
+        expect(view.import_ref_count()).to_equal(refs.len())
+        var i = 0
+        while i < refs.len():
+            val row = view.import_ref(i)
+            expect(row.module_path).to_equal(refs[i].module_path)
+            expect(row.name).to_equal(refs[i].name)
+            expect(row.decl_index).to_equal(refs[i].decl_index)
+            expect(view.set_once_allowed(SPAB_SECTION_XREF, i)).to_equal(true)
+            i = i + 1
+        expect(view.set_once_allowed(SPAB_SECTION_XREF, refs.len())).to_equal(false)
+        expect(view.set_once_allowed(1, 0)).to_equal(false)
+        # Lossless: the pools still decode to the captured blob.
+        expect(flat_packed_decode_lines_v1(packed, flat_pools_clear_chunks_v1())).to_equal(blob)
+
+    it "never stores custom_primitive_symbol_ids (CLEAR)":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val _m = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val packed = flat_packed_encode_refs_v1(blob, trace, flat_pool_capture_take_refs(), ids(source),
+            xxh3_128_text(SAMPLE))
+        val view = flat_packed_view_v1(packed)
+        # 7 cleared pools: 2 decl mirror slots, 2 ast_gen slots, 2 env mirror
+        # slots, custom_primitive_symbol_ids.
+        expect(view.section(SPAB_SECTION_CLEARED).length / 8).to_equal(7)
+
+    it "refuses a reference row saved filled":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val _m = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val packed = flat_packed_encode_refs_v1(blob, trace, flat_pool_capture_take_refs(), ids(source),
+            xxh3_128_text(SAMPLE))
+        val xref = flat_packed_view_v1(packed).section(SPAB_SECTION_XREF)
+        var filled = packed
+        filled[xref.offset + 16] = 0u8
+        # The section checksum catches it first; either way the blob is a miss.
+        expect(flat_packed_view_v1(filled).valid).to_equal(false)

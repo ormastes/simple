@@ -19,13 +19,40 @@ ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
 RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
-MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-10}
+# Default blocking budget: 10s on an idle Linux host, scaled by a host factor
+# so a slow-but-correct gate is not turned into an ERROR by host speed alone.
+# The budget only bounds wall time -- it never changes any gate's verdict.
+# Measured 2026-10-24 on the 80-thread Windows host: push-tree-size alone
+# 8.0-11.4s and push-stage2-parent-runtime-inheritance 5.1-5.8s (git process
+# spawn is several times slower under MSYS), so every push ERRORed at 10s and
+# agents exported MUST_CHECK_PUSH_BUDGET_S=180 by hand.
+#   Windows (MINGW/MSYS/CYGWIN): x6
+#   Linux: x ceil(2 * loadavg1 / nproc), clamped to 1..6
+must_check_default_budget_s() {
+    _bf=1
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) _bf=6 ;;
+        *)
+            if [ -r /proc/loadavg ]; then
+                _bl=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+                _bn=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+                _bf=$(awk -v l="${_bl:-0}" -v n="${_bn:-1}" 'BEGIN { if (n < 1) n = 1; f = int((2 * l + n - 1) / n); if (f < 1) f = 1; if (f > 6) f = 6; print f }')
+            fi
+            ;;
+    esac
+    echo $(( 10 * _bf ))
+}
+MUST_CHECK_DEFAULT_PUSH_BUDGET_S=$(must_check_default_budget_s)
+MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-$MUST_CHECK_DEFAULT_PUSH_BUDGET_S}
 MUST_CHECK_BUDGET_MS=0
 MUST_CHECK_BUDGET_SPENT_MS=0
 MUST_CHECK_BLOCKING_RUN=0
 MUST_CHECK_BUDGET_OVERRUN=""
 TIMEOUT_BIN=""
-REMOTE_QUERY_TIMEOUT_S=3
+# ls-remote bound for base resolution. 3s was too tight: measured 0.7-1.0s
+# idle on Windows over HTTPS and well past 3s under load, and a timeout
+# made every new-branch push die "cannot verify published new-ref base".
+REMOTE_QUERY_TIMEOUT_S=${MUST_CHECK_REMOTE_QUERY_TIMEOUT_S:-15}
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -309,8 +336,94 @@ push_now_ms() {
     esac
 }
 
+# Deferred-parallel blocking gates (2026-10-24). Within run_manifest_push_gates
+# every blocking dispatch arm calls run_push_gate; while PUSH_PAR_DIR is set,
+# run_push_gate LAUNCHES the gate in the background (each under the budget
+# left at batch start) and push_gate_defer_collect waits for all of them, in
+# manifest order, applying exactly the sequential verdict rules (124/137 ->
+# budget overrun = UNKNOWN, other non-zero -> FAIL). The batch's wall time is
+# charged to the budget once. Replaces the "exactly four known rows" fast path
+# as the general case: with 8 blocking rows that path never fired and every
+# push ran sequentially (29-31s on the Windows host). Advisory rows
+# (MUST_CHECK_ADVISORY=1) stay sequential. SIMPLE_PUSH_SEQUENTIAL_GATES=1
+# disables deferral.
+PUSH_PAR_DIR=""
+push_gate_defer_begin() {
+    PUSH_PAR_DIR=""
+    [ "${SIMPLE_PUSH_SEQUENTIAL_GATES:-0}" = 1 ] && return 0
+    PUSH_PAR_DIR=$(mktemp -d) || { PUSH_PAR_DIR=""; return 0; }
+    PUSH_PAR_T0=$(push_now_ms)
+    PUSH_PAR_LEFT=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+    PUSH_PAR_N=0
+    : > "$PUSH_PAR_DIR/jobs"
+}
+push_gate_defer_launch() {  # id cmd... (blocking only)
+    _dl_id=$1; shift
+    PUSH_PAR_N=$(( PUSH_PAR_N + 1 ))
+    _dl_out="$PUSH_PAR_DIR/$PUSH_PAR_N.out"
+    if [ "$PUSH_PAR_LEFT" -le 0 ]; then
+        printf '%s\t%s\t%s\n' "$_dl_id" "-" "$_dl_out" >> "$PUSH_PAR_DIR/jobs"
+        return 0
+    fi
+    "$TIMEOUT_BIN" -k 2 "$(( PUSH_PAR_LEFT / 1000 )).$(printf '%03d' $(( PUSH_PAR_LEFT % 1000 )))" sh "$@" >"$_dl_out" 2>&1 &
+    printf '%s\t%s\t%s\n' "$_dl_id" "$!" "$_dl_out" >> "$PUSH_PAR_DIR/jobs"
+}
+push_gate_defer_abort() {
+    [ -n "$PUSH_PAR_DIR" ] || return 0
+    while IFS="$(printf '\t')" read -r _da_id _da_pid _da_out; do
+        [ "$_da_pid" = - ] || { kill "$_da_pid" 2>/dev/null; wait "$_da_pid" 2>/dev/null; }
+    done < "$PUSH_PAR_DIR/jobs"
+    rm -rf "$PUSH_PAR_DIR"; PUSH_PAR_DIR=""
+}
+push_gate_defer_collect() {
+    [ -n "$PUSH_PAR_DIR" ] || return 0
+    _dc_fail=0
+    _dc_jobs="$PUSH_PAR_DIR/jobs"
+    _dc_dir=$PUSH_PAR_DIR
+    PUSH_PAR_DIR=""
+    while IFS="$(printf '\t')" read -r _dc_id _dc_pid _dc_out; do
+        if [ "$_dc_pid" = - ]; then
+            MUST_CHECK_BUDGET_OVERRUN=$_dc_id
+            echo "push-must-check: ERROR — blocking gate $_dc_id not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+            _dc_fail=1; continue
+        fi
+        wait "$_dc_pid"; _dc_rc=$?
+        _dc_ms=$(( $(push_now_ms) - PUSH_PAR_T0 ))
+        cat "$_dc_out" 2>/dev/null
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        echo "push-must-check: gate $_dc_id exit=$_dc_rc ${_dc_ms}ms (parallel batch, budget ${MUST_CHECK_BUDGET_MS}ms)" >&2
+        case "$_dc_rc" in
+            0) : ;;
+            124|137)
+                MUST_CHECK_BUDGET_OVERRUN=$_dc_id
+                echo "push-must-check: ERROR — blocking gate $_dc_id killed at the push budget (${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                _dc_fail=1 ;;
+            *)
+                echo "push-must-check: BLOCKING gate $_dc_id failed (exit $_dc_rc)" >&2
+                _dc_fail=1 ;;
+        esac
+    done < "$_dc_jobs"
+    MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + $(push_now_ms) - PUSH_PAR_T0 ))
+    rm -rf "$_dc_dir"
+    return "$_dc_fail"
+}
+
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
+    # Fail closed with a clear ERROR when the gate script is absent from this
+    # checkout (sparse worktree). `sh <missing>` otherwise exits 127 with only
+    # a terse "No such file" line, which agents read as a broken host and
+    # route around with --no-verify.
+    if [ ! -f "$1" ]; then
+        echo "push-must-check: ERROR — gate $_gate_id not run: script $1 is missing from this checkout (sparse worktree?). Materialise scripts/ and config/ in full (git sparse-checkout add scripts config), or push from a full checkout. A missing gate is never a pass (gate verdict ERROR, push blocked)." >&2
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        [ "$_gate_blocking" = true ] && return 1
+        return 0
+    fi
+    if [ "$_gate_blocking" = true ] && [ -n "$PUSH_PAR_DIR" ]; then
+        push_gate_defer_launch "$_gate_id" "$@"
+        return 0
+    fi
     _gate_t0=$(push_now_ms)
     if [ "$_gate_blocking" = true ]; then
         _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
@@ -542,6 +655,7 @@ run_manifest_push_gates() {
         fi
     fi
 
+    push_gate_defer_begin
     while IFS="$_tab" read -r _id _blocking _mode _command; do
         case "$_id:$_mode:$_command" in
             'push-stage2-parent-runtime-inheritance:tree:sh scripts/check/check-stage2-parent-runtime-inheritance.shs')
@@ -650,6 +764,8 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-mir-transient-scope-boundary:tree:sh scripts/check/check-mir-transient-scope-boundary.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-mir-transient-scope-boundary.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-per-file-overlap-receipt:tree:sh scripts/check/check-per-file-overlap-receipt.shs --selftest')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-per-file-overlap-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-concat-nul:tree:sh scripts/check/check-runtime-concat-nul.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-concat-nul.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tcp-write-nosigpipe:tree:tcp_probe_root=$(mktemp -d) && SIMPLE_TCP_CHECK_OUT=$tcp_probe_root/probe sh scripts/check/check-tcp-write-nosigpipe.shs')
@@ -958,12 +1074,16 @@ run_manifest_push_gates() {
                 # 2 without a word, so the caller reported "one or more gates
                 # failed" after a run in which no blocking gate had failed.
                 echo "push-must-check: manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                push_gate_defer_abort
                 rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"
+    push_gate_defer_collect
+    _defer_rc=$?
     rm -f "$_push_rows"
     [ "$_advisory_skipped" -eq 0 ] ||
         echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
+    return "$_defer_rc"
 }
 
 # The manifest is read from the COMMIT being pushed, so the dispatch arms must be
@@ -1125,6 +1245,7 @@ rebased_push_published_base() {
     _rebased_lines=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" \
         refs/heads/main refs/heads/release_phase3 'refs/heads/release/*' 2>/dev/null) || return 1
     _rebased_best=""
+    _rebased_missing=""
     _rebased_best_count=""
     while read -r _rebased_sha _rebased_ref; do
         case "$_rebased_ref" in
@@ -1137,7 +1258,10 @@ rebased_push_published_base() {
             *) continue ;;
         esac
         case "$_rebased_sha" in ''|*[!0-9a-f]*) continue ;; esac
-        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || continue
+        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || {
+            _rebased_missing="$_rebased_missing ${_rebased_ref#refs/heads/}"
+            continue
+        }
         _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || continue
         [ -n "$_rebased_base" ] || continue
         [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
@@ -1150,7 +1274,10 @@ rebased_push_published_base() {
     done <<REBASED_LINES
 $_rebased_lines
 REBASED_LINES
-    [ -n "$_rebased_best" ] || return 1
+    if [ -z "$_rebased_best" ]; then
+        [ -z "$_rebased_missing" ] || echo "push-must-check: remote has newer$_rebased_missing than this clone has fetched; run git fetch first" >&2
+        return 1
+    fi
     printf '%s\n' "$_rebased_best"
 }
 
@@ -1166,7 +1293,16 @@ REBASED_LINES
 new_ref_published_base() {
     _nr_ref=$1
     _nr_tip=$2
-    case "$_nr_ref" in refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;; *) return 1 ;; esac
+    # `git push origin HEAD:refs/heads/<b>` reports the local ref as HEAD:
+    # resolve it to the checked-out branch; a detached HEAD has no upstream
+    # and takes the closest-published-line path below.
+    if [ "$_nr_ref" = HEAD ]; then
+        _nr_ref=$(git -C "$ROOT" symbolic-ref -q HEAD 2>/dev/null) || _nr_ref=HEAD
+    fi
+    case "$_nr_ref" in
+        refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;;
+        *) new_ref_closest_published_base "$_nr_tip"; return ;;
+    esac
     _nr_merge=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.merge" 2>/dev/null) || _nr_merge=""
     # `--get-all` may return several configured upstreams. Never let a mixed
     # release/main value drop into the ordinary-main fallback by accident.
@@ -1191,22 +1327,49 @@ new_ref_published_base() {
             case "$_nr_push_remote" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
             _nr_destination=${MUST_CHECK_PUSH_DESTINATION:-}
             case "$_nr_destination" in ''|-*) return 1 ;; esac
+            # A stale/forged tracking ref must never replace this live query
+            # (see --self-test-release-base); a failed query refuses, and says why.
             _nr_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" \
-                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || return 1
+                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || {
+                echo "push-must-check: ls-remote of $_nr_merge at the push destination failed or exceeded ${REMOTE_QUERY_TIMEOUT_S}s (MUST_CHECK_REMOTE_QUERY_TIMEOUT_S)" >&2
+                return 1
+            }
             _nr_sha=${_nr_line%%[[:space:]]*}
             _nr_seen_ref=${_nr_line#*[[:space:]]}
             [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
-            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || return 1
+            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || {
+                echo "push-must-check: remote has newer ${_nr_merge#refs/heads/} ($_nr_sha) than this clone has fetched; run git fetch first" >&2
+                return 1
+            }
             _nr_base=$(git -C "$ROOT" merge-base --all "$_nr_sha" "$_nr_tip") || return 1
             [ -n "$_nr_base" ] || return 1
             [ "$(printf '%s\n' "$_nr_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
             printf '%s\n' "$_nr_base"
             ;;
         *)
-            # Keep the historical main-based behavior for ordinary new refs.
-            git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            # No release upstream. With no upstream at all, base on the closest
+            # published protected line
+            # (main, release_phase3, release/*), as rebased pushes already do.
+            # Measuring a release-based branch against origin/main scanned
+            # every main..release difference and overran the push budget.
+            # Only for a branch with NO upstream at all: a configured
+            # non-release upstream (e.g. a near-match like release_phase30)
+            # keeps the historical origin/main base and must not gain release
+            # authority (--self-test-release-base).
+            if [ -z "$_nr_merge" ]; then
+                new_ref_closest_published_base "$_nr_tip"
+            else
+                git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            fi
             ;;
     esac
+}
+
+# Closest published protected line for a new ref without a usable release
+# upstream; falls back to the historical origin/main merge-base.
+new_ref_closest_published_base() {
+    rebased_push_published_base "$1" && return 0
+    git -C "$ROOT" merge-base "$1" origin/main
 }
 
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
@@ -1216,8 +1379,8 @@ new_ref_published_base() {
 case "$MUST_CHECK_PUSH_BUDGET_S" in
     ''|*[!0-9]*|0) echo "push-must-check: ERROR — nothing was checked (MUST_CHECK_PUSH_BUDGET_S must be a positive integer, got '$MUST_CHECK_PUSH_BUDGET_S')"; exit 2 ;;
 esac
-[ "$MUST_CHECK_PUSH_BUDGET_S" -eq 10 ] ||
-    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (default 10s)" >&2
+[ "$MUST_CHECK_PUSH_BUDGET_S" -eq "$MUST_CHECK_DEFAULT_PUSH_BUDGET_S" ] ||
+    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (host default ${MUST_CHECK_DEFAULT_PUSH_BUDGET_S}s)" >&2
 MUST_CHECK_BUDGET_MS=$(( MUST_CHECK_PUSH_BUDGET_S * 1000 ))
 # Tool selection (2026-09-24 fix): `command -v timeout` alone is unsafe on two
 # real hosts. (1) Stock macOS has no `timeout` at all — only Homebrew's
@@ -1362,6 +1525,16 @@ if [ "${1:-}" = --self-test-release-base ]; then
     [ "$(git -C "$ROOT" rev-list --count "$_st_release_one..$_st_tip")" -eq 1 ] || exit 2
     echo 'push-must-check: release-based new ref scans its one own commit: PASS'
 
+    # `git push origin HEAD:refs/heads/<b>` reports local ref HEAD.
+    [ "$(new_ref_published_base HEAD "$_st_tip")" = "$_st_release_one" ] || exit 2
+    echo 'push-must-check: HEAD local ref resolves to the checked-out branch: PASS'
+    # No upstream at all: base on the closest published line, not origin/main.
+    git -C "$ROOT" branch -q --unset-upstream fix/release || exit 2
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    [ "$(new_ref_published_base HEAD "$(git -C "$ROOT" rev-parse HEAD)")" = "$_st_release_one" ] || exit 2
+    git -C "$ROOT" branch -q --set-upstream-to=origin/release/1.0 fix/release || exit 2
+    echo 'push-must-check: upstream-less release-based new ref scans only its own commit: PASS'
+
     git -C "$ROOT" switch -q release/1.0
     printf 'release two\n' >> "$ROOT/release.txt"
     git -C "$ROOT" add release.txt && git -C "$ROOT" commit -qm release-two &&
@@ -1492,8 +1665,9 @@ if [ "${1:-}" = --self-test-release-base ]; then
     _st_unfetched=$(printf 'remote-only legacy\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com commit-tree "$_st_tree" -p "$_st_published_merge") || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release_phase3 "$_st_unfetched" || exit 2
     git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null && exit 2
-    new_ref_published_base refs/heads/work/legacy "$_st_own" >/dev/null 2>&1 && exit 2
-    echo 'push-must-check: unavailable published legacy commit refuses: PASS'
+    _st_err=$(new_ref_published_base refs/heads/work/legacy "$_st_own" 2>&1 >/dev/null) && exit 2
+    case "$_st_err" in *"run git fetch first"*) ;; *) exit 2 ;; esac
+    echo 'push-must-check: unavailable published legacy commit refuses and says to fetch: PASS'
 
     git -C "$ROOT" push -q origin :refs/heads/release_phase3 || exit 2
     git -C "$ROOT" update-ref refs/remotes/origin/release_phase3 "$_st_legacy" || exit 2
@@ -1583,6 +1757,29 @@ if [ "${1:-}" = --self-test ]; then
     _rc=$?
     [ "$_rc" -ne 0 ] || die "budget-exhausted gate reported success (rc=0), never a pass is required"
     [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-exhausted-fixture" ] || die "budget-exhausted gate did not record MUST_CHECK_BUDGET_OVERRUN"
+
+    # Deferred-parallel fixtures: the batch must apply the sequential verdict
+    # rules -- a failing, a budget-killed, and an all-pass batch.
+    printf '#!/bin/sh\nexit 1\n' > "$_tmp/fail-gate.shs"
+    MUST_CHECK_BUDGET_MS=5000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    [ -n "$PUSH_PAR_DIR" ] || die "deferred batch did not start"
+    run_push_gate "par-pass" true "$_tmp/fast-gate.shs" || die "deferred launch returned non-zero"
+    run_push_gate "par-fail" true "$_tmp/fail-gate.shs" || die "deferred launch returned non-zero"
+    push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a failing gate passed"
+    MUST_CHECK_BUDGET_MS=1000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    run_push_gate "par-slow" true "$_tmp/slow-gate.shs"
+    run_push_gate "par-pass" true "$_tmp/fast-gate.shs"
+    push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a budget-killed gate passed"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "par-slow" ] || die "deferred overrun did not name the killed gate"
+    MUST_CHECK_BUDGET_MS=5000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    push_gate_defer_begin
+    run_push_gate "par-a" true "$_tmp/fast-gate.shs"
+    run_push_gate "par-b" true "$_tmp/fast-gate.shs"
+    push_gate_defer_collect >/dev/null 2>&1 || die "all-pass deferred batch failed"
+    [ "$MUST_CHECK_BUDGET_SPENT_MS" -gt 0 ] || die "deferred batch did not charge the budget"
+    MUST_CHECK_BUDGET_MS=500; MUST_CHECK_BUDGET_SPENT_MS=500; MUST_CHECK_BUDGET_OVERRUN=""
 
     # Awk dispatcher parity fixture (review finding item2#4ii): a push-blocking
     # manifest row whose `id:mode:command` key matches no exact arm in the

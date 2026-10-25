@@ -1,0 +1,518 @@
+# P4 static-AOP directory match cache contract (P1 piece).
+#
+# doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md
+# sections 3.2 (DirFactsKey / PointcutMatchKey / AdviceApplyKey), 5 and 11
+# (A-01..A-04).
+#
+# Pure DTO + key + match contract. No filesystem, no locks, no leases: every
+# value is immutable, the match cache is a persistent value (insert returns a
+# new cache), and publication/single-flight belong to the driver
+# (80.driver/cache/daemon/cache_single_flight_v1.spl). Keys are SHA-256 over
+# domain-separated, length-framed canonical text; any xxh3 index over them is
+# an in-memory accelerator only (80.driver/cache/id_scope_v1.spl).
+#
+# Selection is split from implementation: PointcutMatchKey never reads the
+# advice body, AdviceApplyKey does. Selectors are boolean `!`/`&`/`|` over
+# atoms this file can evaluate completely from directory facts; anything else
+# is `supported = false`. Negation and recursive `within` need the complete
+# candidate universe (pointcut_match_universe_v1). Only static `before`/`after`
+# advice is cacheable; everything else stays on the existing weave path, which
+# still re-checks the live forwarder shape (35.semantics/aspect_weave.spl).
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, HASH_ALGO_SHA256_V1,
+    DIGEST_SET_MATCH_V1, digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok,
+    digest_set_match_v1}
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1,
+    active_guard_root_admissible_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, SemanticQueryReadV1}
+
+pub struct JoinPointFactV1:
+    id: text
+    kind: text
+    symbol: text
+    attrs: [text]
+    owner_file: text
+    base_body_digest: text
+
+pub struct DirectoryJoinPointFactsV1:
+    scope_id: text
+    sorted_member_files: [text]
+    sorted_join_points: [JoinPointFactV1]
+    sorted_child_roots: [text]
+    complete: bool
+    negative_root: text
+    active_guard_root: text
+    facts_key: text
+
+pub struct PointcutSelNodeV1:
+    op: text
+    form: text
+    operand: text
+    left: i64
+    right: i64
+
+pub struct PointcutSelectorV1:
+    source: text
+    form: text
+    operand: text
+    supported: bool
+    nodes: [PointcutSelNodeV1]
+    root: i64
+    needs_universe: bool
+    selector_digest: text
+
+pub struct PointcutMatchShardV1:
+    selector_digest: text
+    dir_facts_key: text
+    sorted_matching_ids: [text]
+    complete: bool
+    match_digest: text
+
+pub struct AdviceFacetsV1:
+    advice_fn: text
+    mode: text
+    activation: text
+    signature_digest: text
+    effects_digest: text
+    body_digest: text
+    order: i64
+
+pub struct PointcutMatchCacheV1:
+    shards: Dict<text, PointcutMatchShardV1>
+    computations: i64
+
+pub struct PointcutMatchAcquireV1:
+    cache: PointcutMatchCacheV1
+    key: text
+    shard: PointcutMatchShardV1
+    hit: bool
+    cacheable: bool
+
+pub struct WeavePlanDeltaV1:
+    weave: [text]
+    unweave: [text]
+    reweave: [text]
+    reuse: [text]
+
+fn _h(domain: text, parts: [text]) -> text:
+    var framed = "{domain}\u0000"
+    for p in parts:
+        framed = framed + "{p.len()}:{p}\u0000"
+    _sha256_digest(sha256_u8_hex(text_to_bytes(framed)))
+
+fn _sorted_texts(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1] > v:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _sorted_points(values: [JoinPointFactV1]) -> [JoinPointFactV1]:
+    var out: [JoinPointFactV1] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1].id > v.id:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _join(values: [text]) -> text:
+    var s = ""
+    for v in values:
+        s = s + "{v.len()}:{v};"
+    s
+
+fn _point_fact_text(p: JoinPointFactV1) -> text:
+    # Selector-visible facts only; the base body digest is an AdviceApplyKey
+    # input, so a body-only edit cannot dirty the match shard.
+    "{p.id}|{p.kind}|{p.symbol}|{p.owner_file}|{_join(_sorted_texts(p.attrs))}"
+
+# Negative/completeness witness: the full sorted id universe of this scope.
+# Any add/delete/rename changes it even when no old positive match existed.
+fn _negative_root(scope_id: text, files: [text], points: [JoinPointFactV1], complete: bool) -> text:
+    var ids: [text] = []
+    for p in points:
+        ids.push(p.id)
+    _h("aop-dir-negative/v1", [scope_id, _join(files), _join(ids), "{complete}"])
+
+pub fn directory_facts_key_v1(f: DirectoryJoinPointFactsV1) -> text:
+    var facts: [text] = []
+    for p in f.sorted_join_points:
+        facts.push(_point_fact_text(p))
+    _h("aop-dir-facts/v1", [f.scope_id, _join(f.sorted_member_files), _join(facts),
+        _join(f.sorted_child_roots), f.negative_root, f.active_guard_root, "{f.complete}"])
+
+# No static guard consulted: equivalent to an empty, complete ActiveGuardRoot.
+# Callers whose join points depend on `@when`/cfg/feature use the guarded form.
+pub fn directory_join_point_facts_v1(scope_id: text, member_files: [text],
+        join_points: [JoinPointFactV1], child_roots: [text], complete: bool) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_guarded_v1(scope_id, member_files, join_points, child_roots,
+        complete, active_guard_root_empty_v1(""))
+
+# ActiveGuardRoot enters the facts key; an incomplete (unevaluable-guard) root
+# makes the facts incomplete, so its shards are never admitted (miss).
+pub fn directory_join_point_facts_guarded_v1(scope_id: text, member_files: [text],
+        join_points: [JoinPointFactV1], child_roots: [text], inventory_complete: bool,
+        guards: ActiveGuardRootV1) -> DirectoryJoinPointFactsV1:
+    val complete = inventory_complete and active_guard_root_admissible_v1(guards)
+    val files = _sorted_texts(member_files)
+    val points = _sorted_points(join_points)
+    val f = DirectoryJoinPointFactsV1(scope_id: scope_id, sorted_member_files: files,
+        sorted_join_points: points, sorted_child_roots: _sorted_texts(child_roots),
+        complete: complete, negative_root: _negative_root(scope_id, files, points, complete),
+        active_guard_root: guards.root_digest, facts_key: "")
+    DirectoryJoinPointFactsV1(..f, facts_key: directory_facts_key_v1(f))
+
+fn _is_ident(s: text) -> bool:
+    if s.len() == 0: return false
+    for ch in s.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+            (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok: return false
+    true
+
+fn _is_path(s: text) -> bool:
+    if s.len() == 0: return false
+    for ch in s.chars():
+        val ok = _is_ident(ch) or ch == "." or ch == "/" or ch == "*"
+        if not ok: return false
+    true
+
+fn _node(op: text, form: text, operand: text, left: i64, right: i64) -> PointcutSelNodeV1:
+    PointcutSelNodeV1(op: op, form: form, operand: operand, left: left, right: right)
+
+struct _SelParseV1:
+    nodes: [PointcutSelNodeV1]
+    node: i64
+    pos: i64
+    ok: bool
+
+fn _skip_ws(cs: [text], pos: i64) -> i64:
+    var p = pos
+    while p < cs.len() and cs[p] == " ":
+        p = p + 1
+    p
+
+fn _fail(nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
+    _SelParseV1(nodes: nodes, node: -1, pos: pos, ok: false)
+
+fn _push(nodes: [PointcutSelNodeV1], n: PointcutSelNodeV1, pos: i64) -> _SelParseV1:
+    var out = nodes
+    out.push(n)
+    _SelParseV1(nodes: out, node: out.len() - 1, pos: pos, ok: true)
+
+fn _parse_atom(cs: [text], nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
+    var p = _skip_ws(cs, pos)
+    var word = ""
+    while p < cs.len() and _is_ident(cs[p]):
+        word = word + cs[p]
+        p = p + 1
+    if word == "": return _fail(nodes, p)
+    val q = _skip_ws(cs, p)
+    if q >= cs.len() or cs[q] != "(":
+        return _push(nodes, _node("atom", "exact", word, -1, -1), p)
+    var r = q + 1
+    var arg = ""
+    while r < cs.len() and cs[r] != ")":
+        if cs[r] != " ": arg = arg + cs[r]
+        r = r + 1
+    if r >= cs.len(): return _fail(nodes, r)
+    val after = r + 1
+    if word == "execution":
+        if arg.ends_with("*") and _is_ident(arg.slice(0, arg.len() - 1)):
+            return _push(nodes, _node("atom", "prefix", arg.slice(0, arg.len() - 1), -1, -1), after)
+        if _is_ident(arg): return _push(nodes, _node("atom", "exact", arg, -1, -1), after)
+        return _fail(nodes, after)
+    if word == "attr":
+        if _is_ident(arg): return _push(nodes, _node("atom", "attr", arg, -1, -1), after)
+        return _fail(nodes, after)
+    if word == "within":
+        if not _is_path(arg): return _fail(nodes, after)
+        var path = arg.replace(".", "/")
+        var form = "within"
+        if path.ends_with("/*"):
+            path = path.slice(0, path.len() - 2)
+            form = "within_tree"
+        elif path.ends_with("*"):
+            return _fail(nodes, after)
+        if path == "" or path.contains("*"): return _fail(nodes, after)
+        return _push(nodes, _node("atom", form, path, -1, -1), after)
+    # call(), args(), target(), cflow(), ...: not enumerable from static facts.
+    _fail(nodes, after)
+
+fn _parse_unary(cs: [text], nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
+    val p = _skip_ws(cs, pos)
+    if p < cs.len() and cs[p] == "!":
+        val inner = _parse_unary(cs, nodes, p + 1)
+        if not inner.ok: return inner
+        return _push(inner.nodes, _node("not", "", "", inner.node, -1), inner.pos)
+    if p < cs.len() and cs[p] == "(":
+        val inner = _parse_or(cs, nodes, p + 1)
+        if not inner.ok: return inner
+        val q = _skip_ws(cs, inner.pos)
+        if q >= cs.len() or cs[q] != ")": return _fail(inner.nodes, q)
+        return _SelParseV1(nodes: inner.nodes, node: inner.node, pos: q + 1, ok: true)
+    _parse_atom(cs, nodes, p)
+
+fn _parse_and(cs: [text], nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
+    var acc = _parse_unary(cs, nodes, pos)
+    while acc.ok:
+        val p = _skip_ws(cs, acc.pos)
+        if p >= cs.len() or cs[p] != "&": return acc
+        val rhs = _parse_unary(cs, acc.nodes, p + 1)
+        if not rhs.ok: return rhs
+        acc = _push(rhs.nodes, _node("and", "", "", acc.node, rhs.node), rhs.pos)
+    acc
+
+fn _parse_or(cs: [text], nodes: [PointcutSelNodeV1], pos: i64) -> _SelParseV1:
+    var acc = _parse_and(cs, nodes, pos)
+    while acc.ok:
+        val p = _skip_ws(cs, acc.pos)
+        if p >= cs.len() or cs[p] != "|": return acc
+        val rhs = _parse_and(cs, acc.nodes, p + 1)
+        if not rhs.ok: return rhs
+        acc = _push(rhs.nodes, _node("or", "", "", acc.node, rhs.node), rhs.pos)
+    acc
+
+fn _canon(nodes: [PointcutSelNodeV1], i: i64) -> text:
+    val n = nodes[i]
+    if n.op == "atom": return "{n.form}({n.operand.len()}:{n.operand})"
+    if n.op == "not": return "not({_canon(nodes, n.left)})"
+    "{n.op}({_canon(nodes, n.left)},{_canon(nodes, n.right)})"
+
+fn _needs_universe(nodes: [PointcutSelNodeV1]) -> bool:
+    for n in nodes:
+        if n.op == "not" or n.form == "within_tree": return true
+    false
+
+# `!`, `&`, `|`, parentheses over `execution(name|prefix*)`, `attr(name)`,
+# `within(dir)`, `within(dir.*)` and bare exact names. A selector with any
+# other atom or a malformed expression is `supported = false` (fail closed).
+pub fn pointcut_selector_parse_v1(source: text) -> PointcutSelectorV1:
+    val cs = source.trim().chars()
+    val r = _parse_or(cs, [], 0)
+    val ok = r.ok and _skip_ws(cs, r.pos) == cs.len()
+    if not ok:
+        return PointcutSelectorV1(source: source, form: "unsupported", operand: source.trim(),
+            supported: false, nodes: [], root: -1, needs_universe: true,
+            selector_digest: _h("aop-selector/v1", ["unsupported", source.trim()]))
+    val root = r.nodes[r.node]
+    var form = "expr"
+    var operand = _canon(r.nodes, r.node)
+    if root.op == "atom":
+        form = root.form
+        operand = root.operand
+    PointcutSelectorV1(source: source, form: form, operand: operand, supported: true,
+        nodes: r.nodes, root: r.node, needs_universe: _needs_universe(r.nodes),
+        selector_digest: _h("aop-selector/v1", [_canon(r.nodes, r.node)]))
+
+fn _dir_of(path: text) -> text:
+    val i = path.rfind("/")
+    if i == nil: return ""
+    path.slice(0, i!)
+
+fn _node_matches(nodes: [PointcutSelNodeV1], i: i64, p: JoinPointFactV1) -> bool:
+    val n = nodes[i]
+    if n.op == "not": return not _node_matches(nodes, n.left, p)
+    if n.op == "and": return _node_matches(nodes, n.left, p) and _node_matches(nodes, n.right, p)
+    if n.op == "or": return _node_matches(nodes, n.left, p) or _node_matches(nodes, n.right, p)
+    if n.form == "exact": return p.symbol == n.operand
+    if n.form == "prefix": return p.symbol.starts_with(n.operand)
+    if n.form == "attr": return p.attrs.contains(n.operand)
+    if n.form == "within": return _dir_of(p.owner_file) == n.operand
+    if n.form == "within_tree":
+        val d = _dir_of(p.owner_file)
+        return d == n.operand or d.starts_with(n.operand + "/")
+    false
+
+fn _selector_matches(sel: PointcutSelectorV1, p: JoinPointFactV1) -> bool:
+    if not sel.supported or p.kind != "forward": return false
+    _node_matches(sel.nodes, sel.root, p)
+
+pub fn pointcut_match_key_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
+    _h("aop-match/v1", [sel.selector_digest, f.facts_key])
+
+pub fn pointcut_match_shard_compute_v1(sel: PointcutSelectorV1,
+        f: DirectoryJoinPointFactsV1) -> PointcutMatchShardV1:
+    var ids: [text] = []
+    for p in f.sorted_join_points:
+        if _selector_matches(sel, p):
+            ids.push(p.id)
+    val complete = sel.supported and f.complete
+    PointcutMatchShardV1(selector_digest: sel.selector_digest, dir_facts_key: f.facts_key,
+        sorted_matching_ids: ids, complete: complete,
+        match_digest: _h("aop-match-result/v1", [sel.selector_digest, f.facts_key, _join(ids),
+            "{complete}"]))
+
+pub fn pointcut_match_cache_new_v1() -> PointcutMatchCacheV1:
+    PointcutMatchCacheV1(shards: {}, computations: 0)
+
+# Reuse an admitted shard for the exact (selector, facts) key; otherwise
+# compute it. Incomplete inventories and unsupported selectors are computed
+# but never admitted (`cacheable = false`) so the caller keeps the existing
+# fallback. Returns a new cache value; the input cache is never mutated.
+pub fn pointcut_match_cache_acquire_v1(cache: PointcutMatchCacheV1, sel: PointcutSelectorV1,
+        f: DirectoryJoinPointFactsV1) -> PointcutMatchAcquireV1:
+    val key = pointcut_match_key_v1(sel, f)
+    val cacheable = sel.supported and f.complete and aop_digest_known_v1(sel.selector_digest) and
+        aop_digest_known_v1(f.facts_key)
+    if cacheable and cache.shards.contains_key(key):
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: cache.shards[key],
+            hit: true, cacheable: true)
+    val shard = pointcut_match_shard_compute_v1(sel, f)
+    if not cacheable:
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: shard, hit: false,
+            cacheable: false)
+    var shards: Dict<text, PointcutMatchShardV1> = {}
+    for k in cache.shards.keys():
+        shards[k] = cache.shards[k]
+    shards[key] = shard
+    PointcutMatchAcquireV1(
+        cache: PointcutMatchCacheV1(shards: shards, computations: cache.computations + 1),
+        key: key, shard: shard, hit: false, cacheable: true)
+
+pub fn aspect_advice_mode_cacheable_v1(mode: text, activation: text) -> bool:
+    activation == "static" and (mode == "before" or mode == "after")
+
+# Weave identity of one matched join point: match result, ordered advice
+# signature/effects/body, and the immutable BASE body of the join point.
+pub fn advice_apply_key_v1(match_digest: text, advice: AdviceFacetsV1,
+        base_body_digest: text) -> text:
+    _h("aop-apply/v1", [match_digest, advice.advice_fn, advice.mode, advice.activation,
+        advice.signature_digest, advice.effects_digest, advice.body_digest, "{advice.order}",
+        base_body_digest])
+
+# old ∪ new is the minimum invalidation set: old-only ids are unwoven,
+# new-only woven, intersection reused only when its apply key is unchanged.
+pub fn aspect_weave_plan_delta_v1(old_shard: PointcutMatchShardV1, old_apply: Dict<text, text>,
+        new_shard: PointcutMatchShardV1, new_apply: Dict<text, text>) -> WeavePlanDeltaV1:
+    var weave: [text] = []
+    var unweave: [text] = []
+    var reweave: [text] = []
+    var reuse: [text] = []
+    for id in old_shard.sorted_matching_ids:
+        if not new_shard.sorted_matching_ids.contains(id):
+            unweave.push(id)
+    for id in new_shard.sorted_matching_ids:
+        if not old_shard.sorted_matching_ids.contains(id):
+            weave.push(id)
+        elif old_apply.contains_key(id) and new_apply.contains_key(id) and
+                old_apply[id] == new_apply[id]:
+            reuse.push(id)
+        else:
+            reweave.push(id)
+    WeavePlanDeltaV1(weave: weave, unweave: unweave, reweave: reweave, reuse: reuse)
+
+export JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1, PointcutMatchShardV1
+export AdviceFacetsV1, PointcutMatchCacheV1, PointcutMatchAcquireV1, WeavePlanDeltaV1
+export directory_join_point_facts_guarded_v1
+export directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1
+export pointcut_match_key_v1, pointcut_match_shard_compute_v1
+export pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1
+export aspect_advice_mode_cacheable_v1, advice_apply_key_v1, aspect_weave_plan_delta_v1
+
+# Forward reads in the .rr schema v2 vocabulary (reverse_reference_projection_v2:
+# aop.directory_facts -> "directory-scope", aop.match -> "aop-match-membership").
+# Two reads per shard: the match query's membership read of the directory facts
+# (witness = negative root, so add/delete/rename reaches it) and the weave
+# query's positive read of the match result.
+pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1,
+        shard: PointcutMatchShardV1, profile_digest: text) -> [SemanticQueryReadV1]:
+    # The v1 read manifest carries bare SHA-256 hex (its implied algorithm).
+    # Any other algorithm emits no reads, so the consumer sees no coverage
+    # (conservative), never a mislabelled digest.
+    val all = [f.facts_key, f.negative_root, shard.match_digest, sel.selector_digest]
+    for d in all:
+        if not _is_sha256(d): return []
+    var coverage = SemanticCoverageV1.Conservative
+    if shard.complete: coverage = SemanticCoverageV1.Complete
+    val facts_q = SemanticQueryKeyV1(kind: "aop.directory_facts", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(f.facts_key))
+    val match_q = SemanticQueryKeyV1(kind: "aop.match", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(pointcut_match_key_v1(sel, f)))
+    val weave_q = SemanticQueryKeyV1(kind: "aop.weave", stable_entity_id: f.scope_id,
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(shard.match_digest))
+    [SemanticQueryReadV1(producer: facts_q, consumer: match_q, facet: "membership:join-points",
+        ordinal: 0, consumed_fingerprint: _hex(f.facts_key), witness_digest: _hex(f.negative_root),
+        partition_id: f.scope_id, completeness: coverage),
+     SemanticQueryReadV1(producer: match_q, consumer: weave_q, facet: "aop-match",
+        ordinal: 1, consumed_fingerprint: _hex(shard.match_digest), witness_digest: _hex(sel.selector_digest),
+        partition_id: f.scope_id, completeness: coverage)]
+
+export aspect_match_forward_reads_v1
+
+pub struct PointcutUniverseMatchV1:
+    sorted_matching_ids: [text]
+    complete: bool
+    reason: text
+
+# Cross-directory evaluation: the union of per-directory matches. Per-shard
+# results are exact for each complete directory (negation is evaluated over
+# that directory's full inventory), but a selector that needs the universe
+# (`!`, `within(x.*)`) is only complete when the caller proves the directory
+# list is the whole candidate universe; otherwise the result is conservative
+# and must not authorize skipping a weave.
+pub fn pointcut_match_universe_v1(sel: PointcutSelectorV1, dirs: [DirectoryJoinPointFactsV1],
+        universe_complete: bool) -> PointcutUniverseMatchV1:
+    var ids: [text] = []
+    var reason = ""
+    if not sel.supported: reason = "unsupported-selector"
+    for f in dirs:
+        if not f.complete and reason == "": reason = "incomplete-directory:{f.scope_id}"
+        for id in pointcut_match_shard_compute_v1(sel, f).sorted_matching_ids:
+            ids.push(id)
+    if reason == "" and sel.needs_universe and not universe_complete:
+        reason = "universe-incomplete"
+    PointcutUniverseMatchV1(sorted_matching_ids: _sorted_texts(ids), complete: reason == "",
+        reason: reason)
+
+export PointcutSelNodeV1, PointcutUniverseMatchV1, pointcut_match_universe_v1
+
+# Hash agility: every digest here is DigestV1 text `<algo>:<hex>` from the
+# shared registry (cache_contract/hash_algorithm_registry_v1). Persisted
+# identity requires a collision-resistant algorithm; an unknown or fast-class
+# digest is ABSENT: never a match, never cacheable. This producer writes sha256.
+fn _sha256_digest(hex: text) -> text:
+    match digest_v1_new(HASH_ALGO_SHA256_V1, hex):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
+
+fn _is_sha256(d: text) -> bool:
+    match digest_v1_parse(d):
+        case Some(v): v.algo_id == HASH_ALGO_SHA256_V1
+        case nil: false
+
+fn _hex(d: text) -> text:
+    match digest_v1_parse(d):
+        case Some(v): v.hex
+        case nil: ""
+
+pub fn aop_digest_known_v1(d: text) -> bool:
+    match digest_v1_parse(d):
+        case Some(v): digest_v1_identity_ok(v)
+        case nil: false
+
+fn _parse_set(values: [text]) -> [DigestV1]:
+    var out: [DigestV1] = []
+    for x in values:
+        match digest_v1_parse(x):
+            case Some(v): out.push(v)
+            case nil: pass
+    out
+
+# 1..3 digests per identity; registry negotiation over identity-class
+# algorithms only (no common known algorithm => miss).
+pub fn aop_digest_tables_match_v1(a: [text], b: [text]) -> bool:
+    if a.len() == 0 or a.len() > 3 or b.len() == 0 or b.len() > 3: return false
+    digest_set_match_v1(_parse_set(a), _parse_set(b), true) == DIGEST_SET_MATCH_V1
+
+export aop_digest_known_v1, aop_digest_tables_match_v1

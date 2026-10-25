@@ -146,9 +146,7 @@ impl TypeMapper for VulkanTypeMapper:
         val (major, _) = self.vulkan_version
         major == major
 
-impl VulkanTypeMapper:
-    # === SPIR-V-specific methods ===
-
+    # @workaround bug=trait_default_inherent_override_duplicate_symbol_2026-10-24 reason=inherent-impl override of a trait default emitted a duplicate Owner::method body; moved into the trait impl
     fn map_struct(fields: [(text, MirType)]) -> text:
         """
         Map struct type to SPIR-V representation.
@@ -166,16 +164,6 @@ impl VulkanTypeMapper:
         """
         val elem_ty = self.map_type(element)
         "OpTypeArray {elem_ty} {size}"
-
-    fn map_runtime_array(element: MirType) -> text:
-        """
-        Map runtime array (unsized) to SPIR-V representation.
-
-        SPIR-V: OpTypeRuntimeArray element_type
-        Used for SSBOs with dynamic size.
-        """
-        val elem_ty = self.map_type(element)
-        "OpTypeRuntimeArray {elem_ty}"
 
     fn map_tuple(elements: [MirType]) -> text:
         """
@@ -198,6 +186,99 @@ impl VulkanTypeMapper:
         val param_types = params.map(self.map_type(_))
         val ret_type = self.map_type(ret)
         "OpTypeFunction {ret_type} {param_types.join(' ')}"
+
+    fn size_of(ty: MirType) -> i64:
+        """
+        Get size in bytes of a type (Vulkan std430 layout rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Unit: 0
+            case Ptr(_, _): 8  # 64-bit logical pointers
+            case Struct(sym):
+                # std430 layout with padding; fields come from the module type table.
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var offset = 0
+                            for f in fields:
+                                val align = self.align_of(f.type_)
+                                offset = ((offset + align - 1) / align) * align
+                                offset = offset + self.size_of(f.type_)
+                            offset
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
+            case Array(elem, size):
+                val elem_size = self.size_of(elem)
+                val elem_align = self.align_of(elem)
+                val stride = ((elem_size + elem_align - 1) / elem_align) * elem_align
+                stride * size
+            case Tuple(elements):
+                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                var elements_size: i64 = 0
+                for element in elements:
+                    elements_size = elements_size + self.size_of(element)
+                elements_size
+            case _:
+                panic("Cannot compute size of {ty}")
+
+    fn align_of(ty: MirType) -> i64:
+        """
+        Get alignment in bytes of a type (Vulkan std430 layout rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64 | Ptr(_, _): 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Struct(sym):
+                # Struct alignment is largest member alignment.
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var max_align = 1
+                            for field in fields:
+                                val alignment = self.align_of(field.type_)
+                                if alignment > max_align:
+                                    max_align = alignment
+                            max_align
+                        case _: 8
+                else:
+                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
+                    8
+            case Array(elem, _):
+                # Array alignment is element alignment (std430)
+                self.align_of(elem)
+            case Tuple(elements):
+                var max_align = 1
+                for element in elements:
+                    val alignment = self.align_of(element)
+                    if alignment > max_align:
+                        max_align = alignment
+                max_align
+            case _:
+                1
+
+impl VulkanTypeMapper:
+    # === SPIR-V-specific methods ===
+
+    fn map_runtime_array(element: MirType) -> text:
+        """
+        Map runtime array (unsized) to SPIR-V representation.
+
+        SPIR-V: OpTypeRuntimeArray element_type
+        Used for SSBOs with dynamic size.
+        """
+        val elem_ty = self.map_type(element)
+        "OpTypeRuntimeArray {elem_ty}"
 
     fn map_image_type(dim: SpirvImageDim, sampled: bool, depth: bool) -> text:
         """
@@ -297,88 +378,6 @@ impl VulkanTypeMapper:
         Varies by vendor: NVIDIA=32, AMD=32/64, Intel=8-32.
         """
         32  # Conservative default
-
-    # === Size and alignment (SPIR-V/Vulkan rules) ===
-
-    fn size_of(ty: MirType) -> i64:
-        """
-        Get size in bytes of a type (Vulkan std430 layout rules).
-        """
-        match ty.kind:
-            case I64 | U64 | F64: 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
-            case Unit: 0
-            case Ptr(_, _): 8  # 64-bit logical pointers
-            case Struct(sym):
-                # std430 layout with padding; fields come from the module type table.
-                if self.type_defs.contains_key(sym):
-                    val type_def: MirTypeDef = self.type_defs[sym]
-                    match type_def.kind:
-                        case MirTypeDefKind.Struct(fields):
-                            var offset = 0
-                            for f in fields:
-                                val align = self.align_of(f.type_)
-                                offset = ((offset + align - 1) / align) * align
-                                offset = offset + self.size_of(f.type_)
-                            offset
-                        case _: 8
-                else:
-                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
-                    # symbol absent from the table: legacy pointer-passed slot
-                    8
-            case Array(elem, size):
-                val elem_size = self.size_of(elem)
-                val elem_align = self.align_of(elem)
-                val stride = ((elem_size + elem_align - 1) / elem_align) * elem_align
-                stride * size
-            case Tuple(elements):
-                # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
-                var elements_size: i64 = 0
-                for element in elements:
-                    elements_size = elements_size + self.size_of(element)
-                elements_size
-            case _:
-                panic("Cannot compute size of {ty}")
-
-    fn align_of(ty: MirType) -> i64:
-        """
-        Get alignment in bytes of a type (Vulkan std430 layout rules).
-        """
-        match ty.kind:
-            case I64 | U64 | F64 | Ptr(_, _): 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
-            case Struct(sym):
-                # Struct alignment is largest member alignment.
-                if self.type_defs.contains_key(sym):
-                    val type_def: MirTypeDef = self.type_defs[sym]
-                    match type_def.kind:
-                        case MirTypeDefKind.Struct(fields):
-                            var max_align = 1
-                            for field in fields:
-                                val alignment = self.align_of(field.type_)
-                                if alignment > max_align:
-                                    max_align = alignment
-                            max_align
-                        case _: 8
-                else:
-                    # @workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24
-                    8
-            case Array(elem, _):
-                # Array alignment is element alignment (std430)
-                self.align_of(elem)
-            case Tuple(elements):
-                var max_align = 1
-                for element in elements:
-                    val alignment = self.align_of(element)
-                    if alignment > max_align:
-                        max_align = alignment
-                max_align
-            case _:
-                1
 
 # ============================================================================
 # SPIR-V Support Types

@@ -77,6 +77,15 @@ val CL_LINKAGE_EXPORT: i64 = 0
 val CL_LINKAGE_IMPORT: i64 = 1
 val CL_LINKAGE_LOCAL: i64 = 2
 val CL_LINKAGE_HIDDEN: i64 = 3
+# Module-scoped mono instance (`MirFunction.is_comdat`): every requesting object
+# carries its own copy and the linker keeps one -- the cranelift analogue of the
+# `linkonce_odr` + `comdat any` MirToLlvm emits. The SFFI places it in a
+# COMDAT(any) group (ELF: weak in a group; COFF: IMAGE_COMDAT_SELECT_ANY) or,
+# on Mach-O, marks it N_WEAK_DEF. See comdat_instance_linkage in cranelift_sffi.rs.
+val CL_LINKAGE_COMDAT: i64 = 4
+
+fn cranelift_function_linkage(func: MirFunction) -> i64:
+    if func.is_comdat: CL_LINKAGE_COMDAT else: CL_LINKAGE_EXPORT
 val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
 
 # Takes the MirStatic (both callers pass one): the original signature took a
@@ -180,7 +189,7 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         val emit_name = cl_function_emit_name(func.name)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
-        val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
+        val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
         func_handles[func.name] = handle
 
     for func in module.functions.values():
@@ -241,7 +250,7 @@ impl Codegen for CraneliftCodegenAdapter:
         for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
             val emit_name = cl_function_emit_name(func.name)
-            val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
+            val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
             func_handles[func.name] = handle
 
         # Second pass: compile each function
@@ -882,6 +891,18 @@ fn cl_translate_instruction(
                 val continuation = cranelift_create_block(ctx)
                 cranelift_switch_to_block(ctx, continuation)
 
+        case Ref(dest, _, place):
+            # A borrow (`&x` / `&mut x`) lowers to the identity on the borrowed
+            # place's value, exactly as the LLVM backend's llvm_ref_impl does
+            # (and with the same Copy store discipline). Missing here, the
+            # catch-all panicked and aborted MIR shard workers in codegen.
+            # See doc/08_tracking/bug/cranelift_ref_unlowered_shard_abort_2026-10-24.md
+            val src_val = load_local(ctx, place.local.id, value_map, slot_map, func)
+            value_map[dest.id] = src_val
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+                val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
+                cranelift_store(ctx, src_val, addr, 0)
+
         case Nop:
             ()
 
@@ -1517,6 +1538,28 @@ fn cl_translate_call(
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     if name == "rt_process_spawn_guarded":
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_spawn_guarded_value", arg_vals)
+                    # Process-run owners return a registered SplArray, but
+                    # MIR destructures the (text, text, int) result by
+                    # loading words 0/8/16 of the handle -- which read the
+                    # array header (status came back as its capacity, 4).
+                    # Use the runtime_native.c *_tuple facades the LLVM lane
+                    # already uses: same (ptr, len, args, ...) words, raw
+                    # 3-word result block with slot 2 untagged. Arity is the
+                    # post-split word count (cmd = ptr + len), like the MIR guard.
+                    if name == "rt_process_run" and arg_vals.len() == 3:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_tuple", arg_vals)
+                    if name == "rt_process_run_bounded" and arg_vals.len() == 5:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_bounded_tuple", arg_vals)
+                    if name == "rt_process_run_timeout" and arg_vals.len() == 4:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_timeout_tuple", arg_vals)
+                    if name == "rt_process_run_owned_observed_bounded_value" and arg_vals.len() == 5:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_owned_observed_bounded_text", arg_vals)
+                    if name == "rt_process_run_bounded_bytes" and arg_vals.len() == 5:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_run_bounded_bytes_tuple", arg_vals)
+                    # rt_cpuid_tuple returns a registered 4-tuple of tagged
+                    # ints; the raw-block twin holds the untagged registers.
+                    if name == "rt_cpuid_tuple" and arg_vals.len() == 2:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_cpuid_tuple_block", arg_vals)
                     if name == "rt_env_get" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_env_get_value", arg_vals)
                     # MIR currently represents compiler-generated collection

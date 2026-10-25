@@ -4,6 +4,15 @@
 
 ## Status
 
+> Superseded 2026-10-25: implementation is no longer wholly pending. V1 contracts
+> (`EnvironmentSnapshotV1`, `VariantDescriptorV1`, `BindingPlanV1`,
+> `FrontendFacetV1`) and the composite selector/publication owner are source-landed
+> (`src/compiler/00.common/structural_contracts/environment_variant_*`,
+> `src/compiler/80.driver/environment_composite_publication_owner_v1.spl`,
+> `src/lib/nogc_sync_mut/composition/environment_variants/`). Executed provider
+> evidence, ABI publication, and the system spec bodies remain open (PARTIAL). See
+> `doc/03_plan/compiler/environment_optimized_dynamic_libraries.md` § "Status update 2026-10-25".
+
 **Selected design direction: Feature A + NFR N2 + target registry B + inspector input 1; implementation evidence is pending.** This
 document refines the research in
 `doc/01_research/compiler/simd/simple_environment_optimized_dynamic_libraries_2026-09-07.md`.

@@ -36,12 +36,21 @@ use compiler.core.parser.{parser_promote_transient_owners, parser_initialization
 use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
 use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
+    worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
+    worker_surface_restrict_claims_v1, worker_surface_text_v1,
+    worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
+    worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
 }
-use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses,
+    frontend_cache_native_digest_unavailable}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
@@ -66,6 +75,7 @@ use compiler.driver.driver_log_helpers.{
     log_module_surface_stage,
     log_build_progress
 }
+use compiler.driver.driver_cache_scope_policy_v1.{driver_frontend_cache_scope_publish_allowed_v1}
 use compiler.driver.driver_phase_gates.{
     driver_streaming_surface_enabled,
     driver_source_entry_request,
@@ -75,8 +85,8 @@ use compiler.driver.driver_phase_gates.{
 }
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
-use std.io_runtime.{file_exists, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use std.io_runtime.{file_exists}
 use compiler.common.structural_contracts.offload_profile.{OffloadDecision, validate_offload_profile}
 use compiler.common.structural_contracts.frontend_offload_switch.{
     FrontendOffloadInputs, FrontendOffloadSwitch, resolve_frontend_offload,
@@ -197,11 +207,12 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # reaches; whoever claims first parses it, everyone else skips. Work stays
 # balanced to within one module.
 #
-# Claim = a marker file under the queue dir, created inside a single flock'd
-# critical section (rt_file_lock is flock(2) and exists in both the seed and
-# the C runtime; rt_dir_create returns true on EEXIST and rename(2) overwrites,
-# so neither is an atomic claim on its own). The section is a stat and a tiny
-# write, microseconds against a multi-second parse.
+# Claim = a marker file under the queue dir, created with an exclusive create
+# (O_CREAT|O_EXCL / CREATE_NEW): exactly one process can create a given path,
+# so the create IS the claim and no shared lock is needed. (rt_dir_create
+# returns true on EEXIST and rename(2) overwrites, so neither is an atomic
+# claim on its own.) The former flock'd critical section serialized every
+# shard on one lock file for every module.
 #
 # Output is unchanged by construction: a claimed module is parsed by exactly
 # one shard into the same content-keyed cache entry the static split would
@@ -210,8 +221,9 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
 # a pure function of the path -- WHICH shard parses a module now depends on
 # timing -- but the union still is, and only the union reaches the cache.
 #
-# Lock failure degrades to the static split for that module rather than to
-# "owns nothing" (same fail-closed reasoning as the malformed-spec case).
+# A failed create of a marker that does not exist (queue dir unwritable)
+# degrades to the static split for that module rather than to "owns nothing"
+# (same fail-closed reasoning as the malformed-spec case).
 
 var _driver_parse_shard_queue_memo: text = "@@unset@@"
 var _driver_parse_shard_claimed: i64 = 0
@@ -232,13 +244,9 @@ fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
     val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
     if file_exists(marker):
         return false
-    val fd = file_lock("{queue_dir}/.lock", 30)
-    if fd < 0:
+    val claimed = file_create_exclusive(marker, _driver_parse_shard_spec())
+    if not claimed and not file_exists(marker):
         return _driver_parse_shard_owns_static(path)
-    var claimed = false
-    if not file_exists(marker):
-        claimed = file_write(marker, _driver_parse_shard_spec())
-    val _unlocked = file_unlock(fd)
     if claimed:
         _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
     claimed
@@ -250,6 +258,15 @@ fn _driver_parse_shard_owns(path: text) -> bool:
     if queue_dir == "":
         return _driver_parse_shard_owns_static(path)
     _driver_parse_shard_claim(queue_dir, path)
+
+# Public seams for the --parse-fibers child (driver_parse_fibers_entry.spl):
+# the same claim-queue ownership and frontend cache-scope publication the
+# entry-closure parse loop uses, so fiber parses land on identical cache keys.
+pub fn driver_parse_shard_owns_v1(path: text) -> bool:
+    _driver_parse_shard_owns(path)
+
+pub fn driver_publish_frontend_cache_scope_v1(ctx: CompileContext) -> bool:
+    _driver_publish_frontend_cache_scope(ctx)
 
 fn _driver_publish_frontend_cache_scope(ctx: CompileContext) -> bool:
     # The shared parse store is opt-in and carries no caller-supplied parser
@@ -263,11 +280,12 @@ fn _driver_publish_frontend_cache_scope(ctx: CompileContext) -> bool:
             _sffi_env_get("SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST") ?? "")
         if not _sffi_env_set("SIMPLE_SHARED_PARSE_CAS_PARSER_IDENTITY", parser_digest):
             return false
-    if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
-        return true
-    val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
-    if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
-        return false
+    # An inherited scope (e.g. pre-published by the native-build orchestrator)
+    # only skips computing the scope; phase-2 staging/import below always run.
+    if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") == "":
+        val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
+        if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+            return false
     if not driver_stage_phase2_frontend_frozen_raw_v1(ctx.runtime_std_cfg_source_identity_by_path):
         dtrace("[M3] frontend compatibility frozen-identity-stage-failed")
         return false
@@ -450,6 +468,11 @@ impl CompilerDriver:
 
     me parse_full_frontend_selected_v1(source_content: text, source_path: text,
         source_module_name: text) -> Result<ParserModule, text>:
+        # Step-3 lazy restore on the retained route: an opted-in HIR shard
+        # worker parses the module SKELETON here (surfaces only); HIR re-parses
+        # the full source of each module it claims (driver_hir_pipeline_lowering).
+        val parse_text = driver_surface_parse_text_v1(source_content,
+            _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
         # cache-decode scratch. Borrow one per-file scope through preprocessing,
         # parsing and desugaring, then retain exactly the escaped owners.
@@ -459,13 +482,13 @@ impl CompilerDriver:
             self.ctx.options.cli_mode_text == "aot"
         if not aot:
             return self.parse_full_frontend_unscoped_selected_v1(
-                source_content, source_path, source_module_name)
+                parse_text, source_path, source_module_name)
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
         if not _sffi_transient_array_scope_begin():
             panic("transient retained parser scope unavailable for {source_path}")
         val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
-            source_content, source_path, source_module_name)
+            parse_text, source_path, source_module_name)
         if not _sffi_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             panic("transient retained parser scope pause failed for {source_path}")
@@ -546,8 +569,12 @@ impl CompilerDriver:
         source_module_name: text,
         source_index: i64,
         canonical_path: text,
-        force_source_parse: bool = false
+        force_source_parse: bool = false,
+        worker_mode: i64 = 0
     ) -> Result<ModuleSurfaceBuilder, text>:
+        # worker_mode: 0 = ordinary, 1 = worker closure module (skeleton via
+        # worker_surface_text_v1), 2 = worker placeholder (empty text; identity
+        # fields still come from `source`, so the HIR closure digest holds).
         if builder.frozen:
             return Err("module surface builder is frozen")
         if builder.index_by_path_lookup_index(canonical_path) >= 0:
@@ -561,13 +588,25 @@ impl CompilerDriver:
             authored_path: source_authored_path,
             content: source_content,
             module_name: source_module_name)
+        # Step-3 lazy restore: an opted-in HIR shard worker builds the surface
+        # from the module skeleton (driver_hir_worker_surface_v1.spl).
+        val surface_text = if worker_mode == 2:
+            ""
+        elif worker_mode == 1:
+            worker_surface_text_v1(source_path, source_content,
+                if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
+                    (_sffi_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "") + "/tldr"
+                else: "")
+        else:
+            driver_surface_parse_text_v1(source_content,
+                _sffi_env_get("SIMPLE_HIR_SHARD") ?? "", _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
         log_module_surface_stage(source_path, "parse-start")
         val selected_module = if force_source_parse:
             self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         else:
             self.parse_full_frontend_in_borrowed_scope_selected_v1(
-                source_content, source_path, source_module_name)
+                surface_text, source_path, source_module_name)
         val module = match selected_module:
             case Ok(value): value
             case Err(error):
@@ -649,7 +688,7 @@ impl CompilerDriver:
             return Err(add_result.unwrap_err())
         # The transient scope is already closed: only allocate the digest/key
         # and persistent proof row now, never retain ParserModule or its bodies.
-        if declaration_only:
+        if declaration_only and worker_mode != 2:
             val proof_key = driver_native_objectless_proof_key(source_module_name, canonical_path)
             self.ctx.native_objectless_decl_proofs[proof_key] = sha256_text(source_content)
         log_module_surface_stage(source_path, "commit-done")
@@ -700,6 +739,39 @@ impl CompilerDriver:
         var source_index = 0
         var release_seq: i64 = 0
         val parse_shard = driver_parse_shard_active()
+        # P5: a HIR shard worker builds real surfaces only for its seeds'
+        # import closure (driver_worker_surface_closure_v1.spl).
+        val worker_spec = _sffi_env_get("SIMPLE_HIR_SHARD") ?? ""
+        val worker_flag = _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+        # P-A: a module-scoped MIR child (file-worker lane) seeds from its
+        # admitted targets and later loads HIR only for their import closure.
+        val mir_targets = if worker_spec == "":
+            worker_mir_scoped_targets_v1(_sffi_env_get("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+                _sffi_env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
+        else:
+            []
+        val mir_scoped = mir_targets.len() > 0
+        val worker_closure = not parse_shard and (mir_scoped or
+            worker_surface_closure_selected_v1(worker_spec, worker_flag))
+        var worker_needed: [bool] = []
+        var worker_built: [bool] = []
+        var mir_advice_paths: [text] = []
+        if worker_closure:
+            var seeds: [bool] = []
+            var seed_index = 0
+            for seed_path in source_paths:
+                if mir_scoped:
+                    # Possible AOP advice modules are seeded too: the weave
+                    # reads advice from every loaded HIR module.
+                    val is_advice = worker_source_may_declare_advice_v1(source_contents[seed_index])
+                    if is_advice and not mir_advice_paths.contains(seed_path):
+                        mir_advice_paths.push(seed_path)
+                    seeds.push(mir_targets.contains(seed_path) or is_advice)
+                else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
+                seed_index = seed_index + 1
+            worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
+            for _p in source_paths:
+                worker_built.push(false)
         while source_index < frozen_source_count:
             # A parse shard exists only to warm the front-end cache for the
             # files it owns (static hash slice, or a claim from the shared
@@ -726,7 +798,8 @@ impl CompilerDriver:
                     source_authored_paths[source_index],
                     source_contents[source_index],
                     source_module_names[source_index],
-                    source_index, canonical_path)
+                    source_index, canonical_path, false,
+                    if not worker_closure: 0 elif worker_needed[source_index]: 1 else: 2)
                 if parsed_result.is_err():
                     val stream_err = parsed_result.unwrap_err()
                     # Emit while the local Result still owns the reason. Native
@@ -755,6 +828,8 @@ impl CompilerDriver:
                         "Module surface extraction error: {stream_err}")
                     return false
                 builder = parsed_result.unwrap()
+                if worker_closure and worker_needed[source_index]:
+                    worker_built[source_index] = true
                 release_seq = release_seq + 1
                 log_module_surface_released(source_paths[source_index], release_seq)
             source_index = source_index + 1
@@ -766,7 +841,7 @@ impl CompilerDriver:
         # `phase2:surface:file:parse-start` line fires before the cache is
         # consulted, so counting those lines over-reports cold parses.
         if frontend_parse_cache_enabled():
-            print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()}"
+            print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()} native_digest_unavailable={frontend_cache_native_digest_unavailable()}"
         if parse_shard:
             # The shard's job ends with the cache warm. The surface registry
             # below is the real build's, and a shard child must never carry on
@@ -846,6 +921,74 @@ impl CompilerDriver:
         # context.  Assigning it through a copied `streaming_ctx` returned
         # parse_ok=true while the caller still observed module_surfaces=nil
         # under native value semantics.
+        if worker_closure:
+            # Claim only modules whose resolved import/export-route closure is
+            # fully built; placeholders are never lowered by this worker.
+            var built_canonical: Dict<text, bool> = {}
+            var bi = 0
+            while bi < frozen_source_count:
+                if worker_built[bi]: built_canonical[canonical_paths[bi]] = true
+                bi = bi + 1
+            var surface_built: [bool] = []
+            var surface_edges: [[i64]] = []
+            for ws in retained_surfaces.surfaces:
+                surface_built.push(built_canonical.contains_key(ws.canonical_path))
+                var edges: [i64] = []
+                for t in ws.import_target_indices: edges.push(t)
+                for t in ws.export_route_target_indices: edges.push(t)
+                surface_edges.push(edges)
+            val surface_ready = worker_surface_ready_v1(surface_built, surface_edges)
+            var ready_canonical: Dict<text, bool> = {}
+            var si = 0
+            while si < surface_ready.len():
+                if surface_ready[si]: ready_canonical[retained_surfaces.surfaces[si].canonical_path] = true
+                si = si + 1
+            var allowed_paths: [text] = []
+            var ai = 0
+            while ai < frozen_source_count:
+                if ready_canonical.contains_key(canonical_paths[ai]): allowed_paths.push(source_paths[ai])
+                ai = ai + 1
+            if mir_scoped:
+                # Every target and every possible advice module must have a
+                # fully built closure, else fail closed (MONO-PENDING): no MIR
+                # from a placeholder surface, no weave missing an advice.
+                val mir_queue_dir = _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+                val source_of_canonical = source_path_by_canonical_map_v1(canonical_paths, source_paths)
+                var surface_source: [text] = []
+                for rs in retained_surfaces.surfaces:
+                    surface_source.push(source_of_canonical.get(rs.canonical_path) ?? "")
+                var root_indices: [i64] = []
+                var found_targets: [text] = []
+                var pending_reason = ""
+                var ti = 0
+                while ti < surface_source.len():
+                    val tpath = surface_source[ti]
+                    val is_target = mir_targets.contains(tpath)
+                    if is_target or mir_advice_paths.contains(tpath):
+                        if not surface_ready[ti]:
+                            pending_reason = if is_target: "import-closure surface missing for {tpath}"
+                                else: "aop advice outside import closure ({tpath})"
+                        root_indices.push(ti)
+                        if is_target and not found_targets.contains(tpath): found_targets.push(tpath)
+                    ti = ti + 1
+                if pending_reason == "" and found_targets.len() != mir_targets.len():
+                    pending_reason = "a MIR target has no surface in this closure"
+                if pending_reason != "":
+                    for target in mir_targets:
+                        val _pending = native_file_worker_mono_pending_publish_v1(mir_queue_dir, target, pending_reason)
+                    self.ctx.add_error("MONO-PENDING: {pending_reason}")
+                    return false
+                val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
+                var load_paths: [text] = []
+                var ci = 0
+                while ci < closure.len():
+                    if closure[ci] and surface_source[ci] != "":
+                        load_paths.push(surface_source[ci])
+                    ci = ci + 1
+                worker_hir_restrict_loads_v1(load_paths)
+                print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count} advice_modules={mir_advice_paths.len()}"
+            else:
+                worker_surface_restrict_claims_v1(allowed_paths)
         self.streaming_module_surfaces_owner = retained_surfaces
         self.streaming_surface_owner_ready = true
         self.ctx.module_surfaces = Some(retained_surfaces)
@@ -942,7 +1085,8 @@ impl CompilerDriver:
             # bootstrap_flat_llvm_receiver_ownership_spec. The cache also only
             # pays off across native builds. An explicitly inherited
             # SIMPLE_FRONTEND_CACHE_SCOPE still opts in.
-            val _cache_scope_published = if self.ctx.options.mode == CompileMode.Interpret:
+            val _cache_scope_published = if not driver_frontend_cache_scope_publish_allowed_v1(
+                    self.ctx.options.mode.to_text(), self.ctx.options.cli_mode_text):
                 false
             else:
                 _driver_publish_frontend_cache_scope(self.ctx)
@@ -1060,7 +1204,7 @@ impl CompilerDriver:
             # emitted only when the cache is actually on, so a non-caching build
             # does not grow a line that always reads hits=0.
             if frontend_parse_cache_enabled():
-                print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()}"
+                print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()} native_digest_unavailable={frontend_cache_native_digest_unavailable()}"
             if driver_parse_shard_active():
                 # Shard children exist only to warm the cache. Everything after
                 # this point (surfaces, HIR, MIR, codegen, link) is the real

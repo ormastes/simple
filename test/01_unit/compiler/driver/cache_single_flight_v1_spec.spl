@@ -1,0 +1,83 @@
+use std.spec
+use std.async.poll.{Poll}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    cache_single_flight_key_v1, SINGLE_FLIGHT_LEADER_V1, SINGLE_FLIGHT_WAITER_V1}
+use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use std.service.daemon_base.{daemon_config_new}
+
+describe "cache single-flight table":
+    it "wakes 39 waiters exactly once when the one leader completes":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("tldr", "sha256:d1")
+        val (role, flight) = table.join_at(key, "leader", 0)
+        expect(role).to_equal(SINGLE_FLIGHT_LEADER_V1)
+        var i = 0
+        while i < 39:
+            val (r, f) = table.join_at(key, "w{i}", 1)
+            expect(r).to_equal(SINGLE_FLIGHT_WAITER_V1)
+            expect(f).to_equal(flight)
+            i = i + 1
+        expect(table.take_woken(flight).len()).to_equal(0)
+        expect(table.complete(key, "w3", Some([1u8]))).to_equal(false)
+        expect(table.complete(key, "leader", Some([1u8]))).to_equal(true)
+        val woken = table.take_woken(flight)
+        expect(woken.len()).to_equal(39)
+        expect(woken[0]).to_equal("w0")
+        expect(table.take_woken(flight).len()).to_equal(0)
+        expect(table.inflight_count()).to_equal(0)
+
+    it "re-drives an abandoned leader to the oldest waiter":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("ast", "sha256:d2")
+        val (_r, flight) = table.join_at(key, "leader", 0)
+        val (_w1, _f1) = table.join_at(key, "w1", 10)
+        val (_w2, _f2) = table.join_at(key, "w2", 20)
+        expect(table.redrive(50, 100).len()).to_equal(0)
+        val promoted = table.redrive(150, 100)
+        expect(promoted).to_equal(["{flight}\u0000w1"])
+        expect(table.complete(key, "leader", nil)).to_equal(false)
+        expect(table.complete(key, "w1", Some([2u8]))).to_equal(true)
+        expect(table.take_woken(flight)).to_equal(["w2"])
+
+    it "drops an abandoned flight that has no waiters so the next join leads":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("ast", "sha256:d3")
+        val (_r, _f) = table.join_at(key, "leader", 0)
+        expect(table.redrive(500, 100).len()).to_equal(0)
+        val (role, _g) = table.join_at(key, "next", 600)
+        expect(role).to_equal(SINGLE_FLIGHT_LEADER_V1)
+
+    it "keeps the in-process future for participants that hold the table":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("tldr", "sha256:d4")
+        val (_r, flight) = table.join(key, "a")
+        expect(table.complete(key, "a", Some([9u8]))).to_equal(true)
+        val got = match table.future(flight).poll():
+            case Poll.Ready(blob):
+                match blob:
+                    case Some(bytes): bytes.len()
+                    case nil: -1
+            case Poll.Pending: -2
+        expect(got).to_equal(1)
+
+describe "cache daemon host artifact flights":
+    it "refuses artifact production before daemon admission":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        val (role, _f) = host.join_artifact("tldr", "sha256:d9", "req-a", 1)
+        expect(role).to_equal(-1)
+
+    it "parks waiters and hands their reply paths back once on completion":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        host.package_admission_open = true
+        val (role_a, flight) = host.join_artifact("tldr", "sha256:d9", "req-a", 1)
+        val (role_b, _same) = host.join_artifact("tldr", "sha256:d9", "req-b", 2)
+        expect(role_a).to_equal(SINGLE_FLIGHT_LEADER_V1)
+        expect(role_b).to_equal(SINGLE_FLIGHT_WAITER_V1)
+        host.park_waiter("req-b", "q/b")
+        expect(host.lifecycle.request_count).to_equal(1)
+        expect(host.complete_artifact("tldr", "sha256:d9", "req-a", Some([4u8, 2u8]), 3)).to_equal(flight)
+        expect(host.lifecycle.request_count).to_equal(0)
+        val (replies, _blob) = host.take_woken_replies(flight)
+        expect(replies).to_equal(["q/b"])
+        val (again, _b2) = host.take_woken_replies(flight)
+        expect(again.len()).to_equal(0)

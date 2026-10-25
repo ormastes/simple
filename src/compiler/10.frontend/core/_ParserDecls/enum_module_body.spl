@@ -23,7 +23,7 @@ use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags, decl_set_asm_placement}
 use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
+use compiler.core.ast.{decl_is_gpu_kernel_set_at, decl_is_simd_set_at, decl_is_packed_set_at, decl_derives_set_at}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path}
 use compiler.frontend.core._Ast.module_state.{module_add_decl}
@@ -37,7 +37,7 @@ use compiler.core.types.{named_type_register, named_type_update, named_type_find
 use compiler.core.types.{newunit_register}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -54,6 +54,7 @@ use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_e
 use compiler.frontend.core.parser_stmts.{parse_trailing_colon_block_arg, try_parse_bare_ident_string_call}
 use compiler.core.ast.{EXPR_CALL, EXPR_METHOD_CALL, expr_get_tag}
 use compiler.core.tokens.{TOK_COLON}
+use compiler.core.ast.{macro_fact_def_push}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
@@ -155,6 +156,121 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     args.push(expr_string_lit(uses_list.join(","), 0))
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== `macro NAME(params) -> (contract): body` declarations =====
+# "macro" is a soft keyword (an identifier elsewhere). The declaration emits no
+# decl: its facts (name, params, raw contract/body source, nested `n!(` names)
+# go to the macro fact pools in _Ast/decl_nodes.spl, which feed the macro
+# reference cache (plan 2026-10-24 §6). Expansion itself is not done here.
+fn current_ident_is_macro_decl() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+# True when the current identifier token is immediately followed by `!(`.
+fn current_ident_is_macro_invocation() -> bool:
+    val end = lex_token_end_get()
+    if end + 1 >= lex_source_len():
+        return false
+    lex_source_char_at(end) == "!" and lex_source_char_at(end + 1) == "("
+
+fn _macro_join_unique(values: [text]) -> text:
+    var out: [text] = []
+    for v in values:
+        if not out.contains(v):
+            out.push(v)
+    out.join(",")
+
+fn parse_macro_decl(visibility: text):
+    val decl_line = par_line_get()
+    parser_advance()  # consume 'macro'
+    if par_kind_get() != TOK_IDENT:
+        parser_error("expected macro name after 'macro'")
+        return
+    val name = par_text_get()
+    parser_advance()
+    var params: [text] = []
+    if par_kind_get() == 140:
+        var depth = 0
+        var expect_name = true
+        while par_kind_get() != 190:
+            val k = par_kind_get()
+            if k == 140 or k == 144 or k == 142:
+                depth = depth + 1
+                if depth == 1:
+                    expect_name = true
+                    parser_advance()
+                    continue
+            elif k == 141 or k == 145 or k == 143:
+                depth = depth - 1
+                if depth == 0:
+                    parser_advance()
+                    break
+            elif k == TOK_COMMA and depth == 1:
+                expect_name = true
+                parser_advance()
+                continue
+            elif k == TOK_IDENT and depth == 1 and expect_name:
+                params.push(par_text_get())
+            elif depth == 1 and par_text_get() == "const" and params.len() > 0:
+                # `n: Int const` -- a compile-time (CTFE) parameter; recorded as
+                # `n=const` so the macro facts carry the declared CTFE effect.
+                params[params.len() - 1] = params[params.len() - 1] + "=const"
+            expect_name = false
+            parser_advance()
+    var contract = ""
+    if par_kind_get() == 167:
+        parser_advance()
+        if par_kind_get() == 140:
+            val start = lex_token_start_get()
+            var depth = 0
+            var end = start
+            while par_kind_get() != 190:
+                val k = par_kind_get()
+                if k == 140: depth = depth + 1
+                if k == 141:
+                    depth = depth - 1
+                    if depth == 0:
+                        end = lex_token_end_get()
+                        parser_advance()
+                        break
+                parser_advance()
+            contract = lex_source_slice(start, end)
+    if par_kind_get() != TOK_COLON:
+        parser_error("expected ':' after macro '{name}' header")
+        return
+    parser_advance()
+    # Body: the indented block (or the rest of the line). Raw source is kept;
+    # nested invocations are the identifiers directly followed by `!(`.
+    var nested: [text] = []
+    val body_start = lex_token_start_get()
+    var body_end = body_start
+    var depth = 0
+    var seen_indent = false
+    while par_kind_get() != 190:
+        val k = par_kind_get()
+        if k == 180 and not seen_indent and depth == 0:
+            parser_advance()
+            if par_kind_get() != 181:
+                break
+            continue
+        if k == 181:
+            depth = depth + 1
+            seen_indent = true
+        elif k == 182:
+            depth = depth - 1
+            if depth <= 0:
+                parser_advance()
+                break
+        elif k == TOK_IDENT and current_ident_is_macro_invocation():
+            nested.push(par_text_get())
+        if k != 180 and k != 181 and k != 182:
+            body_end = lex_token_end_get()
+        parser_advance()
+    val body = if body_end > body_start: lex_source_slice(body_start, body_end) else: ""
+    macro_fact_def_push(name, params.join(","), contract, body, _macro_join_unique(nested),
+        decl_line, visibility)
 
 # ===== WP-A: `resource` declarations + `@sffi(...)` attribute =====
 # doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
@@ -423,9 +539,11 @@ fn parse_enum_decl() -> i64:
                     # Handle optional ? after type
                     if par_kind_get() == 130:
                         parser_advance()
-                elif par_kind_get() == 144:
-                    val bracket_type = parser_parse_type()
-                    variant_field_types.push(bracket_type)
+                elif par_kind_get() == 144 or par_kind_get() == 140:
+                    # A positional array or tuple is one complete payload type.
+                    # Let the type parser consume its own nested delimiters.
+                    val positional_type = parser_parse_type()
+                    variant_field_types.push(positional_type)
                     variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
@@ -757,7 +875,7 @@ fn parser_pending_asm_placement() -> text:
     """Asm-embedding contract (design A.2): the subset of the pending
     decorator spellings that place or shape a function symbol
     (`naked`, `section(...)`, `align(n)`, `global`, `noreturn`, `entry`,
-    `interrupt`, `export(C[,name:sym])`), "|"-joined for
+    `interrupt`, `export(C[,name:sym])`, `inline`), "|"-joined for
     decl_set_asm_placement. Everything else in PENDING_DECL_ATTRS keeps its
     existing rt/gpu/vhdl routing. `export` is here because it fixes the
     symbol's linkage name: dropped from the flat pool, HirFunction lost
@@ -770,7 +888,13 @@ fn parser_pending_asm_placement() -> text:
     for spelling in PENDING_DECL_ATTRS:
         val paren = spelling.index_of("(")
         val attr_name = if paren >= 0: spelling[0:paren] else: spelling
-        if attr_name == "naked" or attr_name == "section" or attr_name == "align" or attr_name == "global" or attr_name == "noreturn" or attr_name == "entry" or attr_name == "interrupt" or attr_name == "export":
+        if attr_name == "naked" or attr_name == "section" or attr_name == "align" or attr_name == "global" or attr_name == "noreturn" or attr_name == "entry" or attr_name == "interrupt" or attr_name == "export" or attr_name == "inline":
+            out.push(spelling)
+        elif paren < 0:
+            # Bare marker decorators (`@logged`) reach ParserFunction.attributes
+            # as name-only Attributes so AOP `attr(...)` selectors can see them
+            # (frontend/join_point_attr_registry). Name-only: no argument is
+            # reinterpreted, and every existing consumer matches by name.
             out.push(spelling)
     out.join("|")
 
@@ -972,6 +1096,10 @@ fn parse_module_body():
         val representation_target = par_kind_get()
         if not [20, 34, 23, 24, 25, 31, 53, 30, 171].contains(representation_target):
             representation_reject_pending_v1()
+        if parsed_visibility != "private" and par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl(parsed_visibility)
+            parser_reset_pending_vhdl_decorators()
+            continue
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
@@ -1204,6 +1332,9 @@ fn parse_module_body():
         elif par_kind_get() == 209:
             val d = parse_bitfield_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
+            parse_macro_decl("private")
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
             # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,
@@ -1684,7 +1815,7 @@ fn parse_module_body():
             elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
-                    decl_is_gpu_kernel[d] = 1
+                    decl_is_gpu_kernel_set_at(d, 1)
                     if gpu_target_arg.len() > 0:
                         decl_set_gpu_target_text(d, gpu_target_arg)
                         if gpu_target_arg_name.len() > 0:
@@ -1696,7 +1827,7 @@ fn parse_module_body():
             elif decorator_name == "simd":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
-                    decl_is_simd[d] = 1
+                    decl_is_simd_set_at(d, 1)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
             elif decorator_name == "packed":
@@ -1708,7 +1839,7 @@ fn parse_module_body():
                         if packed_field_bits[pfi] <= 0:
                             parser_error("@packed struct fields must use explicit bit widths; use an explicit nested struct instead")
                         pfi = pfi + 1
-                    decl_is_packed[d] = 1
+                    decl_is_packed_set_at(d, 1)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
             elif decorator_name == "derive":
@@ -1716,7 +1847,7 @@ fn parse_module_body():
                 val is_struct: bool = par_kind_get() == 23
                 if is_class or is_struct:
                     val d = parse_struct_decl(is_class)
-                    decl_derives[d] = derive_traits
+                    decl_derives_set_at(d, derive_traits)
                     module_add_decl(d)
                     # Generate derived trait method implementations
                     generate_derive_impls(d, derive_traits)
@@ -2173,3 +2304,74 @@ pub fn flat_pending_pools_restore(r: FlatPoolReader) -> bool:
     r.ok
 
 export flat_pending_pools_dump, flat_pending_pools_restore
+
+# ===== PendingDeclAttrState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct PendingDeclAttrState:
+    PENDING_SFFI: i64
+    PENDING_SFFI_KEYS: [text]
+    PENDING_SFFI_VALUES: [text]
+    PENDING_HARDWARE: i64
+    PENDING_CLOCKED_ARGS: [text]
+    PENDING_VHDL_GENERIC_ARGS: [i64]
+    PENDING_FLATTEN_STRUCT_OUTPUT: i64
+    PENDING_UNSAFE: i64
+    PENDING_UNSAFE_REASON: text
+    PENDING_UNSAFE_CAPS: [text]
+    UNSAFE_ANNOTATIONS: [text]
+    PENDING_DECL_ATTRS: [text]
+    ENUM_ATTRIBUTES: [text]
+    ENUM_OPEN_REGIONS: [text]
+
+pub fn pending_decl_attr_state_take() -> PendingDeclAttrState:
+    val s = PendingDeclAttrState(
+        PENDING_SFFI: PENDING_SFFI,
+        PENDING_SFFI_KEYS: PENDING_SFFI_KEYS,
+        PENDING_SFFI_VALUES: PENDING_SFFI_VALUES,
+        PENDING_HARDWARE: PENDING_HARDWARE,
+        PENDING_CLOCKED_ARGS: PENDING_CLOCKED_ARGS,
+        PENDING_VHDL_GENERIC_ARGS: PENDING_VHDL_GENERIC_ARGS,
+        PENDING_FLATTEN_STRUCT_OUTPUT: PENDING_FLATTEN_STRUCT_OUTPUT,
+        PENDING_UNSAFE: PENDING_UNSAFE,
+        PENDING_UNSAFE_REASON: PENDING_UNSAFE_REASON,
+        PENDING_UNSAFE_CAPS: PENDING_UNSAFE_CAPS,
+        UNSAFE_ANNOTATIONS: UNSAFE_ANNOTATIONS,
+        PENDING_DECL_ATTRS: PENDING_DECL_ATTRS,
+        ENUM_ATTRIBUTES: ENUM_ATTRIBUTES,
+        ENUM_OPEN_REGIONS: ENUM_OPEN_REGIONS
+    )
+    PENDING_SFFI = 0
+    PENDING_SFFI_KEYS = []
+    PENDING_SFFI_VALUES = []
+    PENDING_HARDWARE = 0
+    PENDING_CLOCKED_ARGS = []
+    PENDING_VHDL_GENERIC_ARGS = []
+    PENDING_FLATTEN_STRUCT_OUTPUT = 0
+    PENDING_UNSAFE = 0
+    PENDING_UNSAFE_REASON = ""
+    PENDING_UNSAFE_CAPS = []
+    UNSAFE_ANNOTATIONS = []
+    PENDING_DECL_ATTRS = []
+    ENUM_ATTRIBUTES = []
+    ENUM_OPEN_REGIONS = []
+    s
+
+pub fn pending_decl_attr_state_install(s: PendingDeclAttrState):
+    PENDING_SFFI = s.PENDING_SFFI
+    PENDING_SFFI_KEYS = s.PENDING_SFFI_KEYS
+    PENDING_SFFI_VALUES = s.PENDING_SFFI_VALUES
+    PENDING_HARDWARE = s.PENDING_HARDWARE
+    PENDING_CLOCKED_ARGS = s.PENDING_CLOCKED_ARGS
+    PENDING_VHDL_GENERIC_ARGS = s.PENDING_VHDL_GENERIC_ARGS
+    PENDING_FLATTEN_STRUCT_OUTPUT = s.PENDING_FLATTEN_STRUCT_OUTPUT
+    PENDING_UNSAFE = s.PENDING_UNSAFE
+    PENDING_UNSAFE_REASON = s.PENDING_UNSAFE_REASON
+    PENDING_UNSAFE_CAPS = s.PENDING_UNSAFE_CAPS
+    UNSAFE_ANNOTATIONS = s.UNSAFE_ANNOTATIONS
+    PENDING_DECL_ATTRS = s.PENDING_DECL_ATTRS
+    ENUM_ATTRIBUTES = s.ENUM_ATTRIBUTES
+    ENUM_OPEN_REGIONS = s.ENUM_OPEN_REGIONS
+
+export PendingDeclAttrState, pending_decl_attr_state_take, pending_decl_attr_state_install

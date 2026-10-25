@@ -16,7 +16,12 @@ use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_phase}
 use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use compiler.mono.monomorphize_integration.*
+use compiler.driver.cache.module_artifacts_v1.{MonoGenericUsesV1,
+    module_tldr_update_generic_spec_from_mono_v1, module_artifact_module_id_v1}
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
     safety_pass_severity_phased
@@ -31,6 +36,129 @@ use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
 use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
 use compiler.driver.driver_mono_publication_v1.{driver_publish_mono_warnings_and_stats_v1, driver_publish_mono_diagnostics_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1,
+    mono_module_scoped_selected_v1, native_file_worker_deps_read_v1, native_file_worker_mono_fallback_reader_v1,
+    native_file_worker_transitive_deps_v1, native_file_worker_mono_pending_publish_v1,
+    native_file_worker_global_mono_forbidden_v1, native_file_worker_missing_templates_v1,
+    native_file_worker_reader_instances_available_v1, native_file_worker_reader_instances_enabled_v1,
+    NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
+    native_file_worker_hirkey_read_v1, native_file_worker_missing_template_args_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_counters_v1}
+use compiler.driver.cache.reader.template_body_loader_v1.{TemplateBodyLoaderV1,
+    template_body_loader_new_v1, template_body_owner_of_v1}
+
+# Template-BODY-on-demand seam (P-G4). Serves the OWNER module's HIR that
+# carries the body of `template`, taken from the HIR this MIR child already
+# admitted from the HIR cache (never a re-parse of the closure), so F
+# instantiates it into F's own object (module-scoped mono does relocation and
+# COMDAT placement) without waiting on the owner's HIR shard. Owners are
+# searched only in F's transitive import closure (HirModule.imports); outside
+# it or ambiguous = miss. The decision is cached per process-local
+# TemplateBodyDecisionKeyV1 (NOT a ConcreteTldrKey), set-once; an owner content
+# change invalidates its entries. The owner digest is hashed lazily, only on a miss.
+# P-G1's reader_concrete_instance_v1 still serves TYPE views only.
+# None = body unavailable (fail closed: the caller widens, then MONO-PENDING).
+var driver_template_body_loader_v1: TemplateBodyLoaderV1 = template_body_loader_new_v1()
+
+fn driver_template_decl_names_v1(module: HirModule) -> [text]:
+    var names: [text] = []
+    for f in module.functions.values():
+        val func: HirFunction = f
+        if func.is_generic_template or (func.type_params != nil and func.type_params.len() > 0):
+            names = names.push(func.name)
+    for s in module.structs.values():
+        val st: HirStruct = s
+        if st.is_generic_template or (st.type_params != nil and st.type_params.len() > 0):
+            names = names.push(st.name)
+    for c in module.classes.values():
+        val cl: HirClass = c
+        if cl.is_generic_template or (cl.type_params != nil and cl.type_params.len() > 0):
+            names = names.push(cl.name)
+    names
+
+# P-G5b: owner bodies this child did NOT admit, loaded from the HIR cache by
+# the content key the HIR child published (`.hirkey` record). Single-flight and
+# set-once per process: a module is loaded at most once; a failed load is
+# remembered and never retried (fail closed -> widen / MONO-PENDING).
+var driver_template_owner_bodies_v1: Dict<text, HirModule> = {}
+var driver_template_owner_load_failed_v1: Dict<text, text> = {}
+
+fn driver_template_owner_body_v1(owner: text, owner_path: text, hir_queue: text,
+        modules: Dict<text, HirModule>) -> HirModule?:
+    if owner == "":
+        return nil
+    if modules.contains_key(owner) and modules[owner] != nil:
+        return modules[owner]
+    if driver_template_owner_bodies_v1.contains_key(owner):
+        return driver_template_owner_bodies_v1[owner]
+    if driver_template_owner_load_failed_v1.contains_key(owner):
+        return nil
+    var reason = ""
+    if owner_path == "":
+        reason = "owner-path-unknown"
+    else:
+        val key = native_file_worker_hirkey_read_v1(hir_queue, owner_path)
+        if key.is_err():
+            reason = key.unwrap_err()
+        else:
+            val loaded = hir_cache_load_in_owned_scope(key.unwrap())
+            if loaded == nil:
+                reason = "hir-cache-miss"
+            else:
+                driver_template_owner_bodies_v1[owner] = loaded
+                print "[file-worker] template-body owner-load module={owner}"
+                return loaded
+    driver_template_owner_load_failed_v1[owner] = reason
+    print "[file-worker] template-body owner-load-miss module={owner} reason={reason}"
+    nil
+
+# F's transitive import closure as module names, walked over the HIR ledger's
+# path-keyed deps records (frozen surface import targets), never over
+# HirImport.module_path spellings: a spelling that differs from the module key
+# no longer stops the walk. An unreadable record or an unknown path stops that
+# edge only (fail closed: a miss, never a wrong owner).
+fn driver_template_import_closure_v1(path: text, hir_queue: text,
+        name_of_path: Dict<text, text>) -> [text]:
+    var out: [text] = []
+    var frontier: [text] = [path]
+    var pos = 0
+    while pos < frontier.len():
+        val node = frontier[pos]
+        pos = pos + 1
+        val deps = native_file_worker_deps_read_v1(hir_queue, node)
+        if deps.is_err():
+            continue
+        for d in deps.unwrap():
+            if d == path or frontier.contains(d):
+                continue
+            frontier = frontier.push(d)
+            if name_of_path.contains_key(d):
+                out = out.push(name_of_path[d])
+    out
+
+fn driver_reader_concrete_instance_v1(template: text, requester_path: text,
+        modules: Dict<text, HirModule>, declared: Dict<text, [text]>, closure: [text],
+        content_of: Dict<text, text>, path_of_name: Dict<text, text>, hir_queue: text,
+        type_arg_keys: [text]) -> Option<HirModule>:
+    if not native_file_worker_reader_instances_enabled_v1(
+            env_get(NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1) ?? "",
+            native_file_worker_reader_instances_available_v1()):
+        return None
+    val owner = template_body_owner_of_v1(template, declared, closure)
+    val owner_path = if owner != "" and path_of_name.contains_key(owner): path_of_name[owner] else: ""
+    val body = driver_template_owner_body_v1(owner, owner_path, hir_queue, modules)
+    var loaded = body != nil
+    if loaded and owner_path == requester_path:
+        loaded = false
+    # Lazy: only the resolved owner is hashed, only on an E-MONO-040 miss.
+    val digest = if owner != "" and content_of.contains_key(owner): sha256_text(content_of[owner]) else: ""
+    val result = driver_template_body_loader_v1.load(owner, template, type_arg_keys, digest, loaded)
+    if not result.found:
+        print "[file-worker] template-body miss template={template} owner={owner} reason={result.pending_reason}"
+        return None
+    print "[file-worker] template-body {result.source} template={template} owner={owner}"
+    Some(body!)
 
 
 impl CompilerDriver:
@@ -131,6 +259,18 @@ impl CompilerDriver:
         if skip_mono == "1":
             print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
             return true
+        # File-worker P4/P-G3 (per-file lane + SIMPLE_MIR_SHARD_ONLY_PATHS):
+        # this MIR child lowers only the admitted modules, so mono runs
+        # module-scoped for exactly those instead of the global pass.
+        val scoped_paths = native_file_worker_only_paths_from_env_v1()
+        val whole_program = env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""
+        if mono_module_scoped_selected_v1(whole_program, scoped_paths.len() > 0):
+            return self.monomorphize_file_worker_scoped_v1(scoped_paths)
+        # P-G3: the per-file lane never runs the global pass.
+        val in_file_worker_lane = (env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != ""
+        if native_file_worker_global_mono_forbidden_v1(whole_program, in_file_worker_lane):
+            self.ctx.add_error("per-file lane: global monomorphize pass is forbidden (no admitted target paths; set SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 for the whole-program lane)")
+            return false
         # Cycle-121: the modules dict comes back through the module-global
         # owner (mono_report_modules_owner), not the 4-tuple return -- the
         # tuple's native value ABI corrupted the dict slot (the docstring
@@ -161,7 +301,146 @@ impl CompilerDriver:
         val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
         driver_publish_post_mono_report_v1(self.ctx, mono_report, self.ctx.hir_modules.len())
 
+    me monomorphize_file_worker_scoped_v1(target_paths: [text]) -> bool:
+        """Module-scoped mono for the file-worker MIR child. Templates for F
+        are the HIR (loaded from the HIR cache by this child) of F's direct
+        imports, read from the HIR ledger's deps record. On E-MONO-040 the
+        set is widened once to the transitive import closure; if a template is
+        still missing F is marked MONO-PENDING and the child fails closed, so
+        no object is ever emitted from a partial template set. Non-target
+        modules are left untouched: this child neither lowers nor emits them."""
+        print "[file-worker] mir-child {worker_hir_counters_v1()}"
+        val hir_queue = env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? ""
+        val mir_queue = env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+        var name_of_path: Dict<text, text> = {}
+        # Owner content for the template-body loader (P-G4); hashed lazily.
+        var content_of: Dict<text, text> = {}
+        var path_of_name: Dict<text, text> = {}
+        var tldr_id_of_module: Dict<text, text> = {}
+        for src in self.ctx.sources:
+            name_of_path[src.path] = src.module_name
+            tldr_id_of_module[src.module_name] = module_artifact_module_id_v1(src.path)
+            path_of_name[src.module_name] = src.path
+            content_of[src.module_name] = src.content
+        # Template declarations of closure modules, filled lazily (set-once).
+        var declared: Dict<text, [text]> = {}
+        var verified: Dict<text, HirModule> = {}
+        for path in target_paths:
+            if not name_of_path.contains_key(path) or self.ctx.hir_modules[name_of_path[path]] == nil:
+                self.ctx.add_error("file-worker mono: no HIR for admitted module {path}")
+                return false
+            val name = name_of_path[path]
+            val direct = native_file_worker_deps_read_v1(hir_queue, path)
+            if direct.is_err():
+                self.ctx.add_error("file-worker mono: {direct.unwrap_err()}")
+                return false
+            var dep_paths: [text] = direct.unwrap()
+            var widened = false
+            var done = false
+            # Reader-provided concrete instance sources (P-G1), keyed by the
+            # carrying module name; each template is asked for at most once.
+            var reader_templates: Dict<text, HirModule> = {}
+            var reader_asked: [text] = []
+            var import_closure: [text] = []
+            var closure_built = false
+            while not done:
+                var templates: Dict<text, HirModule> = {}
+                for dep in dep_paths:
+                    if name_of_path.contains_key(dep) and self.ctx.hir_modules[name_of_path[dep]] != nil:
+                        templates[name_of_path[dep]] = self.ctx.hir_modules[name_of_path[dep]]
+                for reader_key in reader_templates.keys():
+                    if not templates.contains_key(reader_key):
+                        templates[reader_key] = reader_templates[reader_key]
+                val (scoped_module, scoped_stats, scoped_diags) =
+                    run_monomorphization_module_scoped_v1(self.ctx.hir_modules[name], templates)
+                var reader_served: i64 = 0
+                for missing in native_file_worker_missing_templates_v1(scoped_diags):
+                    if reader_asked.contains(missing):
+                        continue
+                    reader_asked = reader_asked.push(missing)
+                    if not closure_built:
+                        import_closure = driver_template_import_closure_v1(path, hir_queue, name_of_path)
+                        for member in import_closure:
+                            if declared.contains_key(member):
+                                continue
+                            val member_path = if path_of_name.contains_key(member): path_of_name[member] else: ""
+                            val member_body = driver_template_owner_body_v1(member, member_path,
+                                hir_queue, self.ctx.hir_modules)
+                            if member_body != nil:
+                                declared[member] = driver_template_decl_names_v1(member_body!)
+                        closure_built = true
+                    val served = driver_reader_concrete_instance_v1(missing, path,
+                        self.ctx.hir_modules, declared, import_closure, content_of, path_of_name,
+                        hir_queue, native_file_worker_missing_template_args_v1(scoped_diags, missing))
+                    if served.is_some():
+                        val carrier = served.unwrap()
+                        reader_templates[carrier.name] = carrier
+                        reader_served = reader_served + 1
+                val decision = native_file_worker_mono_fallback_reader_v1(scoped_diags, widened, reader_served)
+                if decision == "reader":
+                    print "[file-worker] mono reader-instances module={name} served={reader_served}"
+                elif decision == "widen":
+                    var edges: Dict<text, [text]> = {}
+                    var frontier: [text] = [path]
+                    var pos = 0
+                    while pos < frontier.len():
+                        val node = frontier[pos]
+                        pos = pos + 1
+                        val node_deps = native_file_worker_deps_read_v1(hir_queue, node)
+                        if node_deps.is_ok():
+                            edges[node] = node_deps.unwrap()
+                            for d in node_deps.unwrap():
+                                if not frontier.contains(d):
+                                    frontier = frontier.push(d)
+                    dep_paths = native_file_worker_transitive_deps_v1(path, edges)
+                    widened = true
+                    print "[file-worker] mono widen module={name} templates={dep_paths.len()}"
+                elif decision == "MONO-PENDING":
+                    val _marked = native_file_worker_mono_pending_publish_v1(mir_queue, path, "E-MONO-040 after transitive widening")
+                    for diag in scoped_diags:
+                        self.ctx.add_error(diag)
+                    self.ctx.add_error("MONO-PENDING: module {name} needs a template not visible through its imports")
+                    return false
+                else:
+                    driver_publish_mono_warnings_and_stats_v1(self.ctx, scoped_stats, [])
+                    if not driver_publish_mono_diagnostics_v1(self.ctx, scoped_diags, 1):
+                        return false
+                    self.ctx.hir_modules[name] = scoped_module
+                    verified[name] = scoped_module
+                    driver_publish_generic_spec_from_mono_v1(path, tldr_id_of_module)
+                    done = true
+        val scoped_report = post_mono_verify_modules(verified)
+        driver_publish_post_mono_report_v1(self.ctx, scoped_report, verified.len())
+
 export publish_module_typecheck_receipt_v1
+
+# P-G5: rewrite the module's TLDR `generic-spec` list from what the module-scoped
+# mono run that just finished actually instantiated. No frontend cache dir or
+# an unfinished run leaves the emit-time (incomplete, text-scan) list in place.
+# `tldr_id_of_module`: HIR module name -> TLDR module id of its source, so an
+# observed use resolves to its template by exact owner-qualified symbol id.
+fn driver_publish_generic_spec_from_mono_v1(path: text, tldr_id_of_module: Dict<text, text>):
+    val cache_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    val (uses, complete, ready) = mono_scoped_generic_uses_last_v1()
+    if cache_dir == "" or not ready:
+        return
+    var owners: [text] = []
+    var names: [text] = []
+    var args: [[text]] = []
+    for u in uses:
+        owners.push(if tldr_id_of_module.contains_key(u.owner): tldr_id_of_module[u.owner] else: "")
+        names.push(u.name)
+        args.push(u.arg_texts)
+    # Imported generic function instances key through their function template (P-G6).
+    for fi in mono_scoped_generic_fn_instances_last_v1():
+        owners.push(if tldr_id_of_module.contains_key(fi.owner): tldr_id_of_module[fi.owner] else: "")
+        names.push(fi.name)
+        args.push(fi.arg_texts)
+    val err = module_tldr_update_generic_spec_from_mono_v1(path, cache_dir + "/tldr",
+        MonoGenericUsesV1(owners: owners, names: names, args: args, complete: complete))
+    if err != "":
+        # Fail closed: the emit-time list stays incomplete, so planners fall back.
+        print "[file-worker] generic-spec update skipped module={path}: {err}"
 
 pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirTypecheckReceiptV1):
     for message in receipt.warnings:
@@ -232,6 +511,98 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
 # distinguishable from "it ran and found nothing".
 # ---------------------------------------------------------------------------
 
+# Bug native_build_hir_phase_scopes_2026_10_24: the any-escape, enum-contract
+# and representation passes walk every module with no transient scope, so
+# each walk's scratch (~1.3 MB/module measured for the enum-contract window at
+# 472 modules) stays immortal in the no-GC runtime. The collectors are
+# read-only ("Only rendered diagnostic arrays escape",
+# hir_semantic_consumer_v1.spl) and write no global or ctx state, so each one
+# runs in its own scope and only its receipt is promoted. Every persistent
+# write -- publish_module_typecheck_receipt_v1 (ctx.add_warning/add_error),
+# the `out` push, the representation write-back into `hir_modules` -- runs
+# AFTER scope end. SIMPLE_HIR_SEMANTIC_PASS_SCOPE=0 restores the unscoped walk.
+fn hir_semantic_pass_scope_enabled_v1() -> bool:
+    (env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE") ?? "") != "0"
+
+fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
+    if not hir_semantic_pass_scope_enabled_v1(): return false
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        eprint("[hir-pass-scope] WARNING transient scope refused; running {pass_name} UNSCOPED, arena retained: module={name}")
+        return false
+    true
+
+# Promotion stays in the frame that owns the receipt (a struct passed by value
+# could reach a helper as a copy), and the three arrays are promoted too so the
+# children survive even if the struct shell is a by-value no-op promotion.
+# Re-promoting an already-immortal child is a documented no-op success.
+fn _hir_pass_scope_failed_v1(pass_name: text, name: text, paused: bool, owned: bool, ended: bool):
+    eprint("[hir-pass-scope] WARNING receipt promotion failed (paused={paused} owned={owned} ended={ended}); re-running {pass_name} UNSCOPED: module={name}")
+
+fn _any_escape_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("any_escape", name):
+        return collect_module_any_escape_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_any_escape_receipt_v1(name, module, strictness)
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val messages_v: [text] = receipt.messages
+    val warnings_v: [text] = receipt.warnings
+    val errors_v: [text] = receipt.errors
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(messages_v) and
+        transient_promote(warnings_v) and transient_promote(errors_v)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("any_escape", name, paused, owned, ended)
+    collect_module_any_escape_receipt_v1(name, module, strictness)
+
+fn _enum_contract_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("enum_contract", name):
+        return collect_module_enum_contract_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_enum_contract_receipt_v1(name, module, strictness)
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val messages_v: [text] = receipt.messages
+    val warnings_v: [text] = receipt.warnings
+    val errors_v: [text] = receipt.errors
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(messages_v) and
+        transient_promote(warnings_v) and transient_promote(errors_v)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("enum_contract", name, paused, owned, ended)
+    collect_module_enum_contract_receipt_v1(name, module, strictness)
+
+fn _representation_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("representation_manifest", name):
+        return collect_module_representation_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_representation_receipt_v1(name, module, strictness)
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val messages_v: [text] = receipt.messages
+    val warnings_v: [text] = receipt.warnings
+    val errors_v: [text] = receipt.errors
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(messages_v) and
+        transient_promote(warnings_v) and transient_promote(errors_v)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("representation_manifest", name, paused, owned, ended)
+    collect_module_representation_receipt_v1(name, module, strictness)
+
+# The bind result is written back into the persistent `hir_modules` by the
+# caller, so it is promoted here and the module is never mutated in scope.
+fn _representation_bind_scoped_v1(contexts: Dict<text, RepresentationSourceContextV1>,
+        name: text, module: HirModule) -> [RepresentationDeclarationV1]:
+    if not _hir_pass_scope_open_v1("representation_bind", name):
+        return representation_bind_module_facts_v1(contexts, name, module)
+    val declarations = representation_bind_module_facts_v1(contexts, name, module)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(declarations)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return declarations
+    eprint("[hir-pass-scope] WARNING declaration promotion failed (paused={paused} owned={owned} ended={ended}); re-running representation_bind UNSCOPED: module={name}")
+    representation_bind_module_facts_v1(contexts, name, module)
+
 pub fn run_any_escape_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
@@ -243,7 +614,7 @@ pub fn run_any_escape_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_any_escape_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _any_escape_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -272,7 +643,7 @@ pub fn run_enum_contract_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_enum_contract_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _enum_contract_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -341,9 +712,9 @@ pub fn run_representation_manifest_pass(ctx: CompileContext,
     var errors_raised = 0
     for name in hir_modules.keys():
         var module: HirModule = hir_modules[name]
-        module.representation_declarations = representation_bind_module_facts_v1(contexts, name, module)
+        module.representation_declarations = _representation_bind_scoped_v1(contexts, name, module)
         hir_modules[name] = module
-        val receipt = collect_module_representation_receipt_v1(name, module, strictness)
+        val receipt = _representation_receipt_scoped_v1(name, module, strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)

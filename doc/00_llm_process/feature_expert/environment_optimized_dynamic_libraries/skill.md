@@ -71,3 +71,12 @@ requires a refreshed `mdsoc_only` route before implementation.
 - Admission roots now include `/usr/local/lib/simple/providers/` (FreeBSD/macOS).
 - DB staging: exact-length inputs skip padded copy; readback via `raw_read_u32s`
   (seed DB probe 810 ms -> 2.1 ms/op).
+
+## Status snapshot 2026-10-25
+
+Verified against `origin/release/1.0.0` @ `57a129fb2b9`: V1 contracts and the
+composite selector are source-landed (DONE as source); executed provider
+selection/ABI/fallback evidence is PARTIAL (system spec bodies still pending);
+compile-mode per-module dynlibs and import libraries are OPEN
+(`doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md`).
+Full table: `doc/03_plan/compiler/environment_optimized_dynamic_libraries.md`.

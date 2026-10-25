@@ -653,6 +653,17 @@ fn stmt_get_expr(idx: i64) -> i64:
         return -1
     stmt_expr[idx]
 
+# Owner write path (ParseContext stage 2): a cross-module `stmt_expr[i] = v`
+# mutates a copy in the seed and is silently dropped.
+fn stmt_set_expr(idx: i64, value: i64):
+    if not stmt_idx_is_live(idx, stmt_expr.len()):
+        stmt_oob_trace("stmt_set_expr", idx, stmt_expr.len())
+        return
+    stmt_expr[idx] = value
+
+fn stmt_owner_len() -> i64:
+    stmt_tag.len()
+
 fn stmt_get_name(idx: i64) -> text:
     if not stmt_idx_is_live(idx, stmt_name.len()):
         stmt_oob_trace("stmt_get_name", idx, stmt_name.len())
@@ -693,7 +704,7 @@ export STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIN
 export STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH
 export STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT
 export STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES
-export stmt_tag, stmt_span, stmt_expr, stmt_name, stmt_type_tag, stmt_body, stmt_count
+export stmt_count, stmt_set_expr, stmt_owner_len
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set
@@ -725,6 +736,7 @@ pub fn flat_stmt_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(stmt_body_offsets))
     parts = parts.push(flat_pool_enc_i64(stmt_count_slot))
     parts = parts.push(flat_pool_enc_i64(stmt_empty_i64))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(stmt_env_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(stmt_expr))
     parts = parts.push(flat_pool_enc_i64_list(stmt_gpu_block_exprs))
@@ -758,6 +770,87 @@ pub fn flat_stmt_pools_restore(r: FlatPoolReader) -> bool:
     stmt_type_tag = flat_pool_dec_i64_into(stmt_type_tag, r)
     r.ok
 
-export flat_stmt_pools_dump, flat_stmt_pools_restore
+# Live line chunks of this family's CLEAR pools, in dump order, for the
+# packed-blob line adapter (flat_pool_packed_v1.spl): process-local values are
+# never read back from a blob.
+pub fn flat_stmt_pools_clear_chunks_v1() -> [text]:
+    [ flat_pool_enc_i64(stmt_env_mirror_high_slot)]
+
+export flat_stmt_pools_dump, flat_stmt_pools_restore, flat_stmt_pools_clear_chunks_v1
 
 export STMT_USE_IMPORT, stmt_use_import
+
+# ===== StmtStoreState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct StmtStoreState:
+    stmt_env_mirror_high_slot: [i64]
+    stmt_tag: [i64]
+    stmt_span: [i64]
+    stmt_expr: [i64]
+    stmt_name: [text]
+    stmt_type_tag: [i64]
+    stmt_body: [[i64]]
+    stmt_body_offsets: [i64]
+    stmt_body_counts: [i64]
+    stmt_body_flat: [i64]
+    stmt_if_single_else: [i64]
+    stmt_if_val_marker: [bool]
+    stmt_count_slot: [i64]
+    stmt_gpu_grid_exprs: [[i64]]
+    stmt_gpu_block_exprs: [[i64]]
+
+pub fn stmt_store_state_take() -> StmtStoreState:
+    val s = StmtStoreState(
+        stmt_env_mirror_high_slot: stmt_env_mirror_high_slot,
+        stmt_tag: stmt_tag,
+        stmt_span: stmt_span,
+        stmt_expr: stmt_expr,
+        stmt_name: stmt_name,
+        stmt_type_tag: stmt_type_tag,
+        stmt_body: stmt_body,
+        stmt_body_offsets: stmt_body_offsets,
+        stmt_body_counts: stmt_body_counts,
+        stmt_body_flat: stmt_body_flat,
+        stmt_if_single_else: stmt_if_single_else,
+        stmt_if_val_marker: stmt_if_val_marker,
+        stmt_count_slot: stmt_count_slot,
+        stmt_gpu_grid_exprs: stmt_gpu_grid_exprs,
+        stmt_gpu_block_exprs: stmt_gpu_block_exprs
+    )
+    stmt_tag = []
+    stmt_span = []
+    stmt_expr = []
+    stmt_name = []
+    stmt_type_tag = []
+    stmt_body = []
+    stmt_body_offsets = []
+    stmt_body_counts = []
+    stmt_body_flat = []
+    stmt_if_single_else = []
+    stmt_if_val_marker = []
+    stmt_count_slot = [0]
+    stmt_gpu_grid_exprs = []
+    stmt_gpu_block_exprs = []
+    stmt_env_mirror_high_slot = [0]
+    s
+
+pub fn stmt_store_state_install(s: StmtStoreState):
+    stmt_env_mirror_high_slot = s.stmt_env_mirror_high_slot
+    stmt_tag = s.stmt_tag
+    stmt_span = s.stmt_span
+    stmt_expr = s.stmt_expr
+    stmt_name = s.stmt_name
+    stmt_type_tag = s.stmt_type_tag
+    stmt_body = s.stmt_body
+    stmt_body_offsets = s.stmt_body_offsets
+    stmt_body_counts = s.stmt_body_counts
+    stmt_body_flat = s.stmt_body_flat
+    stmt_if_single_else = s.stmt_if_single_else
+    stmt_if_val_marker = s.stmt_if_val_marker
+    stmt_count_slot = s.stmt_count_slot
+    stmt_gpu_grid_exprs = s.stmt_gpu_grid_exprs
+    stmt_gpu_block_exprs = s.stmt_gpu_block_exprs
+
+export StmtStoreState, stmt_store_state_take, stmt_store_state_install

@@ -1,6 +1,7 @@
 use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_take_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_error_v1}
@@ -62,7 +63,7 @@ use compiler.driver.perf.compiler_work_counters.{
 use std.io_runtime.{file_copy, env_get_opt}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
-use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
+use compiler.backend.backend_helpers.{get_effective_backend_name}
 use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{driver_hir_capture_managed_runtime_selection_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_shard_active}
 use compiler.driver.driver_hir_archive_production_controller_v1.{
@@ -288,7 +289,11 @@ impl CompilerDriver:
             return CompileResult.RuntimeError("bounded HIR production begin refused")
         log_phase("phase1:load_sources:start")
         val sources_streaming_in_place = streaming_route == 1
-        val (loaded_ctx, load_ok) = self.load_sources_impl(nil)
+        # A native-build worker that admitted the parent's frozen closure
+        # request hands it over here (closure_walks=0). load_sources_impl
+        # re-opens it against this driver's policy digest and still refuses it
+        # under an admitted source epoch; the CLI never installs one there.
+        val (loaded_ctx, load_ok) = self.load_sources_impl(native_entry_closure_handoff_take_v1())
         # `load_sources_impl` commits directly for the streaming owner. A
         # second aggregate assignment at this exact boundary corrupted the
         # returned context under Stage-3 native value semantics, before the

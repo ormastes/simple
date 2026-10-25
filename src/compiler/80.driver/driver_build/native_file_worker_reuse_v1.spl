@@ -1,0 +1,44 @@
+# File-worker P-E reuse file, MIR-child side (kept free of the coordinator's
+# planner/interface imports). One line per reusable module:
+#   <source path>\t<cached object or "">\t<functions>\t<statics>\t<capsule identity>
+# Written by native_file_worker_incremental_v1.file_worker_inc_prepare_v1.
+use std.io_runtime.{file_exists, file_read}
+
+pub const FILE_WORKER_REUSE_ENV_V1: text = "SIMPLE_FILE_WORKER_REUSE"
+
+pub struct FileWorkerReuseRowV1:
+    path: text
+    cached_object: text
+    functions: i64
+    statics: i64
+    capsule: text
+
+pub fn file_worker_reuse_encode_v1(rows: [FileWorkerReuseRowV1]) -> text:
+    var out = ""
+    for r in rows:
+        out = out + "{r.path}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\n"
+    out
+
+pub fn file_worker_reuse_find_v1(content: text, path: text) -> FileWorkerReuseRowV1?:
+    if path == "":
+        return None
+    for line in content.split("\n"):
+        val f = line.split("\t")
+        if f.len() == 5 and f[0] == path:
+            return Some(FileWorkerReuseRowV1(path: f[0], cached_object: f[1],
+                functions: f[2].to_i64() ?? 0, statics: f[3].to_i64() ?? 0, capsule: f[4]))
+    None
+
+# The cached record for a claimed source path; None when absent or its cached
+# object vanished (the module is then lowered normally).
+pub fn file_worker_inc_reuse_lookup_v1(reuse_path: text, path: text) -> FileWorkerReuseRowV1?:
+    if reuse_path == "" or not file_exists(reuse_path):
+        return None
+    if val r = file_worker_reuse_find_v1(file_read(reuse_path), path):
+        if r.cached_object != "" and not file_exists(r.cached_object):
+            return None
+        return Some(r)
+    None
+
+export FILE_WORKER_REUSE_ENV_V1, FileWorkerReuseRowV1
+export file_worker_reuse_encode_v1, file_worker_reuse_find_v1, file_worker_inc_reuse_lookup_v1

@@ -1,5 +1,23 @@
 # Item 5 development evidence ledger
 
+## Status 2026-10-25 (verified against origin/release/1.0.0 @ 57a129fb2b9)
+
+Superseded 2026-10-25: the "Target: main" and runtime-gate rows below are
+historical. The current destination is `release/1.0.0`. Item 5 is **OPEN**;
+no host certification cell is claimed.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Acceptance scaffold I5 P01-P07 | DONE (scaffold only) | `9a970f7051d`; specs under `test/03_system/runtime/provider/item5_pending/` are `@tag:in-development` |
+| Provider admission rejection reasons + dependency identity | DONE | `4efd8885ded` |
+| I5-04 member authority (name/offset/extent/payload digest per pinned member) | OPEN, never landed | `src/compiler/99.loader/provider_admission/` has no member-binding code |
+| Phase 3 `relocate_provider_*` MIR crash | PARTIAL | `1b0605695cb` relocates provider struct field defaults (#4596); `item5_phase3_open_failures_2026_10_14` not closed |
+| `--mode dynload` per-module dynlibs + import library | OPEN | `doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md` (#4426); `native-build` still warns `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` |
+| AOP directory match cache / selector algebra / digests | DONE | #4393, #4398, #4399, GuardIdV1 #4412 |
+| Forward weave through cached shards; `@when` guard key | OPEN (held PRs) | #4401, #4414 |
+| Import-closure-only HIR (P-A) | DONE | #4588 |
+| Dependency exclusion, size/startup/RSS cohorts, host evidence | OPEN | no admitted self-hosted runtime: `bin/release/` still absent on this Windows host |
+
 Status: BLOCKED / TEST_BLOCKED. No item completion, production PASS,
 verified RED/GREEN, implementation PR/merge, release admission or publication
 is claimed. Documentation is separately reviewed for landing.

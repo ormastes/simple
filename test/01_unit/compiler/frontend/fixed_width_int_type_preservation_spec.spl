@@ -1,0 +1,62 @@
+# Purpose: fixed-width integer annotations keep their declared type through
+# the pure-Simple parser: `u32?`/`u8?` stay Optional(u32/u8) instead of
+# collapsing to Option<any>, and non-standard widths like `u7` keep their
+# name instead of silently becoming i64. Rust seed parity: the seed parser
+# already yields Optional(Simple("u32")) / Simple("u7").
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_error_count}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+
+fn render(t: Type) -> text:
+    match t.kind:
+        case Named(name, args):
+            if name == "Option" and args.len() == 1: render(args[0]) + "?"
+            elif name == "Option": "Option<any>"
+            else: name
+        case Optional(inner): render(inner) + "?"
+        case _: "other"
+
+val SRC = "fn f(a: u32?, b: u8?, c: u7, d: i3?, e: i64?) -> u7?:\n    nil\n"
+val SRC_I64 = "fn f(a: i64?, b: i64?, c: i64, d: i64?, e: i64?) -> i64?:\n    nil\n"
+
+describe "fixed-width integer annotations":
+    it "keep optional fixed-width payloads and non-standard widths":
+        val m = parse_full_frontend(SRC, "fw_fixture.spl", "fw_fixture", Logger(level: 0))
+        expect(parser_error_count()).to_equal(0)
+        val f = m.functions["f"]
+        expect(render(f.params[0].type_)).to_equal("u32?")
+        expect(render(f.params[1].type_)).to_equal("u8?")
+        expect(render(f.params[2].type_)).to_equal("u7")
+        expect(render(f.params[3].type_)).to_equal("i3?")
+        expect(render(f.params[4].type_)).to_equal("i64?")
+        expect(render(f.return_type)).to_equal("u7?")
+
+    it "no longer collapse to the i64 / Option<any> shapes":
+        val m = parse_full_frontend(SRC, "fw_fixture.spl", "fw_fixture", Logger(level: 0))
+        val n = parse_full_frontend(SRC_I64, "fw_i64_fixture.spl", "fw_i64_fixture", Logger(level: 0))
+        var same = 0
+        var i = 0
+        while i < 5:
+            if render(m.functions["f"].params[i].type_) == render(n.functions["f"].params[i].type_):
+                same = same + 1
+            i = i + 1
+        expect(same).to_equal(1)
+
+fn surface_of(src: text, name: text) -> text:
+    module_surface_canonical_digest_v1(parse_full_frontend(src, name + ".spl", name, Logger(level: 0)))
+
+describe "fixed-width types reach the module surface digest":
+    it "u32? vs u8?, u7 vs i64 and u7? vs u7 give different digests":
+        val u32_opt = surface_of("pub fn f(a: u32?) -> i64:\n    0\n", "sd_a")
+        val u8_opt = surface_of("pub fn f(a: u8?) -> i64:\n    0\n", "sd_b")
+        val u7 = surface_of("pub fn f(a: u7) -> i64:\n    0\n", "sd_c")
+        val i64_ = surface_of("pub fn f(a: i64) -> i64:\n    0\n", "sd_d")
+        val u7_opt = surface_of("pub fn f(a: u7?) -> i64:\n    0\n", "sd_e")
+        expect(u32_opt == u8_opt).to_equal(false)
+        expect(u7 == i64_).to_equal(false)
+        expect(u7_opt == u7).to_equal(false)
+        expect(surface_of("pub fn f(a: u7) -> i64:\n    0\n", "sd_f")).to_equal(u7)

@@ -362,6 +362,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // source itself) failed with "unknown extern function" (task #113).
     insert_simple!("rt_enum_discriminant", enum_sffi::rt_enum_discriminant_fn);
     insert_simple!("rt_enum_payload", enum_sffi::rt_enum_payload_fn);
+    insert_simple!("rt_enum_id", enum_sffi::rt_enum_id_fn);
     insert_simple!("dprint", io::print::dprint);
     insert_simple!("eprintln", io::print::eprintln);
     insert_simple!("exit", process::exit);
@@ -1588,6 +1589,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_stat_mtime", file_io::rt_file_stat_mtime);
     insert_simple!("rt_file_stat_size", file_io::rt_file_stat_size);
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
+    insert_simple!("rt_mmap_create", file_io::rt_mmap_create);
+    insert_simple!("rt_munmap", file_io::rt_munmap);
+    insert_simple!("rt_msync", file_io::rt_msync);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
@@ -1623,6 +1627,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // were implemented -- see
     // doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
     insert_simple!("rt_io_file_open", io_file::rt_io_file_open);
+    insert_simple!("rt_io_file_open_read", io_file::rt_io_file_open_read);
+    insert_simple!("rt_io_file_open_write", io_file::rt_io_file_open_write);
+    insert_simple!("rt_io_file_open_append", io_file::rt_io_file_open_append);
     insert_simple!("rt_io_file_read", io_file::rt_io_file_read);
     insert_simple!("rt_io_file_read_all", io_file::rt_io_file_read_all);
     insert_simple!("rt_io_file_read_line", io_file::rt_io_file_read_line);
@@ -2429,6 +2436,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_cpu_topology_count", concurrency::rt_cpu_topology_count);
+    insert_simple!("rt_cpu_topology_field", concurrency::rt_cpu_topology_field);
+    insert_simple!("rt_thread_pin_current", concurrency::rt_thread_pin_current);
+    insert_simple!("rt_thread_current_cpu", concurrency::rt_thread_current_cpu);
+    insert_simple!("rt_par_atomic_add_i64", concurrency::rt_par_atomic_add_i64);
+    insert_simple!("rt_par_atomic_xchg_i64", concurrency::rt_par_atomic_xchg_i64);
+    insert_simple!("rt_par_atomic_cmpxchg_i64", concurrency::rt_par_atomic_cmpxchg_i64);
     insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);

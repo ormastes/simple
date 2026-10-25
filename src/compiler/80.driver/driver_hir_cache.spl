@@ -50,20 +50,24 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_stable, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_reason, hir_module_decode_stable, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envelope_parse, hir_cache_parser_record_valid_v1}
 use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_deps_publish_v1,
+    native_file_worker_hirkey_publish_v1, mono_module_scoped_selected_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -73,13 +77,13 @@ extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_file_move(src: text, dst: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
-# v3: body checksum line after the header (see INTEGRITY above). A v2 entry
-# fails the header test and is a counted `header` rejection, not a decode.
-val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v3"
+# v4: keeps v3's body checksum and adds Any-warning diagnostics to cached HIR
+# semantics. A v3 entry can lack that warning, so reject it before replay.
+val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v4"
 val HIR_CACHE_CHECKSUM_PREFIX: text = "C "
 # Rejection classes, in summary order. Every load that returns nil for an
 # EXISTING key increments exactly one of them.
-val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode"]
+val HIR_CACHE_REJECT_REASONS: [text] = ["absent", "header", "checksum", "framing", "decode", "rebase"]
 
 # Diagnostic counters, same shape as the front-end cache's.
 var _hir_cache_hits: i64 = 0
@@ -93,7 +97,7 @@ var _hir_cache_stores: i64 = 0
 var _hir_cache_refused: i64 = 0
 var _hir_cache_last_reason: text = "-"
 # Index-aligned with HIR_CACHE_REJECT_REASONS.
-var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0]
+var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0, 0]
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
@@ -103,7 +107,15 @@ fn hir_cache_enabled() -> bool:
         return false
     # Requires the front-end cache scope: that is the compiler identity the
     # header is checked against. No scope, no identity, no cache.
-    frontend_parse_cache_scope() != ""
+    _hir_cache_identity_scope() != ""
+
+# Identity the HIR header folds. Equals frontend_parse_cache_scope() whenever
+# the frontend cache is on; with SIMPLE_FRONTEND_CACHE=0 it falls back to the
+# published SIMPLE_FRONTEND_CACHE_SCOPE so the HIR cache keeps working.
+fn _hir_cache_identity_scope() -> text:
+    hir_cache_identity_scope_v1(frontend_parse_cache_scope(),
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "",
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE") ?? "")
 
 fn hir_cache_dir() -> text:
     val root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? ""
@@ -158,7 +170,7 @@ fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
     hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
 fn hir_cache_header() -> text:
-    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
+    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
 
 # `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
 # source + closure digests, but the HEADER additionally folds
@@ -205,11 +217,56 @@ fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
 var _hir_cache_last_parser_objectless: bool = false
 fn hir_cache_last_parser_objectless() -> bool: _hir_cache_last_parser_objectless
 
+# Hits stored under another SCV snapshot root and rebased onto the consuming
+# root before decode, so module.path, every Span.file and the replayed
+# warnings name the consuming snapshot instead of the storing one.
+var _hir_cache_rebased_hits: i64 = 0
+fn hir_cache_rebased_hits_v1() -> i64: _hir_cache_rebased_hits
+
+# Bug post_hir_rt_criticality_census_reencode_2026_10_25 (snapshot-root
+# section): entries are keyed
+# repo-relative, but the blob embeds the STORING run's absolute snapshot root
+# (build/scv/snapshots/scv-revision-v1-<id>/) in module.path and every
+# Span.file, and every build freezes a new revision. Returns [old_root,
+# new_root] when the stored module.path (third blob line: codec header, name,
+# path) and `source_path` are the same repo-relative file under two different
+# non-empty roots, else []. The codec is line-oriented with one escaped scalar
+# per line, so replacing "\n" + old_root with "\n" + new_root rewrites exactly
+# the text fields that start with the old root -- the decode of the result is
+# the module as lowered under the new root, and the result is its canonical
+# encoding. Backslash-bearing roots are refused (their escaped form differs).
+fn _hir_cache_rebase_root_ok_v1(root: text) -> bool:
+    root.starts_with("/") and root != "/" and root.ends_with("/")
+
+fn hir_cache_snapshot_root_rebind_v1(blob: text, source_path: text) -> [text]:
+    if source_path == "" or source_path.contains("\\"): return []
+    val header_end = blob.index_of("\n")
+    if header_end < 0: return []
+    val name_end = blob.index_of("\n", header_end + 1)
+    if name_end < 0: return []
+    val path_end = blob.index_of("\n", name_end + 1)
+    if path_end < 0: return []
+    val stored = blob.substring(name_end + 1, path_end)
+    if stored == source_path or stored.contains("\\"): return []
+    val rel = module_source_relative_path(source_path)
+    if rel == "" or module_source_relative_path(stored) != rel: return []
+    if not stored.ends_with(rel) or not source_path.ends_with(rel): return []
+    val old_root = stored.substring(0, stored.len() - rel.len())
+    val new_root = source_path.substring(0, source_path.len() - rel.len())
+    # An empty old root would match every line; a relative one (`../x/`) or
+    # `/` could prefix ordinary text values. Only absolute, non-root snapshot
+    # roots rebase; re-joining proves the split.
+    if not _hir_cache_rebase_root_ok_v1(old_root) or old_root + rel != stored: return []
+    if new_root != "" and not _hir_cache_rebase_root_ok_v1(new_root): return []
+    if new_root + rel != source_path: return []
+    [old_root, new_root]
+
 fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "") -> HirModule?:
     if parser_binding.len() != 64: return nil
-    val loaded = hir_cache_load(key, parser_binding)
+    val loaded = hir_cache_load(key, parser_binding, source_path)
     if source_path == "" or loaded == nil: return loaded
-    # The entry may come from the other route's spelling of this file.
+    # The entry may come from the other route's spelling of this file. A
+    # snapshot-root move was already rebased inside the load.
     var module = loaded.unwrap()
     module.path = source_path
     Some(module)
@@ -218,13 +275,13 @@ fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_
     if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
     sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header())
 
-fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
+fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "") -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
     if key == "" or not hir_cache_enabled():
         return nil
     if not transient_scope_begin():
         return nil
-    val decoded = hir_cache_load_in_owned_scope(key, parser_binding)
+    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path)
     val paused = transient_scope_pause()
     # A miss has no graph to promote: the runtime correctly rejects nil roots.
     # The owned loader only replaces the persistent warning root on a hit.
@@ -249,7 +306,7 @@ fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain
 # only their small diagnostics/receipts, so no full HIR root is promoted here.
-fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirModule?:
+fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "") -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key, parser_binding != "")
@@ -272,15 +329,32 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirMod
     # main build's `[hir-cache] hits=2702 misses=0` reading as a stall.
     # SIMPLE_HIR_CACHE_SELFCHECK=1 / SIMPLE_HIR_CODEC_ROUNDTRIP=1 ("all")
     # keep the load-side roundtrip as an explicit diagnostic.
+    # The checksum above covered the stored bytes; a snapshot-root rebase is
+    # applied after it, before the single decode (hir_cache_snapshot_root_rebind_v1).
+    var blob = entry.blob
+    var warnings = entry.warnings
+    val rebind = hir_cache_snapshot_root_rebind_v1(blob, source_path)
+    if rebind.len() == 2:
+        blob = blob.replace("\n" + rebind[0], "\n" + rebind[1])
+        var rebased_warnings: [text] = []
+        for warning in warnings:
+            rebased_warnings.push(warning.replace(rebind[0], rebind[1]))
+        warnings = rebased_warnings
     val decoded = if hir_cache_load_reencodes_v1(hir_cache_selfcheck_mode()):
-        hir_module_decode_stable(entry.blob)
+        hir_module_decode_stable(blob)
     else:
-        hir_module_decode(entry.blob)
+        hir_module_decode(blob)
     if decoded == nil:
         _hir_cache_reject("decode")
         return nil
+    if rebind.len() == 2:
+        # Fail closed: a rebase that did not land the consuming path is a miss.
+        if decoded.unwrap().path != source_path:
+            _hir_cache_reject("rebase")
+            return nil
+        _hir_cache_rebased_hits = _hir_cache_rebased_hits + 1
     _hir_cache_last_parser_objectless = entry.parser_classification.starts_with("objectless:")
-    _hir_cache_last_warnings = entry.warnings
+    _hir_cache_last_warnings = warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
 
@@ -684,7 +758,7 @@ fn hir_cache_selfcheck_failed() -> i64:
 fn hir_cache_selfcheck_blob(blob: text) -> text:
     val decoded = hir_module_decode(blob)
     if decoded == nil:
-        return "reason=decode bytes={blob.len()}"
+        return "reason=decode bytes={blob.len()} cause={hir_module_decode_reason(blob)}"
     val again = hir_module_encode(decoded.unwrap())
     if again == blob:
         return ""
@@ -788,10 +862,18 @@ fn hir_shard_owner() -> text:
     sosix_env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? hir_shard_spec()
 
 fn hir_shard_begin(path: text, key: text) -> i64:
+    # P5: a worker whose surfaces cover only its seeds' import closure never
+    # claims a module outside it (driver_worker_surface_closure_v1.spl).
+    if not worker_surface_claim_allowed_v1(path): return 0
     val queue = _hir_shard_queue_dir()
     if queue == "":
         return if hir_shard_owns(path): 1 else: 0
     if hir_shard_recovery_blocked(queue): return -1
+    # File-worker HIR child (driver_build/native_file_worker_v1.spl): stop
+    # claiming after SIMPLE_HIR_SHARD_CLAIM_LIMIT modules; the rest stay
+    # unclaimed for the next round or another worker. Unset/<=0 = no limit.
+    val claim_limit = (sosix_env_get_nullable("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "").to_i64() ?? 0
+    if claim_limit > 0 and _hir_shard_claimed >= claim_limit: return 0
     val claimed = hir_shard_recovery_claim(queue, hir_shard_owner(), path, key)
     if claimed > 0:
         _hir_shard_claimed = _hir_shard_claimed + 1
@@ -800,6 +882,21 @@ fn hir_shard_begin(path: text, key: text) -> i64:
 fn hir_shard_finish(path: text, state: text, cache_stored: bool) -> bool:
     if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
     hir_shard_recovery_terminal(_hir_shard_queue_dir(), hir_shard_owner(), path, state, cache_stored)
+
+# File-worker P4: deps records are written only when a file worker drives
+# this HIR child (its hir ledger env is set), unless SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
+fn hir_shard_deps_wanted_v1() -> bool:
+    hir_shard_active() and _hir_shard_queue_dir() != "" and
+        mono_module_scoped_selected_v1(sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "")
+
+fn hir_shard_publish_deps_v1(path: text, deps: [text]) -> bool:
+    native_file_worker_deps_publish_v1(_hir_shard_queue_dir(), path, deps)
+
+# P-G5b: the module's HIR cache key, so a MIR child can load this module's
+# body by content identity (template-body seam).
+fn hir_shard_publish_hirkey_v1(path: text, key: text) -> bool:
+    native_file_worker_hirkey_publish_v1(_hir_shard_queue_dir(), path, key)
 
 fn hir_shard_complete() -> bool:
     if _hir_shard_queue_dir() == "": return true
@@ -959,13 +1056,14 @@ fn hir_shard_level_count(levels: [i64]) -> i64:
     top + 1
 
 fn hir_shard_summary(levels: i64, lowered: i64) -> text:
-    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels}"
+    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels} {worker_surface_counters_v1()}"
 
 export HIR_CACHE_ENTRY_VERSION, HIR_CACHE_CHECKSUM_PREFIX, HIR_CACHE_REJECT_REASONS
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
 export hir_cache_path
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_module_encode_retained_v1
+export hir_cache_rebased_hits_v1, hir_cache_snapshot_root_rebind_v1
 export hir_cache_load_in_owned_scope
 export hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
@@ -978,6 +1076,7 @@ export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SA
 export hir_cache_load_reencodes_v1, hir_cache_adoption_receipt_v1
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
+export hir_shard_deps_wanted_v1, hir_shard_publish_deps_v1, hir_shard_publish_hirkey_v1
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
 export hir_shard_inventory
 

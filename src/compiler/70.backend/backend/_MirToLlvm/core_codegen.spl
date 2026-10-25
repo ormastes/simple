@@ -1,5 +1,6 @@
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
+use std.nogc_sync_mut.io_runtime.{cwd}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
 use compiler.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
@@ -87,6 +88,26 @@ fn _sffi_string_builder_len(handle: i64) -> i64:
 fn _sffi_string_builder_push(handle: i64, value: text):
     unsafe(capabilities: [ffi]):
         rt_string_builder_push(handle, value)
+
+# Debug-info path prefix map (live_object_key.sdn gap debug_info_path_prefix,
+# closed): a source path under the build root is emitted RELATIVE to it, so
+# objects built from the same repo-relative source in two workspaces carry the
+# same DIFile and a cross-workspace cache hit cannot embed another
+# workspace's absolute path. Paths outside the root are left as given.
+# Separators are normalized to '/'; the root match ignores ASCII case on a
+# drive-letter path (Windows).
+pub fn debug_info_prefix_map_path(path: text, root: text) -> text:
+    val p = path.replace("\\", "/")
+    var r = root.replace("\\", "/")
+    while r.len() > 1 and r.ends_with("/"):
+        r = r.substring(0, r.len() - 1)
+    if r == "" or p.len() <= r.len() + 1:
+        return p
+    val head = p.substring(0, r.len())
+    val same = if r.len() >= 2 and r.substring(1, 2) == ":": head.to_lower() == r.to_lower() else: head == r
+    if same and p.substring(r.len(), r.len() + 1) == "/":
+        return p.substring(r.len() + 1, p.len())
+    p
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -375,7 +396,7 @@ impl MirTextCodegen for MirToLlvm:
                             break
             if dbg_source_file == "":
                 dbg_source_file = "{module.name}.spl"
-            val (dbg_filename, dbg_directory) = debug_info_split_path(dbg_source_file)
+            val (dbg_filename, dbg_directory) = debug_info_split_path(debug_info_prefix_map_path(dbg_source_file, cwd()))
             self.builder.emit_debug_info_header(dbg_filename, dbg_directory)
 
         # Origin discriminator (see mir_call_ownership.spl): record which
@@ -397,7 +418,9 @@ impl MirTextCodegen for MirToLlvm:
         self.module_qualified_symbol_names = {}
         if not is_entry_module and module.name != "":
             for fn_qualify in mir_module_functions_sorted(module):
-                if not fn_qualify.name.contains("."):
+                # A COMDAT instance keeps its bare mangled name: every object
+                # that instantiated it must spell the same symbol to dedupe.
+                if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
         for fn_owner in mir_module_functions_sorted(module):
             if mir_runtime_owned_call_name(fn_owner.name):
@@ -417,6 +440,9 @@ impl MirTextCodegen for MirToLlvm:
             # body is emitted -- llvm_function_symbol_name consults fn_global
             # at call sites, and translate_function reads the rest on the
             # `define` line / at the terminator.
+            if fn_owner.is_comdat:
+                self.fn_comdat[fn_owner.name] = true
+                self.fn_comdat[self.llvm_function_symbol_name(fn_owner.name)] = true
             if fn_owner.is_global:
                 self.fn_global[fn_owner.name] = true
             if fn_owner.is_naked or fn_owner.section != "" or fn_owner.align > 0:
@@ -883,7 +909,21 @@ impl MirTextCodegen for MirToLlvm:
             placement_suffix = placement_suffix + " section \"" + self.fn_section[name] + "\""
         if self.fn_align.has(name):
             placement_suffix = placement_suffix + " align {self.fn_align[name]}"
-        val placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        var placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        # Module-scoped mono instance: every requesting object defines its own
+        # copy as `linkonce_odr` in a same-named `any` comdat; the linker
+        # keeps one (ELF group / COFF IMAGE_COMDAT_SELECT_ANY / Mach-O weak).
+        if self.fn_comdat.has(name):
+            placement_prefix = "define linkonce_odr"
+            placement_suffix = " comdat" + placement_suffix
+            val comdat_decl = "$" + fn_name + " = comdat any"
+            if ir_handle >= 0:
+                if _sffi_string_builder_len(ir_handle) > 0:
+                    val comdat_newline = "\n"
+                    _sffi_string_builder_push(ir_handle, comdat_newline)
+                _sffi_string_builder_push(ir_handle, comdat_decl)
+            else:
+                self.builder.emit(comdat_decl)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
             var attrs = " nounwind" + placement_attrs
@@ -1058,7 +1098,10 @@ impl MirTextCodegen for MirToLlvm:
             val agg_kind: AggregateKind = _sffi_tuple_get<AggregateKind>(agg_payload, 1)
             val agg_operands: [MirOperand] = _sffi_tuple_get<[MirOperand]>(agg_payload, 2)
             if mir_trace_enabled():
-                eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operands.len()}\n")
+                # Bind the array operation before interpolation, whose nested
+                # expression loses the receiver type on the staged MIR path.
+                val agg_operand_count: i64 = agg_operands.len()
+                eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operand_count}\n")
             # Call the uniquely-named impl, NOT the trait name: the trait
             # declares translate_aggregate with a `()` body, and a call through
             # the trait name reaches that silent no-op on this lane.
@@ -1584,8 +1627,12 @@ impl MirTextCodegen for MirToLlvm:
         """Same lookup pattern as lookup_function_return_type (direct name,
         then bare name with the leading '@' stripped)."""
         val direct = self.function_return_unsigned.get(func_name)
-        if direct.?:
-            return direct.unwrap()
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24 reason=unwrap/len on Option payload of un-annotated receiver unresolved; match instead
+        match direct:
+            case Some(direct_unsigned):
+                return direct_unsigned
+            case _:
+                pass
         if func_name.starts_with("@"):
             val bare = func_name[1:]
             # `.has()` + index, not `.get() ?? false` — under native codegen a
@@ -2493,17 +2540,19 @@ impl MirTextCodegen for MirToLlvm:
         # (verbatim byte copy, both [u8] layouts). A quoted LLVM name
         # (`@"text.from_bytes"`) is matched too.
         val bare_static_name = bare_name_for_call.replace("\"", "")
-        # Process-run externs: the .spl extern shape
-        # (cmd as one text value, tuple-of-3 result) does not match the C
-        # owners' seed ABI (cmd as ptr+len, SplArray* result with a tagged
-        # int in slot 2) -- calling the seed symbol directly from generated
-        # code misaligns every arg after cmd and misreads the result
-        # (parity case process_run_timeout: SIGSEGV). Route to the
-        # runtime_native.c *_tuple facades, which accept the tagged-or-raw
-        # cmd text value and return the rt_alloc'd 3-word tuple block the
-        # Tuple destructure loads expect (declares registered in
-        # emit_runtime_declarations, asm_constraints_helpers.spl).
-        var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run": "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded": "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_inherit": "@rt_process_run_inherit_value" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout": "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value": "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        # Process-run externs: the MIR text_arg_indices registry already
+        # split cmd into the C owners' (ptr, len) words, but the owners
+        # return a SplArray* with a tagged int in slot 2, which the LLVM
+        # Tuple destructure misreads (parity case process_run_timeout:
+        # SIGSEGV). Route to the runtime_native.c *_tuple facades, which take
+        # the same (ptr, len, args, ...) words and return the rt_alloc'd
+        # 3-word tuple block the destructure loads expect (declares
+        # registered in emit_runtime_declarations, asm_constraints_helpers.spl).
+        # rt_process_run_inherit returns a plain i64 and needs no facade.
+        # Each facade is guarded by its post-split word count (cmd = ptr + len),
+        # like the MIR split and the Cranelift remap: a different-arity import
+        # of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
+        var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         call_func_name = self.normalize_call_callee(call_func_name)
         var arg_parts: [text] = []
         var arg_tys: [text] = []
@@ -2885,19 +2934,24 @@ impl MirTextCodegen for MirToLlvm:
     me lookup_function_param_type(func_name: text, index: i64) -> text:
         # ponytail: flattened for the same reason as lookup_function_return_type.
         val direct = self.function_param_types.get(func_name)
-        if direct.?:
-            val param_tys = direct.unwrap()
-            if index < param_tys.len():
-                return param_tys[index]
-            return ""
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24 reason=unwrap/len on Option payload of un-annotated receiver unresolved; match instead
+        match direct:
+            case Some(param_tys):
+                if index < param_tys.len():
+                    return param_tys[index]
+                return ""
+            case _:
+                pass
         if func_name.starts_with("@"):
             val bare = func_name[1:]
             val bare_hit = self.function_param_types.get(bare)
-            if bare_hit.?:
-                val bare_param_tys = bare_hit.unwrap()
-                if index < bare_param_tys.len():
-                    return bare_param_tys[index]
-                return ""
+            match bare_hit:
+                case Some(bare_param_tys):
+                    if index < bare_param_tys.len():
+                        return bare_param_tys[index]
+                    return ""
+                case _:
+                    pass
         val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
         if bootstrap_index >= 0 and index >= 0 and index < bootstrap_mir_function_param_count_at(bootstrap_index):
             return bootstrap_llvm_static_type_text(bootstrap_mir_function_param_type_tag_at(bootstrap_index, index), self.native_int_type)
@@ -2909,13 +2963,20 @@ impl MirTextCodegen for MirToLlvm:
         lookup_function_param_type's name resolution: direct key first, then the
         bare `@`-stripped key."""
         val direct = self.function_param_types.get(func_name)
-        if direct.?:
-            return direct.unwrap().len()
+        # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24 reason=unwrap/len on Option payload of un-annotated receiver unresolved; match instead
+        match direct:
+            case Some(direct_tys):
+                return direct_tys.len()
+            case _:
+                pass
         if func_name.starts_with("@"):
             val bare = func_name[1:]
             val bare_hit = self.function_param_types.get(bare)
-            if bare_hit.?:
-                return bare_hit.unwrap().len()
+            match bare_hit:
+                case Some(bare_tys):
+                    return bare_tys.len()
+                case _:
+                    pass
         val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
         if bootstrap_index >= 0:
             return bootstrap_mir_function_param_count_at(bootstrap_index)

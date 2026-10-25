@@ -1,4 +1,5 @@
 # Explicit payload owners survive import-surface projection.
+use compiler.frontend.core._AstExpr.nodes.{asm_arm_owner_abi, asm_arm_owner_archs, asm_arm_owner_asm_text, asm_arm_owner_backend, asm_arm_owner_error_msg, asm_arm_owner_is_compile_error, asm_arm_owner_is_wildcard, asm_arm_owner_os, asm_arm_owner_ver_ops, asm_arm_owner_ver_vals}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind, Interpolation}
 use compiler.frontend.core.ast_expr.{expr_get_call_type_args}
 use compiler.core.ast_stmt.{STMT_USE_IMPORT}
@@ -16,7 +17,7 @@ use compiler.frontend.core.lexer.{lex_init_with_path}
 use compiler.core.tokens.{TOK_EOF}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.string_interpolation_expand.{
-    parse_interpolation_fragment, interpolation_literalize_region
+    parse_interpolation_fragment, parse_interpolation_fragment_at, interpolation_literalize_region
 }
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
@@ -25,7 +26,6 @@ use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_ha
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
-use compiler.core.ast.{decl_is_packed}
 use compiler.core.ast.{elif_get_else}
 use compiler.core.ast_expr.*
 use compiler.frontend.core._AstExpr.accessors.*
@@ -746,7 +746,7 @@ fn flat_asm_expr_with_operands(idx: i64, span: Span) -> AsmExpr:
             kind: kind,
             location: location,
             value: convert_flat_expr(values[operand_index]),
-            output_value: if operand_index < outputs.len() and outputs[operand_index] >= 0: convert_flat_expr(outputs[operand_index]) else: nil,
+            output_value: if operand_index < outputs.len() and outputs[operand_index] >= 0: convert_flat_expr(outputs[operand_index]) else: None,
             span: span
         ))
         operand_index = operand_index + 1
@@ -762,35 +762,35 @@ fn flat_asm_expr_with_operands(idx: i64, span: Span) -> AsmExpr:
 
 fn flat_asm_spec_from_arm(arm_idx: i64, span: Span) -> AsmTargetSpec:
     var versions: [AsmVersionConstraint] = []
-    val ops = asm_arm_ver_ops[arm_idx]
-    val vals = asm_arm_ver_vals[arm_idx]
+    val ops = asm_arm_owner_ver_ops(arm_idx)
+    val vals = asm_arm_owner_ver_vals(arm_idx)
     var vi = 0
     while vi < ops.len() and vi < vals.len():
         versions.push(AsmVersionConstraint(op: ops[vi], version: vals[vi]))
         vi = vi + 1
     AsmTargetSpec(
-        archs: flat_copy_text_list(asm_arm_archs[arm_idx]),
-        has_os: asm_arm_os[arm_idx] != "",
-        os: asm_arm_os[arm_idx],
-        has_abi: asm_arm_abi[arm_idx] != "",
-        abi: asm_arm_abi[arm_idx],
-        has_backend: asm_arm_backend[arm_idx] != "",
-        backend: asm_arm_backend[arm_idx],
+        archs: flat_copy_text_list(asm_arm_owner_archs(arm_idx)),
+        has_os: asm_arm_owner_os(arm_idx) != "",
+        os: asm_arm_owner_os(arm_idx),
+        has_abi: asm_arm_owner_abi(arm_idx) != "",
+        abi: asm_arm_owner_abi(arm_idx),
+        has_backend: asm_arm_owner_backend(arm_idx) != "",
+        backend: asm_arm_owner_backend(arm_idx),
         version_constraints: versions,
         span: span
     )
 
 fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
-    val is_compile_error = asm_arm_is_compile_error[arm_idx]
-    val wildcard = asm_arm_is_wildcard[arm_idx]
+    val is_compile_error = asm_arm_owner_is_compile_error(arm_idx)
+    val wildcard = asm_arm_owner_is_wildcard(arm_idx)
     AsmMatchArm(
         has_spec: not wildcard,
         spec: flat_asm_spec_from_arm(arm_idx, span),
         is_wildcard: wildcard,
         has_asm_body: not is_compile_error,
-        asm_body: flat_asm_expr(asm_arm_asm_text[arm_idx], span),
+        asm_body: flat_asm_expr(asm_arm_owner_asm_text(arm_idx), span),
         is_compile_error: is_compile_error,
-        error_message: asm_arm_error_msg[arm_idx],
+        error_message: asm_arm_owner_error_msg(arm_idx),
         span: span
     )
 
@@ -821,6 +821,18 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     var region_start = 0
     var depth = 0
     var inner_parts: [text] = []
+    # Source position of each region's first inner character, so the
+    # sub-parsed fragment's spans can be rebased onto the real source line
+    # (fragment-relative spans made every receiver at a region start `:1:1`).
+    # Only ordinary `"..."` literals interpolate (triple-quoted and `'`/r-prefixed
+    # ones are raw: lexer_struct.spl scan_string / primary_expr.spl), and an
+    # ordinary literal cannot contain a real newline, so every `\n` in the
+    # stored (escape-DECODED) value is an escape: the region is on the
+    # literal's own line. The column is exact when no escape precedes the
+    # region and short by the escapes' extra source bytes otherwise.
+    var region_line = 0
+    var region_col = 0
+    var region_offset = 0
     var i = 0
     val n = value.len()
     while i < n:
@@ -842,13 +854,17 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             depth = 1
             region_start = i
             inner_parts = []
+            region_offset = span.start + 1 + i + 1
+            if span.line > 0:
+                region_line = span.line
+                region_col = span.col + 1 + i + 1
         elif depth > 0 and ch == "{":
             depth = depth + 1
             inner_parts.push(ch)
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = parse_interpolation_fragment(inner_parts.join(""))
+                val part_idx = parse_interpolation_fragment_at(inner_parts.join(""), region_offset, region_line, region_col)
                 if part_idx < 0:
                     chunks.push(value.substring(copied_until, region_start))
                     chunks.push(interpolation_literalize_region(
@@ -1253,7 +1269,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
             dict_ei = dict_ei + 1
         return Expr(kind: ExprKind.DictLit(dict_entries), span: span)
     if tag == EXPR_UNIT:
-        return Expr(kind: ExprKind.NilLit, span: span)
+        # Source () is the empty tuple, matching its declared type and the
+        # canonical parser. Nil has its own literal and payload semantics.
+        var unit_elements: [Expr] = []
+        return Expr(kind: ExprKind.TupleLit(unit_elements), span: span)
     if tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
         return Expr(kind: ExprKind.NilLit, span: span)
     if tag == EXPR_EXISTS_CHECK:
@@ -1389,8 +1408,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # (expr_range() takes no step argument), so step is always nil here.
         val range_start_idx = expr_get_left(idx)
         val range_end_idx = expr_get_right(idx)
-        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: nil
-        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: nil
+        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: None
+        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: None
         val range_inclusive = expr_get_int(idx) != 0
         return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, None), span: span)
     if tag == EXPR_SPREAD:
@@ -1413,7 +1432,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # native_build_fresh_seed_optionwrap_landmine_2026-07-18.md, "SCOPE
         # CORRECTION" section).
         val spread_inner_idx = expr_get_left(idx)
-        val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: nil
+        val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: None
         return Expr(kind: ExprKind.Range(None, spread_inner, false, None), span: span)
     if tag == EXPR_SPAWN:
         # `spawn <expr>` (EXPR_SPAWN, tag 39) -- built unconditionally by
@@ -1482,7 +1501,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # `20.hir/hir_lowering/expressions.spl:954-960`. The operand slot is
         # optional here to match the enum's `Expr?` payload.
         val yield_inner_idx = expr_get_left(idx)
-        val yield_inner: Expr? = if yield_inner_idx >= 0: convert_flat_expr(yield_inner_idx) else: nil
+        val yield_inner: Expr? = if yield_inner_idx >= 0: convert_flat_expr(yield_inner_idx) else: None
         return Expr(kind: ExprKind.Yield(yield_inner), span: span)
     if tag == EXPR_DICT_COMP:
         val dc_args = expr_get_args(idx)
@@ -1654,7 +1673,13 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         while api < arr_pat_indices.len():
             arr_pat_elems.push(convert_flat_pattern(arr_pat_indices[api]))
             api = api + 1
-        return Pattern(kind: PatternKind.Array(arr_pat_elems, nil), span: pspan)
+        return Pattern(kind: PatternKind.Array(arr_pat_elems, None), span: pspan)
+    elif ptag == EXPR_UNIT:
+        # The canonical parser represents () in pattern position as an empty
+        # tuple, not a nil literal or a wildcard. Preserve the enclosing enum
+        # payload slot and discriminant while introducing no child bindings.
+        var unit_pattern_elements: [Pattern] = []
+        return Pattern(kind: PatternKind.Tuple(unit_pattern_elements), span: pspan)
     elif ptag == EXPR_TUPLE:
         # `(a, b, ...)` tuple-destructure pattern. Before this case existed,
         # EXPR_TUPLE fell through to the Wildcard catch-all below, so
@@ -1676,8 +1701,8 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # Before this case existed, EXPR_RANGE fell through to Wildcard.
         val rp_start_idx = expr_get_left(pat_eid)
         val rp_end_idx = expr_get_right(pat_eid)
-        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: nil
-        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: nil
+        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: None
+        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: None
         val rp_inclusive = expr_get_int(pat_eid) != 0
         return Pattern(kind: PatternKind.Range(rp_start, rp_end, rp_inclusive), span: pspan)
     elif ptag == EXPR_UNARY:
@@ -1821,7 +1846,7 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
         val expression_id = stmt_get_expr(idx)
         if expression_id >= 0:
             return defer_return_replay(convert_flat_expr(expression_id), idx, make_span())
-        return defer_return_replay(nil, idx, make_span())
+        return defer_return_replay(None, idx, make_span())
     else:
         return [convert_flat_stmt(idx)]
 
@@ -2162,7 +2187,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     var contract_invariants: [ContractClause] = []
     var contract_postconditions: [ContractClause] = []
     var contract_error_postconditions: [ContractClause] = []
-    var contract_decreases: ContractClause? = nil
+    var contract_decreases: ContractClause? = None
     var contract_post_binding = ""
     var contract_error_binding = ""
     var contract_proof_uses = ""
@@ -2576,3 +2601,22 @@ fn text_parse_int_simple(s: text) -> i64:
             result = result + 9
         i = i + 1
     result
+
+# ===== PendingDeferState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct PendingDeferState:
+    g_pending_defers: [[Stmt]]
+
+pub fn pending_defer_state_take() -> PendingDeferState:
+    val s = PendingDeferState(
+        g_pending_defers: g_pending_defers
+    )
+    g_pending_defers = []
+    s
+
+pub fn pending_defer_state_install(s: PendingDeferState):
+    g_pending_defers = s.g_pending_defers
+
+export PendingDeferState, pending_defer_state_take, pending_defer_state_install

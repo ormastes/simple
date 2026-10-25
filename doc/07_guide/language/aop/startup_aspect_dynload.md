@@ -1,6 +1,8 @@
 # Startup aspect dynload
 
 **Status:** implemented and gated (2026-08-24).
+
+Superseded 2026-10-25: this status covers only the startup loader (gate `scripts/check/check-startup-aspect-dynload.shs` exists). The producer side is still absent: `native-build --mode dynload` emits no aspect pack (`W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED`) and no per-module dynlibs — see `doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md`.
 **Gate:** `sh scripts/check/check-startup-aspect-dynload.shs` — exercises the
 environment and command-line extension forms with real shared libraries.
 **Runtime:** `src/runtime/runtime_native.c` (`__simple_startup_before_main`)

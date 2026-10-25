@@ -1,0 +1,31 @@
+# Gap ctfe_env_reads (live_object_key.sdn) closed: every env var CTFE may read
+# is declared in CTFE_ENV_INPUTS_V1 and is part of the native-build semantic
+# environment identity, so changing it changes the live object key.
+use std.spec
+use compiler.semantics.const_eval.{CTFE_ENV_INPUTS_V1}
+use compiler.driver.cache.native_build_environment_identity.{
+    NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1,
+    native_build_environment_snapshot_fingerprint_v1}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "CTFE env inputs are key-visible":
+    it "declares every CTFE env input in the semantic environment identity":
+        expect(CTFE_ENV_INPUTS_V1.len() > 0).to_equal(true)
+        for name in CTFE_ENV_INPUTS_V1:
+            expect(NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1.contains(name)).to_equal(true)
+
+    it "changes the environment fingerprint when a CTFE input changes":
+        val off = native_build_environment_snapshot_fingerprint_v1([("BOOTSTRAP_NO_C", "0")])
+        val on = native_build_environment_snapshot_fingerprint_v1([("BOOTSTRAP_NO_C", "1")])
+        val absent = native_build_environment_snapshot_fingerprint_v1([])
+        expect(off.valid).to_equal(true)
+        expect(off.digest == on.digest).to_equal(false)
+        expect(off.digest == absent.digest).to_equal(false)
+
+    it "rejects an undeclared env name before reading it":
+        val src = rt_file_read_text("src/compiler/35.semantics/const_eval.spl")
+        val guard = src.index_of("if not CTFE_ENV_INPUTS_V1.contains(env_name):")
+        val read = src.index_of("val value = env_get(env_name)")
+        expect(guard > 0).to_equal(true)
+        expect(read > guard).to_equal(true)

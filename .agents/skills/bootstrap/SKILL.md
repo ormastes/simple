@@ -40,3 +40,9 @@ For serialized crash diagnosis, host CUDA policy, RAM cache-parent staging and
 terminal consumer authority, apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md).
 Keep campaign Phase 3 priority and full-CLI test ownership explicit; source review
 and a linked bootstrap binary do not admit suite execution.
+
+## Current state (2026-10-25)
+
+Shard knobs, frozen-Stage-2 Stage 3, `.spab`/DigestV1 cache protocol and Lean
+cache gates: [bootstrap options](../../../doc/07_guide/tooling/bootstrap_options.md).
+Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. Never `git stash`.

@@ -458,6 +458,117 @@ fn primitive_to_text_method_call_is_builtin_qualified() {
 }
 
 #[test]
+fn integer_text_methods_bypass_nominal_dispatch_but_enum_methods_remain_nominal() {
+    let mir = compile_to_mir(
+        r#"type I32Alias = i32
+type I32Alias2 = I32Alias
+
+enum SdnValue:
+    Int(i64)
+    fn to_text() -> text:
+        match self:
+            case Int(_): "sdn"
+
+fn i8_text(value: i8) -> text: value.to_text()
+fn i16_text(value: i16) -> text: value.to_text()
+fn i32_text(value: i32) -> text: value.to_text()
+fn i64_text(value: i64) -> text: value.to_text()
+fn u8_text(value: u8) -> text: value.to_text()
+fn u16_text(value: u16) -> text: value.to_text()
+fn u32_text(value: u32) -> text: value.to_text()
+fn u64_text(value: u64) -> text: value.to_text()
+fn alias_text(value: I32Alias2) -> text: value.to_text()
+fn i32_string(value: i32) -> text: value.to_string()
+fn i32_str(value: i32) -> text: value.str()
+fn bool_text(value: bool) -> text: value.to_text()
+fn f32_text(value: f32) -> text: value.to_text()
+fn f64_text(value: f64) -> text: value.to_text()
+fn char_text(value: char) -> text: value.to_text()
+fn make_i32() -> i32: 7
+fn receiver_once() -> text: make_i32().to_text()
+fn enum_text(value: SdnValue) -> text: value.to_text()
+"#,
+    )
+    .unwrap();
+
+    for name in [
+        "i8_text", "i16_text", "i32_text", "u8_text", "u16_text", "u32_text",
+        "alias_text", "i32_string", "i32_str",
+    ] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+        )), "{name} must use the boxed primitive text conversion");
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text") || func_name.ends_with(".to_string") || func_name.ends_with(".str")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+
+    for name in ["bool_text", "f32_text", "f64_text"] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")
+        )), "{name} must use the shared boxed scalar text conversion");
+        if name == "bool_text" {
+            assert!(instructions.iter().any(|instruction| matches!(
+                instruction,
+                MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool")
+            )), "bool must be boxed with the bool runtime constructor");
+        } else {
+            assert!(instructions.iter().any(|instruction| matches!(instruction, MirInst::BoxFloat { .. })),
+                "{name} must retain Float boxing");
+        }
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+    let char_function = mir.functions.iter().find(|function| function.name == "char_text").unwrap();
+    assert!(char_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_char_from_code")
+    )), "char must retain its Unicode-scalar bridge");
+    assert!(!char_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+    )), "char must not enter nominal suffix-based method dispatch");
+
+    for (name, target) in [("i64_text", "rt_raw_i64_to_string"), ("u64_text", "rt_raw_u64_to_string")] {
+        let function = mir.functions.iter().find(|function| function.name == name).unwrap();
+        let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::Call { target: actual, .. } if actual == &CallTarget::from_name(target)
+        )), "{name} must retain the lossless raw integer bridge");
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".to_text")
+        )), "{name} must not enter nominal suffix-based method dispatch");
+    }
+
+    let receiver_once = mir.functions.iter().find(|function| function.name == "receiver_once").unwrap();
+    assert_eq!(
+        receiver_once.blocks.iter().flat_map(|block| &block.instructions).filter(|instruction| matches!(
+            instruction,
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("make_i32")
+        )).count(),
+        1,
+        "the integer receiver expression must be evaluated once"
+    );
+
+    let enum_function = mir.functions.iter().find(|function| function.name == "enum_text").unwrap();
+    assert!(enum_function.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(
+        instruction,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "SdnValue.to_text"
+    )), "the enum-owned to_text method must remain nominal");
+}
+
+#[test]
 fn char_to_text_uses_unicode_scalar_runtime_bridge() {
     let mir = compile_to_mir("fn test() -> text:\n    return (123 as char).to_text()\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(

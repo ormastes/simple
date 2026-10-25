@@ -565,7 +565,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     for name in sources:
         source_sig = source_sig + ";" + name
     val timestamp_owner = runtime_profile == "core-c-bootstrap" or alloc_observer
-    val flag_sig = "v6;alloc_observer_v1={alloc_observer};profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy};runtime_owner={runtime_owner}"
+    val flag_sig = "v7;alloc_observer_v1={alloc_observer};profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy};runtime_owner={runtime_owner}"
     var cmd = "( printf '%s\\n' '" + flag_sig + "'; '" + cc + "' --version 2>/dev/null; "
     cmd = cmd + "find '" + rt_dir + "' -type f \\( -name '*.c' -o -name '*.h' \\) 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null "
     cmd = cmd + ") | sha256sum 2>/dev/null | cut -c1-40"
@@ -627,7 +627,7 @@ pub fn runtime_core_c_sources_v1() -> [text]:
     and the narrow core provider owners. Extra existing media/device providers
     retain their C ABI; this profile never adds Rust archives or trap stubs.
     """
-    ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
+    ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_disk_headroom", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
 
 pub fn runtime_thread_rust_owner_v1(runtime_owner: text, include_dynload: bool,
         core_c_profile: bool, coff_host: bool, target: text) -> bool:
@@ -682,15 +682,18 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if cc == "":
         return Err("No C compiler found. Install clang or gcc.")
 
-    val rt_dir = if native_tool_strict_requested_v1():
-        if env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") != "":
-            native_runtime_strict_source_dir_v1()?
-        else:
-            # Source authority not configured (stage2/3 phase-C rows): same
-            # legacy fallback as find_runtime_source_dir, which this branch
-            # bypasses. See the matching note there.
-            find_runtime_source_dir()
-    else: find_runtime_source_dir()
+    # @workaround bug=if_expression_text_result_erased_to_i64_2026-10-25 reason=nested_if_with_try_lost_text_type
+    # The nested if-expression form compiled (Stage 2, full closure) with an
+    # i64 result: "{rt_dir}/{name}.c" rendered the text handle as a decimal
+    # and every hosted link failed "Required runtime source not found:
+    # 202444832811553/runtime_native.c". A typed var + statements keeps text.
+    # The strict + configured-root arm calls the authority directly (one call)
+    # so its real Err text reaches the caller.
+    var rt_dir: text = ""
+    if native_tool_strict_requested_v1() and env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") != "":
+        rt_dir = native_runtime_strict_source_dir_v1()?
+    else:
+        rt_dir = find_runtime_source_dir()
     if trace:
         print "[RT-COMPILE] rt_dir={rt_dir}"
     if rt_dir == "":
@@ -716,7 +719,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     # this array's flat `{rt_dir}/{name}.c` naming does not support without
     # also teaching the object-path builder below to create nested
     # directories -- left as a follow-up, not silently dropped.
-    var sources = ["runtime", "runtime_native", "runtime_alloc_observer", "runtime_file_view", "runtime_backend_plugin", "runtime_contracts", "runtime_coverage_core", "runtime_rocm", "runtime_renderdoc", "runtime_directx_core", "runtime_thread", "runtime_memtrack", "runtime_timestamp", "runtime_fork", "runtime_process", "runtime_process_owned", "runtime_memory", "runtime_simd_utf8", "runtime_simd_search", "runtime_simd_case", "runtime_simd_dispatch", "runtime_packed_span", "runtime_font", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_framebuffer", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_terminal", "runtime_prof_sample"]
+    var sources = ["runtime", "runtime_native", "runtime_alloc_observer", "runtime_file_view", "runtime_disk_headroom", "runtime_backend_plugin", "runtime_contracts", "runtime_coverage_core", "runtime_rocm", "runtime_renderdoc", "runtime_directx_core", "runtime_thread", "runtime_memtrack", "runtime_timestamp", "runtime_fork", "runtime_process", "runtime_process_owned", "runtime_memory", "runtime_simd_utf8", "runtime_simd_search", "runtime_simd_case", "runtime_simd_dispatch", "runtime_packed_span", "runtime_font", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_framebuffer", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_terminal", "runtime_prof_sample"]
     # Stage4 retains its separately admitted provider projection composition.
     val runtime_profile = runtime_object_profile_v1(runtime_bundle, include_stage4_legacy_compat)
     val core_c_profile = runtime_profile == "core-c-bootstrap" or alloc_observer
@@ -801,6 +804,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 for abi_define in abi_defines:
                     comp_args.push(abi_define)
                 comp_args.push("/DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1")
+                comp_args.push("/DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1")
             # runtime_memory.c is always in this bundle and canonically owns
             # the overlapping allocator/pointer ABI, including native-all.
             comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
@@ -853,6 +857,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 comp_args.push("-DSIMPLE_RUNTIME_THREAD_RUST_OWNER=1")
             if core_c_profile:
                 comp_args.push("-DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1")
+                comp_args.push("-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1")
             if include_dynload or core_c_profile:
                 # Standalone core-C suppresses hosted fallbacks; native-all
                 # must retain them and therefore must not receive this flag.

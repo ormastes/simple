@@ -34,6 +34,71 @@ thread_local! {
 struct TransientHeapScope {
     paused: bool,
     objects: Vec<RuntimeValue>,
+    /// Lazily built header-address -> `objects` position index, so promotion
+    /// answers ownership and removal in O(reachable) instead of rescanning
+    /// every object the scope ever tracked. Tracking only appends while the
+    /// scope is running and promotion only runs while it is paused, so the
+    /// index is synced (extended over `objects[indexed..]`) at promote time.
+    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
+    /// two full rescans were ~50% of parse-phase samples.
+    by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
+    indexed: usize,
+    /// Two tracked objects share a header address; fall back to the exact
+    /// original linear scans for this scope.
+    index_ambiguous: bool,
+}
+
+impl TransientHeapScope {
+    fn sync_index(&mut self) {
+        while self.indexed < self.objects.len() {
+            let object = self.objects[self.indexed];
+            if object.is_heap() {
+                let ptr = object.as_heap_ptr() as usize;
+                if self.by_ptr.insert(ptr, self.indexed).is_some() {
+                    self.index_ambiguous = true;
+                }
+            }
+            self.indexed += 1;
+        }
+    }
+
+    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+        self.sync_index();
+        if self.index_ambiguous {
+            return self
+                .objects
+                .iter()
+                .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr);
+        }
+        self.by_ptr.contains_key(&(root_ptr as usize))
+    }
+
+    /// Drop every tracked object whose exact value bits are in `reachable`.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        self.sync_index();
+        if self.index_ambiguous {
+            self.objects.retain(|object| !reachable.contains(&object.0));
+            self.by_ptr.clear();
+            self.indexed = 0;
+            self.index_ambiguous = false;
+            return;
+        }
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if !value.is_heap() {
+                continue;
+            }
+            let ptr = value.as_heap_ptr() as usize;
+            if let Some(&position) = self.by_ptr.get(&ptr) {
+                if self.objects[position].0 == *bits {
+                    // Tombstone: NIL is not heap, so scope end skips it and
+                    // the free order of the survivors is unchanged.
+                    self.objects[position] = RuntimeValue::NIL;
+                    self.by_ptr.remove(&ptr);
+                }
+            }
+        }
+    }
 }
 
 /// Nodes whose promotion fully committed earlier in the open share window:
@@ -2687,6 +2752,9 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         *slot = Some(TransientHeapScope {
             paused: false,
             objects: Vec::new(),
+            by_ptr: Default::default(),
+            indexed: 0,
+            index_ambiguous: false,
         });
         true
     })
@@ -2877,12 +2945,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // Scope-owned registered roots are walked, never treated as persistent:
         // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|scope| {
-                scope
-                    .objects
-                    .iter()
-                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
-            })
+            slot.borrow_mut()
+                .as_mut()
+                .is_some_and(|scope| scope.owns_heap_ptr(root_ptr))
         });
         if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
             // An unowned root can still hold scope-owned children: allocations
@@ -2969,7 +3034,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        scope.release_reachable(&reachable_heap);
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3029,10 +3094,88 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     let Some(scope) = scope else {
         return false;
     };
-    for object in scope.objects {
-        free_transient_heap(object);
+    // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
+    // the old per-object `free_transient_heap` took the registry mutex twice
+    // per object, and each erase bumped the free epoch, so the next object's
+    // validation always missed its cache and probed the process-wide set cold.
+    // Exactly the objects `free_transient_heap` would free are erased here;
+    // shared strings stay registered, as `rt_string_free` leaves them, and
+    // closures take the per-object path below so a pinned one is orphaned
+    // (`closure_pin_defer_free`) rather than freed.
+    let mut erased = Vec::with_capacity(scope.objects.len());
+    let mut closures = Vec::new();
+    super::heap::unregister_heap_ptrs_batch(
+        &scope.objects,
+        |value, ptr| unsafe {
+            match (*ptr).object_type {
+                HeapObjectType::String => (*ptr).reserved & RT_STRING_FLAG_SHARED == 0,
+                HeapObjectType::Array | HeapObjectType::Tuple | HeapObjectType::Dict => true,
+                HeapObjectType::Object
+                | HeapObjectType::Enum
+                | HeapObjectType::Float
+                | HeapObjectType::UInt
+                | HeapObjectType::Int => std::alloc::Layout::from_size_align((*ptr).size as usize, 8).is_ok(),
+                HeapObjectType::Closure => {
+                    closures.push(value);
+                    false
+                }
+                _ => false,
+            }
+        },
+        &mut erased,
+    );
+    // Every erase is complete (all chunks) before the first free below.
+    for (ptr, kind) in erased {
+        unsafe { dealloc_erased_transient(ptr, kind) };
+    }
+    for closure in closures {
+        free_transient_heap(closure);
     }
     unsafe { rt_transient_raw_scope_end() != 0 }
+}
+
+/// Release the memory of a heap object this thread just erased from the
+/// registry. Mirrors the deallocation half of `rt_string_free`,
+/// `rt_array_free`, `rt_tuple_free`, `rt_dict_free` and the generic arm of
+/// `free_transient_heap`; keep them in step.
+unsafe fn dealloc_erased_transient(ptr: *mut HeapHeader, kind: HeapObjectType) {
+    match kind {
+        HeapObjectType::String => {
+            let len = (*(ptr as *mut RuntimeString)).len;
+            let size = std::mem::size_of::<RuntimeString>() + len as usize;
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Array => {
+            let array = ptr as *mut RuntimeArray;
+            if !(*array).data.is_null() {
+                let data_layout = if (*array).is_byte_packed() {
+                    byte_array_data_layout((*array).capacity)
+                } else {
+                    array_data_layout((*array).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+                std::alloc::dealloc((*array).data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        HeapObjectType::Tuple => {
+            let len = (*(ptr as *mut RuntimeTuple)).len;
+            let size = std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Dict => {
+            let dict = ptr as *mut RuntimeDict;
+            super::dict::dict_free_slots((*dict).data, (*dict).capacity);
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        _ => {
+            // Object/Enum/Float/UInt/Int: layout validity was checked before erasing.
+            let layout = std::alloc::Layout::from_size_align((*ptr).size as usize, 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
 }
 
 /// Create an array from a slice of RuntimeValues

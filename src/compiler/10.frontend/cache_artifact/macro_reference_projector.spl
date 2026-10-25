@@ -1,0 +1,597 @@
+# Macro definition / use section producer (plan 2026-10-24 §6, slice P5).
+#
+# Turns one module's macro definitions and invocations into the module `.tld`
+# sections defined by compiler.common.cache_contract.macro_reference_manifest_v1:
+#   - MacroDefinitionTableV1 keyed by scoped MacroDefId, with a MacroDefKey per
+#     definition that folds in the transitive nested-macro read root;
+#   - MacroUseTableV1: one forward MacroUseV1 per invocation, including
+#     unresolved (absence witness) and inactive guarded invocations;
+#   - the macro-generated public surface that feeds the module TLDR.
+#
+# Only FORWARD facts live here. The reverse `.rr` projection and the
+# pre-edit preview API are built from these by the reference coordinator (P2).
+# A definition's identity never includes its users (plan §6.3).
+#
+# Named gaps: ParserModule carries no macro definitions/invocations yet, so
+# the producer input is MacroModuleSourceV1 rather than a parsed module; CTFE
+# reads are not modelled (ctfe read root is the fixed "none" digest);
+# Guards are GuardIdV1 (compiler.common.cache_contract.guard_id_v1); the
+# expand key's active-guard root is ActiveGuardRootV1.root_digest, and an
+# inadmissible (incomplete) root makes every use conservative (cache miss).
+
+
+use compiler.common.cache_contract.guard_id_v1.{GuardIdV1, GuardEvalV1, ActiveGuardRootV1,
+    active_guard_root_v1, active_guard_root_admissible_v1}
+use compiler.frontend.parser.macro_registry.{MacroDef, macro_def_contract_canonical_text,
+    macro_def_generated_public_names}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{MacroDefIdV1,
+    MacroDefinitionEntryV1, MacroDefinitionTableV1, MacroUseV1, MacroUseTableV1,
+    MacroUseStatusV1, MacroNameMembershipV1, PackageMacroNameIndexV1,
+    macro_def_id_canonical_v1, macro_def_key_v1, macro_expand_key_v1,
+    macro_absence_witness_v1, macro_hash_v1, macro_use_identity_v1,
+    macro_use_status_tag_v1, macro_reference_schema_v1,
+    package_macro_name_index_build_v1, macro_effect_admitted_v1, macro_content_digest_v1}
+
+pub struct MacroSourceDefV1:
+    def: MacroDef
+    namespace: text
+    body_text: text
+    nested_macro_names: [text]
+    declared_effects: [text]
+    guard_ids: [GuardIdV1]
+    is_public: bool
+
+pub struct MacroSourceInvocationV1:
+    region_id: text
+    stable_invocation_id: text
+    requested_name: text
+    invocation_text: text
+    args_text: text
+    hygiene_scope_id: text
+    active_guard_id: text    # guard_id_v1(kind, expr).digest, "" = unguarded
+    active: bool
+
+pub struct MacroModuleSourceV1:
+    package: text
+    module: text
+    source_id: text
+    defs: [MacroSourceDefV1]
+    invocations: [MacroSourceInvocationV1]
+
+pub struct MacroDefKeyEntryV1:
+    def_id: text
+    macro_name: text
+    key: text
+
+pub struct MacroModuleProjectionV1:
+    package: text
+    module: text
+    source_id: text
+    def_table: MacroDefinitionTableV1
+    def_keys: [MacroDefKeyEntryV1]
+    use_table: MacroUseTableV1
+    generated_public_names: [text]
+    generated_public_surface_digest: text
+    diagnostics: [MacroDiagnosticV1]
+    uncacheable_def_ids: [text]
+
+pub struct MacroDiagnosticV1:
+    code: text
+    subject: text
+    message: text
+
+pub struct MacroProjectionDiffV1:
+    changed_def_ids: [text]
+    added_def_ids: [text]
+    removed_def_ids: [text]
+    added_use_ids: [text]
+    removed_use_ids: [text]
+    rebound_use_ids: [text]
+    reexpand_use_ids: [text]
+
+# ---------------------------------------------------------------------------
+
+fn _sorted_unique(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = 0
+        var dup = false
+        while i < out.len():
+            if out[i] == v:
+                dup = true
+                break
+            if v < out[i]:
+                break
+            i = i + 1
+        if not dup:
+            # Keep the typed array carrier explicit for native MIR lowering.
+            var tail = out.len()
+            out.push(v)
+            while tail > i:
+                out[tail] = out[tail - 1]
+                tail = tail - 1
+            out[i] = v
+    out
+
+fn _contains(values: [text], v: text) -> bool:
+    for x in values:
+        if x == v: return true
+    false
+
+fn _index_of(values: [text], v: text) -> i64:
+    var i = 0
+    while i < values.len():
+        if values[i] == v: return i
+        i = i + 1
+    -1
+
+# Visible candidate for a name: local definitions first (any visibility),
+# then public definitions of the imported module projections.
+struct _CandidateV1:
+    def_id: text
+    key: text
+    member_names: [text]
+    member_root: text
+
+class _KeyCtxV1:
+    src: MacroModuleSourceV1
+    imported: [MacroModuleProjectionV1]
+    names: [text]
+    keys: [text]
+    guard_root: ActiveGuardRootV1
+    evals: [GuardEvalV1]
+    visiting: [text]
+    cyclic: [text]
+
+fn _local_def_id(src: MacroModuleSourceV1, d: MacroSourceDefV1) -> MacroDefIdV1:
+    MacroDefIdV1(package: src.package, module: src.module, namespace: d.namespace, binder: d.def.name)
+
+fn _imported_candidates(imported: [MacroModuleProjectionV1], name: text) -> [_CandidateV1]:
+    var out: [_CandidateV1] = []
+    for p in imported:
+        for e in p.def_table.entries:
+            if e.macro_name == name and e.is_public:
+                val id = macro_def_id_canonical_v1(e.def_id)
+                var key = ""
+                for k in p.def_keys:
+                    if k.def_id == id: key = k.key
+                out.push(_CandidateV1(def_id: id, key: key,
+                    member_names: e.generated_member_names, member_root: e.generated_member_root))
+    out
+
+fn _local_index(src: MacroModuleSourceV1, name: text) -> i64:
+    var i = 0
+    while i < src.defs.len():
+        if src.defs[i].def.name == name: return i
+        i = i + 1
+    -1
+
+fn _scope_root(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1]) -> text:
+    var local: [text] = []
+    for d in src.defs:
+        local.push(d.def.name)
+    val index = package_macro_name_index_v1(src.package, imported)
+    macro_hash_v1("macro-scope/v1", [index.candidate_root] + _sorted_unique(local))
+
+fn _member_root(names: [text]) -> text:
+    macro_hash_v1("macro-generated-members/v1", names)
+
+fn _entry_without_keys(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1],
+        d: MacroSourceDefV1) -> MacroDefinitionEntryV1:
+    var deps: [text] = []
+    for n in d.nested_macro_names:
+        val li = _local_index(src, n)
+        if li >= 0:
+            deps.push(macro_def_id_canonical_v1(_local_def_id(src, src.defs[li])))
+        else:
+            val cands = _imported_candidates(imported, n)
+            if cands.len() == 1: deps.push(cands[0].def_id)
+    val members = macro_def_generated_public_names(d.def)
+    val contract = macro_def_contract_canonical_text(d.def)
+    MacroDefinitionEntryV1(def_id: _local_def_id(src, d), macro_name: d.def.name, generation: 1,
+        contract_digest: macro_content_digest_v1(contract), body_digest: macro_content_digest_v1(d.body_text),
+        hygiene_schema: "macro-hygiene/v1", declared_effects: _sorted_unique(d.declared_effects),
+        dependent_macros: _sorted_unique(deps), guard_ids: _guard_digests(d.guard_ids),
+        is_public: d.is_public, generated_member_names: members,
+        generated_member_root: _member_root(members),
+        exported_surface_digest: macro_hash_v1("macro-exported-surface/v1", [contract, _member_root(members)]))
+
+# MacroDefKey with the TRANSITIVE nested read root: a nested macro's key
+# change propagates into every macro that expands it. Cycles get a
+# deterministic cycle marker instead of recursing.
+fn _key_of_local(ctx: _KeyCtxV1, idx: i64) -> text:
+    val d = ctx.src.defs[idx]
+    val known = _index_of(ctx.names, d.def.name)
+    if known >= 0: return ctx.keys[known]
+    val id = macro_def_id_canonical_v1(_local_def_id(ctx.src, d))
+    if _contains(ctx.visiting, d.def.name):
+        # Every macro on the stack from the re-entered one onward is in the cycle.
+        var on_cycle = false
+        for v in ctx.visiting:
+            if v == d.def.name: on_cycle = true
+            if on_cycle and not _contains(ctx.cyclic, v): ctx.cyclic.push(v)
+        return macro_hash_v1("macro-cycle/v1", [id])
+    ctx.visiting.push(d.def.name)
+    var reads: [text] = []
+    for n in d.nested_macro_names:
+        val li = _local_index(ctx.src, n)
+        if li >= 0:
+            reads.push("key:" + _key_of_local(ctx, li))
+        else:
+            val cands = _imported_candidates(ctx.imported, n)
+            if cands.len() == 1:
+                reads.push("key:" + cands[0].key)
+            else:
+                reads.push("absent:" + macro_absence_witness_v1(n, _scope_root(ctx.src, ctx.imported)))
+    val root = macro_hash_v1("macro-nested-read/v1", _sorted_unique(reads))
+    val key = macro_def_key_v1(_entry_without_keys(ctx.src, ctx.imported, d), root)
+    ctx.visiting.pop()
+    ctx.names.push(d.def.name)
+    ctx.keys.push(key)
+    key
+
+pub fn package_macro_name_index_v1(package: text,
+        projections: [MacroModuleProjectionV1]) -> PackageMacroNameIndexV1:
+    var names: [text] = []
+    for p in projections:
+        for e in p.def_table.entries:
+            if e.is_public: names.push(e.macro_name)
+    var entries: [MacroNameMembershipV1] = []
+    for n in _sorted_unique(names):
+        var ids: [text] = []
+        for p in projections:
+            for e in p.def_table.entries:
+                if e.is_public and e.macro_name == n:
+                    ids.push(macro_def_id_canonical_v1(e.def_id))
+        entries.push(MacroNameMembershipV1(scoped_name: n, def_ids: _sorted_unique(ids)))
+    package_macro_name_index_build_v1(package, entries)
+
+# Default profile: no guard evaluations (complete, admissible empty root).
+pub fn project_macro_module_v1(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1]) -> MacroModuleProjectionV1:
+    project_macro_module_guarded_v1(src, imported, macro_content_digest_v1("macro-profile/default"), [])
+
+# `evals` come from the guard evaluator (aop_source_guard_evals_v1 once landed).
+fn _project_active_v1(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], profile_digest: text,
+        evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
+    var ctx = _KeyCtxV1(src: src, imported: imported, names: [], keys: [], visiting: [],
+        cyclic: [], guard_root: active_guard_root_v1(profile_digest, evals), evals: evals)
+    # Definitions, sorted by canonical scoped id.
+    var ids: [text] = []
+    for d in src.defs:
+        ids.push(macro_def_id_canonical_v1(_local_def_id(src, d)))
+    val sorted_ids = _sorted_unique(ids)
+    var entries: [MacroDefinitionEntryV1] = []
+    var def_keys: [MacroDefKeyEntryV1] = []
+    for sid in sorted_ids:
+        val idx = _index_of(ids, sid)
+        val d = src.defs[idx]
+        entries.push(_entry_without_keys(src, imported, d))
+        def_keys.push(MacroDefKeyEntryV1(def_id: sid, macro_name: d.def.name,
+            key: _key_of_local(ctx, idx)))
+    val uncacheable = _uncacheable_names(src, imported, ctx)
+    var uncacheable_ids: [text] = []
+    for n in uncacheable:
+        uncacheable_ids.push(macro_def_id_canonical_v1(_local_def_id(src, src.defs[_local_index(src, n)])))
+    # Uses, sorted by (source, region).
+    val scope_root = _scope_root(src, imported)
+    var use_ids: [text] = []
+    var uses: [MacroUseV1] = []
+    var generated: [text] = []
+    for inv in src.invocations:
+        var u = _use_of(src, imported, ctx, inv, scope_root)
+        if u.has_resolved_def and (_contains(uncacheable_ids, u.resolved_def_id) or
+                _imported_uncacheable(imported, u.resolved_def_id)):
+            u.coverage = "conservative"
+        use_ids.push(macro_use_identity_v1(u))
+        uses.push(u)
+        if macro_use_status_tag_v1(u.status) == "resolved":
+            for n in _members_of(src, imported, inv.requested_name):
+                generated.push(n)
+    var sorted_uses: [MacroUseV1] = []
+    for uid in _sorted_unique(use_ids):
+        sorted_uses.push(uses[_index_of(use_ids, uid)])
+    val gen_names = _sorted_unique(generated)
+    val module_id = src.package + "/" + src.module
+    MacroModuleProjectionV1(package: src.package, module: src.module, source_id: src.source_id,
+        def_table: MacroDefinitionTableV1(schema: macro_reference_schema_v1(), module_id: module_id,
+            entries: entries),
+        def_keys: def_keys,
+        use_table: MacroUseTableV1(schema: macro_reference_schema_v1(), module_id: module_id,
+            uses: sorted_uses),
+        generated_public_names: gen_names,
+        generated_public_surface_digest: macro_hash_v1("macro-generated-surface/v1", gen_names),
+        diagnostics: _module_diagnostics(src, ctx, sorted_uses, imported),
+        uncacheable_def_ids: _sorted_unique(uncacheable_ids))
+
+fn _members_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], name: text) -> [text]:
+    val li = _local_index(src, name)
+    if li >= 0: return macro_def_generated_public_names(src.defs[li].def)
+    val cands = _imported_candidates(imported, name)
+    if cands.len() == 1: return cands[0].member_names
+    []
+
+fn _use_of(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1], ctx: _KeyCtxV1,
+        inv: MacroSourceInvocationV1, scope_root: text) -> MacroUseV1:
+    val inv_digest = macro_content_digest_v1(inv.invocation_text)
+    val args_digest = macro_content_digest_v1(inv.args_text)
+    var def_id = ""
+    var key = ""
+    var member_root = ""
+    var candidates = 0
+    var active = inv.active
+    var guard_conservative = not active_guard_root_admissible_v1(ctx.guard_root)
+    if inv.active_guard_id != "":
+        var found = false
+        for e in ctx.evals:
+            if e.guard.digest == inv.active_guard_id:
+                found = true
+                if e.evaluable: active = e.active
+                else: guard_conservative = true
+        if not found and ctx.evals.len() > 0: guard_conservative = true
+    if active:
+        val li = _local_index(src, inv.requested_name)
+        if li >= 0:
+            candidates = 1
+            def_id = macro_def_id_canonical_v1(_local_def_id(src, src.defs[li]))
+            key = _key_of_local(ctx, li)
+            member_root = _member_root(macro_def_generated_public_names(src.defs[li].def))
+        else:
+            val cands = _imported_candidates(imported, inv.requested_name)
+            candidates = cands.len()
+            if candidates == 1:
+                def_id = cands[0].def_id
+                key = cands[0].key
+                member_root = cands[0].member_root
+    var u = MacroUseV1(invoking_source_id: src.source_id, region_id: inv.region_id,
+        stable_invocation_id: inv.stable_invocation_id, requested_scoped_name: inv.requested_name,
+        has_resolved_def: false, resolved_def_id: "", resolved_def_key: "", invocation_ast_digest: inv_digest,
+        argument_digest: args_digest, hygiene_scope_id: inv.hygiene_scope_id,
+        active_guard_id: inv.active_guard_id, generated_symbols_digest: _member_root([]),
+        resolution_candidate_root: scope_root, has_absence_witness: false, absence_witness: "",
+        expand_key: "", status: MacroUseStatusV1.Inactive, coverage: "complete")
+    if not active:
+        return u
+    if candidates == 1:
+        u.has_resolved_def = true
+        u.resolved_def_id = def_id
+        u.resolved_def_key = key
+        u.generated_symbols_digest = member_root
+        u.expand_key = macro_expand_key_v1(key, inv_digest, args_digest, inv.hygiene_scope_id,
+            macro_content_digest_v1("ctfe:none"), ctx.guard_root.root_digest)
+        u.status = MacroUseStatusV1.Resolved
+        if guard_conservative: u.coverage = "conservative"
+        return u
+    # Negative (0) or ambiguous (>1) resolution: an absence witness bound to the
+    # complete candidate scope, so a new/removed definition invalidates it.
+    u.status = MacroUseStatusV1.Unresolved
+    u.has_absence_witness = true
+    u.absence_witness = macro_absence_witness_v1(inv.requested_name, scope_root)
+    if candidates > 1 or guard_conservative: u.coverage = "conservative"
+    u
+
+pub fn macro_def_key_of_v1(p: MacroModuleProjectionV1, macro_name: text) -> text:
+    for k in p.def_keys:
+        if k.macro_name == macro_name: return k.key
+    ""
+
+# Forward diff between two generations of ONE module's macro facts.
+pub fn macro_projection_diff_v1(old: MacroModuleProjectionV1,
+        new: MacroModuleProjectionV1) -> MacroProjectionDiffV1:
+    var old_ids: [text] = []
+    var old_keys: [text] = []
+    for k in old.def_keys:
+        old_ids.push(k.def_id)
+        old_keys.push(k.key)
+    var changed: [text] = []
+    var added: [text] = []
+    var new_ids: [text] = []
+    for k in new.def_keys:
+        new_ids.push(k.def_id)
+        val i = _index_of(old_ids, k.def_id)
+        if i < 0: added.push(k.def_id)
+        elif old_keys[i] != k.key: changed.push(k.def_id)
+    var removed: [text] = []
+    for id in old_ids:
+        if not _contains(new_ids, id): removed.push(id)
+    var old_use_ids: [text] = []
+    for u in old.use_table.uses:
+        old_use_ids.push(macro_use_identity_v1(u))
+    var new_use_ids: [text] = []
+    var added_uses: [text] = []
+    var rebound: [text] = []
+    var reexpand: [text] = []
+    for u in new.use_table.uses:
+        val uid = macro_use_identity_v1(u)
+        new_use_ids.push(uid)
+        val i = _index_of(old_use_ids, uid)
+        if i < 0:
+            added_uses.push(uid)
+        else:
+            val o = old.use_table.uses[i]
+            val same_binding = macro_use_status_tag_v1(o.status) == macro_use_status_tag_v1(u.status) and
+                o.resolved_def_id == u.resolved_def_id and o.absence_witness == u.absence_witness
+            if not same_binding: rebound.push(uid)
+            elif o.expand_key != u.expand_key: reexpand.push(uid)
+    var removed_uses: [text] = []
+    for uid in old_use_ids:
+        if not _contains(new_use_ids, uid): removed_uses.push(uid)
+    MacroProjectionDiffV1(changed_def_ids: changed, added_def_ids: added, removed_def_ids: removed,
+        added_use_ids: added_uses, removed_use_ids: removed_uses, rebound_use_ids: rebound,
+        reexpand_use_ids: reexpand)
+
+# Forward scan (oracle for the `.rr` reverse projection): every invocation that
+# reads the macro directly or through a nested macro, in sorted use identity.
+pub fn macro_forward_users_of_v1(projections: [MacroModuleProjectionV1], package: text,
+        module: text, binder: text) -> [text]:
+    var closure: [text] = []
+    for p in projections:
+        for e in p.def_table.entries:
+            if e.def_id.package == package and e.def_id.module == module and e.def_id.binder == binder:
+                closure.push(macro_def_id_canonical_v1(e.def_id))
+    var grew = true
+    while grew:
+        grew = false
+        for p in projections:
+            for e in p.def_table.entries:
+                val id = macro_def_id_canonical_v1(e.def_id)
+                if _contains(closure, id): continue
+                for dep in e.dependent_macros:
+                    if _contains(closure, dep):
+                        closure.push(id)
+                        grew = true
+                        break
+    var users: [text] = []
+    for p in projections:
+        for u in p.use_table.uses:
+            if u.has_resolved_def and _contains(closure, u.resolved_def_id):
+                users.push(macro_use_identity_v1(u))
+    _sorted_unique(users)
+
+# ---------------------------------------------------------------------------
+# M-04: cycle, ambient-effect and hygiene diagnostics. A diagnosed macro is
+# UNCACHEABLE: its uses keep coverage "conservative", which
+# macro_use_cacheable_v1 refuses, so no expansion-cache hit can stand in for
+# a reference expansion.
+# ---------------------------------------------------------------------------
+
+fn _has_ambient_effect(d: MacroSourceDefV1) -> bool:
+    for e in d.declared_effects:
+        if not macro_effect_admitted_v1(e): return true
+    false
+
+fn _imported_uncacheable(imported: [MacroModuleProjectionV1], def_id: text) -> bool:
+    for p in imported:
+        if _contains(p.uncacheable_def_ids, def_id): return true
+    false
+
+# Cyclic or ambient-effect macros, plus everything that (transitively) expands
+# one of them, locally or through an uncacheable imported definition.
+fn _uncacheable_names(src: MacroModuleSourceV1, imported: [MacroModuleProjectionV1],
+        ctx: _KeyCtxV1) -> [text]:
+    var out: [text] = []
+    for d in src.defs:
+        if _contains(ctx.cyclic, d.def.name) or _has_ambient_effect(d):
+            out.push(d.def.name)
+    var grew = true
+    while grew:
+        grew = false
+        for d in src.defs:
+            if _contains(out, d.def.name): continue
+            for n in d.nested_macro_names:
+                var tainted = _contains(out, n)
+                if not tainted and _local_index(src, n) < 0:
+                    val cands = _imported_candidates(imported, n)
+                    if cands.len() == 1: tainted = _imported_uncacheable(imported, cands[0].def_id)
+                if tainted:
+                    out.push(d.def.name)
+                    grew = true
+                    break
+    _sorted_unique(out)
+
+fn _module_diagnostics(src: MacroModuleSourceV1, ctx: _KeyCtxV1, uses: [MacroUseV1],
+        imported: [MacroModuleProjectionV1]) -> [MacroDiagnosticV1]:
+    var keys: [text] = []
+    var diags: [MacroDiagnosticV1] = []
+    for name in _sorted_unique(ctx.cyclic):
+        keys.push("E-MACRO-CYCLE|" + name)
+        diags.push(MacroDiagnosticV1(code: "E-MACRO-CYCLE", subject: name,
+            message: "macro '{name}' expands itself through a nested-macro cycle"))
+    for d in src.defs:
+        for e in d.declared_effects:
+            if not macro_effect_admitted_v1(e):
+                keys.push("E-MACRO-AMBIENT-EFFECT|" + d.def.name + "|" + e)
+                diags.push(MacroDiagnosticV1(code: "E-MACRO-AMBIENT-EFFECT", subject: d.def.name,
+                    message: "macro '{d.def.name}' reads ambient input '{e}'; expansion is not cacheable"))
+    # Two expansions in one module introducing the same public name collide:
+    # contract intros are unhygienic by design (they are the public surface).
+    var seen: [text] = []
+    var owner: [text] = []
+    for u in uses:
+        if not u.has_resolved_def: continue
+        for n in _members_of(src, imported, u.requested_scoped_name):
+            val i = _index_of(seen, n)
+            if i < 0:
+                seen.push(n)
+                owner.push(macro_use_identity_v1(u))
+            else:
+                keys.push("E-MACRO-INTRO-COLLISION|" + n + "|" + macro_use_identity_v1(u))
+                diags.push(MacroDiagnosticV1(code: "E-MACRO-INTRO-COLLISION", subject: n,
+                    message: "'{n}' introduced by {owner[i]} and {macro_use_identity_v1(u)}"))
+    var sorted: [MacroDiagnosticV1] = []
+    for k in _sorted_unique(keys):
+        sorted.push(diags[_index_of(keys, k)])
+    sorted
+
+# Collisions between macro-introduced public names and the module's own
+# declarations (e.g. ParserModule symbol names).
+pub fn macro_symbol_collisions_v1(p: MacroModuleProjectionV1,
+        module_symbols: [text]) -> [MacroDiagnosticV1]:
+    var out: [MacroDiagnosticV1] = []
+    for n in p.generated_public_names:
+        if _contains(module_symbols, n):
+            out.push(MacroDiagnosticV1(code: "E-MACRO-INTRO-SHADOWS", subject: n,
+                message: "macro-introduced '{n}' shadows a declaration of module {p.module}"))
+    out
+
+fn _guard_digests(guards: [GuardIdV1]) -> [text]:
+    var out: [text] = []
+    for g in guards:
+        out.push(g.digest)
+    _sorted_unique(out)
+
+# A definition is inactive when any of its guards evaluated to false under
+# the profile. Inactive definitions are RETAINED in the def table (so a guard
+# flip is a visible def-table change) but never resolve: they are projected
+# with is_public=false, get a key over a fixed "inactive" nested root, and are
+# excluded from local resolution, nested reads and the name index.
+fn _def_inactive(d: MacroSourceDefV1, evals: [GuardEvalV1]) -> bool:
+    for g in d.guard_ids:
+        for e in evals:
+            if e.guard.digest == g.digest and e.evaluable and not e.active:
+                return true
+    false
+
+pub fn project_macro_module_guarded_v1(src: MacroModuleSourceV1,
+        imported: [MacroModuleProjectionV1], profile_digest: text,
+        evals: [GuardEvalV1]) -> MacroModuleProjectionV1:
+    var active_defs: [MacroSourceDefV1] = []
+    var inactive_defs: [MacroSourceDefV1] = []
+    for d in src.defs:
+        if _def_inactive(d, evals): inactive_defs.push(d)
+        else: active_defs.push(d)
+    val active_src = MacroModuleSourceV1(package: src.package, module: src.module,
+        source_id: src.source_id, defs: active_defs, invocations: src.invocations)
+    val p = _project_active_v1(active_src, imported, profile_digest, evals)
+    if inactive_defs.len() == 0:
+        return p
+    var ids: [text] = []
+    var entries: [MacroDefinitionEntryV1] = []
+    var keys: [MacroDefKeyEntryV1] = []
+    for e in p.def_table.entries:
+        ids.push(macro_def_id_canonical_v1(e.def_id))
+        entries.push(e)
+    for k in p.def_keys:
+        keys.push(k)
+    for d in inactive_defs:
+        var e = _entry_without_keys(active_src, imported, d)
+        e.is_public = false
+        ids.push(macro_def_id_canonical_v1(e.def_id))
+        entries.push(e)
+        keys.push(MacroDefKeyEntryV1(def_id: macro_def_id_canonical_v1(e.def_id),
+            macro_name: d.def.name,
+            key: macro_def_key_v1(e, macro_hash_v1("macro-inactive-def/v1", []))))
+    var sorted_entries: [MacroDefinitionEntryV1] = []
+    var sorted_keys: [MacroDefKeyEntryV1] = []
+    for sid in _sorted_unique(ids):
+        sorted_entries.push(entries[_index_of(ids, sid)])
+        for k in keys:
+            if k.def_id == sid: sorted_keys.push(k)
+    MacroModuleProjectionV1(package: p.package, module: p.module, source_id: p.source_id,
+        def_table: MacroDefinitionTableV1(schema: p.def_table.schema, module_id: p.def_table.module_id,
+            entries: sorted_entries),
+        def_keys: sorted_keys, use_table: p.use_table,
+        generated_public_names: p.generated_public_names,
+        generated_public_surface_digest: p.generated_public_surface_digest,
+        diagnostics: p.diagnostics, uncacheable_def_ids: p.uncacheable_def_ids)

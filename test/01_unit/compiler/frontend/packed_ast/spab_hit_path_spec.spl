@@ -1,0 +1,126 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped, build_module_from_packed_view_v1,
+    flat_pools_dump_all, build_module_from_flat_pool_blob}
+use compiler.frontend.core.flat_pool_codec.{flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_v1, flat_packed_open_v1,
+    flat_packed_close_v1, flat_packed_store_v1, flat_packed_admit_view_v1, flat_packed_view_v1,
+    SpabDigestV1}
+extern fn rt_file_read_text(path: text) -> text
+
+# packed_binary_ast_v1.md step 2: a .spab hit restores the flat pools from
+# typed tokens (no line blob) and must leave the same pools -- and build the
+# same module -- as the line-blob restore of the same parse.
+val SAMPLE: text = "src/compiler/80.driver/driver_parse_shard_hash.spl"
+
+fn ids(source: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 16, hex: xxh3_128_text(source)),
+     SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+
+# The live pools as a packed blob (CLEAR process-local slots excluded).
+fn packed_snapshot(source: text) -> [u8]:
+    flat_pool_type_trace_arm_v1()
+    val lines = flat_pools_dump_all()
+    flat_packed_encode_v1(lines, flat_pool_type_trace_take_v1(), ids(source), xxh3_128_text(SAMPLE))
+
+# "" when equal, else the first section id whose bytes differ.
+fn section_difference(a: [u8], b: [u8]) -> text:
+    val va = flat_packed_view_v1(a)
+    val vb = flat_packed_view_v1(b)
+    if not va.valid or not vb.valid:
+        return "invalid {va.reason} / {vb.reason}"
+    var i = 0
+    while i < va.sections.len() and i < vb.sections.len():
+        val x = va.sections[i]
+        val y = vb.sections[i]
+        if x.id != 0:
+            if x.id != y.id or x.length != y.length:
+                return "section {x.id}/{y.id} length {x.length}/{y.length}"
+            var k = 0
+            while k < x.length:
+                if a[x.offset + k] != b[y.offset + k]:
+                    return "section {x.id} byte {k}"
+                k = k + 1
+        i = i + 1
+    if va.sections.len() != vb.sections.len():
+        return "section count {va.sections.len()}/{vb.sections.len()}"
+    ""
+
+fn sorted_names(names: [text]) -> [text]:
+    var out = names
+    var i = 1
+    while i < out.len():
+        var j = i
+        while j > 0 and out[j] < out[j - 1]:
+            val t = out[j]
+            out[j] = out[j - 1]
+            out[j - 1] = t
+            j = j - 1
+        i = i + 1
+    out
+
+describe "packed .spab hit path":
+    it "restores the same pools and module as the line-blob restore":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val fresh = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val packed = flat_packed_encode_v1(blob, trace, ids(source), xxh3_128_text(SAMPLE))
+        expect(packed.len() > 0).to_equal(true)
+        dir_create_all("build/spab_hit_spec")
+        val path = "build/spab_hit_spec/sample.spab"
+        expect(flat_packed_store_v1(path, packed)).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(true)
+        expect(flat_packed_admit_view_v1(view, ids(source))).to_equal("")
+        val restored = build_module_from_packed_view_v1(view, source, SAMPLE)
+        val _closed = flat_packed_close_v1(view)
+        expect(restored != nil).to_equal(true)
+        val after_packed = packed_snapshot(source)
+        val line_restored = build_module_from_flat_pool_blob(blob, source, SAMPLE)
+        expect(line_restored != nil).to_equal(true)
+        val after_line = packed_snapshot(source)
+        expect(section_difference(after_line, after_packed)).to_equal("")
+        val m = restored.unwrap()
+        expect(m.imports.len()).to_equal(fresh.imports.len())
+        expect(sorted_names(m.functions.keys())).to_equal(sorted_names(fresh.functions.keys()))
+
+    it "misses on a blob admitted against a different source":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val view = flat_packed_open_v1("build/spab_hit_spec/sample.spab")
+        expect(flat_packed_admit_view_v1(view, ids(source + " "))).to_equal("digest mismatch for subject 1 (xxh3-128)")
+        val _closed = flat_packed_close_v1(view)
+        expect(flat_packed_open_v1("build/spab_hit_spec/absent.spab").reason).to_equal("absent")
+
+    it "leaves the same pools as a fresh parse of the same source":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        flat_pool_capture_arm()
+        val fresh = parse_and_build_module_scoped(source, SAMPLE, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val after_fresh = packed_snapshot(source)
+        val packed = flat_packed_encode_v1(blob, trace, ids(source), xxh3_128_text(SAMPLE))
+        dir_create_all("build/spab_hit_spec")
+        val path = "build/spab_hit_spec/fresh_eq.spab"
+        expect(flat_packed_store_v1(path, packed)).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(flat_packed_admit_view_v1(view, ids(source))).to_equal("")
+        val restored = build_module_from_packed_view_v1(view, source, SAMPLE)
+        val _closed = flat_packed_close_v1(view)
+        expect(restored != nil).to_equal(true)
+        expect(section_difference(after_fresh, packed_snapshot(source))).to_equal("")
+        val m = restored.unwrap()
+        expect(m.imports.len()).to_equal(fresh.imports.len())
+        expect(sorted_names(m.functions.keys())).to_equal(sorted_names(fresh.functions.keys()))
+
+    it "misses when no expected digest uses a hash algorithm the blob carries":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val view = flat_packed_open_v1("build/spab_hit_spec/sample.spab")
+        val unknown = [SpabDigestV1(subject: 1, algo: 99, hex: xxh3_128_text(source)),
+                       SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+        expect(flat_packed_admit_view_v1(view, unknown)).to_equal("no-common-digest-algorithm for subject 1")
+        val _closed = flat_packed_close_v1(view)

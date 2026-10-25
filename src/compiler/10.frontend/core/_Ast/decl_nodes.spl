@@ -342,6 +342,21 @@ var decl_param_mut_text: [text] = []
 # trailing default reached codegen with fewer args than params: the callee then
 # read an UNINITIALIZED register/stack slot for the missing parameter.
 var decl_param_default_text: [text] = []
+# Macro facts (plan 2026-10-24 §6, P5): one row per `macro NAME(...)` module
+# declaration and per `name!(...)` invocation outside macro bodies. Flat
+# [text]/[i64] rows (lists comma-joined) so the cache codec never round-trips
+# nested arrays. Consumed by cache_artifact/macro_source_from_parse_v1.spl.
+var macro_def_name: [text] = []
+var macro_def_params: [text] = []     # comma-joined parameter names (`n=const` for CTFE params)
+var macro_def_contract: [text] = []   # raw `-> ( ... )` contract source
+var macro_def_body: [text] = []       # raw indented body source
+var macro_def_nested: [text] = []     # comma-joined `n!(` names in the body
+var macro_def_line: [i64] = []
+var macro_def_visibility: [text] = []
+var macro_use_name: [text] = []
+var macro_use_args: [text] = []       # raw source between the call parens
+var macro_use_line: [i64] = []
+var macro_use_col: [i64] = []
 var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
@@ -365,6 +380,72 @@ pub fn decl_metadata_pools_reset():
     decl_pipeline_ii.clear()
     decl_memory_banks.clear()
     decl_param_default_text.clear()
+    macro_facts_reset()
+
+pub fn macro_facts_reset():
+    if macro_def_name == nil:
+        macro_def_name = []
+    if macro_def_params == nil:
+        macro_def_params = []
+    if macro_def_contract == nil:
+        macro_def_contract = []
+    if macro_def_body == nil:
+        macro_def_body = []
+    if macro_def_nested == nil:
+        macro_def_nested = []
+    if macro_def_line == nil:
+        macro_def_line = []
+    if macro_def_visibility == nil:
+        macro_def_visibility = []
+    if macro_use_name == nil:
+        macro_use_name = []
+    if macro_use_args == nil:
+        macro_use_args = []
+    if macro_use_line == nil:
+        macro_use_line = []
+    if macro_use_col == nil:
+        macro_use_col = []
+    macro_def_name.clear()
+    macro_def_params.clear()
+    macro_def_contract.clear()
+    macro_def_body.clear()
+    macro_def_nested.clear()
+    macro_def_line.clear()
+    macro_def_visibility.clear()
+    macro_use_name.clear()
+    macro_use_args.clear()
+    macro_use_line.clear()
+    macro_use_col.clear()
+
+pub fn macro_fact_def_push(name: text, params: text, contract: text, body: text,
+        nested: text, line: i64, visibility: text):
+    macro_def_name.push(name)
+    macro_def_params.push(params)
+    macro_def_contract.push(contract)
+    macro_def_body.push(body)
+    macro_def_nested.push(nested)
+    macro_def_line.push(line)
+    macro_def_visibility.push(visibility)
+
+pub fn macro_fact_use_push(name: text, args: text, line: i64, col: i64):
+    macro_use_name.push(name)
+    macro_use_args.push(args)
+    macro_use_line.push(line)
+    macro_use_col.push(col)
+
+pub fn macro_fact_def_count() -> i64: macro_def_name.len()
+pub fn macro_fact_def_name_at(i: i64) -> text: macro_def_name[i]
+pub fn macro_fact_def_params_at(i: i64) -> text: macro_def_params[i]
+pub fn macro_fact_def_contract_at(i: i64) -> text: macro_def_contract[i]
+pub fn macro_fact_def_body_at(i: i64) -> text: macro_def_body[i]
+pub fn macro_fact_def_nested_at(i: i64) -> text: macro_def_nested[i]
+pub fn macro_fact_def_line_at(i: i64) -> i64: macro_def_line[i]
+pub fn macro_fact_def_visibility_at(i: i64) -> text: macro_def_visibility[i]
+pub fn macro_fact_use_count() -> i64: macro_use_name.len()
+pub fn macro_fact_use_name_at(i: i64) -> text: macro_use_name[i]
+pub fn macro_fact_use_args_at(i: i64) -> text: macro_use_args[i]
+pub fn macro_fact_use_line_at(i: i64) -> i64: macro_use_line[i]
+pub fn macro_fact_use_col_at(i: i64) -> i64: macro_use_col[i]
 
 fn decl_count() -> i64:
     ast_decl_count_get()
@@ -1644,11 +1725,13 @@ pub fn decl_pools_promote_transient_owners() -> bool:
 
 # --- flat-AST pool codec: flat_decl ------------------------------
 #
-# Dump/restore for this file's 55 pools, in a FIXED SORTED ORDER that
+# Dump/restore for this file's pools: the original 55 in a FIXED SORTED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # pool names, so a reordering on one side silently pairs each pool with its
 # neighbour's data. Sorting by name keeps the two sides in step without
-# anyone having to maintain a hand-written order.
+# anyone having to maintain a hand-written order. The macro fact pools
+# (macro_def_* / macro_use_*) are appended AFTER the sorted block instead, so
+# the positions of every earlier pool (and packed section) stay stable.
 #
 # Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
 # which derives the pool list from this file and fails when one is not both
@@ -1680,8 +1763,10 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(arm_pattern))
     parts = parts.push(flat_pool_enc_text(arm_rationale))
     parts = parts.push(flat_pool_enc_i64(ast_decl_count_slot))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(ast_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_count_slot))
+    flat_pool_type_trace_clear_next_v1()
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_text(decl_asm_placement))
     # Same erasure dodge, without changing the pool owner or its children.
@@ -1737,6 +1822,19 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(module_decl_slots))
     parts = parts.push(flat_pool_enc_i64(module_decls))
     parts = parts.push(flat_pool_enc_text(module_path_slot))
+    # Macro fact pools: appended at the END of this family (packed section
+    # order follows dump order, so existing pool positions stay stable).
+    parts = parts.push(flat_pool_enc_text(macro_def_name))
+    parts = parts.push(flat_pool_enc_text(macro_def_params))
+    parts = parts.push(flat_pool_enc_text(macro_def_contract))
+    parts = parts.push(flat_pool_enc_text(macro_def_body))
+    parts = parts.push(flat_pool_enc_text(macro_def_nested))
+    parts = parts.push(flat_pool_enc_i64(macro_def_line))
+    parts = parts.push(flat_pool_enc_text(macro_def_visibility))
+    parts = parts.push(flat_pool_enc_text(macro_use_name))
+    parts = parts.push(flat_pool_enc_text(macro_use_args))
+    parts = parts.push(flat_pool_enc_i64(macro_use_line))
+    parts = parts.push(flat_pool_enc_i64(macro_use_col))
     parts.join("")
 
 # Returns false when the blob ran short or was malformed; the caller must
@@ -1802,9 +1900,26 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     module_decl_slots = flat_pool_dec_i64(r)
     module_decls = flat_pool_dec_i64_into(module_decls, r)
     module_path_slot = flat_pool_dec_text_into(module_path_slot, r)
+    macro_def_name = flat_pool_dec_text_into(macro_def_name, r)
+    macro_def_params = flat_pool_dec_text_into(macro_def_params, r)
+    macro_def_contract = flat_pool_dec_text_into(macro_def_contract, r)
+    macro_def_body = flat_pool_dec_text_into(macro_def_body, r)
+    macro_def_nested = flat_pool_dec_text_into(macro_def_nested, r)
+    macro_def_line = flat_pool_dec_i64_into(macro_def_line, r)
+    macro_def_visibility = flat_pool_dec_text_into(macro_def_visibility, r)
+    macro_use_name = flat_pool_dec_text_into(macro_use_name, r)
+    macro_use_args = flat_pool_dec_text_into(macro_use_args, r)
+    macro_use_line = flat_pool_dec_i64_into(macro_use_line, r)
+    macro_use_col = flat_pool_dec_i64_into(macro_use_col, r)
     r.ok
 
-export flat_decl_pools_dump, flat_decl_pools_restore
+# Live line chunks of this family's CLEAR pools, in dump order, for the
+# packed-blob line adapter (flat_pool_packed_v1.spl): process-local values are
+# never read back from a blob.
+pub fn flat_decl_pools_clear_chunks_v1() -> [text]:
+    [ flat_pool_enc_i64(ast_decl_mirror_high_slot), flat_pool_enc_i64(ast_module_decl_mirror_high_slot)]
+
+export flat_decl_pools_dump, flat_decl_pools_restore, flat_decl_pools_clear_chunks_v1
 # Strict frontend cache admission calls this after every pool is restored.
 # The count slots are scalar arrays; an empty pristine slot means zero.
 # module_decls is a legacy compatibility pool: module_add_decl writes the
@@ -1867,5 +1982,522 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_is_value_type.len() != count: return false
     if decl_param_mut_text.len() != count: return false
     if decl_param_default_text.len() != count: return false
+    val macro_defs = macro_def_name.len()
+    if macro_def_params.len() != macro_defs or macro_def_contract.len() != macro_defs or
+            macro_def_body.len() != macro_defs or macro_def_nested.len() != macro_defs or
+            macro_def_line.len() != macro_defs or macro_def_visibility.len() != macro_defs:
+        return false
+    val macro_uses = macro_use_name.len()
+    if macro_use_args.len() != macro_uses or macro_use_line.len() != macro_uses or
+            macro_use_col.len() != macro_uses:
+        return false
     true
 export decl_pools_promote_transient_owners
+export macro_facts_reset, macro_fact_def_push, macro_fact_use_push
+export macro_fact_def_count, macro_fact_def_name_at, macro_fact_def_params_at
+export macro_fact_def_contract_at, macro_fact_def_body_at, macro_fact_def_nested_at
+export macro_fact_def_line_at, macro_fact_def_visibility_at
+export macro_fact_use_count, macro_fact_use_name_at, macro_fact_use_args_at
+export macro_fact_use_line_at, macro_fact_use_col_at
+
+# ===== DeclStoreState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct DeclStoreState:
+    module_decl_slots: [i64]
+    ast_module_decl_mirror_high_slot: [i64]
+    ast_decl_mirror_high_slot: [i64]
+    ast_decl_count_slot: [i64]
+    ast_module_decl_count_slot: [i64]
+    decl_tag: [i64]
+    decl_span: [i64]
+    decl_name: [text]
+    decl_params: [[i64]]
+    decl_param_names: [[text]]
+    decl_param_types: [[i64]]
+    decl_ret_type: [i64]
+    decl_body_stmts: [[i64]]
+    decl_body_stmts_flat: [text]
+    decl_field_names: [[text]]
+    decl_field_types: [[i64]]
+    decl_field_defaults: [[i64]]
+    decl_field_bits: [[i64]]
+    decl_imports: [[text]]
+    decl_visibility: [text]
+    decl_is_async: [i64]
+    decl_is_comptime: [i64]
+    decl_type_params: [[text]]
+    decl_type_param_constraints: [[[text]]]
+    decl_type_param_constraint_mode: [[text]]
+    decl_is_lazy: [i64]
+    decl_is_gpu_kernel: [i64]
+    decl_rt_hal_flags: [i64]
+    decl_asm_placement: [text]
+    decl_gpu_target_text: [text]
+    decl_gpu_target_arg_name_text: [text]
+    decl_gpu_backends_text: [text]
+    decl_is_simd: [i64]
+    decl_is_packed: [i64]
+    decl_derives: [[text]]
+    decl_impl_trait: [text]
+    decl_is_trait: [i64]
+    decl_is_hardware: [i64]
+    decl_clocked_args: [[text]]
+    decl_vhdl_generic_args: [[i64]]
+    decl_flatten_struct_output: [i64]
+    decl_unroll_factor: [i64]
+    decl_pipeline_ii: [i64]
+    decl_memory_banks: [i64]
+    decl_is_value_type: [i64]
+    decl_param_mut_text: [text]
+    decl_param_default_text: [text]
+    macro_def_name: [text]
+    macro_def_params: [text]
+    macro_def_contract: [text]
+    macro_def_body: [text]
+    macro_def_nested: [text]
+    macro_def_line: [i64]
+    macro_def_visibility: [text]
+    macro_use_name: [text]
+    macro_use_args: [text]
+    macro_use_line: [i64]
+    macro_use_col: [i64]
+    arm_pattern: [i64]
+    arm_guard: [i64]
+    arm_body: [[i64]]
+    arm_body_flat: [text]
+    arm_binding: [text]
+    arm_rationale: [text]
+    elif_cond: [i64]
+    elif_body: [[i64]]
+    elif_else: [[i64]]
+    module_path_slot: [text]
+    module_decls: [i64]
+    lexer_state_core_pos_slot: [text]
+    lexer_state_core_line_slot: [text]
+
+pub fn decl_store_state_take() -> DeclStoreState:
+    val s = DeclStoreState(
+        module_decl_slots: module_decl_slots,
+        ast_module_decl_mirror_high_slot: ast_module_decl_mirror_high_slot,
+        ast_decl_mirror_high_slot: ast_decl_mirror_high_slot,
+        ast_decl_count_slot: ast_decl_count_slot,
+        ast_module_decl_count_slot: ast_module_decl_count_slot,
+        decl_tag: decl_tag,
+        decl_span: decl_span,
+        decl_name: decl_name,
+        decl_params: decl_params,
+        decl_param_names: decl_param_names,
+        decl_param_types: decl_param_types,
+        decl_ret_type: decl_ret_type,
+        decl_body_stmts: decl_body_stmts,
+        decl_body_stmts_flat: decl_body_stmts_flat,
+        decl_field_names: decl_field_names,
+        decl_field_types: decl_field_types,
+        decl_field_defaults: decl_field_defaults,
+        decl_field_bits: decl_field_bits,
+        decl_imports: decl_imports,
+        decl_visibility: decl_visibility,
+        decl_is_async: decl_is_async,
+        decl_is_comptime: decl_is_comptime,
+        decl_type_params: decl_type_params,
+        decl_type_param_constraints: decl_type_param_constraints,
+        decl_type_param_constraint_mode: decl_type_param_constraint_mode,
+        decl_is_lazy: decl_is_lazy,
+        decl_is_gpu_kernel: decl_is_gpu_kernel,
+        decl_rt_hal_flags: decl_rt_hal_flags,
+        decl_asm_placement: decl_asm_placement,
+        decl_gpu_target_text: decl_gpu_target_text,
+        decl_gpu_target_arg_name_text: decl_gpu_target_arg_name_text,
+        decl_gpu_backends_text: decl_gpu_backends_text,
+        decl_is_simd: decl_is_simd,
+        decl_is_packed: decl_is_packed,
+        decl_derives: decl_derives,
+        decl_impl_trait: decl_impl_trait,
+        decl_is_trait: decl_is_trait,
+        decl_is_hardware: decl_is_hardware,
+        decl_clocked_args: decl_clocked_args,
+        decl_vhdl_generic_args: decl_vhdl_generic_args,
+        decl_flatten_struct_output: decl_flatten_struct_output,
+        decl_unroll_factor: decl_unroll_factor,
+        decl_pipeline_ii: decl_pipeline_ii,
+        decl_memory_banks: decl_memory_banks,
+        decl_is_value_type: decl_is_value_type,
+        decl_param_mut_text: decl_param_mut_text,
+        decl_param_default_text: decl_param_default_text,
+        macro_def_name: macro_def_name,
+        macro_def_params: macro_def_params,
+        macro_def_contract: macro_def_contract,
+        macro_def_body: macro_def_body,
+        macro_def_nested: macro_def_nested,
+        macro_def_line: macro_def_line,
+        macro_def_visibility: macro_def_visibility,
+        macro_use_name: macro_use_name,
+        macro_use_args: macro_use_args,
+        macro_use_line: macro_use_line,
+        macro_use_col: macro_use_col,
+        arm_pattern: arm_pattern,
+        arm_guard: arm_guard,
+        arm_body: arm_body,
+        arm_body_flat: arm_body_flat,
+        arm_binding: arm_binding,
+        arm_rationale: arm_rationale,
+        elif_cond: elif_cond,
+        elif_body: elif_body,
+        elif_else: elif_else,
+        module_path_slot: module_path_slot,
+        module_decls: module_decls,
+        lexer_state_core_pos_slot: lexer_state_core_pos_slot,
+        lexer_state_core_line_slot: lexer_state_core_line_slot
+    )
+    ast_decl_count_slot = [0]
+    ast_module_decl_count_slot = [0]
+    decl_tag = []
+    decl_span = []
+    decl_name = []
+    decl_params = []
+    decl_param_names = []
+    decl_param_types = []
+    decl_ret_type = []
+    decl_body_stmts = []
+    decl_body_stmts_flat = []
+    decl_field_names = []
+    decl_field_types = []
+    decl_field_defaults = []
+    decl_field_bits = []
+    decl_imports = []
+    decl_visibility = []
+    decl_is_async = []
+    decl_is_comptime = []
+    decl_type_params = []
+    decl_type_param_constraints = []
+    decl_type_param_constraint_mode = []
+    decl_is_lazy = []
+    decl_is_gpu_kernel = []
+    decl_rt_hal_flags = []
+    decl_asm_placement = []
+    decl_gpu_target_text = []
+    decl_gpu_target_arg_name_text = []
+    decl_gpu_backends_text = []
+    decl_is_simd = []
+    decl_is_packed = []
+    decl_derives = []
+    decl_impl_trait = []
+    decl_is_trait = []
+    decl_is_hardware = []
+    decl_clocked_args = []
+    decl_vhdl_generic_args = []
+    decl_flatten_struct_output = []
+    decl_unroll_factor = []
+    decl_pipeline_ii = []
+    decl_memory_banks = []
+    decl_is_value_type = []
+    decl_param_mut_text = []
+    decl_param_default_text = []
+    macro_def_name = []
+    macro_def_params = []
+    macro_def_contract = []
+    macro_def_body = []
+    macro_def_nested = []
+    macro_def_line = []
+    macro_def_visibility = []
+    macro_use_name = []
+    macro_use_args = []
+    macro_use_line = []
+    macro_use_col = []
+    arm_pattern = []
+    arm_guard = []
+    arm_body = []
+    arm_body_flat = []
+    arm_binding = []
+    arm_rationale = []
+    elif_cond = []
+    elif_body = []
+    elif_else = []
+    module_path_slot = [""]
+    module_decls = []
+    lexer_state_core_pos_slot = ["0"]
+    lexer_state_core_line_slot = ["1"]
+    ast_decl_mirror_high_slot = [0]
+    ast_module_decl_mirror_high_slot = [0]
+    var fresh_decl_slots: [i64] = []
+    for _ in 0..128:
+        fresh_decl_slots.push(0)
+    module_decl_slots = fresh_decl_slots
+    s
+
+pub fn decl_store_state_install(s: DeclStoreState):
+    module_decl_slots = s.module_decl_slots
+    ast_module_decl_mirror_high_slot = s.ast_module_decl_mirror_high_slot
+    ast_decl_mirror_high_slot = s.ast_decl_mirror_high_slot
+    ast_decl_count_slot = s.ast_decl_count_slot
+    ast_module_decl_count_slot = s.ast_module_decl_count_slot
+    decl_tag = s.decl_tag
+    decl_span = s.decl_span
+    decl_name = s.decl_name
+    decl_params = s.decl_params
+    decl_param_names = s.decl_param_names
+    decl_param_types = s.decl_param_types
+    decl_ret_type = s.decl_ret_type
+    decl_body_stmts = s.decl_body_stmts
+    decl_body_stmts_flat = s.decl_body_stmts_flat
+    decl_field_names = s.decl_field_names
+    decl_field_types = s.decl_field_types
+    decl_field_defaults = s.decl_field_defaults
+    decl_field_bits = s.decl_field_bits
+    decl_imports = s.decl_imports
+    decl_visibility = s.decl_visibility
+    decl_is_async = s.decl_is_async
+    decl_is_comptime = s.decl_is_comptime
+    decl_type_params = s.decl_type_params
+    decl_type_param_constraints = s.decl_type_param_constraints
+    decl_type_param_constraint_mode = s.decl_type_param_constraint_mode
+    decl_is_lazy = s.decl_is_lazy
+    decl_is_gpu_kernel = s.decl_is_gpu_kernel
+    decl_rt_hal_flags = s.decl_rt_hal_flags
+    decl_asm_placement = s.decl_asm_placement
+    decl_gpu_target_text = s.decl_gpu_target_text
+    decl_gpu_target_arg_name_text = s.decl_gpu_target_arg_name_text
+    decl_gpu_backends_text = s.decl_gpu_backends_text
+    decl_is_simd = s.decl_is_simd
+    decl_is_packed = s.decl_is_packed
+    decl_derives = s.decl_derives
+    decl_impl_trait = s.decl_impl_trait
+    decl_is_trait = s.decl_is_trait
+    decl_is_hardware = s.decl_is_hardware
+    decl_clocked_args = s.decl_clocked_args
+    decl_vhdl_generic_args = s.decl_vhdl_generic_args
+    decl_flatten_struct_output = s.decl_flatten_struct_output
+    decl_unroll_factor = s.decl_unroll_factor
+    decl_pipeline_ii = s.decl_pipeline_ii
+    decl_memory_banks = s.decl_memory_banks
+    decl_is_value_type = s.decl_is_value_type
+    decl_param_mut_text = s.decl_param_mut_text
+    decl_param_default_text = s.decl_param_default_text
+    macro_def_name = s.macro_def_name
+    macro_def_params = s.macro_def_params
+    macro_def_contract = s.macro_def_contract
+    macro_def_body = s.macro_def_body
+    macro_def_nested = s.macro_def_nested
+    macro_def_line = s.macro_def_line
+    macro_def_visibility = s.macro_def_visibility
+    macro_use_name = s.macro_use_name
+    macro_use_args = s.macro_use_args
+    macro_use_line = s.macro_use_line
+    macro_use_col = s.macro_use_col
+    arm_pattern = s.arm_pattern
+    arm_guard = s.arm_guard
+    arm_body = s.arm_body
+    arm_body_flat = s.arm_body_flat
+    arm_binding = s.arm_binding
+    arm_rationale = s.arm_rationale
+    elif_cond = s.elif_cond
+    elif_body = s.elif_body
+    elif_else = s.elif_else
+    module_path_slot = s.module_path_slot
+    module_decls = s.module_decls
+    lexer_state_core_pos_slot = s.lexer_state_core_pos_slot
+    lexer_state_core_line_slot = s.lexer_state_core_line_slot
+
+export DeclStoreState, decl_store_state_take, decl_store_state_install
+
+# Raw owner accessors (ParseContext stage 2): other modules index the decl
+# pools only through these. Unlike decl_get_*, they never fall back to env.
+fn decl_tag_at(idx: i64) -> i64: decl_tag[idx]
+fn decl_name_at(idx: i64) -> text: decl_name[idx]
+fn decl_param_names_at(idx: i64) -> [text]: decl_param_names[idx]
+fn decl_param_types_at(idx: i64) -> [i64]: decl_param_types[idx]
+fn decl_ret_type_at(idx: i64) -> i64: decl_ret_type[idx]
+fn decl_body_stmts_at(idx: i64) -> [i64]: decl_body_stmts[idx]
+fn decl_field_names_at(idx: i64) -> [text]: decl_field_names[idx]
+fn decl_field_types_at(idx: i64) -> [i64]: decl_field_types[idx]
+fn decl_field_defaults_at(idx: i64) -> [i64]: decl_field_defaults[idx]
+fn decl_imports_at(idx: i64) -> [text]: decl_imports[idx]
+fn decl_visibility_at(idx: i64) -> text: decl_visibility[idx]
+fn decl_visibility_len() -> i64: decl_visibility.len()
+fn decl_is_async_at(idx: i64) -> i64: decl_is_async[idx]
+fn decl_is_lazy_at(idx: i64) -> i64: decl_is_lazy[idx]
+fn decl_is_gpu_kernel_at(idx: i64) -> i64: decl_is_gpu_kernel[idx]
+fn decl_is_gpu_kernel_set_at(idx: i64, value: i64):
+    decl_is_gpu_kernel[idx] = value
+fn decl_is_simd_set_at(idx: i64, value: i64):
+    decl_is_simd[idx] = value
+fn decl_is_packed_at(idx: i64) -> i64: decl_is_packed[idx]
+fn decl_is_packed_len() -> i64: decl_is_packed.len()
+fn decl_is_packed_set_at(idx: i64, value: i64):
+    decl_is_packed[idx] = value
+fn decl_derives_set_at(idx: i64, value: [text]):
+    decl_derives[idx] = value
+fn arm_pattern_at(idx: i64) -> i64: arm_pattern[idx]
+fn arm_pattern_len() -> i64: arm_pattern.len()
+
+# Pool lifecycle owned here (ParseContext stage 2). ast_reset in
+# module_state.spl calls these instead of nil-guarding and clearing these
+# pools itself: a cross-module whole-var assignment or .clear() hits a copy
+# in the seed and was silently dropped.
+fn decl_pools_ensure_v1():
+    if decl_tag == nil:
+        decl_tag = []
+    if decl_span == nil:
+        decl_span = []
+    if decl_name == nil:
+        decl_name = []
+    if decl_params == nil:
+        decl_params = []
+    if decl_param_names == nil:
+        decl_param_names = []
+    if decl_param_types == nil:
+        decl_param_types = []
+    if decl_ret_type == nil:
+        decl_ret_type = []
+    if decl_body_stmts == nil:
+        decl_body_stmts = []
+    if decl_body_stmts_flat == nil:
+        decl_body_stmts_flat = []
+    if decl_field_names == nil:
+        decl_field_names = []
+    if decl_field_types == nil:
+        decl_field_types = []
+    if decl_field_defaults == nil:
+        decl_field_defaults = []
+    if decl_field_bits == nil:
+        decl_field_bits = []
+    if decl_imports == nil:
+        decl_imports = []
+    if decl_visibility == nil:
+        decl_visibility = []
+    if decl_is_async == nil:
+        decl_is_async = []
+    if decl_is_comptime == nil:
+        decl_is_comptime = []
+    if decl_type_params == nil:
+        decl_type_params = []
+    if decl_type_param_constraints == nil:
+        decl_type_param_constraints = []
+    if decl_type_param_constraint_mode == nil:
+        decl_type_param_constraint_mode = []
+    if decl_is_lazy == nil:
+        decl_is_lazy = []
+    if decl_is_gpu_kernel == nil:
+        decl_is_gpu_kernel = []
+    if decl_rt_hal_flags == nil:
+        decl_rt_hal_flags = []
+    if decl_gpu_target_text == nil:
+        decl_gpu_target_text = []
+    if decl_gpu_target_arg_name_text == nil:
+        decl_gpu_target_arg_name_text = []
+    if decl_gpu_backends_text == nil:
+        decl_gpu_backends_text = []
+    if decl_is_simd == nil:
+        decl_is_simd = []
+    if decl_is_packed == nil:
+        decl_is_packed = []
+    if decl_derives == nil:
+        decl_derives = []
+    if decl_impl_trait == nil:
+        decl_impl_trait = []
+    if decl_is_trait == nil:
+        decl_is_trait = []
+    if decl_is_hardware == nil:
+        decl_is_hardware = []
+    if decl_clocked_args == nil:
+        decl_clocked_args = []
+    if decl_vhdl_generic_args == nil:
+        decl_vhdl_generic_args = []
+    if decl_flatten_struct_output == nil:
+        decl_flatten_struct_output = []
+    if decl_is_value_type == nil:
+        decl_is_value_type = []
+    if decl_param_mut_text == nil:
+        decl_param_mut_text = []
+    if arm_pattern == nil:
+        arm_pattern = []
+    if arm_guard == nil:
+        arm_guard = []
+    if arm_body == nil:
+        arm_body = []
+    if arm_body_flat == nil:
+        arm_body_flat = []
+    if arm_binding == nil:
+        arm_binding = []
+    if arm_rationale == nil:
+        arm_rationale = []
+    if elif_cond == nil:
+        elif_cond = []
+    if elif_body == nil:
+        elif_body = []
+    if elif_else == nil:
+        elif_else = []
+    if module_decls == nil:
+        module_decls = []
+
+fn decl_pools_clear_v1():
+    decl_tag.clear()
+    decl_span.clear()
+    decl_name.clear()
+    decl_params.clear()
+    decl_param_names.clear()
+    decl_param_types.clear()
+    decl_ret_type.clear()
+    decl_body_stmts.clear()
+    decl_body_stmts_flat.clear()
+    decl_field_names.clear()
+    decl_field_types.clear()
+    decl_field_defaults.clear()
+    decl_field_bits.clear()
+    decl_imports.clear()
+    decl_visibility.clear()
+    decl_is_async.clear()
+    decl_is_comptime.clear()
+    decl_type_params.clear()
+    decl_type_param_constraints.clear()
+    decl_type_param_constraint_mode.clear()
+    decl_is_lazy.clear()
+    decl_is_gpu_kernel.clear()
+    decl_rt_hal_flags.clear()
+    decl_gpu_target_text.clear()
+    decl_gpu_target_arg_name_text.clear()
+    decl_gpu_backends_text.clear()
+    decl_is_simd.clear()
+    decl_is_packed.clear()
+    decl_derives.clear()
+    decl_impl_trait.clear()
+    decl_is_trait.clear()
+    decl_is_hardware.clear()
+    decl_clocked_args.clear()
+    decl_vhdl_generic_args.clear()
+    decl_flatten_struct_output.clear()
+    decl_is_value_type.clear()
+    decl_param_mut_text.clear()
+    arm_pattern.clear()
+    arm_guard.clear()
+    arm_body.clear()
+    arm_body_flat.clear()
+    arm_binding.clear()
+    arm_rationale.clear()
+    module_decls.clear()
+
+# Nil-guards for the decl_nodes-owned lexer/module slots (ParseContext stage 2).
+fn decl_slots_ensure_v1():
+    if module_path_slot == nil:
+        module_path_slot = [""]
+    if lexer_state_core_pos_slot == nil:
+        lexer_state_core_pos_slot = ["0"]
+    if lexer_state_core_line_slot == nil:
+        lexer_state_core_line_slot = ["1"]
+
+# Raw owner accessors used by module_state.spl (ParseContext stage 2).
+fn decl_tag_len() -> i64: decl_tag.len()
+fn decl_span_at(idx: i64) -> i64: decl_span[idx]
+fn decl_field_bits_at(idx: i64) -> [i64]: decl_field_bits[idx]
+fn decl_type_params_at(idx: i64) -> [text]: decl_type_params[idx]
+fn module_path_slot_at(idx: i64) -> text: module_path_slot[idx]
+fn module_path_slot_set_at(idx: i64, value: text):
+    module_path_slot[idx] = value
+fn lexer_state_core_pos_slot_at(idx: i64) -> text: lexer_state_core_pos_slot[idx]
+fn lexer_state_core_pos_slot_set_at(idx: i64, value: text):
+    lexer_state_core_pos_slot[idx] = value
+fn lexer_state_core_line_slot_at(idx: i64) -> text: lexer_state_core_line_slot[idx]
+fn lexer_state_core_line_slot_set_at(idx: i64, value: text):
+    lexer_state_core_line_slot[idx] = value

@@ -1,0 +1,183 @@
+# Producer of the generic template TLDR section (plan P3).
+#
+# Projects one generic declaration into a `GenericTemplateEntryV1`: binder
+# names become positional binder ids (`<symbol>#<index>`) and every field type
+# text becomes the canonical structural key understood by
+# compiler.mono.model.generic_subst_model (`mt_key_type` encoding). Nominal
+# user types are module-qualified (`Named:<module>.<Name>`), so a shadowed
+# `Box<T>` in another module never shares an identity.
+#
+# Scope: unqualified names resolve to the declaring module; dotted names are
+# taken as already qualified. Import-alias resolution is the caller's job
+# (feed qualified names) until this projector is wired to the parser's
+# resolved declaration facts.
+
+use compiler.common.cache_contract.generic_tldr_view_v1.{GenericParamV1,
+    GenericTemplateFieldV1, GenericTemplateEntryV1, GENERIC_TLDR_VIEW_SCHEMA_V1,
+    GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_CONST}
+
+pub struct GenericFieldInputV1:
+    name: text
+    type_text: text
+
+pub struct GenericDeclInputV1:
+    module_path: text
+    name: text
+    params: [text]
+    param_kinds: [text]
+    fields: [GenericFieldInputV1]
+    visibility_root: text
+    active_guard_root: text
+    source_digest: text
+
+val _PRIMITIVES = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+    "f32", "f64", "bool", "text", "char", "unit", "Any"]
+
+fn _frame(value: text) -> text:
+    "{value.len()}:" + value
+
+fn _key_var(name: text) -> text:
+    "v" + _frame(name)
+
+fn _key_con(name: text) -> text:
+    "c" + _frame(name)
+
+fn _key_app(ctor: text, args: [text]) -> text:
+    "a" + _frame(ctor) + "l{args.len()}:" + args.join("")
+
+struct _TyParse:
+    key: text
+    pos: i64
+    error: text
+    generic: bool
+
+fn _fail(error: text) -> _TyParse:
+    _TyParse(key: "", pos: -1, error: error, generic: false)
+
+fn _skip_ws(s: text, pos: i64) -> i64:
+    var i = pos
+    while i < s.len() and s.char_at(i) == " ":
+        i = i + 1
+    i
+
+fn _is_ident(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "."
+
+fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text) -> [_TyParse]:
+    """Comma-separated type list up to `close`; last element carries the
+    position after `close` (or an error)."""
+    var out: [_TyParse] = []
+    var i = _skip_ws(s, pos)
+    while true:
+        val t = _parse_type(s, i, d)
+        if t.error != "":
+            return [t]
+        out = out.push(t)
+        i = _skip_ws(s, t.pos)
+        if i < s.len() and s.char_at(i) == ",":
+            i = _skip_ws(s, i + 1)
+            continue
+        if i < s.len() and s.char_at(i) == close:
+            out = out.push(_TyParse(key: "", pos: i + 1, error: "", generic: false))
+            return out
+        return [_fail("expected '" + close + "' in type '" + s + "'")]
+    out
+
+fn _parse_postfix(s: text, base: _TyParse) -> _TyParse:
+    var t = base
+    while t.pos < s.len() and s.char_at(t.pos) == "?":
+        t = _TyParse(key: _key_app("Optional", [t.key]), pos: t.pos + 1, error: "", generic: t.generic)
+    t
+
+fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1) -> _TyParse:
+    var i = _skip_ws(s, pos)
+    if i >= s.len():
+        return _fail("empty type in '" + s + "'")
+    if s.char_at(i) == "[":
+        val parts = _parse_args(s, i + 1, d, "]")
+        if parts.len() != 2:
+            if parts.len() == 1:
+                return parts[0]
+            return _fail("array type takes one element type")
+        return _parse_postfix(s, _TyParse(key: _key_app("Array", [parts[0].key]), pos: parts[1].pos,
+            error: "", generic: parts[0].generic))
+    var j = i
+    while j < s.len() and _is_ident(s.char_at(j)):
+        j = j + 1
+    if j == i:
+        return _fail("bad type '" + s + "'")
+    val name = s.substring(i, j)
+    var k = _skip_ws(s, j)
+    var arg_keys: [text] = []
+    var generic = false
+    var has_args = false
+    if k < s.len() and s.char_at(k) == "<":
+        val parts = _parse_args(s, k + 1, d, ">")
+        if parts.len() == 1 and parts[0].error != "":
+            return parts[0]
+        var a = 0
+        while a < parts.len() - 1:
+            arg_keys = arg_keys.push(parts[a].key)
+            generic = generic or parts[a].generic
+            a = a + 1
+        k = parts[parts.len() - 1].pos
+        has_args = true
+    var p = 0
+    while p < d.params.len():
+        if d.params[p] == name:
+            if has_args:
+                return _fail("higher-kinded binder '" + name + "' is unsupported")
+            return _parse_postfix(s, _TyParse(key: _key_var(_binder_id(d, p)), pos: k, error: "", generic: true))
+        p = p + 1
+    var key = ""
+    if not has_args and _PRIMITIVES.contains(name):
+        key = _key_con(name)
+    elif name == "Array" or name == "Dict" or name == "Optional" or name == "Result":
+        key = _key_app(name, arg_keys)
+    else:
+        val qualified = if name.contains("."): name else: d.module_path + "." + name
+        key = _key_app("Named:" + qualified, arg_keys)
+    _parse_postfix(s, _TyParse(key: key, pos: k, error: "", generic: generic))
+
+fn _symbol_id(d: GenericDeclInputV1) -> text:
+    d.module_path + "." + d.name
+
+fn _binder_id(d: GenericDeclInputV1, index: i64) -> text:
+    _symbol_id(d) + "#{index}"
+
+pub fn generic_type_text_key_v1(d: GenericDeclInputV1, type_text: text) -> Result<text, text>:
+    val t = _parse_type(type_text, 0, d)
+    if t.error != "":
+        return Err(t.error)
+    if _skip_ws(type_text, t.pos) != type_text.len():
+        return Err("trailing text in type '" + type_text + "'")
+    Ok(t.key)
+
+pub fn project_generic_template_v1(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
+    if d.params.len() != d.param_kinds.len():
+        return Err("generic parameter kind list does not match parameter list")
+    var params: [GenericParamV1] = []
+    var i = 0
+    while i < d.params.len():
+        val kind = d.param_kinds[i]
+        if kind != GENERIC_PARAM_KIND_TYPE and kind != GENERIC_PARAM_KIND_CONST:
+            return Err("unsupported generic parameter kind '" + kind + "'")
+        var j = 0
+        while j < i:
+            if d.params[j] == d.params[i]:
+                return Err("duplicate generic parameter '" + d.params[i] + "'")
+            j = j + 1
+        params = params.push(GenericParamV1(index: i, kind: kind, binder_id: _binder_id(d, i), display_name: d.params[i]))
+        i = i + 1
+    var fields: [GenericTemplateFieldV1] = []
+    for f in d.fields:
+        val ff: GenericFieldInputV1 = f
+        val t = _parse_type(ff.type_text, 0, d)
+        if t.error != "":
+            return Err(t.error)
+        if _skip_ws(ff.type_text, t.pos) != ff.type_text.len():
+            return Err("trailing text in type '" + ff.type_text + "'")
+        fields = fields.push(GenericTemplateFieldV1(name: ff.name, type_key: t.key, generic: t.generic))
+    Ok(GenericTemplateEntryV1(symbol_id: _symbol_id(d), source_digest: d.source_digest,
+        visibility_root: d.visibility_root, active_guard_root: d.active_guard_root,
+        language_schema: GENERIC_TLDR_VIEW_SCHEMA_V1, params: params, fields: fields))

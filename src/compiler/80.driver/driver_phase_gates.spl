@@ -27,9 +27,19 @@ use compiler.driver.driver_streaming_surface_policy.{
 fn driver_env_get_opt(key: text) -> text?:
     env_get_opt(key)
 
+# @workaround bug=dict_index_coalesce_text_decoded_before_nil_test_2026-10-25 reason=missing_key_yields_raw_zero
+# `ctx.config[k] ?? d` on a Dict<text, text> is lowered by Stage 2 as
+# rt_dict_get -> rt_interp_cstr -> rt_is_some: a missing key's nil becomes a
+# NULL char*, rt_is_some(0) is true, and the expression yields raw 0 instead
+# of `d`. Test membership first so the default is taken on a miss.
+fn driver_config_text_or(ctx: CompileContext, key: text, default_value: text) -> text:
+    if ctx.config.contains_key(key):
+        return ctx.config[key]
+    default_value
+
 pub fn driver_explicit_source_entry(ctx: CompileContext) -> text:
     """Compiler-owned source-entry request, independent of process environment."""
-    ctx.config["compiler_source_entry"] ?? ""
+    driver_config_text_or(ctx, "compiler_source_entry", "")
 
 pub fn driver_source_entry_request(ctx: CompileContext) -> text:
     val explicit_entry = driver_explicit_source_entry(ctx)
@@ -80,7 +90,7 @@ pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:
             driver_streaming_entry_ready_values(driver_source_entry_request(ctx),
                 driver_source_entry_closure_enabled(ctx)),
             ctx.config.contains_key("coverage"),
-            (ctx.config["mcdc_mode"] ?? "off") == "off",
+            driver_config_text_or(ctx, "mcdc_mode", "off") == "off",
             ctx.options.backend == "vhdl")
     # compiler_source_entry is published before phase routing by ordinary
     # native-build as well as bootstrap. Do not require a bootstrap-only flag
@@ -90,7 +100,7 @@ pub fn driver_streaming_surface_route(ctx: CompileContext) -> i64:
         driver_streaming_entry_ready_values(driver_source_entry_request(ctx),
             driver_source_entry_closure_enabled(ctx)),
         ctx.config.contains_key("coverage"),
-        (ctx.config["mcdc_mode"] ?? "off") == "off",
+        driver_config_text_or(ctx, "mcdc_mode", "off") == "off",
         ctx.options.backend == "vhdl")
 
 fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
@@ -105,6 +115,7 @@ fn bootstrap_last_fixed_input(options: CompileOptions) -> text:
         case 4: options.bootstrap_input_3
         case 5: options.bootstrap_input_4
         case 6: options.bootstrap_input_5
+        case 7: options.bootstrap_input_6
         case _: ""
 
 fn bootstrap_entry_source_index(ctx: CompileContext) -> i64:

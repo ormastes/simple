@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: Verify the lock-free Chase-Lev run queue in raw shared memory:
+owner LIFO, thief FIFO, bounded capacity, and that under concurrent popping
+and stealing every fiber id is taken exactly once.
+Audience: build-runner engineers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+The interleaving scenario uses real OS threads where the runtime provides
+them. The seed interpreter runs thread closures inline, so there it checks
+only the sequential interleaving (stolen=0); a native run exercises the race.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3
+"""
+use std.nogc_async_mut.fiber.work_queue.{WORK_QUEUE_EMPTY, WORK_QUEUE_RETRY, work_queue_new, work_queue_free, work_queue_len, work_queue_push, work_queue_pop, work_queue_steal}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+
+extern fn rt_par_atomic_add_i64(addr: i64, value: i64) -> i64
+
+val N: i64 = 400
+
+fn _mark(taken: i64, fiber: i64):
+    rt_par_atomic_add_i64(taken + fiber * 8, 1)
+
+fn _thief(q: i64, taken: i64) -> i64:
+    rt_par_atomic_add_i64(taken + (N + 1) * 8, 1)  # ready
+    # steal until the owner has published DONE in taken[0] and the queue is empty
+    var got = 0
+    var idle = 0
+    var spins = 0
+    # bounded: a thread runtime that runs the closure eagerly must not spin forever
+    while idle < 2000 and spins < 2000000:
+        spins = spins + 1
+        val f = work_queue_steal(q)
+        if f > 0:
+            _mark(taken, f)
+            got = got + 1
+            idle = 0
+        elif f == WORK_QUEUE_EMPTY and rt_par_atomic_add_i64(taken, 0) == 1:
+            idle = idle + 1
+    got
+
+describe "lock-free work queue":
+    it "owner pops LIFO and thieves steal FIFO":
+        val q = work_queue_new(8)
+        expect(work_queue_push(q, 1)).to_be(true)
+        expect(work_queue_push(q, 2)).to_be(true)
+        expect(work_queue_push(q, 3)).to_be(true)
+        expect(work_queue_len(q)).to_equal(3)
+        expect(work_queue_steal(q)).to_equal(1)
+        expect(work_queue_pop(q)).to_equal(3)
+        expect(work_queue_pop(q)).to_equal(2)
+        expect(work_queue_pop(q)).to_equal(WORK_QUEUE_EMPTY)
+        expect(work_queue_steal(q)).to_equal(WORK_QUEUE_EMPTY)
+        work_queue_free(q)
+
+    it "refuses to grow past its capacity and rejects non-positive ids":
+        val q = work_queue_new(2)
+        expect(work_queue_push(q, 0)).to_be(false)
+        expect(work_queue_push(q, 5)).to_be(true)
+        expect(work_queue_push(q, 6)).to_be(true)
+        expect(work_queue_push(q, 7)).to_be(false)
+        expect(work_queue_steal(q)).to_equal(5)
+        expect(work_queue_push(q, 7)).to_be(true)
+        expect(work_queue_pop(q)).to_equal(7)
+        work_queue_free(q)
+
+    it "wraps around the ring many times":
+        val q = work_queue_new(4)
+        var i = 1
+        var ok = true
+        while i <= 50:
+            if not work_queue_push(q, i): ok = false
+            if work_queue_steal(q) != i: ok = false
+            i = i + 1
+        expect(ok).to_be(true)
+        expect(work_queue_len(q)).to_equal(0)
+        work_queue_free(q)
+
+    it "takes every fiber exactly once with pop and steal interleaved":
+        val q = work_queue_new(N + 8)
+        val taken = rt_alloc((N + 2) * 8)
+        for k in 0..(N + 2): rt_ptr_write_i64(taken, k * 8, 0)
+        var thieves = []
+        for _t in 0..3:
+            thieves = thieves.push(thread_spawn_with_args(q, taken, \a, b: _thief(a, b)))
+        var f = 1
+        while f <= N:
+            work_queue_push(q, f)
+            if f % 3 == 0:
+                val mine = work_queue_pop(q)
+                if mine > 0: _mark(taken, mine)
+            f = f + 1
+        var left = work_queue_pop(q)
+        while left != WORK_QUEUE_EMPTY:
+            if left > 0: _mark(taken, left)
+            left = work_queue_pop(q)
+        rt_par_atomic_add_i64(taken, 1)
+        var stolen = 0
+        for h in thieves:
+            var handle = h
+            stolen = stolen + (handle.join() ?? 0)
+        var once = 0
+        var dup = 0
+        for k in 1..(N + 1):
+            val c = rt_ptr_read_i64(taken, k * 8)
+            if c == 1: once = once + 1
+            if c > 1: dup = dup + 1
+        print "concurrent: stolen={stolen} exactly_once={once} duplicated={dup}"
+        expect(dup).to_equal(0)
+        expect(once).to_equal(N)
+        rt_free(taken)
+        work_queue_free(q)

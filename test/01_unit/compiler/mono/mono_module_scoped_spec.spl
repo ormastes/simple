@@ -1,0 +1,121 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Module-scoped monomorphization (per-file lane default; whole-program lane uses the global pass)
+
+One module F is monomorphized against a caller-supplied set of visible
+template modules. Instances land in F's own function table flagged for
+COMDAT (`linkonce_odr`) emission, spelled exactly as the global pass spells
+them; the template module is never modified. A generic call whose template
+is not visible is E-MONO-040, never silently skipped.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:generics
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass,
+    run_monomorphization_module_scoped_v1, mono_scoped_generic_uses_last_v1,
+    mono_scoped_generic_fn_instances_last_v1}
+
+val TEMPLATE_SRC = "fn id<X>(x: X) -> X:\n    x\n"
+val USER_SRC = 'use t.{id}' + "\n\nfn main() -> i64:\n    id(1)\n"
+
+fn lower_v1(source: text, name: text) -> HirModule:
+    # `use t.{id}` only resolves when module t's surface is registered (the
+    # driver's contract); a bare HirLowering leaves the callee as Error.
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["t"] = parse_full_frontend(TEMPLATE_SRC, "testdata/t.spl", "t", log)
+    val sources = [SourceFile(path: "testdata/t.spl", content: TEMPLATE_SRC, module_name: "t")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    val path = "testdata/{name}.spl"
+    val ast = parse_full_frontend(source, path, name, log)
+    var lowering = hirlowering_for_module(name, surfaces)
+    var lowered = lowering.lower_module(ast)
+    lowered.name = name
+    lowered
+
+fn instance_names_v1(module: HirModule) -> [text]:
+    var names: [text] = []
+    for key in module.functions.keys():
+        val f: HirFunction = module.functions[key]
+        if f.name.contains("$"): names.push(f.name)
+    names
+
+describe "module-scoped monomorphization":
+    it "places the instance in the requesting module with COMDAT linkage":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val f = lower_v1(USER_SRC, "f")
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = t
+        val (out, stats, diags) = run_monomorphization_module_scoped_v1(f, templates)
+        expect(diags.len()).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+        val names = instance_names_v1(out)
+        expect(names.len()).to_equal(1)
+        for key in out.functions.keys():
+            val fun: HirFunction = out.functions[key]
+            if fun.name.contains("$"):
+                expect(fun.func_attr.is_comdat_instance).to_equal(true)
+
+    it "spells the instance exactly as the global pass does":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val f = lower_v1(USER_SRC, "f")
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = t
+        val (out, _s, _d) = run_monomorphization_module_scoped_v1(f, templates)
+        var both: Dict<text, HirModule> = {}
+        both["t"] = lower_v1(TEMPLATE_SRC, "t")
+        both["f"] = lower_v1(USER_SRC, "f")
+        var global_pass = MonomorphizationPass.create()
+        val global_out = global_pass.process_modules(both)
+        var global_names: [text] = []
+        for key in global_out.keys():
+            for n in instance_names_v1(global_out[key]): global_names.push(n)
+        expect(global_names.len()).to_equal(1)
+        expect(instance_names_v1(out)[0]).to_equal(global_names[0])
+
+    it "leaves the template module unchanged":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val before = t.functions.len()
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = t
+        val (_o, _s, _d) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), templates)
+        val after: HirModule = templates["t"]
+        expect(after.functions.len()).to_equal(before)
+        expect(instance_names_v1(after).len()).to_equal(0)
+
+    it "fails closed with E-MONO-040 when the template is not visible":
+        val empty: Dict<text, HirModule> = {}
+        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), empty)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-040: template")
+        expect(diags[0]).to_contain("not visible to module")
+        expect(instance_names_v1(out).len()).to_equal(0)
+
+    it "records an imported generic function instance with primitive arguments (P-G5)":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val f = lower_v1(USER_SRC, "f")
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = t
+        val (_o, _s, diags) = run_monomorphization_module_scoped_v1(f, templates)
+        expect(diags.len()).to_equal(0)
+        val (_uses, _complete, ready) = mono_scoped_generic_uses_last_v1()
+        expect(ready).to_equal(true)
+        val fns = mono_scoped_generic_fn_instances_last_v1()
+        expect(fns.len()).to_equal(1)
+        if fns.len() == 1:
+            expect(fns[0].owner).to_equal("t")
+            expect(fns[0].name).to_equal("id")
+            expect(fns[0].arg_texts).to_equal(["i64"])
+

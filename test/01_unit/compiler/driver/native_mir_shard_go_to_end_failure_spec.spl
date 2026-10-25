@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_shard.spl 0%
+"""
+# A go-to-end MIR failure in a shard worker is a ledger failure, not a facade PASS
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md
+
+## Purpose and Audience
+
+Phase 3 run-27e: eight modules whose MIR lowering failed under go-to-end
+produced no object, yet each shard child published a PASS/UNCACHED terminal
+for them, because "no outcome and no object" is also the shape of a
+legitimate objectless facade (pure re-export or extern-only module). The
+coordinator counted failed_modules=3 (only the codegen failures) and seven of
+the dropped modules had to be trap-stubbed at link time.
+
+## Expected Outcome
+
+A claimed module the worker's go-to-end ledger recorded as failed never
+publishes PASS; the seal turns it FAILED, the coordinator counts it, and the
+failed-row listing names it. A real objectless facade still PASSes.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, getpid}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
+    native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory,
+    hir_shard_recovery_seal, hir_shard_recovery_failure_count,
+    hir_shard_recovery_failed_rows_v1}
+
+fn fresh_ledger(tag: text) -> text:
+    val dir = "build/test_tmp/native_mir_shard_gte_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+describe "MIR shard module PASS predicate":
+    it "passes an emitted object and a genuine objectless facade":
+        # @req REQ-SSPEC-COMPILER
+        step("passes an emitted object and a genuine objectless facade")
+        assert_true(native_mir_shard_module_passed_v1("OK", true, false))
+        assert_true(native_mir_shard_module_passed_v1("", false, false))
+
+    it "refuses a module the go-to-end ledger recorded as failed":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a module the go-to-end ledger recorded as failed")
+        # run-27e shape: MIR lowering failed, the module was kept out of
+        # ctx.mir_modules, so codegen produced no outcome and no object.
+        assert_false(native_mir_shard_module_passed_v1("", false, true))
+        assert_false(native_mir_shard_module_passed_v1("OK", true, true))
+
+    it "refuses every other outcome/object combination":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses every other outcome/object combination")
+        assert_false(native_mir_shard_module_passed_v1("OK", false, false))
+        assert_false(native_mir_shard_module_passed_v1("", true, false))
+        assert_false(native_mir_shard_module_passed_v1("FAILED", false, false))
+
+describe "MIR shard ledger with a go-to-end MIR failure":
+    it "counts and names the failed module and keeps the facade PASS":
+        # @req REQ-SSPEC-COMPILER
+        step("counts and names the failed module and keeps the facade PASS")
+        val queue = fresh_ledger("fail")
+        val owner = "0/1@0+fork0/2"
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", owner)
+        assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.facade", "mod.mir_broken"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.facade", "src-id"), 1)
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.mir_broken", "src-id"), 1)
+        # Fake shard result: the worker's per-claim decision.
+        val names = ["mod.facade", "mod.mir_broken"]
+        val go_to_end_failed = [false, true]
+        var index = 0
+        while index < names.len():
+            if native_mir_shard_module_passed_v1("", false, go_to_end_failed[index]):
+                assert_true(native_mir_shard_publish_pass_v1(queue, names[index], "", 0, 0, ""))
+            index = index + 1
+        assert_equal(hir_shard_recovery_seal(queue, owner, "FAILED"), 1)
+        assert_equal(hir_shard_recovery_failure_count(queue), 1)
+        val rows = hir_shard_recovery_failed_rows_v1(queue)
+        assert_equal(rows.len(), 1)
+        assert_equal(rows[0], "FAILED mod.mir_broken")
+        assert_false(native_mir_shard_link_inputs_v1(queue, "src-id").is_ok())
+        val _cleanup = dir_remove_all(queue)

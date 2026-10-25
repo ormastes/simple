@@ -28,12 +28,27 @@ pub struct NativeEntryClosureRequestV1:
     receipt_path: text
     receipt_digest: text
 
+# @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25: element-wise
+# compare instead of `==` on [text]. Delete once array Eq/NotEq lowers through
+# rt_native_eq in the compiler that builds this module.
+fn _entry_closure_text_list_eq_v1(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 pub fn native_entry_closure_request_identity_matches_v1(
         actual_root: text, actual_entry: text, actual_roots: [text], actual_producer: text,
         expected_root: text, expected_entry: text, expected_roots: [text], expected_producer: text
 ) -> bool:
+    # @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25 (roots compare).
     actual_root == expected_root and actual_entry == expected_entry and
-        actual_roots == expected_roots and actual_producer == expected_producer
+        _entry_closure_text_list_eq_v1(actual_roots, expected_roots) and
+        actual_producer == expected_producer
 
 pub fn native_entry_closure_request_publish_v1(path: text, request: NativeEntryClosureRequestV1) -> Result<text, text>:
     val binding = request.binding
@@ -140,3 +155,22 @@ pub fn native_entry_closure_open_v1(root: text, snapshot: ScvCompileSnapshotV1,
     val records = native_entry_closure_open_records_v1(path, digest)
     if records.is_err(): return Err(records.unwrap_err())
     native_entry_closure_admit_v1(root, snapshot, source_digest, generation, binding, records.unwrap())
+
+# Process-local handoff from a CLI worker that already admitted the parent's
+# frozen request (app.io._CliCompile.native_build_closure_request_admit) to the
+# driver's compile-path `load_sources_impl`, which re-opens and re-verifies it.
+# Held in an array rather than a global optional struct payload (see the
+# nil-guard note in load_sources_impl). Take-once: a later compile in the same
+# process never inherits a consumed request.
+var _g_native_entry_closure_handoff: [NativeEntryClosureRequestV1] = []
+
+pub fn native_entry_closure_handoff_install_v1(request: NativeEntryClosureRequestV1) -> bool:
+    if _g_native_entry_closure_handoff.len() != 0: return false
+    _g_native_entry_closure_handoff = [request]
+    true
+
+pub fn native_entry_closure_handoff_take_v1() -> NativeEntryClosureRequestV1?:
+    if _g_native_entry_closure_handoff.len() == 0: return None
+    val request = _g_native_entry_closure_handoff[0]
+    _g_native_entry_closure_handoff = []
+    Some(request)

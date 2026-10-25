@@ -1,0 +1,261 @@
+# FileFiber v1 — one fiber owns one source file from read to "ready for
+# lowering", with no parse-all barrier.
+# Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §2,
+# src_based_tldr_build_v1.md (per-file jobs, single-flight, set-once TLDR table).
+#
+# Stages of one fiber (each step runs one stage, then yields or parks):
+#   OPEN   submit an async open of the source        -> park on the IO op
+#   READ   submit an async read of the whole file    -> park on the IO op
+#          (both skipped when the entry carries pre-read `content`)
+#   PARSE  hand the file to the HOST for its one parse, park until
+#          `parse_done` delivers the TLDR (or an error). The host owns the
+#          parse so it can use its own parser context: the native-build
+#          parse child calls the driver's parse_full_frontend_selected_v1, so
+#          parse-cache keys match the real build exactly.
+#   PUBLISH  publish the TLDR set-once into the shared TldrTableV1, waking
+#          every fiber parked on this module
+#   DEPS   for each imported module: loaded -> go on; produced by another fiber
+#          of this run -> park on that module; outside the run -> queue one
+#          fill (TldrTableV1.deref) and park until the host reports it loaded
+#   DONE   ready for HIR/MIR/obj, which still run in the shard-ledger worker
+#          PROCESSES (process exit is what frees MIR today)
+#
+# A fiber publishes its own TLDR before it waits on any import, so import
+# cycles cannot deadlock. Memory admission and stealing come from the
+# scheduler core (fiber_scheduler.spl); IO from the fiber IO reactor.
+#
+# Host loop:   run = file_fiber_begin_v1(...)
+#              while not file_fiber_finished_v1(run):
+#                  run.advance(imports_of)
+#                  for i in run.take_parse_requests(): ...; run.parse_done(i, tldr, err)
+#                  for key in run.take_fill_requests(): ...; run.module_loaded(key) / module_failed
+
+use std.common.task_runner.fiber_scheduler.{FiberSchedV1, FiberStepV1, fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_wake, fiber_sched_all_done, fiber_sched_runnable_count, fiber_step_done, fiber_step_yield, fiber_step_park}
+use std.nogc_async_mut.fiber.io_reactor.{FiberIoReactorV1, fiber_io_new, fiber_io_close, fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump}
+use std.nogc_sync_mut.io_runtime.{file_size}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, tldr_table_fill_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+
+val FILE_FIBER_OPEN: i64 = 0
+val FILE_FIBER_READ: i64 = 1
+val FILE_FIBER_PARSE: i64 = 2
+val FILE_FIBER_PUBLISH: i64 = 3
+val FILE_FIBER_DEPS: i64 = 4
+val FILE_FIBER_DONE: i64 = 5
+
+# Park tokens live above every IO op id: module published / host parse done /
+# outside-run module filled.
+val FILE_FIBER_MODULE_TOKEN_BASE: i64 = 1000000000
+val FILE_FIBER_PARSE_TOKEN_BASE: i64 = 2000000000
+val FILE_FIBER_OUTSIDE_TOKEN_BASE: i64 = 3000000000
+
+struct FileFiberEntryV1:
+    module_key: text
+    path: text
+    est_bytes: i64
+    content: text
+
+class FileFiberRunV1:
+    entries: [FileFiberEntryV1]
+    stage: [i64]
+    op: [i64]
+    fd: [i64]
+    source: [text]
+    tldr: [text]
+    error: [text]
+    done_order: [i64]
+    parse_requests: [i64]
+    outside_keys: [text]
+    outside_error: [text]
+    table: TldrTableV1
+    reactor: FiberIoReactorV1
+    sched: FiberSchedV1
+    dep_parks: i64
+    fills: i64
+
+    fn _index_of_key(key: text) -> i64:
+        for i in 0..self.entries.len():
+            if self.entries[i].module_key == key: return i
+        -1
+
+    fn _outside_index(key: text) -> i64:
+        for i in 0..self.outside_keys.len():
+            if self.outside_keys[i] == key: return i
+        -1
+
+    me _fail(i: i64, why: text) -> FiberStepV1:
+        self.error[i] = why
+        self.stage[i] = FILE_FIBER_DONE
+        # dependants parked on this module must not wait forever
+        self.sched = fiber_sched_wake(self.sched, FILE_FIBER_MODULE_TOKEN_BASE + i)
+        fiber_step_done()
+
+    me step(i: i64, imports_of: fn(text) -> [text]) -> FiberStepV1:
+        val e = self.entries[i]
+        val st = self.stage[i]
+        if st == FILE_FIBER_OPEN:
+            val sub = fiber_io_submit_open(self.reactor, e.path)
+            self.reactor = sub.reactor
+            if sub.op <= 0: return self._fail(i, "open submit failed: {e.path}")
+            self.op[i] = sub.op
+            self.stage[i] = FILE_FIBER_READ
+            if fiber_io_ready(self.reactor, sub.op): return fiber_step_yield()
+            return fiber_step_park(sub.op)
+        if st == FILE_FIBER_READ:
+            val fd = fiber_io_result(self.reactor, self.op[i])
+            self.reactor = fiber_io_forget(self.reactor, self.op[i])
+            if fd < 0: return self._fail(i, "open failed ({fd}): {e.path}")
+            self.fd[i] = fd
+            val sub = fiber_io_submit_read(self.reactor, fd, file_size(e.path), 0)
+            self.reactor = sub.reactor
+            if sub.op <= 0: return self._fail(i, "read submit failed: {e.path}")
+            self.op[i] = sub.op
+            self.stage[i] = FILE_FIBER_PARSE
+            if fiber_io_ready(self.reactor, sub.op): return fiber_step_yield()
+            return fiber_step_park(sub.op)
+        if st == FILE_FIBER_PARSE:
+            if self.op[i] > 0:
+                val n = fiber_io_result(self.reactor, self.op[i])
+                self.source[i] = fiber_io_data(self.reactor, self.op[i])
+                self.reactor = fiber_io_forget(self.reactor, self.op[i])
+                # fire-and-forget close: the pump records its completion
+                self.reactor = fiber_io_submit_close(self.reactor, self.fd[i]).reactor
+                self.op[i] = 0
+                if n < 0: return self._fail(i, "read failed ({n}): {e.path}")
+            self.parse_requests = self.parse_requests.push(i)
+            return fiber_step_park(FILE_FIBER_PARSE_TOKEN_BASE + i)
+        if st == FILE_FIBER_PUBLISH:
+            if not self.table.publish(e.module_key, self.tldr[i]):
+                return self._fail(i, "tldr conflicts with the published entry: {e.module_key}")
+            self.sched = fiber_sched_wake(self.sched, FILE_FIBER_MODULE_TOKEN_BASE + i)
+            self.stage[i] = FILE_FIBER_DEPS
+            return fiber_step_yield()
+        if st == FILE_FIBER_DEPS:
+            for key in imports_of(self.source[i]):
+                if key == e.module_key or self.table.is_loaded(key): continue
+                val producer = self._index_of_key(key)
+                if producer >= 0:
+                    if self.error[producer] != "":
+                        return self._fail(i, "import {key} failed: {self.error[producer]}")
+                    self.dep_parks = self.dep_parks + 1
+                    return fiber_step_park(FILE_FIBER_MODULE_TOKEN_BASE + producer)
+                var o = self._outside_index(key)
+                if o >= 0 and self.outside_error[o] != "":
+                    return self._fail(i, "import {key}: {self.outside_error[o]}")
+                if o < 0:
+                    o = self.outside_keys.len()
+                    self.outside_keys = self.outside_keys.push(key)
+                    self.outside_error = self.outside_error.push("")
+                    # queues exactly one fill request for the host
+                    val _pending = self.table.deref(self.table.handle(key, ""))
+                self.dep_parks = self.dep_parks + 1
+                return fiber_step_park(FILE_FIBER_OUTSIDE_TOKEN_BASE + o)
+            self.stage[i] = FILE_FIBER_DONE
+            self.done_order = self.done_order.push(i)
+            return fiber_step_done()
+        fiber_step_done()
+
+    me take_parse_requests() -> [i64]:
+        val out = self.parse_requests
+        self.parse_requests = []
+        out
+
+    me parse_done(i: i64, tldr: text, error: text):
+        """Host result of the one parse: the module's TLDR, or an error."""
+        if error != "" or tldr == "":
+            self.error[i] = if error != "": error else: "tldr unavailable after parse: {self.entries[i].path}"
+            self.stage[i] = FILE_FIBER_DONE
+            self.sched = fiber_sched_wake(self.sched, FILE_FIBER_MODULE_TOKEN_BASE + i)
+            # the parked fiber resumes into DONE and finishes
+            self.sched = fiber_sched_wake(self.sched, FILE_FIBER_PARSE_TOKEN_BASE + i)
+            return
+        self.tldr[i] = tldr
+        self.stage[i] = FILE_FIBER_PUBLISH
+        self.sched = fiber_sched_wake(self.sched, FILE_FIBER_PARSE_TOKEN_BASE + i)
+
+    me take_fill_requests() -> [text]:
+        self.table.take_fill_requests()
+
+    me module_filled(key: text, error: text):
+        """Host result of an outside-run fill (TLDR already published into
+        `table` on success)."""
+        val o = self._outside_index(key)
+        if o < 0: return
+        if error != "": self.outside_error[o] = error
+        self.fills = self.fills + 1
+        self.sched = fiber_sched_wake(self.sched, FILE_FIBER_OUTSIDE_TOKEN_BASE + o)
+
+    me advance(imports_of: fn(text) -> [text]):
+        """One carrier round: admit, step one fiber per worker, pump IO."""
+        self.sched.external_inflight = self.reactor.in_flight + self.parse_requests.len()
+        self.sched = fiber_sched_admit(self.sched)
+        for w in 0..self.sched.queues.len():
+            val pick = fiber_sched_pick(self.sched, w)
+            self.sched = pick.sched
+            if pick.fiber >= 0:
+                val result = self.step(pick.fiber, imports_of)
+                self.sched.external_inflight = self.reactor.in_flight + self.parse_requests.len()
+                self.sched = fiber_sched_complete(self.sched, w, pick.fiber, result)
+        val wait_ms = if fiber_sched_runnable_count(self.sched) > 0 or self.parse_requests.len() > 0: 0 else: 50
+        val pump = fiber_io_pump(self.reactor, self.sched, wait_ms)
+        self.reactor = pump.reactor
+        self.sched = pump.sched
+
+    fn stalled() -> bool:
+        """Nothing runnable, no IO, no host work pending: by construction this
+        cannot happen while fibers remain; hosts treat it as a hard error."""
+        not fiber_sched_all_done(self.sched) and fiber_sched_runnable_count(self.sched) == 0 and
+            self.sched.pending.len() == 0 and
+            self.reactor.in_flight == 0 and self.parse_requests.len() == 0 and
+            self.table.fill_queue.len() == 0
+
+    me fail_stalled():
+        for i in 0..self.stage.len():
+            if self.stage[i] != FILE_FIBER_DONE:
+                self.error[i] = "stalled waiting in stage {self.stage[i]}"
+                self.stage[i] = FILE_FIBER_DONE
+
+fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budget: i64) -> FileFiberRunV1:
+    var sched = fiber_sched_new(worker_sockets, budget)
+    var stage: [i64] = []
+    var zeros: [i64] = []
+    var texts: [text] = []
+    var sources: [text] = []
+    for e in entries:
+        sched = fiber_sched_submit(sched, e.est_bytes)
+        stage = stage.push(if e.content != "": FILE_FIBER_PARSE else: FILE_FIBER_OPEN)
+        zeros = zeros.push(0)
+        texts = texts.push("")
+        sources = sources.push(e.content)
+    FileFiberRunV1(entries: entries, stage: stage, op: zeros, fd: zeros, source: sources,
+        tldr: texts, error: texts, done_order: [], parse_requests: [], outside_keys: [],
+        outside_error: [], table: TldrTableV1.create(), reactor: fiber_io_new(64), sched: sched,
+        dep_parks: 0, fills: 0)
+
+fn file_fiber_finished_v1(run: FileFiberRunV1) -> bool:
+    fiber_sched_all_done(run.sched) or run.stalled()
+
+fn file_fiber_end_v1(run: FileFiberRunV1):
+    if run.stalled(): run.fail_stalled()
+    fiber_io_close(run.reactor)
+
+fn file_fiber_run_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
+        imports_of: fn(text) -> [text], path_of_key: fn(text) -> text,
+        worker_sockets: [i64], budget: i64) -> FileFiberRunV1:
+    """Host loop over a SourceReader: its update_tldr is the one parse
+    (module_artifacts_emit_v1 for FileReader), read_tldr the result."""
+    var run = file_fiber_begin_v1(entries, worker_sockets, budget)
+    while not file_fiber_finished_v1(run):
+        run.advance(imports_of)
+        for i in run.take_parse_requests():
+            val path = run.entries[i].path
+            val err = reader.update_tldr(path)
+            run.parse_done(i, if err == "": reader.read_tldr(path) else: "", err)
+        for key in run.take_fill_requests():
+            run.module_filled(key, tldr_table_fill_v1(run.table, reader, key, path_of_key(key)))
+    file_fiber_end_v1(run)
+    run
+
+export FileFiberEntryV1, FileFiberRunV1
+export file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1, file_fiber_run_v1
+export FILE_FIBER_OPEN, FILE_FIBER_READ, FILE_FIBER_PARSE, FILE_FIBER_PUBLISH, FILE_FIBER_DEPS, FILE_FIBER_DONE

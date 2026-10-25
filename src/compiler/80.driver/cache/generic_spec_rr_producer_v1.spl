@@ -1,0 +1,82 @@
+# `.rr` producer for generic specializations (P-G2).
+#
+# Turns every module's TLDR `generic-spec` section into a sealed forward read
+# manifest (generic_specialization_list_v1.generic_spec_forward_manifest_v1)
+# and projects/publishes the reverse `.rr` generation through the ordinary
+# reverse_reference_projection_v2 path (content-addressed receipt + temp/rename
+# CURRENT pointer).
+#
+# A generation is one projection over ALL producers' manifests: a caller that
+# also has macro/AOP/import manifests passes them as `other_manifests`, since
+# the projection marks every family it saw no incomplete read for as complete.
+#
+# A module whose companion is missing or stale, or whose `generic-spec`
+# section does not decode, is an unsealed manifest: its previous edges are
+# retained, or the build fails without a prior generation (never "no
+# dependents"). A fresh companion with no section means "needs no instance".
+
+use std.io_runtime.{file_exists, file_read}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_body_v1, module_tldr_companion_sections_v1}
+use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1,
+    generic_specialization_list_of_sections_v1, generic_spec_forward_manifest_v1,
+    generic_spec_consumer_key_v1}
+use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2,
+    reverse_reference_subject_for_key_v2, reverse_reference_project_generation_v2,
+    reverse_reference_publish_projection_v2}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1,
+    reverse_reference_read_current_v1}
+
+# The module's instance list from its fresh companion; nil when unknown.
+pub fn generic_spec_list_of_module_v1(module_path: text, tldr_root: text) -> GenericSpecializationListV1?:
+    val companion = module_tldr_companion_path_v1(tldr_root, module_path)
+    if not file_exists(module_path) or not file_exists(companion):
+        return nil
+    val src = file_read(module_path)
+    val content = file_read(companion)
+    if module_tldr_companion_body_v1(content, src) == "":
+        return nil
+    val sections = module_tldr_companion_sections_v1(content, src)
+    var has_section = false
+    for s in sections:
+        if s.starts_with("generic-spec|"): has_section = true
+    if not has_section:
+        return Some(GenericSpecializationListV1(complete: true, specs: []))
+    val decoded = generic_specialization_list_of_sections_v1(sections)
+    if not decoded.ok:
+        return nil
+    Some(decoded.list)
+
+pub fn generic_spec_sealed_manifest_v1(module_path: text,
+        list: GenericSpecializationListV1?) -> SealedForwardManifestV2:
+    val identity = reverse_reference_subject_for_key_v2(generic_spec_consumer_key_v1(module_path))
+    match list:
+        case Some(l):
+            SealedForwardManifestV2(consumer_identity: identity, sealed: true,
+                manifest: Some(generic_spec_forward_manifest_v1(module_path, l)))
+        case nil:
+            SealedForwardManifestV2(consumer_identity: identity, sealed: false, manifest: nil)
+
+pub fn generic_spec_sealed_manifests_v1(module_paths: [text], tldr_root: text) -> [SealedForwardManifestV2]:
+    var out: [SealedForwardManifestV2] = []
+    for path in module_paths:
+        out.push(generic_spec_sealed_manifest_v1(path, generic_spec_list_of_module_v1(path, tldr_root)))
+    out
+
+# Project and publish one `.rr` generation; returns the read-back current
+# receipt (invalid on any build/publish failure, so callers stay conservative).
+pub fn generic_spec_publish_rr_v1(cache_path: text, owner: text, root: text,
+        module_paths: [text], tldr_root: text,
+        other_manifests: [SealedForwardManifestV2]) -> ReverseReferenceReceiptReadV1:
+    var manifests = generic_spec_sealed_manifests_v1(module_paths, tldr_root)
+    for m in other_manifests: manifests.push(m)
+    val previous = reverse_reference_read_current_v1(cache_path)
+    val build = reverse_reference_project_generation_v2(owner, root, manifests, previous)
+    if not build.ok:
+        return ReverseReferenceReceiptReadV1(false, "generic-spec-build:" + build.reason, nil)
+    if not reverse_reference_publish_projection_v2(cache_path, build):
+        return ReverseReferenceReceiptReadV1(false, "generic-spec-publish-failed", nil)
+    reverse_reference_read_current_v1(cache_path)
+
+export generic_spec_list_of_module_v1, generic_spec_sealed_manifest_v1
+export generic_spec_sealed_manifests_v1, generic_spec_publish_rr_v1

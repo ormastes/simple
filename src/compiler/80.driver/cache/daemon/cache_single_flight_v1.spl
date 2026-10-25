@@ -1,0 +1,149 @@
+# Single-flight table for module artifact production in the cache daemon.
+#
+# Modelled on the test daemon's dedup (src/app/test_daemon/daemon.spl, the
+# `active_requests` dedup_key -> redirect step): the first request for a key
+# becomes the LEADER and is told to produce; every concurrent request for the
+# same key is recorded as a WAITER of the leader's flight instead of producing.
+# The leader (a compiler process) parses and publishes through the SourceReader's
+# update_src / update_tldr; complete() then hands back exactly the recorded
+# waiters (take_woken), so the daemon answers each waiter once -- nobody polls.
+#
+# No parse lease and no mutex: the daemon serves its request queue on one
+# event loop, so the table is only ever touched by that loop, and the
+# published artifacts themselves are temp + rename. This replaces the
+# 2026-10-10 plan's synchronous parse lease.
+#
+# An abandoned leader (no complete() within the daemon's timeout) is re-driven:
+# redrive() promotes the oldest waiter to leader, or drops a waiter-less flight
+# so the next join leads.
+use std.async.future.{Future}
+
+pub val SINGLE_FLIGHT_LEADER_V1: i64 = 1
+pub val SINGLE_FLIGHT_WAITER_V1: i64 = 0
+
+pub fn cache_single_flight_key_v1(kind: text, digest: text) -> text:
+    kind + "\u0000" + digest
+
+class CacheSingleFlightV1:
+    next_flight: i64
+    flight_of: Dict<text, i64>
+    leaders: Dict<text, text>
+    participants: Dict<text, i64>
+    done: Dict<text, [u8]?>
+    waiters: Dict<text, [text]>
+    woken: Dict<text, [text]>
+    started_ms: Dict<text, i64>
+
+    static fn create() -> CacheSingleFlightV1:
+        CacheSingleFlightV1(next_flight: 1, flight_of: {}, leaders: {}, participants: {},
+            done: {}, waiters: {}, woken: {}, started_ms: {})
+
+    # (role, flight id): SINGLE_FLIGHT_LEADER_V1 when this request must produce.
+    me join(key: text, request_id: text) -> (i64, i64):
+        self.join_at(key, request_id, -1)
+
+    # As join; `now_ms` >= 0 starts the leader's redrive clock.
+    me join_at(key: text, request_id: text, now_ms: i64) -> (i64, i64):
+        if self.flight_of.contains_key(key):
+            val existing = self.flight_of[key]
+            val id = "{existing}"
+            self.participants[id] = self.participants[id] + 1
+            var queue = self.waiters[id]
+            queue.push(request_id)
+            self.waiters[id] = queue
+            return (SINGLE_FLIGHT_WAITER_V1, existing)
+        val flight = self.next_flight
+        self.next_flight = flight + 1
+        val id = "{flight}"
+        self.flight_of[key] = flight
+        self.leaders[key] = request_id
+        self.participants[id] = 1
+        self.waiters[id] = []
+        self.started_ms[id] = now_ms
+        (SINGLE_FLIGHT_LEADER_V1, flight)
+
+    # The completed flight's result for an in-process participant (each takes
+    # it once). Cross-process waiters are answered through take_woken instead.
+    me future(flight: i64) -> Future<[u8]?>:
+        val id = "{flight}"
+        if not self.done.contains_key(id):
+            return Future.pending()
+        val blob = self.done[id]
+        val left = self.participants[id] - 1
+        if left <= 0:
+            self.done.remove(id)
+            self.participants.remove(id)
+        else:
+            self.participants[id] = left
+        Future.from_value(blob)
+
+    fn result_of(flight: i64) -> [u8]?:
+        val id = "{flight}"
+        if self.done.contains_key(id): self.done[id] else: nil
+
+    fn leader_of(key: text) -> text:
+        if self.leaders.contains_key(key): self.leaders[key] else: ""
+
+    # Only the key's leader may complete it; nil completes a failed production
+    # (waiters then produce in process). Returns false otherwise.
+    me complete(key: text, request_id: text, blob: [u8]?) -> bool:
+        if not self.flight_of.contains_key(key) or self.leader_of(key) != request_id:
+            return false
+        val flight = self.flight_of[key]
+        val id = "{flight}"
+        self.done[id] = blob
+        self.woken[id] = self.waiters[id]
+        self.waiters.remove(id)
+        self.started_ms.remove(id)
+        self.flight_of.remove(key)
+        self.leaders.remove(key)
+        true
+
+    # The waiters to answer for a completed flight, exactly once.
+    me take_woken(flight: i64) -> [text]:
+        val id = "{flight}"
+        if not self.woken.contains_key(id):
+            return []
+        val out = self.woken[id]
+        self.woken.remove(id)
+        out
+
+    # Re-drive abandoned leaders: entries "<flight>\u0000<new leader request>"
+    # for promoted waiters. A waiter-less abandoned flight is dropped.
+    me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
+        var promoted: [text] = []
+        var dropped: [text] = []
+        for key in self.flight_of.keys():
+            val flight = self.flight_of[key]
+            val id = "{flight}"
+            val started = self.started_ms[id]
+            if started < 0 or now_ms - started < timeout_ms:
+                continue
+            val queue = self.waiters[id]
+            if queue.len() == 0:
+                dropped.push(key)
+                continue
+            val next = queue[0]
+            var rest: [text] = []
+            var i = 1
+            while i < queue.len():
+                rest.push(queue[i])
+                i = i + 1
+            self.waiters[id] = rest
+            self.leaders[key] = next
+            self.started_ms[id] = now_ms
+            promoted.push(id + "\u0000" + next)
+        for key in dropped:
+            val id = "{self.flight_of[key]}"
+            self.flight_of.remove(key)
+            self.leaders.remove(key)
+            self.waiters.remove(id)
+            self.started_ms.remove(id)
+            self.participants.remove(id)
+        promoted
+
+    fn inflight_count() -> i64:
+        self.flight_of.len()
+
+export SINGLE_FLIGHT_LEADER_V1, SINGLE_FLIGHT_WAITER_V1
+export cache_single_flight_key_v1, CacheSingleFlightV1

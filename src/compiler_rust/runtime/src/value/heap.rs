@@ -212,7 +212,124 @@ const MIN_VALID_HEAP_ADDR: usize = 4096;
 /// semantics and table layout.
 pub(crate) type HeapPtrSet<K> = HashSet<K, std::hash::BuildHasherDefault<ahash::AHasher>>;
 
-static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapPtrSet<usize>>> = OnceLock::new();
+/// The allocation registry is split into address-hashed shards, each with
+/// its own lock and its own free epoch on its own cache lines. One global
+/// mutex serialized every allocation/free/validation miss across all worker
+/// threads (bouncing one line between sockets on the 2-socket build host),
+/// and one global free epoch meant a free on ANY thread invalidated EVERY
+/// thread's validation cache. Membership semantics are unchanged: an address
+/// lives in exactly one shard, chosen by the address alone.
+const HEAP_REGISTRY_SHARDS: usize = 64;
+
+#[repr(align(128))]
+struct HeapRegistryShard {
+    set: Mutex<HeapRegistry>,
+    /// Bumped (under this shard's lock) by every erase in this shard.
+    epoch: AtomicU64,
+}
+
+static HEAP_ALLOCATION_REGISTRY: OnceLock<Box<[HeapRegistryShard]>> = OnceLock::new();
+
+/// Live-heap membership set (one per registry shard), fork-aware.
+///
+/// A copy-on-write fork child (`rt_fork_shared_heap_v1`, the MIR fork
+/// workers) inherits a registry holding every parent object. Writing that
+/// inherited table privatizes it page by page, and its first growth allocates
+/// a fresh 2x table: measured on a 2-worker probe, each child mapped a new
+/// 147,460 kB private table (2^24 buckets) and freed the inherited 2^23 one;
+/// on the 1471-module Phase 3 closure the same step is ~4.8 GB per child, in
+/// lockstep across all workers (bug
+/// doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md).
+/// After `freeze_for_fork_child` the inherited table is read-only: the
+/// child's own objects go into `live`, and an erase of an inherited object is
+/// recorded in `frozen_erased`. Membership is unchanged.
+#[derive(Default)]
+pub(crate) struct HeapRegistry {
+    live: HeapPtrSet<usize>,
+    frozen: Option<HeapPtrSet<usize>>,
+    frozen_erased: HeapPtrSet<usize>,
+}
+
+impl HeapRegistry {
+    #[inline]
+    fn frozen_has(&self, addr: usize) -> bool {
+        match &self.frozen {
+            Some(frozen) => {
+                frozen.contains(&addr) && (self.frozen_erased.is_empty() || !self.frozen_erased.contains(&addr))
+            }
+            None => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, addr: &usize) -> bool {
+        self.live.contains(addr) || self.frozen_has(*addr)
+    }
+
+    /// True when `addr` was not registered before this call.
+    #[inline]
+    pub(crate) fn insert(&mut self, addr: usize) -> bool {
+        if let Some(frozen) = &self.frozen {
+            if frozen.contains(&addr) {
+                // An inherited address re-registered after its erase.
+                return self.frozen_erased.remove(&addr);
+            }
+        }
+        self.live.insert(addr)
+    }
+
+    /// True when THIS call erased `addr`.
+    #[inline]
+    pub(crate) fn remove(&mut self, addr: &usize) -> bool {
+        if self.live.remove(addr) {
+            return true;
+        }
+        match &self.frozen {
+            Some(frozen) if frozen.contains(addr) => self.frozen_erased.insert(*addr),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        let inherited = self.frozen.as_ref().map_or(0, |frozen| frozen.len());
+        self.live.len() + inherited - self.frozen_erased.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &usize> + '_ {
+        self.frozen
+            .iter()
+            .flat_map(|frozen| frozen.iter())
+            .filter(|addr| !self.frozen_erased.contains(*addr))
+            .chain(self.live.iter())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.live.clear();
+        self.frozen = None;
+        self.frozen_erased.clear();
+    }
+
+    /// Freeze the inherited table in a fork child. A nested fork keeps the
+    /// first frozen layer and inherits the (small) overlay unchanged.
+    fn freeze_for_fork_child(&mut self) {
+        if self.frozen.is_none() {
+            self.frozen = Some(std::mem::take(&mut self.live));
+        }
+    }
+}
+
+/// Called in the child immediately after `fork()` (single-threaded there).
+/// Freezes every shard's inherited table; membership (and so every shard's
+/// free epoch) is unchanged.
+pub(crate) fn heap_registry_freeze_for_fork_child() {
+    for shard in heap_registry_shards() {
+        shard
+            .set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .freeze_for_fork_child();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Byte-level accounting (header bytes only).
@@ -228,34 +345,110 @@ static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapPtrSet<usize>>> = OnceLock::
 // ---------------------------------------------------------------------------
 const HEAP_KIND_SLOTS: usize = 32;
 
-static HEAP_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+// Counters are STRIPED: each thread writes only its own cache-line-aligned
+// stripe (relaxed adds on an uncontended line), and readers sum the stripes.
+// One global set of atomics bounced the same lines between every allocating
+// thread (and across sockets on the 2-socket build host). An object freed on
+// another thread decrements that thread's stripe, so a single stripe may go
+// negative; only the sum is meaningful, so stripes hold wrapping u64 deltas.
+const HEAP_COUNTER_STRIPES: usize = 64;
+/// Peak is refreshed (one sum over the stripes + fetch_max) every this many
+/// allocations per thread and on every peak read, so the reported high-water
+/// mark can trail the true instantaneous peak by at most that window.
+const HEAP_PEAK_SAMPLE_EVERY: u32 = 1024;
+
+#[repr(align(128))]
+struct HeapCounterStripe {
+    live_bytes: AtomicU64,
+    total_allocs: AtomicU64,
+    total_frees: AtomicU64,
+    kind_live_count: [AtomicU64; HEAP_KIND_SLOTS],
+    kind_live_bytes: [AtomicU64; HEAP_KIND_SLOTS],
+}
+
+static HEAP_COUNTER_STRIPES_TABLE: [HeapCounterStripe; HEAP_COUNTER_STRIPES] = [const {
+    HeapCounterStripe {
+        live_bytes: AtomicU64::new(0),
+        total_allocs: AtomicU64::new(0),
+        total_frees: AtomicU64::new(0),
+        kind_live_count: [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS],
+        kind_live_bytes: [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS],
+    }
+}; HEAP_COUNTER_STRIPES];
 static HEAP_PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
-static HEAP_TOTAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
-static HEAP_TOTAL_FREES: AtomicU64 = AtomicU64::new(0);
-static HEAP_KIND_LIVE_COUNT: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
-static HEAP_KIND_LIVE_BYTES: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
+static HEAP_NEXT_STRIPE: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static HEAP_STRIPE: Cell<(usize, u32)> = const { Cell::new((usize::MAX, 0)) };
+}
+
+/// This thread's stripe, plus whether this allocation should refresh the peak.
+#[inline]
+fn heap_counter_stripe(count_alloc: bool) -> (&'static HeapCounterStripe, bool) {
+    let (index, sample) = HEAP_STRIPE
+        .try_with(|cell| {
+            let (mut index, mut ticks) = cell.get();
+            if index == usize::MAX {
+                index = HEAP_NEXT_STRIPE.fetch_add(1, Ordering::Relaxed) as usize % HEAP_COUNTER_STRIPES;
+            }
+            let mut sample = false;
+            if count_alloc {
+                ticks += 1;
+                if ticks >= HEAP_PEAK_SAMPLE_EVERY {
+                    ticks = 0;
+                    sample = true;
+                }
+            }
+            cell.set((index, ticks));
+            (index, sample)
+        })
+        // TLS torn down (thread exit): stripe 0, always refresh the peak.
+        .unwrap_or((0, true));
+    (&HEAP_COUNTER_STRIPES_TABLE[index], sample)
+}
+
+#[inline]
+fn heap_counter_sum(read: impl Fn(&HeapCounterStripe) -> &AtomicU64) -> u64 {
+    HEAP_COUNTER_STRIPES_TABLE
+        .iter()
+        .fold(0u64, |acc, stripe| acc.wrapping_add(read(stripe).load(Ordering::Relaxed)))
+}
+
+fn heap_refresh_peak() -> u64 {
+    let live = heap_counter_sum(|stripe| &stripe.live_bytes);
+    // A transiently negative sum (frees counted before their allocs on
+    // another stripe) wraps to a huge u64; it is not a real peak.
+    if (live as i64) >= 0 {
+        HEAP_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+    }
+    live
+}
 
 #[inline]
 fn note_heap_alloc(kind: u8, bytes: u64) {
-    HEAP_TOTAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
-    let live = HEAP_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    HEAP_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
-    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+    let (stripe, sample) = heap_counter_stripe(true);
+    stripe.total_allocs.fetch_add(1, Ordering::Relaxed);
+    stripe.live_bytes.fetch_add(bytes, Ordering::Relaxed);
+    if let Some(slot) = stripe.kind_live_count.get(kind as usize) {
         slot.fetch_add(1, Ordering::Relaxed);
     }
-    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+    if let Some(slot) = stripe.kind_live_bytes.get(kind as usize) {
         slot.fetch_add(bytes, Ordering::Relaxed);
+    }
+    if sample {
+        heap_refresh_peak();
     }
 }
 
 #[inline]
 fn note_heap_free(kind: u8, bytes: u64) {
-    HEAP_TOTAL_FREES.fetch_add(1, Ordering::Relaxed);
-    HEAP_LIVE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
-    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+    let (stripe, _) = heap_counter_stripe(false);
+    stripe.total_frees.fetch_add(1, Ordering::Relaxed);
+    stripe.live_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    if let Some(slot) = stripe.kind_live_count.get(kind as usize) {
         slot.fetch_sub(1, Ordering::Relaxed);
     }
-    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+    if let Some(slot) = stripe.kind_live_bytes.get(kind as usize) {
         slot.fetch_sub(bytes, Ordering::Relaxed);
     }
 }
@@ -264,28 +457,45 @@ fn note_heap_free(kind: u8, bytes: u64) {
 /// registry lock (registered == live), used when user threads start.
 pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
     // A poisoned lock still guards a consistent set: packed arrays must be found.
-    let registry = heap_allocation_registry().lock().unwrap_or_else(|e| e.into_inner());
-    registry
-        .iter()
-        .copied()
-        .filter(|addr| unsafe {
+    let mut out = Vec::new();
+    for shard in heap_registry_shards() {
+        let registry = shard.set.lock().unwrap_or_else(|e| e.into_inner());
+        out.extend(registry.iter().copied().filter(|addr| unsafe {
             let header = *addr as *const HeapHeader;
             (*header).object_type == HeapObjectType::Array && (*header).gc_flags & gc_flags::LAZY_WORDS != 0
-        })
-        .collect()
+        }));
+    }
+    out
 }
 
-fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
-    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
+fn heap_registry_shards() -> &'static [HeapRegistryShard] {
+    HEAP_ALLOCATION_REGISTRY.get_or_init(|| {
+        (0..HEAP_REGISTRY_SHARDS)
+            .map(|_| HeapRegistryShard {
+                set: Mutex::new(HeapRegistry::default()),
+                // Starts at 1 so the zeroed validation cache never matches.
+                epoch: AtomicU64::new(1),
+            })
+            .collect()
+    })
 }
 
-/// Bumped (under the registry lock) by every erase. A pointer that a locked
-/// probe found registered at epoch E is still registered while the epoch is
-/// E, so a per-thread `(addr, epoch)` cache answers repeat validations
-/// without the mutex or a probe into the ever-growing set. That probe was
-/// ~half of the Windows stage2 full-CLI parse and HIR profiles (cdb samples,
-/// 2026-10-18). Starts at 1 so the zeroed cache never matches.
-static HEAP_FREE_EPOCH: AtomicU64 = AtomicU64::new(1);
+#[inline]
+pub(crate) fn heap_registry_shard_index(addr: usize) -> usize {
+    let mixed = ((addr >> 3) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)
+}
+
+#[inline]
+fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+    &heap_registry_shards()[heap_registry_shard_index(addr)]
+}
+
+/// A pointer that a locked probe found registered at its shard's epoch E is
+/// still registered while that shard's epoch is E, so a per-thread
+/// `(addr, epoch)` cache answers repeat validations without the mutex or a
+/// probe into the ever-growing set. That probe was ~half of the Windows
+/// stage2 full-CLI parse and HIR profiles (cdb samples, 2026-10-18).
 const VALIDATED_SLOTS: usize = 1 << 12;
 
 thread_local! {
@@ -310,16 +520,14 @@ fn validated_remember(addr: usize, epoch: u64) {
     let _ = VALIDATED.try_with(|cache| cache[validated_slot(addr)].set((addr, epoch)));
 }
 
-#[inline]
-fn heap_free_epoch_bump() {
-    HEAP_FREE_EPOCH.fetch_add(1, Ordering::AcqRel);
-}
 
 #[inline]
 pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
-        let inserted = heap_allocation_registry()
+        let shard = heap_registry_shard(ptr as usize);
+        let epoch = shard.epoch.load(Ordering::Acquire);
+        let inserted = shard
+            .set
             .lock()
             .map(|mut registry| registry.insert(ptr as usize))
             .unwrap_or(false);
@@ -336,12 +544,14 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
 #[inline]
 pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let removed = heap_allocation_registry()
+        let shard = heap_registry_shard(ptr as usize);
+        let removed = shard
+            .set
             .lock()
             .map(|mut registry| {
             let removed = registry.remove(&(ptr as usize));
             if removed {
-                heap_free_epoch_bump();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
             }
             removed
         })
@@ -369,12 +579,14 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     if ptr.is_null() {
         return false;
     }
-    let removed = heap_allocation_registry()
+    let shard = heap_registry_shard(ptr as usize);
+    let removed = shard
+        .set
         .lock()
         .map(|mut registry| {
             let removed = registry.remove(&(ptr as usize));
             if removed {
-                heap_free_epoch_bump();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
             }
             removed
         })
@@ -388,14 +600,116 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     removed
 }
 
+/// Candidates erased per registry lock hold in `unregister_heap_ptrs_batch`.
+/// Bounds how long other threads' registrations and validations wait
+/// (~50 ns/candidate measured => a few ms per chunk).
+pub(crate) const HEAP_UNREGISTER_BATCH_CHUNK: usize = 1 << 16;
+
+/// Batch `unregister_heap_ptr_checked` for a transient scope end: one shard
+/// lock and one shard epoch bump per `HEAP_UNREGISTER_BATCH_CHUNK` of that
+/// shard's candidates, instead of a lock round-trip (plus a validation probe
+/// that always misses, because every per-object erase bumps the shard epoch)
+/// per object.
+///
+/// For each candidate that passes the same address checks as
+/// `RuntimeValue::heap_type` and is registered, `select` is asked, under the
+/// lock, whether to erase it; `select` sees a live header (registered ==
+/// live, and every free erases under this lock first) and must not take any
+/// lock. Erased pointers are pushed to `out` with their kind; exactly one
+/// caller ever erases a given pointer, so each is the caller's to free.
+///
+/// The caller must free `out` only after this returns, never between
+/// chunks: an erased-but-unfreed address cannot be recycled by another
+/// thread, so a stale duplicate of it later in `candidates` (an object freed
+/// and its address reused mid-scope) finds it unregistered and is skipped.
+/// Accounting and the share-window erase run after the last lock release, as
+/// in the single-pointer path.
+pub(crate) fn unregister_heap_ptrs_batch(
+    candidates: &[super::core::RuntimeValue],
+    mut select: impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    let start = out.len();
+    // The registry is sharded by address, so candidates are bucketed by shard
+    // (scope order kept within a bucket) and each shard is locked once per
+    // chunk of its own bucket, bumping only that shard's epoch. Every copy of
+    // an address lands in the same bucket, so the stale-duplicate argument
+    // above holds per shard.
+    let mut buckets: Vec<Vec<super::core::RuntimeValue>> = vec![Vec::new(); HEAP_REGISTRY_SHARDS];
+    for value in candidates {
+        if value.is_heap() {
+            buckets[heap_registry_shard_index(value.as_heap_ptr() as usize)].push(*value);
+        }
+    }
+    let shards = heap_registry_shards();
+    for (index, bucket) in buckets.iter().enumerate() {
+        let shard = &shards[index];
+        for chunk in bucket.chunks(HEAP_UNREGISTER_BATCH_CHUNK) {
+            let chunk_start = out.len();
+            // Poisoned: keep the rest of this shard registered (leaked, never
+            // freed), as the single-pointer path does; what earlier chunks
+            // erased is still ours.
+            let Ok(mut registry) = shard.set.lock() else {
+                break;
+            };
+            erase_selected(&mut registry, chunk, &mut select, out);
+            if out.len() != chunk_start {
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+    for &(ptr, kind) in &out[start..] {
+        // Erased by this call and not yet freed, so the header is readable.
+        let bytes = unsafe { (*ptr).size as u64 };
+        note_heap_free(kind as u8, bytes);
+        note_attr_free(ptr as usize, bytes);
+        super::collections::transient_promote_share_forget(ptr as usize);
+    }
+}
+
+/// One locked chunk of `unregister_heap_ptrs_batch`, over the registry it is
+/// given (the live one, or a test's frozen fork-child registry).
+fn erase_selected(
+    registry: &mut HeapRegistry,
+    chunk: &[super::core::RuntimeValue],
+    select: &mut impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    for value in chunk {
+        if !value.is_heap() {
+            continue;
+        }
+        let ptr = value.as_heap_ptr();
+        let addr = ptr as usize;
+        if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+            continue;
+        }
+        // Erase first (one probe for the common case); a declined object
+        // goes straight back. Nobody can observe the gap: the caller holds
+        // the lock. In a fork child an inherited erase is an erased-set
+        // insert and the put-back its removal, so the frozen table is never
+        // written.
+        if !registry.remove(&addr) {
+            continue;
+        }
+        if !select(*value, ptr) {
+            registry.insert(addr);
+            continue;
+        }
+        out.push((ptr, unsafe { (*ptr).object_type }));
+    }
+}
+
 #[inline]
 pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
     let addr = ptr as usize;
-    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    let shard = heap_registry_shard(addr);
+    let epoch = shard.epoch.load(Ordering::Acquire);
     if addr != 0 && validated_cached(addr, epoch) {
         return true;
     }
-    let present = heap_allocation_registry()
+    let present = shard
+        .set
         .lock()
         .map(|registry| registry.contains(&addr))
         .unwrap_or(false);
@@ -411,26 +725,32 @@ pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
 /// no-GC compiler temporaries stay registered for the process lifetime.
 #[no_mangle]
 pub extern "C" fn rt_heap_registry_count() -> i64 {
-    heap_allocation_registry()
-        .lock()
-        .map(|registry| registry.len() as i64)
-        .unwrap_or(0)
+    heap_registry_shards()
+        .iter()
+        .map(|shard| shard.set.lock().map(|registry| registry.len() as i64).unwrap_or(0))
+        .sum()
 }
 
 pub fn clear_heap_allocation_registry() {
-    if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
-        let _ = registry.lock().map(|mut registry| {
-            registry.clear();
-            heap_free_epoch_bump();
-        });
+    if let Some(shards) = HEAP_ALLOCATION_REGISTRY.get() {
+        for shard in shards.iter() {
+            let _ = shard.set.lock().map(|mut registry| {
+                registry.clear();
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
+            });
+        }
     }
-    HEAP_LIVE_BYTES.store(0, Ordering::Relaxed);
-    HEAP_TOTAL_ALLOCS.store(0, Ordering::Relaxed);
-    HEAP_TOTAL_FREES.store(0, Ordering::Relaxed);
     // Peak intentionally survives a clear: it answers "how big did this
-    // process get", which a bulk reset must not erase.
-    for slot in HEAP_KIND_LIVE_COUNT.iter().chain(HEAP_KIND_LIVE_BYTES.iter()) {
-        slot.store(0, Ordering::Relaxed);
+    // process get", which a bulk reset must not erase. Fold the pre-clear
+    // live total into it first so no sampled window is lost.
+    heap_refresh_peak();
+    for stripe in HEAP_COUNTER_STRIPES_TABLE.iter() {
+        stripe.live_bytes.store(0, Ordering::Relaxed);
+        stripe.total_allocs.store(0, Ordering::Relaxed);
+        stripe.total_frees.store(0, Ordering::Relaxed);
+        for slot in stripe.kind_live_count.iter().chain(stripe.kind_live_bytes.iter()) {
+            slot.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -438,43 +758,46 @@ pub fn clear_heap_allocation_registry() {
 /// buffers — see the accounting comment above).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_bytes() -> i64 {
-    HEAP_LIVE_BYTES.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.live_bytes) as i64
 }
 
 /// High-water mark of `rt_heap_live_bytes` for this process.
 #[no_mangle]
 pub extern "C" fn rt_heap_peak_bytes() -> i64 {
+    heap_refresh_peak();
     HEAP_PEAK_BYTES.load(Ordering::Relaxed) as i64
 }
 
 /// Total registered allocations since process start (monotonic).
 #[no_mangle]
 pub extern "C" fn rt_heap_alloc_count() -> i64 {
-    HEAP_TOTAL_ALLOCS.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.total_allocs) as i64
 }
 
 /// Total unregistered (freed) allocations since process start (monotonic).
 #[no_mangle]
 pub extern "C" fn rt_heap_free_count() -> i64 {
-    HEAP_TOTAL_FREES.load(Ordering::Relaxed) as i64
+    heap_counter_sum(|stripe| &stripe.total_frees) as i64
 }
 
 /// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_count_by_kind(kind: i64) -> i64 {
-    HEAP_KIND_LIVE_COUNT
-        .get(kind as usize)
-        .map(|slot| slot.load(Ordering::Relaxed) as i64)
-        .unwrap_or(0)
+    let kind = kind as usize;
+    if kind >= HEAP_KIND_SLOTS {
+        return 0;
+    }
+    heap_counter_sum(|stripe| &stripe.kind_live_count[kind]) as i64
 }
 
 /// Live header bytes for one `HeapObjectType` tag (0 for out-of-range kinds).
 #[no_mangle]
 pub extern "C" fn rt_heap_live_bytes_by_kind(kind: i64) -> i64 {
-    HEAP_KIND_LIVE_BYTES
-        .get(kind as usize)
-        .map(|slot| slot.load(Ordering::Relaxed) as i64)
-        .unwrap_or(0)
+    let kind = kind as usize;
+    if kind >= HEAP_KIND_SLOTS {
+        return 0;
+    }
+    heap_counter_sum(|stripe| &stripe.kind_live_bytes[kind]) as i64
 }
 
 /// Validate heap object type, returns None if invalid
@@ -538,7 +861,7 @@ pub fn with_typed_ptr<T, R>(
     if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
         return None;
     }
-    let registry = heap_allocation_registry().lock().ok()?;
+    let registry = heap_registry_shard(addr).set.lock().ok()?;
     if !registry.contains(&addr) {
         return None;
     }
@@ -560,16 +883,18 @@ pub(crate) fn registered_heap_type(val: RuntimeValue) -> Option<HeapObjectType> 
     if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
         return None;
     }
-    let epoch = HEAP_FREE_EPOCH.load(Ordering::Acquire);
+    let shard = heap_registry_shard(addr);
+    let epoch = shard.epoch.load(Ordering::Acquire);
     if validated_cached(addr, epoch) {
-        // Seqlock re-check: no erase (so no free) happened around the read.
+        // Seqlock re-check: no erase of this address (so no free) happened
+        // around the read; erases in other shards cannot free it.
         let object_type = unsafe { std::ptr::read_volatile(&(*ptr).object_type) };
         std::sync::atomic::fence(Ordering::Acquire);
-        if HEAP_FREE_EPOCH.load(Ordering::Relaxed) == epoch {
+        if shard.epoch.load(Ordering::Relaxed) == epoch {
             return Some(object_type);
         }
     }
-    let registry = heap_allocation_registry().lock().ok()?;
+    let registry = shard.set.lock().ok()?;
     if !registry.contains(&addr) {
         return None;
     }
@@ -938,5 +1263,102 @@ mod validated_cache_tests {
         assert!(is_registered_heap_ptr(ptr), "re-registered address validates again");
         assert!(unregister_heap_ptr_checked(ptr));
         unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
+    }
+}
+
+#[cfg(test)]
+mod fork_registry_tests {
+    use super::HeapRegistry;
+
+    #[test]
+    fn frozen_registry_keeps_membership_and_is_never_written() {
+        let mut registry = HeapRegistry::default();
+        for addr in (1..=1000usize).map(|i| i * 16) {
+            assert!(registry.insert(addr));
+        }
+        registry.freeze_for_fork_child();
+        let frozen_len = registry.frozen.as_ref().unwrap().len();
+        let frozen_cap = registry.frozen.as_ref().unwrap().capacity();
+        assert_eq!(registry.len(), 1000);
+        assert!(registry.contains(&16) && registry.contains(&16000));
+
+        // Child-owned objects live in the overlay.
+        for addr in (1..=5000usize).map(|i| 1_000_000 + i * 16) {
+            assert!(registry.insert(addr));
+            assert!(!registry.insert(addr), "duplicate insert");
+        }
+        assert!(!registry.insert(32), "inherited address is already present");
+        for addr in (1..=5000usize).map(|i| 1_000_000 + i * 16) {
+            assert!(registry.remove(&addr));
+            assert!(!registry.remove(&addr), "double erase refused");
+            assert!(!registry.contains(&addr));
+        }
+
+        // Erasing an inherited object succeeds exactly once.
+        assert!(registry.remove(&48));
+        assert!(!registry.remove(&48));
+        assert!(!registry.contains(&48));
+        assert_eq!(registry.len(), 999);
+        assert_eq!(registry.iter().count(), 999);
+        assert!(!registry.iter().any(|addr| *addr == 48));
+        // Re-registering the recycled address restores it once.
+        assert!(registry.insert(48));
+        assert!(!registry.insert(48));
+        assert!(registry.contains(&48));
+        assert!(!registry.remove(&999_999), "never registered");
+
+        let frozen = registry.frozen.as_ref().unwrap();
+        assert_eq!(frozen.len(), frozen_len, "inherited table untouched");
+        assert_eq!(frozen.capacity(), frozen_cap, "inherited table never regrown");
+
+        // A nested fork keeps the first frozen layer.
+        registry.freeze_for_fork_child();
+        assert_eq!(registry.len(), 1000);
+        registry.clear();
+        assert_eq!(registry.len(), 0);
+        assert!(!registry.contains(&16));
+    }
+
+    /// The scope-end batch over a fork child's frozen registry: inherited and
+    /// child-owned objects are erased exactly once, a declined inherited
+    /// object stays a member, and the inherited table is never written.
+    #[test]
+    fn batch_erase_over_frozen_registry_never_writes_inherited_table() {
+        use super::{erase_selected, HeapHeader, HeapObjectType};
+        use crate::value::core::RuntimeValue;
+        // 8-aligned storage, as every real heap object has.
+        let headers: Vec<*mut HeapHeader> = (0..4)
+            .map(|_| {
+                let slot = Box::into_raw(Box::new([0u64; 2])) as *mut HeapHeader;
+                unsafe { slot.write(HeapHeader::new(HeapObjectType::Tuple, 16)) };
+                slot
+            })
+            .collect();
+        let addr = |i: usize| headers[i] as usize;
+        let value = |i: usize| RuntimeValue(addr(i) as u64 | crate::value::tags::TAG_HEAP);
+        let mut registry = HeapRegistry::default();
+        for i in 0..3 {
+            assert!(registry.insert(addr(i)));
+        }
+        registry.freeze_for_fork_child();
+        let frozen_cap = registry.frozen.as_ref().unwrap().capacity();
+        assert!(registry.insert(addr(3)), "child-owned object");
+
+        // 0 inherited + erased (listed twice: second is a stale duplicate),
+        // 1 inherited + declined, 2 inherited + not listed, 3 child + erased.
+        let candidates = [value(0), value(1), value(3), value(0)];
+        let mut out = Vec::new();
+        erase_selected(&mut registry, &candidates, &mut |_, ptr| ptr as usize != addr(1), &mut out);
+        let erased: Vec<usize> = out.iter().map(|(ptr, _)| *ptr as usize).collect();
+        assert_eq!(erased, vec![addr(0), addr(3)]);
+        assert!(out.iter().all(|(_, kind)| *kind == HeapObjectType::Tuple));
+        assert!(!registry.contains(&addr(0)) && !registry.contains(&addr(3)));
+        assert!(registry.contains(&addr(1)) && registry.contains(&addr(2)));
+        assert_eq!(registry.len(), 2);
+        let frozen = registry.frozen.as_ref().unwrap();
+        assert_eq!((frozen.len(), frozen.capacity()), (3, frozen_cap), "inherited table untouched");
+        for header in headers {
+            drop(unsafe { Box::from_raw(header as *mut [u64; 2]) });
+        }
     }
 }

@@ -5,6 +5,7 @@
 # source files, manifests, project configuration, or developer file metadata.
 # Discovery consumes only the returned frozen root; there is no live-worktree
 # fallback.
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 
 use app.io.mod.{
     file_exists, file_delete, file_read_regular_no_follow_bounded,
@@ -18,6 +19,7 @@ use std.common.text_bytes.{utf8_bytes_valid}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
     secure_temp_dir_raw, file_publish_noreplace_raw}
@@ -282,6 +284,42 @@ fn scv_compile_snapshot_open_v1(
     root: text, snapshot_root: text, revision_id: text, commit_id: text,
     tree_id: text, inventory_digest: text
 ) -> ScvCompileSnapshotV1:
+    # Only compact authority escapes this read. The full manifest, row/field
+    # splits and integrity-check buffers must not live until a child finishes.
+    # Materialization retains its separate per-file scratch owners.
+    if transient_array_scope_state_v1() != 0:
+        return scv_compile_snapshot_open_unscoped_v1(
+            root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    # File metadata adapters lazily cache the platform in a process-global
+    # array. Initialize it while allocations are persistent, before owning
+    # scratch, so no global can retain an array retired with this read.
+    val _platform_is_windows = host_is_windows_host()
+    if not transient_scope_begin():
+        return scv_compile_snapshot_open_unscoped_v1(
+            root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    val opened = scv_compile_snapshot_open_unscoped_v1(
+        root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    val state = transient_array_scope_state_v1()
+    if state != 1:
+        if state == 2:
+            val ended = transient_scope_end()
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-state-invalid")
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-pause-failed")
+    val retained = transient_promote(opened)
+    val ended = transient_scope_end()
+    # Allocate errors after retirement; opened may now refer to freed storage.
+    if not retained:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-promote-failed")
+    if not ended:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-end-failed")
+    opened
+
+fn scv_compile_snapshot_open_unscoped_v1(
+    root: text, snapshot_root: text, revision_id: text, commit_id: text,
+    tree_id: text, inventory_digest: text
+) -> ScvCompileSnapshotV1:
     val canonical_root = path_absolute(root).replace("\\", "/")
     val canonical_snapshot = path_absolute(snapshot_root).replace("\\", "/")
     if canonical_root == "" or canonical_snapshot == "":
@@ -402,6 +440,12 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     canonical_root: text, cache_root: text, staging: text,
     entry: CompileSourceInventoryEntryV1
 ) -> ScvCompileMaterializedSourceV1:
+    scv_compile_snapshot_materialize_source_unscoped_cost_v1(canonical_root, cache_root, staging, entry, nil)
+
+fn scv_compile_snapshot_materialize_source_unscoped_cost_v1(
+    canonical_root: text, cache_root: text, staging: text,
+    entry: CompileSourceInventoryEntryV1, cost: ScvCompileCostV1?
+) -> ScvCompileMaterializedSourceV1:
     val rel = entry.source_identity
     if not scv_worktree_path_safe(rel):
         return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
@@ -423,12 +467,18 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if content == nil:
         return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
     val bytes: [u8] = content!
+    val source_verify_started = scv_cost_now_v1(cost)
     if scv_compile_snapshot_utf8_refused_v1(rel, bytes):
+        if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, source_verify_started))
         return ScvCompileMaterializedSourceV1("snapshot-source-not-utf8:{rel}", "", false)
     val digest = scv_content_id_for_u8(bytes)
+    if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, source_verify_started))
     if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
         return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
-    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes):
+    val chunk_started = scv_cost_now_v1(cost)
+    val chunk_written = scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes)
+    if cost != nil: cost!.record_copy(scv_cost_elapsed_v1(cost, chunk_started))
+    if not chunk_written:
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
     # Both staging and rel are owned canonical paths. The runtime's recursive
@@ -437,28 +487,44 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     # Keep the existing file-write failure below authoritative if creation
     # fails; do not change the caller's error or publish a partial snapshot.
     val parent_end = destination.rfind("/")
+    val copy_started = scv_cost_now_v1(cost)
     dir_create(destination[0:parent_end], true)
-    if not file_write_bytes(destination, bytes):
+    val copied = file_write_bytes(destination, bytes)
+    if cost != nil: cost!.record_copy(scv_cost_elapsed_v1(cost, copy_started))
+    if not copied:
         return ScvCompileMaterializedSourceV1("snapshot-materialize-failed:{rel}", "", false)
-    if scv_compile_snapshot_source_digest_v1(destination) != digest:
+    val verify_started = scv_cost_now_v1(cost)
+    val copied_digest = scv_compile_snapshot_source_digest_v1(destination)
+    if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, verify_started))
+    if copied_digest != digest:
         return ScvCompileMaterializedSourceV1("snapshot-materialize-digest:{rel}", "", false)
     var drifted = false
+    val drift_started = scv_cost_now_v1(cost)
     val current = scv_compile_snapshot_read_source_v1(path)
     if current == nil:
         drifted = true
     else:
         if scv_content_id_for_u8(current!) != digest:
             drifted = true
+    if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, drift_started))
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
 
 fn scv_compile_snapshot_materialize_source_v1(
     canonical_root: text, cache_root: text, staging: text,
     entry: CompileSourceInventoryEntryV1
 ) -> ScvCompileMaterializedSourceV1:
+    scv_compile_snapshot_materialize_source_cost_v1(canonical_root, cache_root, staging, entry, nil)
+
+fn scv_compile_snapshot_materialize_source_cost_v1(
+    canonical_root: text, cache_root: text, staging: text,
+    entry: CompileSourceInventoryEntryV1, cost: ScvCompileCostV1?
+) -> ScvCompileMaterializedSourceV1:
     if not transient_scope_begin():
         return ScvCompileMaterializedSourceV1("snapshot-scratch-begin-failed", "", false)
-    val result = scv_compile_snapshot_materialize_source_unscoped_v1(
-        canonical_root, cache_root, staging, entry)
+    val started = scv_cost_now_v1(cost)
+    val result = scv_compile_snapshot_materialize_source_unscoped_cost_v1(
+        canonical_root, cache_root, staging, entry, cost)
+    if cost != nil: cost!.record_materialize(scv_cost_elapsed_v1(cost, started))
     if not transient_scope_pause():
         transient_scope_end()
         return ScvCompileMaterializedSourceV1("snapshot-scratch-pause-failed", "", false)
@@ -553,6 +619,12 @@ fn scv_compile_snapshot_reuse_source_unscoped_v1(
     canonical_root: text, cache_root: text, staging: text, reuse_root: text,
     entry: CompileSourceInventoryEntryV1
 ) -> ScvCompileMaterializedSourceV1:
+    scv_compile_snapshot_reuse_source_unscoped_cost_v1(canonical_root, cache_root, staging, reuse_root, entry, nil)
+
+fn scv_compile_snapshot_reuse_source_unscoped_cost_v1(
+    canonical_root: text, cache_root: text, staging: text, reuse_root: text,
+    entry: CompileSourceInventoryEntryV1, cost: ScvCompileCostV1?
+) -> ScvCompileMaterializedSourceV1:
     val rel = entry.source_identity
     if not scv_worktree_path_safe(rel):
         return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
@@ -563,16 +635,25 @@ fn scv_compile_snapshot_reuse_source_unscoped_v1(
         return miss
     val digest = "sha256_{entry.content_digest}"
     val chunk = "{cache_root}/objects/chunks/{digest}.blob"
-    if (not file_exists(chunk) or file_size(chunk) != entry.byte_count or
-            file_hash_sha256_or_empty(chunk) != entry.content_digest):
+    val chunk_verify_started = scv_cost_now_v1(cost)
+    val chunk_invalid = (not file_exists(chunk) or file_size(chunk) != entry.byte_count or
+            file_hash_sha256_or_empty(chunk) != entry.content_digest)
+    if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, chunk_verify_started))
+    if chunk_invalid:
         return miss
     val destination = "{staging}/{rel}"
+    val copy_started = scv_cost_now_v1(cost)
     dir_create(destination[0:destination.rfind("/")], true)
-    if not file_copy("{reuse_root}/{rel}", destination):
+    val copied = file_copy("{reuse_root}/{rel}", destination)
+    if cost != nil: cost!.record_copy(scv_cost_elapsed_v1(cost, copy_started))
+    if not copied:
         file_delete(destination)
         return miss
-    if (file_size(destination) != entry.byte_count or
-            file_hash_sha256_or_empty(destination) != entry.content_digest):
+    val verify_started = scv_cost_now_v1(cost)
+    val copy_invalid = (file_size(destination) != entry.byte_count or
+            file_hash_sha256_or_empty(destination) != entry.content_digest)
+    if cost != nil: cost!.record_verify(scv_cost_elapsed_v1(cost, verify_started))
+    if copy_invalid:
         file_delete(destination)
         return miss
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{entry.byte_count}", false)
@@ -581,10 +662,18 @@ fn scv_compile_snapshot_reuse_source_v1(
     canonical_root: text, cache_root: text, staging: text, reuse_root: text,
     entry: CompileSourceInventoryEntryV1
 ) -> ScvCompileMaterializedSourceV1:
+    scv_compile_snapshot_reuse_source_cost_v1(canonical_root, cache_root, staging, reuse_root, entry, nil)
+
+fn scv_compile_snapshot_reuse_source_cost_v1(
+    canonical_root: text, cache_root: text, staging: text, reuse_root: text,
+    entry: CompileSourceInventoryEntryV1, cost: ScvCompileCostV1?
+) -> ScvCompileMaterializedSourceV1:
     if not transient_scope_begin():
         return ScvCompileMaterializedSourceV1("snapshot-scratch-begin-failed", "", false)
-    val result = scv_compile_snapshot_reuse_source_unscoped_v1(
-        canonical_root, cache_root, staging, reuse_root, entry)
+    val started = scv_cost_now_v1(cost)
+    val result = scv_compile_snapshot_reuse_source_unscoped_cost_v1(
+        canonical_root, cache_root, staging, reuse_root, entry, cost)
+    if cost != nil: cost!.record_materialize(scv_cost_elapsed_v1(cost, started))
     if not transient_scope_pause():
         transient_scope_end()
         return ScvCompileMaterializedSourceV1("snapshot-scratch-pause-failed", "", false)
@@ -596,6 +685,11 @@ fn scv_compile_snapshot_reuse_source_v1(
 
 fn scv_compile_snapshot_acquire_v1(
     root: text, cache_root: text, source_roots: [text]
+) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_acquire_cost_v1(root, cache_root, source_roots, nil)
+
+fn scv_compile_snapshot_acquire_cost_v1(
+    root: text, cache_root: text, source_roots: [text], cost: ScvCompileCostV1?
 ) -> ScvCompileSnapshotV1:
     if root == "" or cache_root == "" or source_roots.len() == 0:
         return scv_compile_snapshot_invalid_v1("snapshot-input-invalid")
@@ -669,11 +763,11 @@ fn scv_compile_snapshot_acquire_v1(
     for entry in typed_entries:
         var materialized = ScvCompileMaterializedSourceV1("snapshot-reuse-miss", "", false)
         if reuse.hits > 0 and reuse.marks[entry_index]:
-            materialized = scv_compile_snapshot_reuse_source_v1(
-                canonical_root, owned_cache_root, staging, reuse.snapshot_root, entry)
+            materialized = scv_compile_snapshot_reuse_source_cost_v1(
+                canonical_root, owned_cache_root, staging, reuse.snapshot_root, entry, cost)
         if materialized.reason != "ok":
-            materialized = scv_compile_snapshot_materialize_source_v1(
-                canonical_root, owned_cache_root, staging, entry)
+            materialized = scv_compile_snapshot_materialize_source_cost_v1(
+                canonical_root, owned_cache_root, staging, entry, cost)
         entry_index = entry_index + 1
         if materialized.reason != "ok":
             dir_remove(staging, true)
@@ -804,6 +898,7 @@ export scv_compile_snapshot_provenance_v1
 export scv_compile_snapshot_receipt_v1
 export scv_compile_snapshot_open_v1
 export scv_compile_snapshot_acquire_v1
+export scv_compile_snapshot_acquire_cost_v1
 export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1

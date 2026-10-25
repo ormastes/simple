@@ -1,0 +1,223 @@
+# Build runner fiber scheduler v1 — mmap writer, per-file pipeline fibers, async IO, memory admission
+
+Status: design (2026-10-24). Tracker items 27–30. Companion to
+`src_based_tldr_build_v1.md` (per-file jobs, single-flight, no locks) and
+`packed_binary_ast_v1.md` (pointer-free mmap-in-place AST blob).
+
+User rules inherited: no locks, fully async, temp+rename publication,
+single-flight futures, per-file jobs, cache limits (#4378/#4381).
+
+## 1. Survey (origin/release/1.0.0)
+
+| Need | Exists | Reusable? |
+|------|--------|-----------|
+| mmap READ | `rt_mmap(path,size,off,readonly)` (`runtime_native.c`), `rt_file_mmap_read_*`, `rt_munmap/rt_msync`; zero-copy blob view `src/lib/nogc_async_mut/sosix/packed_blob_view.spl` (#4397) | yes |
+| mmap WRITE | `rt_mmap(..., readonly=0)` maps RW but opens `OPEN_EXISTING` / `O_RDWR` without `O_CREAT`/size-set | **missing**: create + set length |
+| Stackful fiber | only `fiber_identity.rs` (`rt_fiber_enter/exit/current_task_id`, "for future stackful fiber runtimes") | **missing** — no context switch primitive anywhere |
+| Stackless coroutine | `nogc_async_mut/coroutine.spl` (manual enum state + step fn) | yes, pattern |
+| Green threads | `concurrent/green_thread.spl`: one OS thread, FIFO of `fn() -> i64` closures, run-to-completion, no yield | queue shape only |
+| Multicore pool | `concurrent/multicore_green.spl` → `rt_pool_*` (`runtime_pool.c`): **global mutex** (`g_pool_lock`, CRITICAL_SECTION) | violates "no global lock"; keep only as worker-thread launcher |
+| Work stealing | `async_host/scheduler.spl` `WorkStealingQueue` + `HostScheduler` (Future/Poll/Waker) | Poll/Waker model reusable; queue is not per-socket/lock-free |
+| Async file IO | `src/runtime/platform/async_driver.c` → IOCP (`async_windows.c`, ReadFile OVERLAPPED) and io_uring (`async_linux_uring.c` `io_uring_prep_read`); `rt_iocp_*` externs; `async_ring/` software provider | yes, completion source |
+| CPU topology / affinity | none (`rt_cpu_count` only; no NUMA/socket query, no thread affinity) | **missing** |
+| Memory limits | `80.driver/cache/metadata/cache_limits.spl`, `cache/gc/cache_eviction_plan_v1.spl` | yes, budget source |
+| Build runner | `src/app/buildrunner/runner.spl`, `src/lib/common/task_runner/{scheduler,journal}.spl` — task ids/journal, no per-file future | host for the scheduler |
+
+Conclusion: there is no stackful fiber. Everything that suspends today is a
+stackless state machine (Future/Poll or coroutine step fn).
+
+## 2. Fiber model decision
+
+**v1 = stackless pipeline fiber**, not a stack-switching fiber.
+
+A `FileFiber` is a state machine owning one source file end to end:
+
+```
+Start → AwaitSource → Parse → AwaitDeps(TLDR/packed AST) → Hir → Mir → Obj → Publish → Done
+```
+
+- Each `step()` runs one CPU stage to completion and returns `Poll`:
+  `Ready`, `Yield` (more CPU work, requeue), or `Pending(io_token)`
+  (parked until an IO completion or a single-flight future fires).
+- Yield points are stage boundaries and every file/TLDR/AST read. Stages are
+  not preempted mid-way; per-file stages are small enough for this.
+- Reason: a stack switch (CreateFiber/SwitchToFiber, ucontext/asm) would be a
+  new C/asm boundary, is unrunnable under the seed interpreter (interpreted
+  frames live on the host stack), and costs a stack (≥64 KiB) per fiber at
+  10k+ files. The state machine runs identically on seed, interpreter and
+  native. A stackful backend can later plug in behind the same `step()`
+  contract; `rt_fiber_enter_task_id` is already the identity hook for it.
+
+## 3. Scheduler
+
+- **Workers:** one OS thread per logical CPU, grouped by socket
+  (2 × 40 on this host). Topology from a new `rt_cpu_topology()`
+  (Windows `GetLogicalProcessorInformationEx`, Linux `/sys/devices/system/cpu`),
+  affinity via `rt_thread_set_affinity` (C boundary with Simple twin per
+  `pure_simple_hal.md`). Fallback: 1 socket, `rt_cpu_count()` workers.
+  **Windows processor groups:** 80 logical CPUs > 64, so a process is confined
+  to one group unless threads are assigned explicitly. Topology enumerates
+  groups via `GetLogicalProcessorInformationEx(RelationAll)` and each worker is
+  placed with `SetThreadGroupAffinity(group, mask)`. Linux uses
+  `sched_setaffinity` plus NUMA node ids. Both sit behind a platform-neutral
+  std layer aligned with the portability design (in progress separately).
+- **Run queues:** per-worker Chase–Lev deque (owner push/pop bottom,
+  thieves CAS top). Steal order: same-socket victims first; cross-socket only
+  when the whole socket is idle. No global lock; the injector for new files is a
+  per-socket MPSC ring fed by the runner.
+- **Socket pinning:** a fiber's whole chain stays on the socket that started it
+  (TLDR doc §"pins a job's whole chain"); stealing a fiber moves it only within
+  the socket.
+- **IO:** a worker submits the read (IOCP / io_uring / sync fallback via
+  `async_driver.c`), records `io_token → fiber` in its own table, and runs the
+  next fiber. Each worker polls its completion port non-blocking between steps
+  and blocks on it only when its deque is empty and stealing fails. Completions
+  push the fiber back onto the owning worker's deque.
+- **Single-flight:** waiting on another module's TLDR/AST future parks the
+  fiber in that future's waiter list (lock-free Treiber stack); the producer
+  drains it on publish.
+
+## 4. Memory admission (backpressure)
+
+- Budget = cache-limits config (`cache_limits.spl`) build-memory cap, default
+  a fraction of physical RAM.
+- Each fiber carries an estimate `est = k_src·source_bytes + per-stage peak`
+  (coefficients from the perf journal; conservative constants until measured).
+- Admission: an atomic `reserved` counter; the runner admits a new file fiber
+  only if `reserved + est ≤ budget` (CAS loop, no lock). Otherwise files stay
+  in the not-yet-started list; running fibers always finish (no deadlock,
+  since a parked fiber only waits on fibers already admitted or on IO).
+- Stage-accurate release: after `Obj` publish the fiber releases its whole
+  reservation; packed AST views are mmapped and count only their resident
+  share.
+- Saturation targets: CPU — keep every deque non-empty while budget allows;
+  IO — cap in-flight reads per socket (queue depth, default 64).
+
+## 5. mmap writer (item 27)
+
+New `rt_mmap_create(path, size) -> MapHandle`: create `path.tmp.<pid>.<n>`,
+set length (`SetFilePointerEx+SetEndOfFile` / `ftruncate`), map RW shared.
+Simple API `MappedWriter`: `create(final_path, size)`, `bytes_at(off)` fill,
+`finish()` = flush (`FlushViewOfFile`/`msync`) → unmap → close → atomic rename
+to `final_path` (the existing temp+rename rule). `abort()` unmaps and deletes.
+Object emission: when the backend reports the final size up front (packed AST,
+SMF, our own object writer) write through `MappedWriter`; when it streams
+(LLVM/external tool), it writes to the temp path and we rename — mapping that
+is no gain.
+
+## 6. Delivery (one PR each, to release/1.0.0)
+
+1. mmap writer (`rt_mmap_create` C + Rust runtime, `MappedWriter`, spec).
+2. Scheduler core: `FileFiber` step contract, per-worker deques, memory
+   admission — first in pure Simple on one thread (spec-runnable on seed), then
+   worker threads + topology/affinity.
+3. Async file read integration (`async_driver` completion → requeue).
+4. Per-file pipeline fiber. **Decided 2026-10-24:** this IS the per-file job
+   scheduler; the TLDR plan's PR 4 is folded in. `FileFiber` consumes the TLDR
+   lane's SourceReader / CacheReader / lazy TLDR table / link receipts.
+
+Pre-req if needed: cross-thread CAS atomics (`rt_atomic_*`, C + Rust twins) as
+their own small PR. Correctness rule: every PR ships specs, and memory
+admission must never deadlock.
+
+## 7. Open points
+
+- Resolved: raw-address CAS is `rt_par_atomic_*` (C + Rust), used by the lock-free
+  queue (`fiber/work_queue.spl`).
+- Per-stage memory coefficients are unmeasured.
+- Stackful backend deferred; revisit only if stage-granular yield proves too
+  coarse.
+
+## 8. Module-scoped monomorphization (per-file Mono stage)
+
+Owner: 40.mono / generic-cache lane. The scheduler side is coordinated through the coordinator.
+
+**Problem.** Today every MIR shard worker re-runs monomorphization over the whole program, then lowers only the modules it claims (`80.driver/driver_build/native_mir_shard.spl`, `driver_pipeline_lowering.spl:1385`). A specialization is owned by its *template's* module and is placed into that module's HIR (`monomorphize_integration.spl:593-662`). Other modules reach it through a process-global `SymbolId` (>= `MONO_SYMBOL_BASE`). Neither part works in a per-file pipeline:
+- the owner's fiber may already be `Done` when a requester appears;
+- SymbolIds are not stable across processes or fibers.
+
+**Rule.** A `FileFiber` gains a `Mono` step between `Hir` and `Mir`:
+
+```
+... → Hir → Mono(plan) → [AwaitInstances] → Mir → Obj → Publish → Done
+```
+
+1. **Inputs.** The module's own HIR, plus imported generic templates read as *concrete TLDR views* (`acquire_concrete_tldr`, #4389). Template bodies come from the `.tldr` generic-body sections. Only `Concrete` views are codegen input; `Partial` and `Unresolved` are rejected.
+2. **Identity.** An instance is identified by its `ConcreteTldrKey` (`DigestV1`) and the existing `MonoSemanticKey`. Its symbol is a deterministic link name, `__spl_inst$<sha256(MonoSemanticKey canonical text)>`, with no truncation. It is never a SymbolId.
+3. **Requester produces** (`mono_module_plan_v1`, `80.driver/cache/mono_module_scope_v1.spl`). For each instance its own code requests, the module looks it up in the instance cache (#4403):
+   - **already published:** `reuse` it (reference only);
+   - **wins the single-flight:** `produce` it (instantiate locally, then publish instance MIR and object);
+   - **otherwise:** `await` it (the fiber parks `Pending` on the flight).
+
+   A leader always completes its flight, with nil on failure, and stale leaders are re-driven (#4441).
+4. **Linking.** Every requester's object calls the instance by link name. The instance is emitted as a linkonce/COMDAT definition. The result is therefore correct under any fiber interleaving: equal keys produce equal bytes, and divergence is quarantined by the cache. Single-flight only saves work; correctness does not depend on it.
+5. **Cache and invalidation.** The cache keeps target-neutral instance MIR per `ConcreteTldrKey` and an object per `MonoArtifactKey`. A template change changes its `TemplateId`, and so every dependent key: old instances are simply not hit again. The `.rr` family `generic-specialization` maps a template change to its requesters.
+
+**Status (2026-10-24).**
+- Landed: the planner and its seed spec.
+- Not yet done:
+  - `MonomorphizationPass` running over one module and emitting requests instead of placing bodies into the template's owner. The existing `ArchiveRequests` mode (`MonoSpecializationRequestV1`) is the starting point.
+  - MIR lowering of link-name references.
+  - COMDAT emission.
+
+These need a binary that can run HIR lowering; the Rust seed fails with `rt_enum_id` there. They are UNRUN.
+
+**Open (for the scheduler):**
+- How `AwaitInstances` parks on the instance cache's single-flight future.
+- Whether a fiber whose `await` flight completes with nil re-plans (becoming the producer) inside the same `Mono` step.
+
+## 9. Native-build integration: `--parse-fibers=i/n` (2026-10-24)
+
+The coordinator keeps the #4387 frozen entry-closure request and the K-child
+claim-queue split (default 8: measured 1 worker 459 s, 8 -> 103 s, 16 -> 114 s,
+40 -> 211 s on the 1441-file stage3 capsule). Each child
+(`parse_shard_main.spl --parse-fibers=i/n`, entry
+`driver_run_parse_fibers_with_environment_variant_policy_v1` in
+`driver_parse_shard_entry.spl`) builds the driver exactly like a parse shard,
+loads the frozen sources, and runs one FileFiber per claimed file:
+pre-read content (no second read), the HOST does the one parse through the
+driver's own `parse_full_frontend_selected_v1` (identical parse-cache keys to
+the real build), the TLDR is rendered from the just-parsed module, and a fiber
+parks only on imports produced in the same child (other children's modules
+are skipped, not filled: cross-child waits need the cache daemon's
+single-flight). The child exits, which frees the ASTs.
+`SIMPLE_FILE_FIBERS=0` keeps `--parse-shard`. The focused-capsule route
+(`bootstrap_main` children via `run_parse_shards_with_base`) stays on
+`--parse-shard` until `bootstrap_main`/`compile_targets` accept the flag.
+
+### 9.1 Why not one in-process fiber pool (the real blocker)
+
+Fibers in one process cannot parse in parallel: the frontend's parse state is
+process-global, so it is not thread-safe, and the seed interpreter runs thread
+closures inline anyway. The parse path's module-level mutable state
+(`var` at module scope; 603 such globals under `src/compiler/10.frontend`):
+
+- `core/types.spl` — the flat AST pools and their reset: `span_pool_*` (99-102),
+  `tok_pool_*` (149-151), `sym_names/sym_types/sym_depths/sym_decl_ids/sym_mutable`
+  (173-177), `scope_starts`/`current_scope_depth` (216-217), `named_type_*`
+  (758-762), `custom_primitive_*` (767-769), `newunit_*` (923-925), `fn_sig_*`
+  (1057-1061), `generic_param_*` (1102-1104), the composite type tables
+  (1134-1562), `_flat_pool_reset_count` (1651); `reset_all_pools()` (1662)
+  clears them all.
+- `core/lexer.spl` — `lex_state` and cursor slots (61-99), `lex_all_kinds/texts/lines/cols` (940-943).
+- `core/parser.spl` — `par_lexical_bindings` (105), `par_warnings` (123),
+  `par_had_error` (125), import/diagnostic state (130-150),
+  `par_initialization_generation_v1` (151), cached env flags (174, 417).
+- `core/_Ast/module_state.spl` — lexer-state slots (27 onward) through `ast_persistent_owner_prepared_v1` (468).
+- `core/_AstExpr/nodes.spl`, `core/_Ast/decl_nodes.spl`, `core/ast_stmt.spl`,
+  `core/_ParserDecls/enum_module_body.spl` — AST node arenas (15, 15, 12, 14 globals).
+- `_FlatAstBridge/module_assembly.spl` — the flat-pool capture arm/record/take
+  globals: `_fab_capture_pools` (1416), `_fab_captured_blob` (1417), `_fab_captured_trace` (1419), `_fab_captured_paths` (1431), `_fab_capture_arm_tag` (1440), plus `_fab_capture_write_level_noted` (137).
+- `frontend_parse_cache.spl` — cache-scope memo (60-61), hit/miss/store counters (72-78, 208).
+
+Making these per-context (a `ParseContext` owned by the fiber) is the
+prerequisite for in-process parallel parsing; it is being assigned separately.
+
+### 9.2 Follow-up: in-process variant once the packed AST is used in place
+
+Once the codec agent's packed binary AST is consumed in place (mmap, no
+rebuild — `packed_binary_ast_v1.md`), ASTs stop being heap-resident: a fiber
+holds a mapped view, not a pooled tree, and releasing it is an unmap. Combined
+with per-context parse state (§9.1), the single-process variant (fibers on
+pinned worker threads, no child processes) becomes viable and removes the
+per-child driver construction and source-load cost.

@@ -37,6 +37,11 @@ use compiler.driver.driver_source_loading.{
     driver_entry_scan_cache_hit_count, driver_closure_parity_check_enabled_v1,
     driver_closure_set_digest_v1
 }
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    native_entry_closure_request_open_v1, native_entry_closure_handoff_install_v1}
+use app.io._CliCompile.native_build_closure_request_admit.{
+    native_build_closure_request_present_v1, native_build_closure_request_admit_v1}
 use compiler.driver.driver_build.native_group_request.{
     native_group_request_path_v1, native_group_request_v1,
     native_group_source_paths_v1}
@@ -52,8 +57,8 @@ use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 # interpreter (evaluation_helpers.rs:588 loads it immediately), so both edges were
 # paid in full at module-bootstrap time: app/compile/native.spl alone retained
 # 10,910 export bindings and cost 692ms. Removed as dead imports.
-use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
-use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
+use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization)
+use app.cli.native_build_output_plan.{native_build_is_standalone_flag_v1, native_build_output_format_v1}
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 use app.build.targets.action_identity.{
     NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
@@ -69,6 +74,7 @@ use app.build.targets.artifact_receipt.{
     target_cache_namespace_v1, target_action_key_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use app.build.targets.native_tool_path.{native_tool_receipt_path_v1, native_tool_absolute_path_v1}
 use compiler.common.cache.darwin_runtime_provider_manifest.{
     darwin_runtime_provider_manifest_content_identity_v1
 }
@@ -184,10 +190,11 @@ fn _publish_and_admit_darwin_native_action_v1(
         repo_root, cache_dir, entry, []
     )
     if not digest_is_sha256(dependencies): return dependencies
-    val tool_path = _native_build_relative_identity_path(repo_root, cli_current_exe_path())
-    if not _cli_file_exists_impl(tool_path):
+    val tool_path = native_tool_receipt_path_v1(repo_root, cli_current_exe_path())
+    val tool_absolute = native_tool_absolute_path_v1(repo_root, tool_path)
+    if tool_absolute == "" or not _cli_file_exists_impl(tool_absolute):
         return "target-identity-error: current-tool-artifact-missing"
-    val tool_artifact = file_hash_sha256(tool_path)
+    val tool_artifact = file_hash_sha256(tool_absolute)
     val closure = publish_imported_closure_layer_v1(
         repo_root, cache_dir, entry, entry, tool_artifact, dependencies, closure_inputs
     )
@@ -347,7 +354,7 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
             entry_count = entry_count + 1
             if entry_count > 1:
                 return "multiple native-build entry points; specify one positional entry or --entry"
-        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-entry-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast" or arg == "--keep-going" or arg == "--go-to-end" or arg == "--keep-intermediates" or arg == "--print-intermediates":
+        if native_build_is_standalone_flag_v1(arg):
             i = i + 1
             continue
         if arg == "--log":
@@ -490,6 +497,8 @@ fn cli_native_build_add_bootstrap_input(options: CompileOptions, input_path: tex
         result.bootstrap_input_4 = input_path
     elif slot == 5:
         result.bootstrap_input_5 = input_path
+    elif slot == 6:
+        result.bootstrap_input_6 = input_path
     result.bootstrap_input_count = slot + 1
     result
 
@@ -1340,15 +1349,54 @@ fn _cli_native_build(
             release = true
             opt_level = cli_native_default_opt_level()
 
-        val _nb_target_opt_ctx = target_opt_context_default()
         driver_entry_scan_cache_reset()
 
+        # The coordinator (native_build_main.spl) publishes its frozen entry
+        # closure once; HIR/MIR shard workers and the real worker admit it with
+        # the same checks as parse shards instead of re-walking ~1.4k modules.
+        # Never under an admitted source epoch: that lane binds its own
+        # digest-checked inventory and load_sources_impl refuses to compose.
+        var preclosed_identities: [text] = []
+        var preclosed_source_roots: [text] = []
+        var preclosed_snapshot_root = ""
+        var native_action_entry = entry_point
+        if native_build_closure_request_present_v1():
+            if not effective_entry_closure or native_group_requested or
+                    driver_admitted_epoch_active_v1():
+                _cli_eprint("Error: native-build closure request incompatible with this input mode")
+                return 1
+            val request_admission = native_build_closure_request_admit_v1(entry_point, source_dirs)
+            # Descendants of this worker never inherit the parent's request.
+            env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+            env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+            if request_admission.is_err():
+                _cli_eprint("Error: native-build " + request_admission.unwrap_err())
+                return 1
+            val admitted_request = request_admission.unwrap()
+            val selection = native_entry_closure_request_open_v1(admitted_request,
+                admitted_request.binding.policy_digest)
+            if selection.is_err():
+                _cli_eprint("Error: native-build closure selection rejected: " + selection.unwrap_err())
+                return 1
+            preclosed_snapshot_root = admitted_request.snapshot.snapshot_root
+            preclosed_source_roots = admitted_request.binding.source_roots
+            for identity in selection.unwrap().identities:
+                preclosed_identities = preclosed_identities.push(preclosed_snapshot_root + "/" + identity)
+            if not native_entry_closure_handoff_install_v1(admitted_request):
+                _cli_eprint("Error: native-build closure handoff already installed")
+                return 1
+            native_action_entry = admitted_request.snapshot.snapshot_root + "/" +
+                admitted_request.binding.entry
+            if verbose:
+                _cli_eprint("[native-build] preclosed closure admitted selected={preclosed_identities.len()} closure_walks=0")
         val native_action_inputs = if native_group_requested:
             match native_group_source_paths_v1():
                 case Ok(paths): paths
                 case Err(reason):
                     _cli_eprint("Error: native group sources rejected: {reason}")
                     return 1
+        elif preclosed_identities.len() > 0:
+            preclosed_identities
         else:
             _native_build_entry_closure(entry_point, source_dirs)
         # A real closure always contains the entry itself, so [] means the SCV
@@ -1362,7 +1410,13 @@ fn _cli_native_build(
             env_set("SIMPLE_NATIVE_CLOSURE_COORDINATOR_DIGEST",
                 driver_closure_set_digest_v1(native_action_inputs))
         var native_source_roots: [text] = []
-        if not native_group_requested:
+        val native_snapshot_root = if preclosed_snapshot_root != "":
+            preclosed_snapshot_root
+        else:
+            native_build_closure_snapshot_root_v1()
+        if preclosed_snapshot_root != "":
+            native_source_roots = preclosed_source_roots
+        elif not native_group_requested:
             match native_build_closure_source_roots_v1(entry_point, source_dirs):
                 case Ok(roots): native_source_roots = roots
                 case Err(reason):
@@ -1391,7 +1445,7 @@ fn _cli_native_build(
             options.input_files = native_inputs
             if not native_group_requested:
                 options.native_source_roots = native_source_roots
-                options.native_source_snapshot_root = native_build_closure_snapshot_root_v1()
+                options.native_source_snapshot_root = native_snapshot_root
             if effective_entry_closure or native_group_requested:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
@@ -1405,7 +1459,7 @@ fn _cli_native_build(
             options.mode = CompileMode.Aot
             options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
-            options.output_format = driver_output_format_both()
+            options.output_format = native_build_output_format_v1(build_mode, true, false, native_group_requested)
             options.backend = backend
             options.native_target = native_target
             options.release = release
@@ -1414,7 +1468,6 @@ fn _cli_native_build(
             options.collection_policy = collection_planner.policy
             options.collection_memory_budget_bytes = collection_planner.memory_budget_bytes
             options.low_memory = low_memory
-            options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
                 options, collection):
@@ -1446,7 +1499,7 @@ fn _cli_native_build(
             options.input_files = native_inputs
             if not native_group_requested:
                 options.native_source_roots = native_source_roots
-                options.native_source_snapshot_root = native_build_closure_snapshot_root_v1()
+                options.native_source_snapshot_root = native_snapshot_root
             if effective_entry_closure or native_group_requested:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
@@ -1456,11 +1509,8 @@ fn _cli_native_build(
             options.mode = CompileMode.Aot
             options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
-            if not native_group_requested and build_mode == "dynload" and
-                    not emit_object and not emit_entry_object and not emit_archive and not emit_shared:
-                options.output_format = driver_output_format_both()
-            else:
-                options.output_format = driver_output_format_native()
+            options.output_format = native_build_output_format_v1(build_mode, false,
+                emit_object or emit_entry_object or emit_archive or emit_shared, native_group_requested)
             options.backend = backend
             options.native_target = native_target
             options.release = release
@@ -1469,7 +1519,6 @@ fn _cli_native_build(
             options.collection_policy = collection_planner.policy
             options.collection_memory_budget_bytes = collection_planner.memory_budget_bytes
             options.low_memory = low_memory
-            options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = match _cli_native_build_create_driver_with_environment_variant_policy_v1(
                 options, collection):
@@ -1587,7 +1636,7 @@ fn _cli_native_build(
                 else:
                     "binary"
                 val native_identity_error = _publish_and_admit_darwin_native_action_v1(
-                    cache_dir, output, entry_point, native_action_inputs, backend,
+                    cache_dir, output, native_action_entry, native_action_inputs, backend,
                     native_target, opt_level, release, native_action_artifact_kind
                 )
                 if native_identity_error != "":

@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+Purpose: Verify the fiber IO reactor: a fiber parks on an async read and is
+woken by the completion pump while another fiber keeps running.
+Audience: build-runner engineers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Uses the host completion driver (io_uring on Linux, reference driver elsewhere);
+writes one temp file in the working directory and deletes it.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §3
+"""
+use std.nogc_async_mut.fiber.io_reactor.{fiber_io_new, fiber_io_backend, fiber_io_close, fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump}
+use std.common.task_runner.fiber_scheduler.{fiber_sched_new, fiber_sched_submit, fiber_sched_admit, fiber_sched_pick, fiber_sched_complete, fiber_sched_parked_count, fiber_sched_runnable_count, fiber_step_park, fiber_step_yield, FIBER_STATE_READY}
+use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, getpid, platform_name}
+
+fn _fio_path() -> text:
+    ".fiber_io_spec_{getpid()}.txt"
+
+describe "fiber io reactor":
+    it "opens, reads and closes a file through completions":
+        val path = _fio_path()
+        file_write_exact(path, "hello fibers")
+        var r = fiber_io_new(16)
+        expect(r.error).to_equal("")
+        var sub = fiber_io_submit_open(r, path)
+        r = sub.reactor
+        val open_op = sub.op
+        expect(open_op > 0).to_be(true)
+        var s = fiber_sched_new([0], 100)
+        var pump = fiber_io_pump(r, s, 1000)
+        r = pump.reactor
+        expect(fiber_io_ready(r, open_op)).to_be(true)
+        val fd = fiber_io_result(r, open_op)
+        expect(fd >= 0).to_be(true)
+        sub = fiber_io_submit_read(r, fd, 64, 6)
+        r = sub.reactor
+        pump = fiber_io_pump(r, s, 1000)
+        r = pump.reactor
+        expect(fiber_io_result(r, sub.op)).to_equal(6)
+        expect(fiber_io_data(r, sub.op)).to_equal("fibers")
+        r = fiber_io_forget(r, sub.op)
+        expect(fiber_io_ready(r, sub.op)).to_be(false)
+        sub = fiber_io_submit_close(r, fd)
+        r = sub.reactor
+        pump = fiber_io_pump(r, s, 1000)
+        expect(fiber_io_result(pump.reactor, sub.op)).to_equal(0)
+        fiber_io_close(pump.reactor)
+        file_delete(path)
+
+    it "wakes the fiber parked on a read while another fiber keeps running":
+        val path = _fio_path()
+        file_write_exact(path, "abc")
+        var r = fiber_io_new(16)
+        var s = fiber_sched_new([0], 100)
+        s = fiber_sched_submit(s, 1)
+        s = fiber_sched_submit(s, 1)
+        s = fiber_sched_admit(s)
+        # fiber 1 (LIFO bottom) issues the open and parks on it
+        var pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(1)
+        val sub = fiber_io_submit_open(r, path)
+        r = sub.reactor
+        s = fiber_sched_complete(pick.sched, 0, 1, fiber_step_park(sub.op))
+        expect(fiber_sched_parked_count(s)).to_equal(1)
+        # fiber 0 keeps running meanwhile
+        pick = fiber_sched_pick(s, 0)
+        expect(pick.fiber).to_equal(0)
+        s = fiber_sched_complete(pick.sched, 0, 0, fiber_step_yield())
+        val pump = fiber_io_pump(r, s, 1000)
+        expect(pump.completed).to_equal(1)
+        expect(fiber_sched_parked_count(pump.sched)).to_equal(0)
+        expect(pump.sched.fiber_state[1]).to_equal(FIBER_STATE_READY)
+        expect(fiber_sched_runnable_count(pump.sched)).to_equal(2)
+        val fd = fiber_io_result(pump.reactor, sub.op)
+        val closed = fiber_io_submit_close(pump.reactor, fd)
+        fiber_io_close(fiber_io_pump(closed.reactor, pump.sched, 1000).reactor)
+        file_delete(path)
+
+    it "reports a missing file as a negative result, not a hang":
+        var r = fiber_io_new(16)
+        val sub = fiber_io_submit_open(r, ".fiber_io_spec_missing_{getpid()}.none")
+        val pump = fiber_io_pump(sub.reactor, fiber_sched_new([0], 1), 1000)
+        expect(fiber_io_result(pump.reactor, sub.op) < 0).to_be(true)
+        fiber_io_close(pump.reactor)
+
+    it "a pump with nothing in flight returns immediately":
+        val r = fiber_io_new(4)
+        val pump = fiber_io_pump(r, fiber_sched_new([0], 1), 5000)
+        expect(pump.completed).to_equal(0)
+        fiber_io_close(pump.reactor)
+
+    it "uses the overlapped IOCP provider on Windows":
+        val r = fiber_io_new(4)
+        if platform_name() == "windows":
+            expect(fiber_io_backend(r)).to_equal("iocp")
+        else:
+            expect(fiber_io_backend(r) != "").to_be(true)
+        fiber_io_close(r)

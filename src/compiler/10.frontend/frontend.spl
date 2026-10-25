@@ -11,9 +11,12 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped, parse_and_
 use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take, flat_pool_capture_already_captured, flat_pool_capture_record}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
-use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1, frontend_parse_cache_last_verify_us}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_load_v1, frontend_shared_parse_store_v1}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
+use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_enabled_v1, frontend_spab_load_v1, frontend_spab_store_v1,
+    frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_take_trace, flat_pool_capture_take_refs}
 use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.common.diagnostics.span.{Span}
@@ -131,14 +134,26 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         xxh3_128_text("frontend-advisory-cache-v1|" + source_key + "|" + advisory_cache_identity)
     else:
         source_key
+    if key != "" and frontend_spab_enabled_v1():
+        # Packed .spab hit first (frontend_spab_cache_v1.spl); any doubt falls
+        # through to the line cache and then a real parse.
+        val spab_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
+        val packed = frontend_spab_load_v1(key, parse_source, file_path)
+        if frontend_cache_boundary_profile_enabled():
+            val spab_t1 = frontend_cache_boundary_profile_now()
+            print("PARSECACHE\tload_ms={(spab_t1 - spab_t0) / 1000}\tverify_ms={frontend_spab_last_verify_us_v1() / 1000}\tbuild_ms={frontend_spab_last_build_us_v1() / 1000}\tformat=spab\thit={packed != nil}\tpath={file_path}")
+        if val packed_hit = packed:
+            frontend_parse_cache_note_hit()
+            return packed_hit
     if key != "":
         val load_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val cached_blob = frontend_parse_cache_load(key)
-        if frontend_cache_boundary_profile_enabled():
-            val load_t1 = frontend_cache_boundary_profile_now()
-            print("PARSECACHE\tload_ms={(load_t1 - load_t0) / 1000}\tbytes={cached_blob.len()}\tpath={file_path}")
+        val load_t1 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val cached_module = build_module_from_flat_pool_blob(
             cached_blob, parse_source, file_path)
+        if frontend_cache_boundary_profile_enabled():
+            val build_t1 = frontend_cache_boundary_profile_now()
+            print("PARSECACHE\tload_ms={(load_t1 - load_t0) / 1000}\tverify_ms={frontend_parse_cache_last_verify_us() / 1000}\tbuild_ms={(build_t1 - load_t1) / 1000}\tformat=fpc\tbytes={cached_blob.len()}\tpath={file_path}")
         if cached_module != nil:
             val hit = cached_module.unwrap()
             frontend_parse_cache_note_hit()
@@ -176,7 +191,14 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         if not _already_captured:
             flat_pool_capture_record(file_path)
         val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
-        val stored = frontend_parse_cache_store(key, captured_blob)
+        # Packed .spab is the default store; the text .fpc entry is written only
+        # under SIMPLE_FRONTEND_SPAB=0 or when the packed store was refused.
+        val spab_stored = if frontend_spab_enabled_v1() and captured_blob != "":
+            frontend_spab_store_v1(key, file_path, captured_blob, flat_pool_capture_take_trace(),
+                flat_pool_capture_take_refs())
+        else:
+            false
+        val stored = if spab_stored: true else: frontend_parse_cache_store(key, captured_blob)
         val _shared_stored = frontend_shared_parse_store_v1(raw_source_sha,
             parse_source, shared_target_identity, file_path, captured_blob)
         if frontend_cache_boundary_profile_enabled():

@@ -1,0 +1,109 @@
+# Macro expansion cache keyed by MacroExpandKey (plan 2026-10-24 §3.2, P5).
+#
+# Coalesces identical in-flight expansions through the existing daemon
+# single-flight table (cache/daemon/cache_single_flight_v1.spl): the first
+# request for a key is the LEADER and expands; concurrent requests for the
+# same key become WAITERS and observe the leader's published bytes. No locks:
+# the table is owned by one event loop and published values are immutable.
+#
+# A key whose producer publishes two different expansions is QUARANTINED
+# (plan §9.6): it never hits again and callers fall back to a reference
+# expansion. Newest-wins is never used.
+use std.common.text_bytes.{text_to_bytes}
+use compiler.common.cache_contract.macro_reference_manifest_v1.{macro_identity_digest_v1}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{CacheSingleFlightV1,
+    SINGLE_FLIGHT_LEADER_V1, cache_single_flight_key_v1}
+
+class MacroExpansionCacheV1:
+    flights: CacheSingleFlightV1
+    keys: [text]
+    values: [text]
+    quarantined: [text]
+    computations: i64
+
+    static fn create() -> MacroExpansionCacheV1:
+        MacroExpansionCacheV1(flights: CacheSingleFlightV1.create(), keys: [], values: [],
+            quarantined: [], computations: 0)
+
+    fn _index(expand_key: text) -> i64:
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == expand_key: return i
+            i = i + 1
+        -1
+
+    fn _is_quarantined(expand_key: text) -> bool:
+        for k in self.quarantined:
+            if k == expand_key: return true
+        false
+
+    # "hit" | "leader" | "waiter" | "quarantined" | "uncacheable" (key is not a
+    # collision-resistant tagged digest of a known algorithm => always a miss)
+    # `now_ms` starts the leader's redrive clock, so an abandoned leader is
+    # re-driven by redrive() instead of leaving waiters parked forever.
+    me begin(expand_key: text, request_id: text, now_ms: i64) -> text:
+        if macro_identity_digest_v1(expand_key) == nil: return "uncacheable"
+        if self._is_quarantined(expand_key): return "quarantined"
+        if self._index(expand_key) >= 0: return "hit"
+        val (role, _flight) = self.flights.join_at(cache_single_flight_key_v1("macro-expand", expand_key),
+            request_id, now_ms)
+        if role == SINGLE_FLIGHT_LEADER_V1:
+            self.computations = self.computations + 1
+            return "leader"
+        "waiter"
+
+    # true when published (or an identical republish); false when the key is
+    # now quarantined for a differing expansion.
+    me publish(expand_key: text, request_id: text, expansion: text) -> bool:
+        if macro_identity_digest_v1(expand_key) == nil: return false
+        if self._is_quarantined(expand_key): return false
+        # A leader that was re-driven away is stale: only the current leader of
+        # an in-flight key may publish into it.
+        val leader = self.flights.leader_of(cache_single_flight_key_v1("macro-expand", expand_key))
+        if leader != "" and leader != request_id: return false
+        val i = self._index(expand_key)
+        if i >= 0:
+            if self.values[i] == expansion: return true
+            self.quarantined.push(expand_key)
+            return false
+        self.keys.push(expand_key)
+        self.values.push(expansion)
+        val _done = self.flights.complete(cache_single_flight_key_v1("macro-expand", expand_key),
+            request_id, Some(text_to_bytes(expansion)))
+        true
+
+    # Failure path of a leader: completes the flight with nil so it is never
+    # left in flight; waiters then produce in process (their next begin leads).
+    me fail(expand_key: text, request_id: text) -> bool:
+        self.flights.complete(cache_single_flight_key_v1("macro-expand", expand_key), request_id, nil)
+
+    # try/finally-equivalent leader driver: `expand` returns Err on failure,
+    # and EVERY non-publishing outcome (Err, quarantine) completes with nil.
+    me lead(expand_key: text, request_id: text, expand: fn(text) -> Result<text, text>) -> bool:
+        match expand(expand_key):
+            case Ok(expansion):
+                if self.publish(expand_key, request_id, expansion): return true
+                val _f = self.fail(expand_key, request_id)
+                false
+            case Err(_reason):
+                val _f = self.fail(expand_key, request_id)
+                false
+
+    # Promote the oldest waiter of every leader older than `timeout_ms`
+    # (or drop a waiter-less flight); returns the promoted request ids.
+    me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
+        var out: [text] = []
+        for entry in self.flights.redrive(now_ms, timeout_ms):
+            out.push(entry.substring(entry.index_of("\u0000") + 1))
+        out
+
+    fn value_of(expand_key: text) -> text:
+        if self._is_quarantined(expand_key): return ""
+        val i = self._index(expand_key)
+        if i < 0: return ""
+        self.values[i]
+
+    fn inflight_count() -> i64:
+        self.flights.inflight_count()
+
+export MacroExpansionCacheV1

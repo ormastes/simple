@@ -3,7 +3,10 @@ use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
+@when(os = "macos" or feature = "macho"):
 use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+@end
+use compiler.backend.linker.macho_feature.{MACHO_NOT_BUILT_ERROR}
 export NativeLinkConfig
 # Direct import from the concrete defining sibling module — the seed mangler
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
@@ -1437,6 +1440,7 @@ class _InternalElfByteInputs:
 
 fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result<text, text>:
+    @when(os = "macos" or feature = "macho"):
     if native_tool_strict_requested_v1(): return Err("managed native admission requires the admitted external hosted linker")
     val host = host_os()
     val selected_arch = if arch == "arm64": "aarch64" elif arch == "amd64": "x86_64" else: arch
@@ -1453,6 +1457,9 @@ fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     val runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
     native_macho_link_files_v1(plan, object_files, runtime_archives, output)
+    @else:
+    Err(MACHO_NOT_BUILT_ERROR)
+    @end
 
 fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result:
@@ -2529,7 +2536,7 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
             if native_all_input_present(with_llvm):
                 val llvm = with_llvm[with_llvm.len() - 1]
                 if not library_files.contains(llvm): library_files.push(llvm)
-        var support_libraries = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib",
+        var support_libraries = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib",
             "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
         for library in native_all_msvc_support_libraries(support_inputs):
             if not support_libraries.contains(library): support_libraries.push(library)
@@ -2657,7 +2664,7 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # CROSS-PLATFORM: this list is inside _link_native_msvc and is reached
     # only on the Windows/MSVC link path; Linux, macOS and mingw are
     # byte-unaffected.
-    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
     for wlib in win_libs:
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)

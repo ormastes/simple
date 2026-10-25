@@ -398,6 +398,7 @@ fn build_c_runtime_library(
     build_dir: &Path,
     include_stage4_hosted: bool,
     include_cranelift_stubs: bool,
+    no_rust_array_packing: bool,
 ) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root().or_else(|| {
@@ -408,6 +409,7 @@ fn build_c_runtime_library(
     let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_file_view.c",
+        "runtime_disk_headroom.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
@@ -590,7 +592,8 @@ fn build_c_runtime_library(
         runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
-    let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
+    let fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing}",
+        runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?);
     let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
@@ -668,6 +671,9 @@ fn build_c_runtime_library(
                         .arg("-fno-stack-protector")
                         .arg("-fPIC")
                         .arg("-std=gnu11");
+                }
+                if no_rust_array_packing {
+                    command.arg("-DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1");
                 }
                 command
                     .args(msvc_c11_atomics_flags(&cc))
@@ -754,17 +760,22 @@ fn build_c_runtime_library(
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false, true)
+    build_c_runtime_library(build_dir, false, true, true)
+}
+
+/// C exports supplement a Rust runtime whose lazy arrays must observe C threads.
+pub(crate) fn build_core_c_runtime_supplement_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true, false)
 }
 
 pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     // The compiler backfill owns the real Cranelift hooks. Keep ordinary
     // bootstrap's named-trap stubs out of this archive to prevent overlap.
-    build_c_runtime_library(build_dir, false, false)
+    build_c_runtime_library(build_dir, false, false, false)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true, false)
+    build_c_runtime_library(build_dir, true, false, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
@@ -2347,6 +2358,29 @@ pub(crate) fn build_stage4_runtime_capsule_archive(
 /// Project the requested Rust runtime exports without exposing the rlib's
 /// remaining global ABI. Allowed runtime externals must be supplied by the
 /// adjacent exact Stage-4 capsules.
+fn stage4_rust_runtime_projection_roots(
+    defined: &BTreeMap<String, usize>,
+    requested: &[String],
+) -> Result<Vec<String>, String> {
+    const THREAD_PACKING_HOOK: &str = "simple_note_user_threads_started";
+    let hook_definitions: usize = defined.iter()
+        .filter(|(name, _)| canonical_archive_symbol(name) == THREAD_PACKING_HOOK)
+        .map(|(_, count)| *count).sum();
+    // These two real Rust providers can pack tagged arrays in place. A
+    // synthetic projection with no packing providers needs no callback, but
+    // an incomplete real provider must fail rather than lose thread safety.
+    let packs_arrays = defined.keys().any(|name| matches!(canonical_archive_symbol(name),
+        "rt_typed_words_i64_set" | "rt_typed_words_i64_push"));
+    if (packs_arrays || hook_definitions != 0) && hook_definitions != 1 {
+        return Err(format!("Stage4 Rust array-packing owner requires exactly one {THREAD_PACKING_HOOK} definition; found {hook_definitions}"));
+    }
+    let mut roots = requested.to_vec();
+    if hook_definitions == 1 && !roots.iter().any(|name| name == THREAD_PACKING_HOOK) {
+        roots.push(THREAD_PACKING_HOOK.to_string());
+    }
+    Ok(roots)
+}
+
 pub(crate) fn build_stage4_rust_runtime_projection_archive(
     rust_runtime_archive: &Path,
     requested_symbols: &[String],
@@ -2379,9 +2413,13 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
         }
         return Ok(output);
     }
+    let (defined, _) = archive_global_symbols(rust_runtime_archive)?;
+    // Root the callback, rather than merely exempting it from localization:
+    // it must survive archive extraction and the exact-global-set oracle.
+    let roots = stage4_rust_runtime_projection_roots(&defined, requested_symbols)?;
     project_stage4_archive_closure(
         &[rust_runtime_archive],
-        requested_symbols,
+        &roots,
         allowed_external_runtime_symbols,
         temp_dir,
         "stage4_rust_runtime",

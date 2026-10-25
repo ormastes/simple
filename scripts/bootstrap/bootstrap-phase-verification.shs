@@ -173,6 +173,9 @@ validate_hosted_runtime_authority() {
 phase=""
 verification_backend=""
 stage3_provenance=""
+stage3_self_result=""
+stage3_self_sanity=""
+stage3_original_runtime=""
 compiler=""
 expected_sha=""
 strategy=normal
@@ -216,6 +219,9 @@ for arg in "$@"; do
     --phase=*) phase=${arg#*=} ;;
     --backend=*) verification_backend=${arg#*=} ;;
     --stage3-provenance=*) stage3_provenance=${arg#*=} ;;
+    --stage3-self-rebuild-result=*) stage3_self_result=${arg#*=} ;;
+    --stage3-self-sanity=*) stage3_self_sanity=${arg#*=} ;;
+    --stage3-original-runtime=*) stage3_original_runtime=${arg#*=} ;;
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
@@ -264,6 +270,9 @@ esac
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
+if [ -n "$stage3_self_result$stage3_self_sanity$stage3_original_runtime" ]; then
+  [ "$phase" = stage4 ] && [ -n "$stage3_self_result" ] && [ -n "$stage3_self_sanity" ] && [ -n "$stage3_original_runtime" ] || die "retained self evidence requires Stage4 and all three explicit inputs"
+fi
 if [ "$phase" = stage3 ]; then
   [ -n "$stage3_provenance" ] || die "Stage3 requires admitted provenance"
   [ "$hash_policy" = canonical ] || die "Stage3 requires canonical provenance"
@@ -406,6 +415,22 @@ if [ "$phase" = stage1 ]; then
   bootstrap_phase1_register_tool "$compiler_snapshot" "$snapshot_sha" || die "cannot bind Phase1 compiler snapshot"
 fi
 
+if [ -n "$stage3_self_result" ]; then
+  phase4_controller_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "controller root"
+  phase4_controller=$phase4_controller_root/scripts/bootstrap/bootstrap-phase-verification.shs
+  BOOTSTRAP_STAGE3_FACADE_PATH=$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs
+  STAGE4_PROVENANCE_HELPER_PATH=$phase4_controller_root/scripts/check/lib/stage4-candidate-provenance.shs
+  export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "source provenance helpers"
+  . "$STAGE4_PROVENANCE_HELPER_PATH" || die "retained candidate helpers"
+  stage4_verify_retained_self_result "$stage3_self_result" "$compiler" "$source_root" "$stage3_original_runtime" "$stage3_self_sanity" || die "selected self-P3 lacks current build and sanity evidence"
+  python3 "$phase4_controller_root/scripts/check/lib/stage4-retained-self-evidence.py" verify-capsule-copy \
+    "$runtime_path/phase2-runtime-capsule.env" "$compiler" "$source_root" "$stage3_original_runtime" || die "copied runtime differs from retained authority"
+  stage3_self_result_sha=$(hash_file "$stage3_self_result")
+  stage3_self_sanity_sha=$(hash_file "$stage3_self_sanity")
+  phase4_controller_sha=$(hash_file "$phase4_controller")
+  phase4_candidate_helper_sha=$(hash_file "$STAGE4_PROVENANCE_HELPER_PATH")
+fi
 if [ "$phase" = stage2 ]; then
   bound_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
     "$compiler" "$source_root" "$work_root") || die "Phase2 runtime binding is invalid"
@@ -415,6 +440,12 @@ if [ "$phase" = stage2 ]; then
   fi
   runtime_path=$bound_runtime
   # Phase2 keeps its own admission; only reuse the canonical snapshot helpers.
+  # Those helpers locate the repo through SIMPLE_PROJECT_ROOT or the Stage3
+  # facade path (bootstrap_stage3_native_windows_metadata); Phase2 loads no
+  # facade, so under set -u the first Windows metadata launch died with
+  # "BOOTSTRAP_STAGE3_FACADE_PATH: unbound variable" -> "cannot bind target C
+  # source/profile/tool inputs". Name the path without loading the facade.
+  BOOTSTRAP_STAGE3_FACADE_PATH=${BOOTSTRAP_STAGE3_FACADE_PATH:-$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs}
   . "$source_root/scripts/check/lib/bootstrap-stage3/authority.shs"
   . "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 fi
@@ -809,6 +840,9 @@ run_task() {
   esac
   [ "$task" != lsp_build ] || sanity_review_required=1
   log="$logs/$task.log"
+  if [ -n "$stage3_self_result" ]; then
+    printf '%s\n' "$@" >"$logs/$task.argv" || die "cannot retain Stage4 argv"
+  fi
   active_rss_file="$logs/$task.max-rss-kib"
   rm -f "$active_rss_file"
   started=$(date +%s)
@@ -874,12 +908,22 @@ run_task() {
       HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate
       SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task"
       export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NO_BOOTSTRAP_DELEGATE SIMPLE_NATIVE_BUILD_CACHE_DIR
+      if [ -n "$stage3_self_result" ]; then
+        SIMPLE_PROCESS_TREE_RSS_RECEIPT=$logs/$task.rss.env
+        export SIMPLE_PROCESS_TREE_RSS_RECEIPT
+      fi
       # Bootstrap-only dispatch controls belong only to the Stage 1 native
       # producer below.  Do not let an operator's ambient shell silently
       # redirect version checks or later phase verification.
       # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+      if [ -n "$stage3_self_result" ]; then
+        unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
+        printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
+          'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
+          'SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=absent' 'SIMPLE_TEST_RUNNER_RUST=absent' >"$logs/$task.selectors.env" || exit 1
+      fi
       bootstrap_phase_clear_test_child_authority
       if [ -n "$task_command_owner_receipt" ]; then
         bootstrap_phase_export_test_child_authority "$task_command_owner_receipt" "$logs/$task.children" || exit 90
@@ -1131,6 +1175,25 @@ run_task() {
       "$test_executed" "$test_passed" "$test_failed" "$test_skipped" >>"$summary" ||
       die "cannot append verification summary"
   fi
+  if [ -n "$stage3_self_result" ]; then
+    {
+      echo schema=simple-phase-verification-command-v1
+      echo "task=$task"
+      echo "status=$status"
+      echo "source_root=$source_root"
+      echo "log_path=$log"
+      echo "log_sha256=$(hash_file "$log")"
+      echo "selector_environment_path=$logs/$task.selectors.env"
+      echo "selector_environment_sha256=$(hash_file "$logs/$task.selectors.env")"
+      echo "argv_path=$logs/$task.argv"
+      echo "argv_sha256=$(hash_file "$logs/$task.argv")"
+      echo "artifact_path=$expected_executable"
+      echo "artifact_sha256=$artifact_sha256"
+      echo "max_rss_kib=$max_rss_kib"
+      echo "rss_receipt_path=$logs/$task.rss.env"
+      echo "rss_receipt_sha256=$(hash_file "$logs/$task.rss.env")"
+    } >"$logs/$task.command.env" || die "cannot retain Stage4 command evidence"
+  fi
   [ "$status" -eq 0 ]
 }
 
@@ -1347,6 +1410,50 @@ validate_stage4_tooling_receipt() {
   done
 }
 
+publish_retained_stage4_candidate() (
+  [ "$(hash_file "$stage3_self_result")" = "$stage3_self_result_sha" ] &&
+    [ "$(hash_file "$stage3_self_sanity")" = "$stage3_self_sanity_sha" ] &&
+    [ "$(hash_file "$phase4_controller")" = "$phase4_controller_sha" ] &&
+    [ "$(hash_file "$STAGE4_PROVENANCE_HELPER_PATH")" = "$phase4_candidate_helper_sha" ] || exit 1
+  validate_stage4_tooling_receipt "$stage4_tooling_receipt" || exit 1
+  stage4_verify_retained_self_result "$stage3_self_result" "$compiler" "$source_root" "$stage3_original_runtime" "$stage3_self_sanity" || exit 1
+  request=$tool_outputs/retained-stage4-candidate.request.env
+  (umask 077; set -C; {
+    echo schema=simple-stage4-retained-self-provenance-v1
+    echo status=pass
+    echo artifact_kind=pure-simple-full-cli
+    echo "output_path=$compiler_cli"
+    echo "output_sha256=$compiler_cli_sha"
+    echo "source_root=$source_root"
+    echo "source_head=$(git -C "$source_root" rev-parse HEAD)"
+    echo "source_tree=$(git -C "$source_root" rev-parse 'HEAD^{tree}')"
+    echo "source_snapshot_sha256=$(manifest_value source_snapshot_sha256 "$stage3_self_result")"
+    echo "parent_compiler_path=$compiler"
+    echo "parent_compiler_sha256=$expected_sha"
+    echo "original_runtime_path=$stage3_original_runtime"
+    echo "runtime_path=$runtime_path"
+    echo "runtime_snapshot_sha256=$(manifest_value runtime_snapshot_sha256 "$stage3_self_result")"
+    for pair in "self_result|$stage3_self_result" "selected_sanity|$stage3_self_sanity" \
+      "command_owner|$command_owner_receipt" "tooling_owner|$stage4_tooling_receipt" \
+      "runtime_capsule_receipt|$runtime_path/phase2-runtime-capsule.env" \
+      "controller|$phase4_controller" "helper|$STAGE4_PROVENANCE_HELPER_PATH" \
+      "evidence_validator|$phase4_controller_root/scripts/check/lib/stage4-retained-self-evidence.py" \
+      "essential_tools_owner|$stage4_essential_owner" "build_receipt|$logs/compiler_cli_build.command.env" \
+      "smoke_receipt|$logs/stage4_essential_tools.command.env"; do
+      key=${pair%%|*}; value=${pair#*|}
+      echo "${key}_path=$value"
+      echo "${key}_sha256=$(hash_file "$value")"
+    done
+    echo "essential_tools_log_path=$logs/stage4_essential_tools.log"
+    echo "essential_tools_log_sha256=$(hash_file "$logs/stage4_essential_tools.log")"
+    echo completed_gate=stage4-essential-tools-smoke
+    echo whole_suite_status=NOT_CLAIMED
+  } >"$request") || exit 1
+  stage4_write_retained_candidate_provenance "$request" "$compiler_cli.provenance.env" "$source_root" || exit 1
+  echo "stage4_candidate_provenance=$compiler_cli.provenance.env" >>"$summary"
+  echo "stage4_candidate_provenance_sha256=$(hash_file "$compiler_cli.provenance.env")" >>"$summary"
+)
+
 matrix_failed=0
 matrix_unsupported=0
 
@@ -1439,10 +1546,18 @@ prepare_phase_c_tool_binding() {
     target_c_platform=$(bootstrap_phase_c_target_platform) || return 1
     target_c_source_sha=$(manifest_value source_snapshot_sha256 "$(dirname "$compiler")/admission.env")
   fi
-  # The Windows executor pins clang-cl/MSVC even under Git Bash's GNU MSYSTEM.
+  # The Windows executor pins clang-cl/MSVC, or llvm-mingw clang/ld.lld for the
+  # explicit GNU lane, even under Git Bash's GNU MSYSTEM.
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
-    [ "$target_c_platform" = x86_64-pc-windows-msvc ] || return 1
-    [ "${SIMPLE_WINDOWS_ABI:-msvc}:${SIMPLE_LINKER_FLAVOR:-msvc}:${CL:-/TC}" = msvc:msvc:/TC ] || return 1 ;;
+    case "$(bootstrap_phase_windows_abi)" in
+      msvc)
+        [ "$target_c_platform" = x86_64-pc-windows-msvc ] || return 1
+        [ "${SIMPLE_LINKER_FLAVOR:-msvc}:${CL:-/TC}" = msvc:/TC ] || return 1 ;;
+      gnu)
+        [ "$target_c_platform" = x86_64-pc-windows-gnu ] || return 1
+        case "${SIMPLE_LINKER_FLAVOR:-gnu}" in gnu|mingw) ;; *) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac ;;
   esac
   [ "${#target_c_source_sha}" -eq 64 ] || return 1
   target_c_binding="$work_root/target-c-inputs.env"
@@ -1790,6 +1905,12 @@ run_inventory_row() {
       # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+      if [ -n "$stage3_self_result" ]; then
+        unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
+        printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
+          'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
+          'SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=absent' 'SIMPLE_TEST_RUNNER_RUST=absent' >"$logs/$task.selectors.env" || exit 1
+      fi
       stage2_row_delegation_env inventory-row
       bootstrap_phase_clear_test_child_authority
       bootstrap_phase_export_test_child_authority "$row_owner" "$row_dir/$row_index.children" || exit 90
@@ -2137,6 +2258,12 @@ run_repository_full_tests() {
         # Keep ambient bootstrap routing out of direct repository-test rows;
         # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
         unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+      if [ -n "$stage3_self_result" ]; then
+        unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
+        printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
+          'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
+          'SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=absent' 'SIMPLE_TEST_RUNNER_RUST=absent' >"$logs/$task.selectors.env" || exit 1
+      fi
         stage2_row_delegation_env inventory-row
         bootstrap_phase_clear_test_child_authority
         bootstrap_phase_export_test_child_authority "$full_owner_receipt" "$row_dir/$spec_count.children" || exit 90
@@ -2516,6 +2643,14 @@ else
       stage4_tooling_receipt_sha=$(hash_file "$stage4_tooling_receipt")
       echo "stage4_tooling_receipt=$stage4_tooling_receipt" >>"$summary"
       echo "stage4_tooling_receipt_sha256=$stage4_tooling_receipt_sha" >>"$summary"
+      if [ -n "$stage3_self_result" ]; then
+        stage4_essential_owner=$source_root/scripts/check/check-bootstrap-essential-tools-smoke.shs
+        run_matrix_task stage4_essential_tools --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
+          env "SIMPLE_BINARY=$compiler_cli" sh "$stage4_essential_owner"
+        if [ "$matrix_task_passed" = 1 ]; then
+          publish_retained_stage4_candidate || die "retained Stage4 candidate evidence failed"
+        fi
+      fi
     else
       record_unsupported_task stage4_tooling_owners stage4-cli-runner-mcp-lsp-artifact-not-built
     fi

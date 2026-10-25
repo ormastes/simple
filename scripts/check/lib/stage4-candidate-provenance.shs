@@ -284,7 +284,12 @@ stage4_verify_candidate_provenance() (
   [ "$#" -ge 3 ] && [ "$#" -le 4 ] || exit 1
   provenance="$1" binary="$2" root="$3" mode="${4:-generic}"
   case "$mode" in
-    generic) stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root" ;;
+    generic)
+      case "$(bootstrap_stage3_manifest_value schema "$provenance")" in
+        simple-stage4-retained-self-provenance-v1) stage4_verify_retained_candidate_provenance "$provenance" "$binary" "$root" ;;
+        *) stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root" ;;
+      esac
+      ;;
     phase7-llvm)
       stage4_verify_phase7_llvm_binding "$provenance" "$root" || exit 1
       stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root"
@@ -295,4 +300,46 @@ stage4_verify_candidate_provenance() (
       ;;
     *) exit 1 ;;
   esac
+)
+
+# Explicit retained self-build lane. No canonical Stage3 manifest/lock is invented.
+stage4_verify_retained_self_result() (
+  [ "$#" -eq 5 ] || exit 1
+  result=$1 binary=$2 root=$3 original_runtime=$4 sanity=$5
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  python3 "$validator" verify-self "$result" "$binary" "$root" "$original_runtime" "$sanity" || exit 1
+  work=$(mktemp -d) || exit 1
+  trap 'rm -rf "$work"' EXIT INT TERM
+  bootstrap_stage3_source_snapshot "$work/source" "$root" || exit 1
+  [ "$(bootstrap_stage3_hash_file "$work/source")" = "$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$result")" ] || exit 1
+  bootstrap_stage3_directory_snapshot "$work/runtime" "$original_runtime" || exit 1
+  [ "$(bootstrap_stage3_hash_file "$work/runtime")" = "$(bootstrap_stage3_manifest_value runtime_snapshot_sha256 "$result")" ] || exit 1
+)
+
+stage4_verify_retained_candidate_provenance() (
+  [ "$#" -eq 3 ] || exit 1
+  provenance=$1 binary=$2 root=$3
+  [ "$provenance" = "$binary.provenance.env" ] || exit 1
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  [ "$(bootstrap_stage3_manifest_value helper_path "$provenance")" = "$STAGE4_PROVENANCE_HELPER_PATH" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value evidence_validator_path "$provenance")" = "$validator" ] || exit 1
+  python3 "$validator" verify-candidate "$provenance" "$binary" "$root" || exit 1
+  result=$(bootstrap_stage3_manifest_value self_result_path "$provenance") || exit 1
+  original_runtime=$(bootstrap_stage3_manifest_value original_runtime_path "$provenance") || exit 1
+  selected=$(bootstrap_stage3_manifest_value parent_compiler_path "$provenance") || exit 1
+  sanity=$(bootstrap_stage3_manifest_value selected_sanity_path "$provenance") || exit 1
+  stage4_verify_retained_self_result "$result" "$selected" "$root" "$original_runtime" "$sanity"
+)
+
+stage4_write_retained_candidate_provenance() (
+  [ "$#" -eq 3 ] || exit 1
+  request=$1 provenance=$2 root=$3
+  binary=$(bootstrap_stage3_manifest_value output_path "$request") || exit 1
+  [ "$provenance" = "$binary.provenance.env" ] || exit 1
+  [ ! -e "$provenance" ] && [ ! -L "$provenance" ] || exit 1
+  validator="$(dirname -- "$STAGE4_PROVENANCE_HELPER_PATH")/stage4-retained-self-evidence.py"
+  python3 "$validator" verify-candidate "$request" "$binary" "$root" || exit 1
+  (umask 077; set -C; cat "$request" >"$provenance") || exit 1
+  chmod 400 "$provenance" || exit 1
+  stage4_verify_retained_candidate_provenance "$provenance" "$binary" "$root"
 )

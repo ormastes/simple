@@ -10,6 +10,7 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.frontend.join_point_attr_registry.{join_point_attr_record}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.async.*
 use compiler.hir.hir_lowering.expressions.*
@@ -28,7 +29,7 @@ use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult,
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{decl_get_span, span_is_valid, span_start, span_end, span_line, span_col}
-use compiler.core.{decl_is_gpu_kernel, decl_get_gpu_target_text, decl_get_gpu_backends_text}
+use compiler.core.{decl_is_gpu_kernel_at, decl_get_gpu_target_text, decl_get_gpu_backends_text}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -134,7 +135,7 @@ impl HirLowering:
         self.symbols.pop_scope()
         self.current_function = nil
         var func_attr = FunctionAttr.default()
-        if decl_is_gpu_kernel[decl_idx] != 0:
+        if decl_is_gpu_kernel_at(decl_idx) != 0:
             var fa = func_attr
             fa.is_gpu_kernel = true
             fa.gpu_target = decl_get_gpu_target_text(decl_idx)
@@ -178,6 +179,10 @@ impl HirLowering:
         )
 
     me lower_function(fn_: ParserFunction) -> HirFunction:
+        var jp_attr_names: [text] = []
+        for jp_attr in fn_.attributes:
+            jp_attr_names.push(jp_attr.name)
+        join_point_attr_record(self.module_filename, fn_.name, jp_attr_names)
         if fn_.name == "__simple_rt_string_char_code_at":
             val owns_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
             if not owns_alias:
@@ -394,8 +399,16 @@ impl HirLowering:
                 # lowering could not retain the actual return slot. Preserve it
                 # alongside `text`; expand other shapes only with dedicated ABI
                 # evidence. See native_imported_bool_return_void_2026-09-14.
+                # `f32`/`f64` have that evidence: they are the one scalar class
+                # the uniform-i64 lane cannot absorb. The body still produces
+                # a float value and every caller already sees the declared
+                # float (declared_callable_type lowers it unconditionally), so
+                # erasing only the definition's return made Cranelift reject
+                # `return vN: result 0 has type f64, must match function
+                # signature of i64` (lib.common.math.math, simd, ...). See
+                # cranelift_float_return_erased_to_i64_2026-10-24.
                 match declared_ret.kind:
-                    case HirTypeKind.Str | HirTypeKind.Bool:
+                    case HirTypeKind.Str | HirTypeKind.Bool | HirTypeKind.Float(_):
                         return_type = declared_ret
                     case _:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
@@ -537,7 +550,7 @@ impl HirLowering:
         if fn_.is_async:
             initial_effects = initial_effects.push(Effect(kind: EffectKind.Async, span: fn_.span))
 
-        val hir_func = HirFunction(
+        var hir_func = HirFunction(
             symbol: fn_symbol_id,
             name: fn_.name,
             type_params: type_params,
@@ -559,9 +572,13 @@ impl HirLowering:
             # shifting every later field one slot (same bug class as
             # HirCallArg.value — bug doc iteration 18).
             has_export_attr: has_parsed_export_attr,
-            export_attr: parsed_export_attr,
+            # Stage 2 stores a `T?` local into this desugared `T` field as the Option
+            # enum box (kind=ENUM, None/Some), so hc_enc_export_attr read the box as an
+            # ExportAttr and SEGVed. Construct with nil, assign the unwrapped value below.
+            # @workaround bug=optional_struct_stored_into_desugared_field_keeps_option_box_2026-10-25 reason=stage2_option_box_into_field
+            export_attr: nil,
             has_driver_manifest_attr: has_parsed_driver_manifest,
-            driver_manifest_attr: driver_manifest,
+            driver_manifest_attr: nil,
             has_suspension: false,
             has_vhdl_metadata: vhdl_metadata.is_hardware,
             vhdl_metadata: vhdl_metadata,
@@ -574,6 +591,10 @@ impl HirLowering:
             verification_contract: verification_contract,
             is_generic_template: hir_generic_fn_is_template(fn_.name, type_params.len())
         )
+        if val present_export_attr = parsed_export_attr:
+            hir_func.export_attr = present_export_attr
+        if val present_driver_manifest = driver_manifest:
+            hir_func.driver_manifest_attr = present_driver_manifest
 
         # Validate async functions
         if fn_.is_async:

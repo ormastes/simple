@@ -210,6 +210,31 @@ impl HirLowering:
             if not impl_.methods.contains_key(name): return false
         true
 
+    me record_impl_textual_method_keys(impls: [Impl]):
+        """Index every method written in this module's impl blocks as
+        "Owner::method" before any impl is lowered, so trait-default injection
+        sees an override regardless of impl block order."""
+        var keys: [text] = []
+        var impl_index = 0
+        while impl_index < impls.len():
+            val impl_: Impl = impls[impl_index]
+            val owner_name = parser_type_kind_named_name(impl_.type_.kind)
+            if owner_name != "":
+                for method_name in impl_.methods.keys():
+                    keys.push("{owner_name}::{method_name}")
+            impl_index = impl_index + 1
+        self.impl_textual_method_keys = keys
+
+    me impl_textual_method_key_present(owner_name: text, method_name: text) -> bool:
+        if owner_name == "": return false
+        val key = "{owner_name}::{method_name}"
+        var key_index = 0
+        while key_index < self.impl_textual_method_keys.len():
+            if self.impl_textual_method_keys[key_index] == key:
+                return true
+            key_index = key_index + 1
+        false
+
     me lower_impl(impl_: Impl) -> HirImpl:
         # `class X with Trait:` is a trait impl only once confirmed here.
         val has_trait = impl_.has_trait_ or self.with_trait_candidate_conforms(impl_)
@@ -353,7 +378,22 @@ impl HirLowering:
                     if self.lowered_traits.contains_key(trait_name):
                         val trait_hir: HirTrait = self.lowered_traits[trait_name]
                         for default_fn in trait_hir.defaults:
-                            if not methods.contains_key(default_fn.name):
+                            # Another impl block of this owner (typically an
+                            # inherent `impl Owner:` override) writes this
+                            # method: it owns the `Owner::name` symbol, so
+                            # injecting the default would emit a second body
+                            # under the same name (Cranelift "Duplicate
+                            # definition"). Bind the written method instead.
+                            val default_written_elsewhere = not methods.contains_key(default_fn.name) and self.impl_textual_method_key_present(impl_owner_name, default_fn.name)
+                            if default_written_elsewhere:
+                                match type_.kind:
+                                    case Named(written_owner_symbol, _):
+                                        val written_symbol_name = self.symbols.method_symbol_name(written_owner_symbol, default_fn.name)
+                                        if val written_symbol = self.symbols.lookup(written_symbol_name):
+                                            if written_symbol != nil:
+                                                methods[default_fn.name] = written_symbol
+                                    case _: ()
+                            if not methods.contains_key(default_fn.name) and not default_written_elsewhere:
                                 var concrete_default = default_fn
                                 val concrete_symbol_type = self.concrete_default_method_type(default_fn, type_)
                                 val concrete_symbol_name = match type_.kind:

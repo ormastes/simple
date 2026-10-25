@@ -1,0 +1,56 @@
+use std.spec
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Exact Stage3/Stage4 focused capsules shard by re-executing themselves
+# (native_build_main.spl native_build_focused_capsule_shards_v1).
+describe "focused capsule shard wiring":
+    it "runs the shard pre-pass before both exact capsules":
+        val source = read_source("src/app/cli/bootstrap_main.spl")
+        expect(source).to_contain("bootstrap_capsule_shard_child_env(args)")
+        expect(source).to_contain("if not bootstrap_capsule_shard_prepass(args, true):")
+        expect(source).to_contain("if not bootstrap_capsule_shard_prepass(args, false):")
+        expect(source).to_contain("return run_exact_stage4_focused_capsule(args)")
+        expect(source).to_contain("return run_exact_stage3_focused_capsule(args)")
+        expect(source).to_contain("env_set(\"SIMPLE_MIR_SHARD_LINK\", ledger)")
+
+    it "maps the child shard flags onto the driver shard environment":
+        val source = read_source("src/app/cli/bootstrap_main.spl")
+        expect(source).to_contain("env_set(\"SIMPLE_HIR_SHARD\", arg.substring(12))")
+        expect(source).to_contain("env_set(\"SIMPLE_MIR_SHARD\", arg.substring(12))")
+        expect("--hir-shard=".len()).to_equal(12)
+        expect("--mir-shard=".len()).to_equal(12)
+
+    it "keeps opt-outs, self-exec and evidence isolation in the pre-pass":
+        val source = read_source("src/app/cli/native_build_main.spl")
+        expect(source).to_contain("pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_mir: bool) -> text:")
+        expect(source).to_contain("mir_flag != \"0\"")
+        expect(source).to_contain("env_get(\"SIMPLE_HIR_SHARDING\") ?? \"\") == 1")
+        expect(source).to_contain("val simple_bin = self_exe()")
+        expect(source).to_contain("env_set(\"SIMPLE_MEM_SNAPSHOT_FILE\", \"\")")
+        expect(source).to_contain("env_set(\"SIMPLE_COMPILER_PHASE_PROFILE_FILE\", \"\")")
+        expect(source).to_contain("env_set(\"SIMPLE_BUILD_PROGRESS_EVENTS\", \"\")")
+
+    it "leaves Stage3 MIR unsharded because its AOT reads the whole MIR context":
+        val main = read_source("src/app/cli/bootstrap_main.spl")
+        val aot = read_source("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(aot).to_contain("return \"bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)\"")
+        expect(aot).to_contain("return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)")
+        expect(main).to_contain("bootstrap_compile_context_to_native_local, which reads the whole")
+
+    it "maps --parse-shard onto the driver parse shard environment":
+        val source = read_source("src/app/cli/bootstrap_main.spl")
+        expect(source).to_contain("env_set(\"SIMPLE_PARSE_SHARD\", arg.substring(14))")
+        expect("--parse-shard=".len()).to_equal(14)
+
+    it "warms the parse cache with capsule self-exec workers before HIR":
+        val source = read_source("src/app/cli/native_build_main.spl")
+        val parse_at = source.index_of("run_parse_shards_with_base(base, parse_count, simple_bin, timeout_ms)")
+        val hir_at = source.index_of("val hir_count = if native_build_hir_shard_policy_v1")
+        expect(parse_at > 0).to_equal(true)
+        expect(hir_at > parse_at).to_equal(true)
+        expect(source).to_contain("val CAPSULE_PARSE_SHARD_DEFAULT_MAX: i64 = 8")
+        expect(source).to_contain("val count = native_build_parse_shard_count(args)")
+        expect(source).to_contain("shard_args = shard_args.push(\"--parse-shard=")

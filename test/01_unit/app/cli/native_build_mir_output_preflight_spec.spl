@@ -1,0 +1,75 @@
+# @cover src/app/cli/native_build_output_plan.spl
+# @cover src/app/cli/native_build_main.spl
+# The shared output selector is used by the authoritative worker and the
+# coordinator's scheduling preflight. No compiler build or worker is launched.
+use app.cli.native_build_output_plan.{native_build_output_format_v1,
+    native_build_mir_output_requires_full_set_v1, native_build_is_value_consuming_flag}
+use compiler.common.driver_core_modes.{driver_output_format_is_both}
+use std.io_runtime.{file_read}
+
+describe "native-build MIR output preflight":
+    it "shares the worker's default dynload and explicit one-binary format":
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, false, false))).to_equal(true)
+        expect(driver_output_format_is_both(native_build_output_format_v1("one-binary", false, false, false))).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["entry.spl"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--mode", "one-binary", "entry.spl"], false)).to_equal(false)
+
+    it "recognizes both mode spellings and the last parsed mode":
+        for args in [["--mode=dynload"], ["--build-mode", "dynload"], ["--build-mode=dynload"],
+                ["--mode=one-binary", "--mode", "dynload"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(true)
+        for args in [["--mode=one-binary"], ["--build-mode", "one-binary"], ["--build-mode=one-binary"],
+                ["--mode=dynload", "--build-mode=one-binary"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(false)
+
+    it "leaves explicit native artifacts to existing worker admission":
+        for flag in ["--emit-object", "--emit-entry-object", "--emit-archive", "--emit-shared"]:
+            expect(native_build_mir_output_requires_full_set_v1(["entry.spl", flag], false)).to_equal(false)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--mode=dynload"], false)).to_equal(false)
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, true, false))).to_equal(false)
+
+    it "keeps the full MIR set for an explicit SMF side artifact":
+        expect(native_build_mir_output_requires_full_set_v1(["--mode=one-binary", "--emit-smf"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--emit-smf", "--mode=one-binary"], false)).to_equal(true)
+        expect(driver_output_format_is_both(native_build_output_format_v1("one-binary", true, false, false))).to_equal(true)
+
+    it "does not treat option operands as output mode flags":
+        for flag in ["-o", "--output", "--source", "--entry", "--cache-dir", "--runtime-path",
+                "--collection-profile", "--parser-prefer", "--input-manifest"]:
+            expect(native_build_is_value_consuming_flag(flag)).to_equal(true)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--emit-object"], false)).to_equal(true)
+            expect(native_build_mir_output_requires_full_set_v1([flag, "--mode=one-binary"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--output=--emit-object", "--strip"], false)).to_equal(true)
+        expect(native_build_mir_output_requires_full_set_v1(["--mode=one-binary", "--output", "--emit-smf"], false)).to_equal(false)
+
+    it "preserves selective admission for every projected output":
+        for args in [["entry.spl"], ["--mode=dynload"], ["--emit-smf"], ["--emit-entry-object"], ["--mode=one-binary"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, true)).to_equal(false)
+
+    it "leaves uncertain arguments and missing operands to the existing worker":
+        for args in [["--future-option", "--mode=one-binary"], ["--future-option=x"],
+                ["--mode"], ["--output"], ["--mode=invalid"], ["--mode="], ["--"]]:
+            expect(native_build_mir_output_requires_full_set_v1(args, false)).to_equal(false)
+
+    it "uses the worker's grouped-native override without admitting the whole lane":
+        expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, false, true))).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["entry.spl"], false, true)).to_equal(false)
+        expect(native_build_mir_output_requires_full_set_v1(["--emit-smf"], false, true)).to_equal(true)
+
+    it "runs the shared preflight after selective dispatch and before worker budgeting":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val start = source.index_of("fn native_build_mir_shard_parallel(args:")
+        val end = source.index_of("fn native_build_mir_selective_parallel_v1(args:")
+        expect(start >= 0 and end > start).to_equal(true)
+        val coordinator = source.substring(start, end)
+        val selective = coordinator.index_of("return native_build_mir_selective_parallel_v1(args)")
+        val preflight = coordinator.index_of("if native_build_mir_output_requires_full_set_v1(args, selective,")
+        val budget = coordinator.index_of("val requested = native_build_shard_threads(args,")
+        expect(selective >= 0 and preflight > selective and budget > preflight).to_equal(true)
+        expect(coordinator.substring(preflight, budget)).to_contain("return 0")
+        val worker = file_read("src/app/io/_CliCompile/compile_targets.spl")
+        expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, true, false, native_group_requested)")
+        expect(worker).to_contain("options.output_format = native_build_output_format_v1(build_mode, false,")
+        val driver = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(driver).to_contain("if not self.native_mir_shard_eligible_v1():")
+        expect(driver).to_contain("return \"output format re-reads MIR set\"")

@@ -1,0 +1,44 @@
+"""P4: reweave from the immutable pre-advice base body (idempotent, no stacking)."""
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.config.{Logger}
+use compiler.semantics.aspect_weave.{aspect_weave_base_bodies_new_v1,
+    aspect_weave_base_record_v1, aspect_weave_from_base_v1}
+
+val SRC = "fn submit_impl(n: i64) -> i64:\n    n + 1\n\nfn submit_view(n: i64) -> i64:\n    submit_impl(n)\n"
+
+fn base_view() -> HirFunction:
+    val module = parse_full_frontend(SRC, "wb_probe.spl", "wb_probe", Logger(level: 0))
+    var lowering = HirLowering.with_filename("wb_probe.spl")
+    val hir = lowering.lower_module(module)
+    var out = hir.functions[hir.functions.keys()[0]]
+    for sym in hir.functions.keys():
+        if hir.functions[sym].name == "submit_view":
+            out = hir.functions[sym]
+    out
+
+describe "aspect_weave_from_base_v1":
+    it "reweaves from the base body: advice edits never stack":
+        val base = base_view()
+        val n0 = base.body.stmts.len()
+        val store = aspect_weave_base_record_v1(aspect_weave_base_bodies_new_v1(), "d1", base.body)
+        val w1 = aspect_weave_from_base_v1(store, "d1", base, ["log_a"])
+        expect(w1.body.stmts.len()).to_equal(n0 + 1)
+        # Selector/advice change: reweave the already-woven live function from base.
+        val w2 = aspect_weave_from_base_v1(store, "d1", w1, ["log_b", "log_c"])
+        expect(w2.body.stmts.len()).to_equal(n0 + 2)
+        val w3 = aspect_weave_from_base_v1(store, "d1", w2, [])
+        expect(w3.body.stmts.len()).to_equal(n0)
+    it "first recorded base wins and a missing base leaves the function unchanged":
+        val base = base_view()
+        val n0 = base.body.stmts.len()
+        val s1 = aspect_weave_base_record_v1(aspect_weave_base_bodies_new_v1(), "d1", base.body)
+        val woven = aspect_weave_from_base_v1(s1, "d1", base, ["log_a"])
+        val s2 = aspect_weave_base_record_v1(s1, "d1", woven.body)
+        expect(aspect_weave_from_base_v1(s2, "d1", base, []).body.stmts.len()).to_equal(n0)
+        expect(aspect_weave_from_base_v1(s2, "missing", woven, []).body.stmts.len()).to_equal(n0 + 1)

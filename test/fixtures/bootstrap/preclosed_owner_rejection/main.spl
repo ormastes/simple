@@ -1,0 +1,183 @@
+use app.io.mod.{process_run_bounded}
+use app.io.cli_ops.{cli_current_exe_path}
+use std.io_runtime.{dir_create_all, file_write}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_hash_sha256, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
+use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1, compiler_source_authority_acquire_v1}
+use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
+use compiler.common.driver_core_types.{CompileMode, CompileOptions, driver_core_compile_options_default}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.{EnvironmentVariantAdminRestrictionsV1, environment_variant_policy_resolve_v1}
+use compiler.driver.driver_compiler_type.{CompilerDriver, compiler_driver_next_identity_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{frontend_advisory_policy_from_environment_decision_v1}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
+use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1, native_entry_closure_request_open_v1}
+
+# Real SCV/receipt/loader diagnostic. No parser, HIR or codegen is run here.
+# Every assertion follows restoration of the caller's environment.
+var assertions = 0
+
+fn checked(condition: bool):
+    if not condition:
+        print "preclosed-owner-rejection failed ordinal={assertions + 1}"
+    assert(condition)
+    assertions = assertions + 1
+
+fn restore_value(key: text, previous: text?) -> bool:
+    if val value = previous:
+        env_set(key, value)
+    else:
+        env_remove_process(key)
+
+fn fixture_git(root: text, args: [text]) -> bool:
+    val (_stdout, _stderr, status) = process_run_bounded("git",
+        ["-C", root, "-c", "core.hooksPath=", "-c", "commit.gpgsign=false"] + args,
+        30000, 1048576)
+    status == 0
+
+fn fixture_policy() -> Result<EnvironmentVariantPolicyCollectionV1, text>:
+    val absent = EnvironmentVariantRawValueV1(false, "")
+    val layer = EnvironmentVariantRawPolicyLayerV1(absent, absent, absent, absent,
+        absent, absent, absent, absent)
+    val admin = EnvironmentVariantAdminRestrictionsV1("", "", "", "")
+    match environment_variant_policy_collect_v1(layer, layer, layer, layer, admin):
+        case Ok(value): Ok(value)
+        case Err(_): Err("fixture policy collection refused")
+
+# Same construction/policy operations as driver.spl:139-170; omit its backend facade.
+fn fixture_driver(options: CompileOptions,
+        collection: EnvironmentVariantPolicyCollectionV1) -> Result<CompilerDriver, text>:
+    val driver = CompilerDriver(
+        identity_id: compiler_driver_next_identity_v1(),
+        ctx: CompileContext.create(options),
+        streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
+        streaming_surface_owner_ready: false,
+        streaming_entry_source_index_owner: -1)
+    val decision = environment_variant_policy_resolve_v1(collection.policy_inputs)?
+    driver.ctx.frontend_advisory_policy =
+        frontend_advisory_policy_from_environment_decision_v1(decision)
+    driver.ctx.environment_variant_policy_digest = decision.policy_digest
+    driver.ctx.environment_variant_frontend_owner_id = 0u64
+    driver.ctx.environment_variant_frontend_session_id = 0u64
+    driver.ctx.environment_variant_frontend_generation = 0u64
+    driver.ctx.environment_variant_frontend_cache_identity = decision.policy_digest
+    Ok(driver)
+
+fn issue_request(root: text, authority: CompilerSourceAuthorityV1,
+        binding: NativeEntryClosureBindingV1, identities: [text], receipt: text
+) -> Result<NativeEntryClosureRequestV1, text>:
+    var paths: [text] = []
+    for identity in identities:
+        paths = paths.push(authority.snapshot.snapshot_root + "/" + identity)
+    val digest = compiler_entry_closure_publish_v1(root, authority, binding, paths, receipt)?
+    val request = NativeEntryClosureRequestV1(root, authority.snapshot,
+        authority.source_inventory_digest, authority.inventory_generation,
+        binding, receipt, digest)
+    # Require real receiver admission before constructing a negative case.
+    val opened = native_entry_closure_request_open_v1(request, binding.policy_digest)?
+    if opened.identities != identities: return Err("issued selection differs from requested rows")
+    Ok(request)
+
+fn observe_rejection(request: NativeEntryClosureRequestV1,
+        collection: EnvironmentVariantPolicyCollectionV1, prior: text, reason: text
+) -> Result<(text, text, text, bool, i64, bool), text>:
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Check
+    options.low_memory = true
+    val driver = match fixture_driver(options, collection):
+        case Ok(value): value
+        case Err(_): return Err("fixture driver policy refused")
+    if not env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", prior):
+        return Err("fixture prior marker publication failed")
+    val before = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+    val (loaded, ok) = driver.load_sources_impl(Some(request))
+    val after = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+    var diagnosed = false
+    for error in loaded.errors:
+        print "preclosed-rejection error={error}"
+        if error.contains(reason): diagnosed = true
+    print "preclosed-rejection prior={prior} before={before} after={after} ok={ok} errors={loaded.error_count_value} expected_reason={reason} diagnosed={diagnosed}"
+    Ok((prior, before, after, ok, loaded.error_count_value, diagnosed))
+
+fn rejection_cases() -> Result<[(text, text, text, bool, i64, bool)], text>:
+    val allocated = secure_temp_dir(get_temp_dir(), "preclosed-owner-rejection-")?
+    val root = allocated.replace("\\", "/")
+    print "preclosed-rejection fixture_root={root}"
+    for directory in ["src", "test", "examples/10_tooling", "build"]:
+        if not dir_create_all(root + "/" + directory): return Err("fixture mkdir refused")
+    if not file_write(root + "/.gitignore", "build/\n"): return Err("fixture ignore write failed")
+    if not file_write(root + "/src/main.spl", "fn main() -> i64:\n    0\n"): return Err("fixture entry write failed")
+    if not file_write(root + "/src/imported_answer.spl", "pub fn answer() -> i64:\n    42\n"): return Err("fixture provider write failed")
+    if not file_write(root + "/src/a-b.spl", "pub fn left() -> i64:\n    1\n"): return Err("fixture left write failed")
+    if not file_write(root + "/src/a_b.spl", "pub fn right() -> i64:\n    2\n"): return Err("fixture right write failed")
+    if not fixture_git(root, ["init", "-q"]): return Err("fixture git init failed")
+    if not fixture_git(root, ["add", "src", ".gitignore"]): return Err("fixture git add failed")
+    if not fixture_git(root, ["-c", "user.name=Preclosed owner fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]):
+        return Err("fixture git commit failed")
+    val authority = compiler_source_authority_acquire_v1(root, root + "/build/scv", ["src"], true)
+    if not authority.valid: return Err("fixture authority refused: " + authority.reason)
+    val collection = fixture_policy()?
+    val probe_driver = match fixture_driver(
+            driver_core_compile_options_default(), collection):
+        case Ok(value): value
+        case Err(_): return Err("fixture policy resolution refused")
+    val producer = file_hash_sha256(cli_current_exe_path())
+    if producer.len() != 64: return Err("actual diagnostic producer digest unavailable")
+    val snapshot = authority.snapshot
+    val binding = NativeEntryClosureBindingV1(snapshot.revision_id, snapshot.commit_id,
+        snapshot.tree_id, snapshot.inventory_digest, "src/main.spl", ["src"],
+        probe_driver.ctx.environment_variant_policy_digest, producer)
+    val ordinary = issue_request(root, authority, binding,
+        ["src/main.spl", "src/imported_answer.spl"], root + "/build/ordinary.v1")?
+    val collision = issue_request(root, authority, binding,
+        ["src/main.spl", "src/a-b.spl", "src/a_b.spl"], root + "/build/collision.v1")?
+    val ordinary_bytes = file_read_regular_no_follow_bounded(ordinary.receipt_path, 1048576)?
+    val corrupt_path = root + "/build/corrupt-copy.v1"
+    if not file_write(corrupt_path, ordinary_bytes + "corrupt\n"):
+        return Err("fixture corrupt copy write failed")
+    val corrupt = NativeEntryClosureRequestV1(ordinary.source_root, ordinary.snapshot,
+        ordinary.source_digest, ordinary.generation, ordinary.binding,
+        corrupt_path, ordinary.receipt_digest)
+    if not env_set("SIMPLE_BOOTSTRAP", "1"): return Err("fixture bootstrap publication failed")
+    if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", snapshot.snapshot_root + "/src/main.spl"):
+        return Err("fixture entry publication failed")
+    var observations: [(text, text, text, bool, i64, bool)] = []
+    for prior in ["0", "1"]:
+        observations = observations.push(observe_rejection(corrupt, collection, prior,
+            "entry-closure-receipt-framing-invalid")?)
+        observations = observations.push(observe_rejection(collision, collection, prior,
+            "native module name collision")?)
+    # Keep original immutable selection and snapshot files for attribution.
+    Ok(observations)
+
+fn main() -> i64:
+    val old_bootstrap = env_get_nullable("SIMPLE_BOOTSTRAP")
+    val old_entry = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY")
+    val old_closure = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val outcome = rejection_cases()
+    # Evaluate every restore independently even when another restore fails.
+    val restored_bootstrap = restore_value("SIMPLE_BOOTSTRAP", old_bootstrap)
+    val restored_entry = restore_value("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
+    val restored_closure = restore_value("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)
+    checked(restored_bootstrap)
+    checked(restored_entry)
+    checked(restored_closure)
+    match outcome:
+        case Err(reason):
+            print "preclosed-rejection setup failed: {reason}"
+            return 1
+        case Ok(observations):
+            checked(observations.len() == 4)
+            for observation in observations:
+                val (prior, before, after, load_ok, error_count, diagnosed) = observation
+                checked(not load_ok)
+                checked(error_count > 0)
+                checked(before == prior)
+                checked(after == prior)
+                checked(diagnosed)
+    print "preclosed-owner-rejections cases=4 assertions={assertions}"
+    0

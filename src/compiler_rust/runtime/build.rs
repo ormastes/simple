@@ -30,6 +30,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_disk_headroom.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_disk_headroom_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
     println!("cargo:rerun-if-changed=../../runtime/simple_gpu_provider_abi_v1.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime.h");
@@ -335,6 +337,7 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_file_view.c",
+        "runtime_disk_headroom.c",
         "runtime_fd_stat_rust_bridge.c",
         "runtime_font.c",
         "runtime_memtrack.c",
@@ -464,6 +467,14 @@ fn compile_c_runtime_sources() {
         c_sources.push("vendor/liburing/src/setup.c");
         c_sources.push("vendor/liburing/src/syscall.c");
     }
+    // Windows: the same C layer contributes the IOCP provider (OVERLAPPED
+    // ReadFile/WriteFile + GetQueuedCompletionStatusEx), so reads issued by
+    // scheduler fibers really overlap with compute. Rust stays the rt_driver_*
+    // owner; the software driver remains the explicit "reference" provider.
+    if target_os == "windows" {
+        c_sources.push("platform/async_driver.c");
+        c_sources.push("platform/async_windows.c");
+    }
 
     let mut build = cc::Build::new();
     build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
@@ -474,6 +485,11 @@ fn compile_c_runtime_sources() {
         build.define("SPL_HAS_IO_URING", None);
         build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
         build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
+    if target_os == "windows" {
+        build.include(runtime_c_dir.join("platform"));
+        // Rust owns the rt_driver_* flat ABI; C contributes only the vtable.
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
     }
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     // See the runtime_audio.c comment above: this crate doesn't compile
@@ -628,6 +644,9 @@ fn compile_c_runtime_sources() {
         // hosted_win32.c real mode: CreateWindowExW + CreateDIBSection + BitBlt.
         println!("cargo:rustc-link-lib=dylib=user32");
         println!("cargo:rustc-link-lib=dylib=gdi32");
+        // platform/async_windows.c: AcceptEx/ConnectEx/WSARecv (IOCP provider).
+        println!("cargo:rustc-link-lib=dylib=ws2_32");
+        println!("cargo:rustc-link-lib=dylib=mswsock");
     }
     // openpty / forkpty live in libutil on Linux and most BSDs.
     // On macOS they are part of libc itself; on Windows the functions don't exist.
@@ -688,6 +707,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
             .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
     }
     const LINKED_C_SOURCES: &[&str] = &[
+        "runtime_disk_headroom.c",
         "runtime_memory.c",
         "runtime_alloc_observer.c",
         "runtime_time.c",

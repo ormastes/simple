@@ -1,0 +1,233 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_fork_v1.spl 0%
+"""
+# EXPERIMENTAL copy-on-write MIR fork workers keep the shard ledger protocol
+
+**Category:** Compiler / driver
+**Design:** doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md
+
+## Purpose and Audience
+
+SIMPLE_MIR_FORK_WORKERS=N makes one root shard worker fork N MIR children
+after mono instead of spawning N workers that each rebuild the post-mono heap.
+The children must stay ordinary ledger owners so claims, seals and the link
+child work unchanged.
+
+## Expected Outcome
+
+The knob is off unless it names 2..64 workers; a child owner never collides
+with a coordinator owner; a crashed child's claims are sealed under its own
+owner and count toward the root only through the coordinator's owner-tree
+progress; a dead share is re-forked at most twice and only while inventory
+rows are unclaimed; CRASH-sealed rows are never re-claimed. The fork happens
+only where aot_compile_mir_shard_v1 armed it (the claim loop, after the shared
+lowering setup), and a child claims with its own share cap.
+
+UNEXECUTED: written without running the spec (no builds allowed in that lane).
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, getpid}
+use std.io_runtime.{env_set}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_claim_cap_v1}
+use compiler.driver.driver_build.native_mir_fork_v1.{
+    native_mir_fork_arm_v1, native_mir_fork_armed_v1, native_mir_fork_disarm_v1,
+    native_mir_fork_at_claim_loop_v1, NATIVE_MIR_FORK_WORKERS_ENV_V1,
+    native_mir_fork_workers_of_v1, native_mir_fork_child_owner_v1,
+    native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1, native_mir_fork_fail_fast_v1,
+    NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
+    hir_shard_recovery_seal, hir_shard_recovery_progress,
+    hir_shard_recovery_failure_count, hir_shard_recovery_owner_tree_progress_v1,
+    hir_shard_recovery_inventory, hir_shard_recovery_unclaimed_count,
+    hir_shard_recovery_excluded, hir_shard_recovery_close_inventory,
+    hir_shard_recovery_withdraw_inventory_v1}
+
+fn fresh_ledger(tag: text) -> text:
+    val dir = "build/test_tmp/native_mir_fork_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+describe "MIR fork worker count":
+    it "is disabled unless it names 2..64 workers":
+        # @req REQ-SSPEC-COMPILER
+        step("is disabled unless it names 2..64 workers")
+        assert_equal(native_mir_fork_workers_of_v1(""), 0)
+        assert_equal(native_mir_fork_workers_of_v1("0"), 0)
+        assert_equal(native_mir_fork_workers_of_v1("1"), 0)
+        assert_equal(native_mir_fork_workers_of_v1("-4"), 0)
+        assert_equal(native_mir_fork_workers_of_v1("abc"), 0)
+        assert_equal(native_mir_fork_workers_of_v1("65"), 0)
+        assert_equal(native_mir_fork_workers_of_v1("2"), 2)
+        assert_equal(native_mir_fork_workers_of_v1("16"), 16)
+        assert_false(native_mir_fork_is_child_v1())
+
+describe "MIR fork child owners":
+    it "are distinct from the root and from coordinator owners":
+        # @req REQ-SSPEC-COMPILER
+        step("are distinct from the root and from coordinator owners")
+        val child = native_mir_fork_child_owner_v1("0/1@0", 3, 16, 0)
+        assert_equal(child, "0/1@0+fork3/16")
+        assert_false(child == "0/1@0")
+        assert_false(child == "0/1@1")
+        assert_false(child.contains("\n"))
+
+    it "seals a crashed child's claims without crediting the root":
+        # @req REQ-SSPEC-COMPILER
+        step("seals a crashed child's claims without crediting the root")
+        val queue = fresh_ledger("seal")
+        val child = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 0)
+        assert_equal(hir_shard_recovery_claim(queue, child, "mod.a", "key"), 1)
+        assert_equal(hir_shard_recovery_progress(queue, "0/1@0"), 0)
+        assert_equal(hir_shard_recovery_progress(queue, child), 1)
+        assert_equal(hir_shard_recovery_owner_tree_progress_v1(queue, "0/1@0"), 1)
+        assert_equal(hir_shard_recovery_owner_tree_progress_v1(queue, "0/1@1"), 0)
+        assert_equal(hir_shard_recovery_seal(queue, child, "CRASH"), 1)
+        assert_equal(hir_shard_recovery_seal(queue, child, "CRASH"), 0)
+        assert_equal(hir_shard_recovery_failure_count(queue), 1)
+        val _removed = dir_remove_all(queue)
+
+    it "gives each re-fork attempt its own owner under the fork mark":
+        # @req REQ-SSPEC-COMPILER
+        step("gives each re-fork attempt its own owner under the fork mark")
+        val first = native_mir_fork_child_owner_v1("0/1@0", 2, 4, 0)
+        val retry = native_mir_fork_child_owner_v1("0/1@0", 2, 4, 1)
+        assert_equal(retry, "0/1@0+fork2/4~r1")
+        assert_false(first == retry)
+        assert_true(retry.starts_with("0/1@0+fork"))
+        assert_false(retry.contains("\n"))
+
+describe "MIR fork re-fork of a dead share":
+    it "re-forks an unfinished share only while rows are unclaimed":
+        # @req REQ-SSPEC-COMPILER
+        step("re-forks an unfinished share only while rows are unclaimed")
+        assert_true(native_mir_fork_reforkable_v1(false, false, false, 0, 3))
+        assert_true(native_mir_fork_reforkable_v1(false, false, false, 1, 1))
+        # B's rule: every row claimed (and sealed) means nothing to re-fork for.
+        assert_false(native_mir_fork_reforkable_v1(false, false, false, 0, 0))
+        assert_false(native_mir_fork_reforkable_v1(false, false, false, 0, -1))
+
+    it "never re-forks a finished share, past the retry limit, under fail-fast or BLOCKED":
+        # @req REQ-SSPEC-COMPILER
+        step("never re-forks a finished share, past the retry limit, under fail-fast or BLOCKED")
+        assert_equal(NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1, 2)
+        assert_false(native_mir_fork_reforkable_v1(false, false, true, 0, 3))
+        assert_false(native_mir_fork_reforkable_v1(false, false, false, 2, 3))
+        assert_false(native_mir_fork_reforkable_v1(true, false, false, 0, 3))
+        assert_false(native_mir_fork_reforkable_v1(false, true, false, 0, 3))
+
+    it "leaves a CRASH-sealed row claimed so a replacement cannot take it":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a CRASH-sealed row claimed so a replacement cannot take it")
+        val queue = fresh_ledger("refork")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b", "mod.c"]))
+        val dead = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 0)
+        val retry = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 1)
+        assert_equal(hir_shard_recovery_claim(queue, dead, "mod.a", "key"), 1)
+        assert_equal(hir_shard_recovery_seal(queue, dead, "CRASH"), 1)
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 2)
+        # The replacement cannot re-claim the crashed row, only the residue.
+        assert_equal(hir_shard_recovery_claim(queue, retry, "mod.a", "key"), 0)
+        assert_equal(hir_shard_recovery_claim(queue, retry, "mod.b", "key"), 1)
+        assert_equal(hir_shard_recovery_seal(queue, dead, "CRASH"), 0)
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 1)
+        assert_equal(hir_shard_recovery_owner_tree_progress_v1(queue, "0/1@0"), 2)
+        assert_equal(hir_shard_recovery_failure_count(queue), 1)
+        val _removed = dir_remove_all(queue)
+
+describe "MIR fork excluded rows and fail-fast":
+    it "does not count go-to-end-excluded rows as unclaimed":
+        # @req REQ-SSPEC-COMPILER
+        step("does not count go-to-end-excluded rows as unclaimed")
+        val queue = fresh_ledger("excluded")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b", "mod.c"]))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 3)
+        assert_true(hir_shard_recovery_excluded(queue, "key", ["mod.b"]))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 2)
+        # Same record is idempotent; a different one is refused.
+        assert_true(hir_shard_recovery_excluded(queue, "key", ["mod.b"]))
+        assert_false(hir_shard_recovery_excluded(queue, "key", ["mod.c"]))
+        # The inventory is untouched, so close_inventory still sees every row.
+        assert_equal(hir_shard_recovery_close_inventory(queue, false), 3)
+        val _removed = dir_remove_all(queue)
+
+    it "keeps the root fail-fast predicate equal to the coordinator's":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the root fail-fast predicate equal to the coordinator's")
+        assert_false(native_mir_fork_fail_fast_v1("", ""))
+        assert_true(native_mir_fork_fail_fast_v1("1", ""))
+        assert_false(native_mir_fork_fail_fast_v1("0", ""))
+
+describe "MIR fork point after the shared lowering setup":
+    it "forks only when aot_compile_mir_shard_v1 armed it":
+        # @req REQ-SSPEC-COMPILER
+        step("forks only when aot_compile_mir_shard_v1 armed it")
+        # Unarmed: the claim-loop fork point is inert for every other
+        # lower_to_mir caller (explicit targets, selective, cohorts).
+        assert_false(native_mir_fork_armed_v1())
+        val (role, code) = native_mir_fork_at_claim_loop_v1()
+        assert_equal(role, "off")
+        assert_equal(code, 0)
+        assert_false(native_mir_fork_disarm_v1())
+
+    it "does not arm with the experiment off or without a ledger":
+        # @req REQ-SSPEC-COMPILER
+        step("does not arm with the experiment off or without a ledger")
+        assert_true(env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""))
+        native_mir_fork_arm_v1("build/test_tmp/native_mir_fork_unarmed", "0/1@0")
+        assert_false(native_mir_fork_armed_v1())
+        assert_true(env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, "4"))
+        native_mir_fork_arm_v1("", "0/1@0")
+        assert_false(native_mir_fork_armed_v1())
+        assert_true(env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""))
+
+    it "reports an armed fork whose point was never reached, once":
+        # @req REQ-SSPEC-COMPILER
+        step("reports an armed fork whose point was never reached, once")
+        assert_true(env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, "4"))
+        native_mir_fork_arm_v1("build/test_tmp/native_mir_fork_unreached", "0/1@0")
+        assert_true(env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""))
+        assert_true(native_mir_fork_armed_v1())
+        # aot_compile_mir_shard_v1 disarms after lower_to_mir: true means the
+        # claim loop was never reached and nothing forked.
+        assert_true(native_mir_fork_disarm_v1())
+        assert_false(native_mir_fork_armed_v1())
+        assert_false(native_mir_fork_disarm_v1())
+        val (role, _code) = native_mir_fork_at_claim_loop_v1()
+        assert_equal(role, "off")
+
+    it "gives a forked child the claim cap of its own share, not the root's":
+        # @req REQ-SSPEC-COMPILER
+        step("gives a forked child the claim cap of its own share, not the root's")
+        # The root computes its cap from spec 0/1 before forking; the child
+        # recomputes it from "i/N" after the fork installs its spec.
+        assert_equal(native_mir_shard_claim_cap_v1("0/1", 100), 100)
+        assert_equal(native_mir_shard_claim_cap_v1("3/20", 100), 5)
+        assert_equal(native_mir_shard_claim_cap_v1("3/20", 101), 6)
+
+    it "withdraws an unclaimed inventory when the root declines after publishing":
+        # @req REQ-SSPEC-COMPILER
+        step("withdraws an unclaimed inventory when the root declines after publishing")
+        val queue = fresh_ledger("withdraw")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b"]))
+        assert_true(hir_shard_recovery_excluded(queue, "key", ["mod.b"]))
+        assert_true(hir_shard_recovery_withdraw_inventory_v1(queue))
+        # Pre-inventory shape: unreadable inventory, so the coordinator's close
+        # seals nothing BLOCKED and the zero-claim run reads as fallback.
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), -1)
+        assert_equal(hir_shard_recovery_close_inventory(queue, false), -1)
+        assert_equal(hir_shard_recovery_failure_count(queue), 0)
+        val _removed = dir_remove_all(queue)
+
+    it "refuses to withdraw an inventory once a row is claimed":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses to withdraw an inventory once a row is claimed")
+        val queue = fresh_ledger("withdraw_claimed")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b"]))
+        val child = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 0)
+        assert_equal(hir_shard_recovery_claim(queue, child, "mod.a", "key"), 1)
+        assert_false(hir_shard_recovery_withdraw_inventory_v1(queue))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 1)
+        val _removed = dir_remove_all(queue)

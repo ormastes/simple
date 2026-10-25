@@ -53,7 +53,12 @@ use std.io_runtime.{env_get_opt}
 # (build/**/shared_parse*, .simple/cache) rather than rely on the label.
 # v7 combines imported generic instances with adaptive named arguments/layout
 # owners and the List import parser flag. Neither branch's older layout matches.
-val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v8-a5-refusal"
+# v9 (2026-10-24): the decl family gained the macro fact pools (macro_def_*,
+# macro_use_*) appended after its sorted block; an older reader would misalign
+# every later family on a new blob, so the label must change.
+# v10 (2026-10-24): macro_def_params entries carry `=const` for CTFE params;
+# a v9 blob would restore params without it (different macro effects).
+pub val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v10-macro-const"
 
 # Generated HIR records currently top out well below this representation
 # reservation. Container entries and text are charged separately by next_len
@@ -120,6 +125,17 @@ pub class FlatPoolReader:
     var maximum_depth: i64
     var charged_work_units: i64
     var audit_events: i64
+    # Token mode (packed .spab restore, flat_pool_packed_v1.spl): the same
+    # cursor API over typed tokens decoded straight from the packed sections --
+    # integers are never formatted or re-parsed. kinds: 0 integer, 1 text
+    # (texts are carried ESCAPED, so every existing decoder's unescape stays
+    # correct; escape/unescape return their input unchanged for plain text).
+    var tok_mode: bool = false
+    var tok_kinds: [i64] = []
+    var tok_ints: [i64] = []
+    var tok_texts: [text] = []
+    var tok_int_pos: i64 = 0
+    var tok_text_pos: i64 = 0
 
     pub static fn new(blob: text) -> FlatPoolReader:
         FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
@@ -145,8 +161,27 @@ pub class FlatPoolReader:
             reader.reject_malformed("missing_final_newline")
         reader
 
+    # Token-mode cursor (see the tok_* fields). Canonical: no trailing data.
+    pub static fn from_tokens(kinds: [i64], ints: [i64], texts: [text]) -> FlatPoolReader:
+        var reader: FlatPoolReader = FlatPoolReader(lines: [], pos: 0, ok: true,
+            bounded: false, canonical: true, failure_kind: "", failure_detail: "",
+            max_allocation_bytes: 0, max_nodes: 0, max_depth: 0,
+            max_work_units: 0, live_reserved_bytes: 0, entered_nodes: 0,
+            current_depth: 0, maximum_depth: 0, charged_work_units: 0,
+            audit_events: 0)
+        reader.tok_mode = true
+        reader.tok_kinds = kinds
+        reader.tok_ints = ints
+        reader.tok_texts = texts
+        reader
+
     me finish_canonical_frame() -> bool:
         if not self.ok:
+            return false
+        if self.tok_mode:
+            if self.pos == self.tok_kinds.len():
+                return true
+            self.reject_malformed("trailing_data")
             return false
         # split implementations may retain the final newline's empty field.
         if self.pos == self.lines.len():
@@ -263,6 +298,19 @@ pub class FlatPoolReader:
     me next() -> text:
         if not self.ok:
             return ""
+        if self.tok_mode:
+            if self.pos >= self.tok_kinds.len():
+                self.reject_malformed("truncated")
+                return ""
+            val kind = self.tok_kinds[self.pos]
+            self.pos = self.pos + 1
+            if kind == 1:
+                val t = self.tok_texts[self.tok_text_pos]
+                self.tok_text_pos = self.tok_text_pos + 1
+                return t
+            val v = self.tok_ints[self.tok_int_pos]
+            self.tok_int_pos = self.tok_int_pos + 1
+            return "{v}"
         if self.bounded and not self.charge_work(1):
             return ""
         if self.pos >= self.lines.len():
@@ -368,6 +416,16 @@ pub class FlatPoolReader:
             self.charge_work(total_bytes * 3 + 1)
 
     me next_i64() -> i64:
+        if self.tok_mode:
+            if not self.ok:
+                return 0
+            if self.pos >= self.tok_kinds.len() or self.tok_kinds[self.pos] != 0:
+                self.reject_malformed("integer")
+                return 0
+            self.pos = self.pos + 1
+            val v = self.tok_ints[self.tok_int_pos]
+            self.tok_int_pos = self.tok_int_pos + 1
+            return v
         val raw = self.next()
         if not self.ok:
             return 0
@@ -392,7 +450,8 @@ pub class FlatPoolReader:
             val n = self.next_i64()
             if not self.ok:
                 return 0
-            if (n < 0) or (n > (self.lines.len() - self.pos)):
+            val remaining = if self.tok_mode: self.tok_kinds.len() - self.pos else: self.lines.len() - self.pos
+            if (n < 0) or (n > remaining):
                 self.ok = false
                 return 0
             return n
@@ -459,6 +518,46 @@ extern fn rt_string_len(value: text) -> i64
 var _flat_pool_sanitize_capture: bool = false
 var _flat_pool_capture_poisoned: bool = false
 
+# Packed-blob type trace (flat_pool_packed_v1.spl). While armed, every public
+# pool encoder records its shape tag in emission order, so the packed encoder
+# can type each line of the canonical blob without re-deriving the pool list.
+var _flat_pool_type_trace: [i64] = []
+var _flat_pool_type_trace_armed: bool = false
+var _flat_pool_type_trace_family: i64 = 0
+var _flat_pool_type_trace_clear_next: bool = false
+
+pub fn flat_pool_type_trace_arm_v1():
+    _flat_pool_type_trace = []
+    _flat_pool_type_trace_family = 0
+    _flat_pool_type_trace_clear_next = false
+    _flat_pool_type_trace_armed = true
+
+pub fn flat_pool_type_trace_take_v1() -> [i64]:
+    val trace = _flat_pool_type_trace
+    _flat_pool_type_trace = []
+    _flat_pool_type_trace_armed = false
+    trace
+
+# Pool family of the pools encoded next (1 decl, 2 expr, 3 stmt, 4 type,
+# 5 parser state, 6 extend, 7 pending); recorded as family * 16 + shape tag.
+pub fn flat_pool_type_trace_family_v1(family: i64):
+    _flat_pool_type_trace_family = family
+
+# The NEXT encoded pool is process-local state (packed_binary_ast_v1.md §1
+# CLEAR): it stays in the line blob but never enters the packed blob.
+pub fn flat_pool_type_trace_clear_next_v1():
+    _flat_pool_type_trace_clear_next = true
+
+fn _flat_pool_trace(tag: i64):
+    # The CLEAR flag is consumed by the very next pool even when unarmed: an
+    # unarmed dump (e.g. the packed-restore line render) otherwise leaks the
+    # last flag into the next armed dump, marking its first pool CLEAR and
+    # shifting every section id after a cache hit.
+    val clear = if _flat_pool_type_trace_clear_next: 1024 else: 0
+    _flat_pool_type_trace_clear_next = false
+    if _flat_pool_type_trace_armed:
+        _flat_pool_type_trace.push(clear + _flat_pool_type_trace_family * 16 + tag)
+
 pub fn flat_pool_capture_sanitize_arm_v1():
     _flat_pool_sanitize_capture = true
     _flat_pool_capture_poisoned = false
@@ -468,6 +567,37 @@ pub fn flat_pool_capture_sanitize_disarm_v1():
 
 pub fn flat_pool_capture_poisoned_v1() -> bool:
     _flat_pool_capture_poisoned
+
+# Text-handle validation without serialization. A parse-cache HIT used to run
+# a full capture encode (every i64 formatted and appended into a discarded
+# buffer, ~13% of warm parse samples) only to learn whether any TEXT handle
+# dangles. Only text appends can poison a capture, so validation mode checks
+# each text handle and skips every non-text encoder. Same poisoned flag and
+# same refusal semantics as the sanitize capture.
+var _flat_pool_validate_only: bool = false
+
+pub fn flat_pool_validate_texts_arm_v1():
+    _flat_pool_validate_only = true
+    _flat_pool_sanitize_capture = true
+    _flat_pool_capture_poisoned = false
+
+pub fn flat_pool_validate_texts_disarm_v1():
+    _flat_pool_validate_only = false
+    _flat_pool_sanitize_capture = false
+
+var _flat_pool_pooldbg_memo: i64 = -1
+fn flat_pool_pooldbg() -> bool:
+    if _flat_pool_pooldbg_memo < 0:
+        _flat_pool_pooldbg_memo = if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1": 1 else: 0
+    _flat_pool_pooldbg_memo == 1
+
+fn flat_pool_validate_text(value: text, item: i64):
+    val length =
+        unsafe(capabilities: [ffi]):
+            rt_string_len(value)
+    if length < 0 and not _flat_pool_capture_poisoned:
+        _flat_pool_capture_poisoned = true
+        print("[flat-pool] capture refused: invalid text handle site=text.value item={item} input_length={length}; cache store skipped")
 
 fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
     val appended =
@@ -516,6 +646,8 @@ fn flat_pool_builder_finish(handle: i64) -> text:
     result
 
 fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
+    if _flat_pool_validate_only:
+        return
     flat_pool_builder_push(handle, "{pool.len()}\n", 0, -1)
     var item = 0
     for v in pool:
@@ -523,15 +655,21 @@ fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
         item = item + 1
 
 fn flat_pool_enc_text_into(handle: i64, pool: [text]):
+    if _flat_pool_validate_only:
+        var vitem = 0
+        for v in pool:
+            flat_pool_validate_text(v, vitem)
+            vitem = vitem + 1
+        return
     flat_pool_builder_push(handle, "{pool.len()}\n", 2, -1)
-    if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1" and pool.len() > 1:
+    if flat_pool_pooldbg() and pool.len() > 1:
         val item1_len = unsafe(capabilities: [ffi]):
             rt_string_len(pool[1])
         if item1_len >= 0:
             print("[pooldbg] enc_pool_head n={pool.len()} item1='{pool[1]}'")
     var item = 0
     for v in pool:
-        if (env_get_opt("SIMPLE_POOLDBG") ?? "") == "1":
+        if flat_pool_pooldbg():
             val probe_len = unsafe(capabilities: [ffi]):
                 rt_string_len(v)
             print("[pooldbg] enc_text item={item} len={probe_len}")
@@ -547,11 +685,17 @@ fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
         flat_pool_enc_text_into(handle, inner)
 
 pub fn flat_pool_enc_i64(pool: [i64]) -> text:
+    if _flat_pool_validate_only:
+        return ""
+    _flat_pool_trace(1)
     val handle = flat_pool_builder_new()
     flat_pool_enc_i64_into(handle, pool)
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
+    if _flat_pool_validate_only:
+        return ""
+    _flat_pool_trace(2)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 6, -1)
     var item = 0
@@ -561,11 +705,15 @@ pub fn flat_pool_enc_bool(pool: [bool]) -> text:
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
+    _flat_pool_trace(3)
     val handle = flat_pool_builder_new()
     flat_pool_enc_text_into(handle, pool)
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
+    if _flat_pool_validate_only:
+        return ""
+    _flat_pool_trace(4)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 8, -1)
     for inner in pool:
@@ -573,11 +721,13 @@ pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
+    _flat_pool_trace(5)
     val handle = flat_pool_builder_new()
     flat_pool_enc_text_list_into(handle, pool)
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
+    _flat_pool_trace(6)
     val handle = flat_pool_builder_new()
     flat_pool_builder_push(handle, "{pool.len()}\n", 9, -1)
     for inner in pool:
@@ -791,12 +941,15 @@ pub fn flat_pool_dec_text_list_list_into(dest: [[[text]]], r: FlatPoolReader) ->
 # enc_/dec_ pattern recognises them uniformly.
 
 pub fn flat_pool_enc_scalar_i64(value: i64) -> text:
+    _flat_pool_trace(7)
     "{value}\n"
 
 pub fn flat_pool_enc_scalar_bool(value: bool) -> text:
+    _flat_pool_trace(8)
     if value: "1\n" else: "0\n"
 
 pub fn flat_pool_enc_scalar_text(value: text) -> text:
+    _flat_pool_trace(9)
     flat_pool_escape(value) + "\n"
 
 pub fn flat_pool_dec_scalar_i64(r: FlatPoolReader) -> i64:
@@ -809,6 +962,8 @@ pub fn flat_pool_dec_scalar_text(r: FlatPoolReader) -> text:
     flat_pool_unescape(r.next())
 
 export FLAT_POOL_CODEC_VERSION
+export flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1, flat_pool_type_trace_family_v1
+export flat_pool_type_trace_clear_next_v1
 export flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64
 export FlatPoolReader
 export flat_pool_enc_i64, flat_pool_enc_bool, flat_pool_enc_text

@@ -1,0 +1,28 @@
+# Known gap stdlib_source (live_object_key.sdn) closed: src/lib content is a
+# producer input. The fingerprint must follow file CONTENT, not just presence.
+use std.spec
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.driver_build.incremental.{native_build_spl_tree_fingerprint}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_getpid() -> i64
+
+fn fixture_root() -> text:
+    "build/.stdlib_fp_spec_{rt_getpid()}"
+
+describe "native_build_spl_tree_fingerprint":
+    it "is empty for an absent tree":
+        expect(native_build_spl_tree_fingerprint("build/.no_such_tree_for_fp_spec")).to_equal("")
+
+    it "changes when a stdlib-shaped .spl body changes and ignores non-.spl files":
+        val root = fixture_root()
+        dir_create_all(root + "/common")
+        expect(rt_file_write_text(root + "/common/a.spl", "fn a() -> i64:\n    1\n")).to_equal(true)
+        val first = native_build_spl_tree_fingerprint(root)
+        expect(first.len() > 0).to_equal(true)
+        expect(first.ends_with("n1")).to_equal(true)
+        expect(rt_file_write_text(root + "/common/notes.md", "ignored")).to_equal(true)
+        expect(native_build_spl_tree_fingerprint(root)).to_equal(first)
+        expect(rt_file_write_text(root + "/common/a.spl", "fn a() -> i64:\n    2\n")).to_equal(true)
+        val second = native_build_spl_tree_fingerprint(root)
+        expect(second == first).to_equal(false)

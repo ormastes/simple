@@ -1291,19 +1291,44 @@ bootstrap_stage3_target_c_compiler() {
 }
 
 bootstrap_stage3_windows_gnu_tool_path() {
-    bootstrap_stage3_gnu_tool_selected=$(command -v "$1" 2>/dev/null) || return 1
+    bootstrap_stage3_gnu_tool_request=$1
+    # The bootstrap exports CC/LD in native drive-letter spelling
+    # (`C:/.../bin/clang.exe`) because Cargo and the native compiler consume
+    # it; `command -v` echoes that verbatim and the canonical-path helper only
+    # accepts POSIX `/...` input, so the admitted llvm-mingw clang was rejected
+    # ("Windows GNU phase requires CC to be llvm-mingw clang"). Normalize the
+    # spelling first, then bind the physical `.exe` when the extensionless
+    # alias was recorded.
+    case "$bootstrap_stage3_gnu_tool_request" in
+        [A-Za-z]:[\/]*)
+            bootstrap_stage3_gnu_tool_request=$(cygpath -u "$bootstrap_stage3_gnu_tool_request" \
+                2>/dev/null) || return 1 ;;
+    esac
+    bootstrap_stage3_gnu_tool_selected=$(command -v "$bootstrap_stage3_gnu_tool_request" \
+        2>/dev/null) || return 1
+    case "$bootstrap_stage3_gnu_tool_selected" in
+        *.exe) ;;
+        *) [ -f "$bootstrap_stage3_gnu_tool_selected.exe" ] &&
+            bootstrap_stage3_gnu_tool_selected=$bootstrap_stage3_gnu_tool_selected.exe ;;
+    esac
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_canonical_file \
         "$bootstrap_stage3_gnu_tool_selected") || return 1
     [ -x "$bootstrap_stage3_gnu_tool_path" ] || return 1
     printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
+# llvm-mingw identity is the driver's default target, not its file name: a
+# stock LLVM clang.exe (Target: x86_64-pc-windows-msvc) must not satisfy the
+# GNU lane just because ambient PATH found it first.
 bootstrap_stage3_windows_gnu_clang_path() {
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
     case "${bootstrap_stage3_gnu_tool_path##*/}" in
-        clang|clang.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        clang|clang.exe) ;;
         *) return 1 ;;
     esac
+    "$bootstrap_stage3_gnu_tool_path" --version 2>/dev/null |
+        grep -Eq '^Target: [A-Za-z0-9_]+-w64-(windows-gnu|mingw32)' || return 1
+    printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
 bootstrap_stage3_windows_gnu_llvm_ar_path() {
@@ -5024,7 +5049,7 @@ public static class Stage3MaterializedConsumer {
     // bound is a runaway guard only, not a buffer size.
     static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 1200000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -5724,8 +5749,20 @@ bootstrap_stage3_materialized_git_state() (
     # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
     # full-checkout measurement) must win the race against this outer kill:
     # a too-tight timeout here reports a healthy, still-walking consumer as a
-    # generic bind failure.
-    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # generic bind failure. The budget is host-scaled (WA-PREFLIGHT-RETRY: a
+    # fixed 330s kill fired under load): unset -> 300s x (1 + load1/ncpu),
+    # capped at 4x; the outer kill always derives from the same budget + 30s.
+    if [ -z "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
+        stage3_ncpu=$(nproc 2>/dev/null || echo 1)
+        stage3_load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null | cut -d. -f1)
+        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
+        [ "$stage3_scale" -le 4 ] || stage3_scale=4
+        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$((300000 * stage3_scale))
+        export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+    fi
+    case "$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" in ''|*[!0-9]*) exit 1 ;; esac
+    stage3_outer_s=$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 30))
+    /usr/bin/timeout -k 2s "${stage3_outer_s}s" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
 )
 
 bootstrap_stage3_git_state() {

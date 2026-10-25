@@ -40,6 +40,7 @@ use compiler.driver.driver_source_loading.{
     _driver_text_bucket_set_new,
     _driver_unique_physical_sources
 }
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
 use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1, native_group_source_paths_v1}
@@ -222,7 +223,7 @@ impl CompilerDriver:
         var i = 0
         var has_project_source = false
         var driver_inputs: [text] = []
-        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 6:
+        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 7:
             if self.ctx.options.bootstrap_input_count > 0:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_0]
             if self.ctx.options.bootstrap_input_count > 1:
@@ -235,6 +236,8 @@ impl CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_4]
             if self.ctx.options.bootstrap_input_count > 5:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
+            if self.ctx.options.bootstrap_input_count > 6:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_6]
         else:
             driver_inputs = self.ctx.options.input_files
         var closure_source_roots = driver_inputs
@@ -261,6 +264,17 @@ impl CompilerDriver:
                 self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
+            match native_source_root_paths_v1(request.binding.source_roots,
+                    request.snapshot.snapshot_root):
+                case Ok(roots):
+                    if roots != closure_source_roots:
+                        self.ctx.add_error("preclosed source root authority mismatch")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
             admitted_preclosed = Some(selected.unwrap())
             preclosed_snapshot_root = request.snapshot.snapshot_root
             driver_inputs = []
@@ -387,6 +401,11 @@ impl CompilerDriver:
                     cold_snapshot_root, selected.unwrap())
                 if admitted.valid:
                     cold_entry_input = admitted.canonical_path
+                    # Keep code generation aligned with the validated frozen entry.
+                    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", admitted.canonical_path):
+                        self.ctx.add_error("frozen cold entry codegen identity unavailable")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
                 else:
                     frozen_reason = admitted.reason
             if frozen_reason != "":
@@ -662,7 +681,11 @@ impl CompilerDriver:
             archive_transaction = committed.transaction
             self.ctx.archive_semantic_owner = committed.semantic_owner
             self.ctx.archive_action_owner = committed.action_owner
-            if committed.result.is_err():
+            # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24 reason=is_err on field receiver unresolved; match on the Result instead
+            val commit_failed: bool = match committed.result:
+                case Ok(_): false
+                case Err(_): true
+            if commit_failed:
                 _ = route_capability_scope_close_all_v1(&capability_scope)
                 self.ctx.add_error("package archive route commit failed")
                 driver_entry_scan_cache_release()
@@ -1217,6 +1240,22 @@ impl CompilerDriver:
             # crashed the post-mono walker on poisoned statements.
             rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
+        # Preclosed source selection has already validated the complete entry
+        # closure, but the existing parser still needs closure mode to preserve
+        # its entry-source semantics.
+        if admitted_preclosed != nil:
+            match driver_preclosed_source_aliases_v1(all_sources,
+                    closure_source_roots, preclosed_snapshot_root):
+                case Ok(sources): all_sources = sources
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+            if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
+                self.ctx.add_error("preclosed entry parser mode unavailable")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
         # so a small userland entry doesn't compile all of src/{app,lib,compiler,runtime}.
@@ -1334,6 +1373,20 @@ impl CompilerDriver:
         driver_entry_scan_cache_release()
         if source_trace:
             print "[load_sources] total {all_sources.len()}"
+
+        # The authenticated preclosed route skips the entry walk that normally
+        # publishes this mode. Both the flat bridge and HIR import lowering
+        # require it to retain real non-entry declarations and function bodies.
+        # Publish only after all source admission checks have succeeded; keep it
+        # live through parse/HIR, as on the ordinary entry-walk route.
+        if admitted_preclosed != nil and self.ctx.error_count_value == 0:
+            if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
+                self.ctx.add_error("preclosed source parser mode publication failed: {preclosed_snapshot_root}")
+                return (self.ctx, false)
+            val published_closure_mode = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+            if published_closure_mode != "1":
+                self.ctx.add_error("preclosed source parser mode readback failed: {preclosed_snapshot_root}")
+                return (self.ctx, false)
 
         # Keep the scalar error verdict in this aggregate's owning frame.  The
         # self-hosted Stage2 ABI cannot safely pass the freshly copied

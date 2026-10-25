@@ -442,6 +442,34 @@ C
     esac
     st_n=$((st_n + 1))
 
+    # Fixture 9: a STALE PR branch must be judged against its merge-base, not
+    # against the base branch's current tip. main gains the C twin of rt_ronly
+    # after the branch point; the branch never touches it. Comparing the branch
+    # tip with main's tip used to report rt_ronly as "1 new" (the branch merely
+    # lacks main's fix) -- the CI failure on PR #4440/#4470 (2026-10-25).
+    mkfixture f9
+    ( cd "$st_dir/f9" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/f9/scripts/check"
+    printf 'rt_conly\tc-only\nrt_ronly\trust-only\n' \
+        > "$st_dir/f9/scripts/check/rt_dual_implementation_baseline.txt"
+    ( cd "$st_dir/f9" && git add -A && git commit -q -m base && git branch -q stale ) >/dev/null 2>&1
+    printf 'int64_t rt_ronly(void) { return 2; }\n' >> "$st_dir/f9/src/runtime/r.c"
+    ( cd "$st_dir/f9" && git add -A && git commit -q -m main-fix ) >/dev/null 2>&1
+    st_main=$(cd "$st_dir/f9" && git rev-parse HEAD)
+    ( cd "$st_dir/f9" && git checkout -q stale \
+      && printf 'x\n' > notes.txt && git add -A && git commit -q -m unrelated ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh "$SELF" \
+        --root "$st_dir/f9" --rev HEAD --baseline-rev "$st_main" 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 2 symbol(s) checked against 2 single-lane at base"*"0 new"*) ;;
+        *) echo "selftest: FAILED — stale branch blamed for the base tip's fix, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_n=$((st_n + 1))
+
     rm -rf "$st_dir"
     echo "selftest: $st_n fixture(s) passed"
     return 0
@@ -580,6 +608,23 @@ fi
 # lanes keep running the frozen comparison, so main's own debt stays visible
 # there instead of being paid by whichever pusher arrives first.
 if [ -n "$BASELINE_REV" ]; then
+    # Judge the change against the MERGE-BASE of --rev and --baseline-rev, not
+    # the base branch tip. CI passes github.event.pull_request.base.sha, which
+    # is the base branch's CURRENT tip; a PR branched before a fix landed on
+    # base then "adds" every symbol base has since made dual (PR #4440 vs
+    # #4442, PR #4470 vs #4469, 2026-10-25). The merge-base is the tree the PR
+    # actually changed. A shallow clone without the merge-base keeps the given
+    # base (noted), which is the previous behaviour.
+    if [ -n "$REV" ]; then
+        _mb=$(cd "$ROOT" && git merge-base "$REV" "$BASELINE_REV" 2>/dev/null)
+        _given=$(cd "$ROOT" && git rev-parse --verify -q "$BASELINE_REV^{commit}" 2>/dev/null)
+        if [ -n "$_mb" ] && [ -n "$_given" ] && [ "$_mb" != "$_given" ]; then
+            echo "note: base $BASELINE_REV is not an ancestor of $REV; judging against merge-base $_mb" >&2
+            BASELINE_REV=$_mb
+        elif [ -z "$_mb" ]; then
+            echo "note: no merge-base of $REV and $BASELINE_REV in this clone; using $BASELINE_REV as given" >&2
+        fi
+    fi
     # Content-keyed census cache for the base (positive proof, not a path
     # filter): the single-lane set is a pure function of the two runtime
     # trees, so it is stored under the sha of their tree ids plus this

@@ -1,0 +1,90 @@
+#!/bin/sh
+# Re-run ONLY the Stage 2 compiler-tests gate against an already-built,
+# already-admitted Stage 2 compiler and, when it passes, publish the same
+# stage2-compiler-tests.env receipt bootstrap-from-scratch.sh writes -- so a
+# Stage 2 rejected by a gate-side defect (e.g. the Windows GNU CC spelling bug)
+# is admitted without rebuilding it, and managed Stage 3 resume can start.
+#
+# Nothing is relaxed: the gate and publisher are the SOURCE ROOT's own copies
+# (the Stage 2 admission binds scripts/** in its source snapshot, so running a
+# different checkout's verifier would be refused as stale), the compiler is
+# re-hashed, and a retained rejection is archived, never deleted.
+#
+# usage: admit-built-stage2-compiler-tests.shs --source-root=DIR --output=DIR
+#        --platform=TRIPLE [--backend=llvm|cranelift] [--strategy=normal|full]
+#        [--timeout-seconds=N]
+# Windows GNU: export MSYS2_ENV_CONV_EXCL="CL=;CC=" when the source root
+# predates the CC drive-letter fix, so the native watchdog keeps CC POSIX.
+set -eu
+src="" out="" plat="" backend=llvm strategy=normal timeout=""
+for a in "$@"; do
+  case "$a" in
+    --source-root=*) src=${a#*=} ;;
+    --output=*) out=${a#*=} ;;
+    --platform=*) plat=${a#*=} ;;
+    --backend=*) backend=${a#*=} ;;
+    --strategy=*) strategy=${a#*=} ;;
+    --timeout-seconds=*) timeout=${a#*=} ;;
+    *) echo "admit-stage2: unknown argument: $a" >&2; exit 64 ;;
+  esac
+done
+[ -n "$src" ] && [ -n "$out" ] && [ -n "$plat" ] || { sed -n '13,17p' "$0" >&2; exit 64; }
+src=$(CDPATH= cd -- "$src" && pwd -P)
+out=$(CDPATH= cd -- "$out" && pwd -P)
+case "$strategy" in full) profile=full ;; normal) profile=slim ;; *) exit 64 ;; esac
+case "$plat" in *windows*) default_timeout=7200 ;; *) default_timeout=3600 ;; esac
+timeout=${timeout:-$default_timeout}
+compiler="$out/stage3/$plat/stage2-admitted/simple"
+[ -f "$compiler" ] || compiler="$compiler.exe"
+[ -f "$compiler" ] && [ -f "$(dirname "$compiler")/admission.env" ] ||
+  { echo "admit-stage2: no admitted Stage 2 compiler under $out/stage3/$plat/stage2-admitted" >&2; exit 1; }
+sha=$(sha256sum "$compiler" | cut -c1-64)
+root="$out/stage2-compiler-tests/$plat"
+work="$root/verification"
+log="$out/logs/$plat/stage2-compiler-tests.log"
+mkdir -p "$root" "$(dirname "$log")"
+[ ! -e "$root/stage2-compiler-tests.env" ] ||
+  { echo "admit-stage2: receipt already published: $root/stage2-compiler-tests.env" >&2; exit 0; }
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+if [ -e "$root/rejection.env" ]; then
+  mv "$root/rejection.env" "$root/rejection.env.superseded-$stamp"
+fi
+[ ! -f "$log" ] || mv "$log" "$log.superseded-$stamp"
+status=0
+(
+  cd "$src"
+  BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY="${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-1}"
+  BOOTSTRAP_STAGE2_TEST_DELEGATE="${BOOTSTRAP_STAGE2_TEST_DELEGATE:-0}"
+  # Older source roots resolve the repo for Windows metadata launches only
+  # through SIMPLE_PROJECT_ROOT (Phase2 loads no Stage3 facade); the verifier
+  # requires it to equal --source-root.
+  SIMPLE_PROJECT_ROOT=$src
+  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE SIMPLE_PROJECT_ROOT
+  sh "$src/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
+    "--backend=$backend" "--compiler=$compiler" "--compiler-sha256=$sha" \
+    "--strategy=$strategy" "--profile=$profile" --hash-policy=canonical \
+    "--work-root=$work" "--cache-root=$root/cache" "--source-root=$src" \
+    "--timeout-seconds=$timeout"
+) >"$log" 2>&1 || status=$?
+[ "$status" -ne 0 ] || [ -f "$work/summary.env" ] || status=95
+if [ "$status" -eq 0 ]; then
+  sh "$src/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish \
+    "$out" "$plat" "$compiler" "$sha" "$src" "$work/summary.env" "$log" || status=95
+fi
+if [ "$status" -ne 0 ]; then
+  {
+    echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
+    echo "status=rejected"
+    echo "reason=stage2-compiler-tests-failed"
+    echo "candidate=$compiler"
+    echo "candidate_sha256=$sha"
+    echo "strategy=$strategy"
+    echo "verification_status=$status"
+    echo "verification_summary=$work/summary.env"
+    echo "verification_log=$log"
+  } >"$root/rejection.env"
+  chmod 400 "$root/rejection.env"
+  echo "admit-stage2: REJECTED (status=$status); log: $log" >&2
+  exit 1
+fi
+echo "admit-stage2: ADMITTED $compiler ($sha); receipt: $root/stage2-compiler-tests.env"

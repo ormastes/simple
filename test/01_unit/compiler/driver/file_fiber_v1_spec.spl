@@ -1,0 +1,146 @@
+"""
+## Purpose and audience
+Purpose: Verify FileFiber v1: one fiber per source file runs async read ->
+one parse -> TLDR publish -> import waits, with no parse-all barrier.
+Audience: compiler-driver and build-runner engineers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Uses a stub SourceReader (the real one is module_artifacts_emit_v1); writes
+small temp source files in the working directory and deletes them.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §2
+"""
+use std.spec
+use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, file_fiber_run_v1, file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader}
+use compiler.frontend.parser_types.{ParserModule}
+use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, file_exists, file_read, getpid}
+
+class StubReader:
+    parsed: [text]
+    broken: text
+
+impl SourceReader for StubReader:
+    fn read_src(path: text) -> ParserModule?:
+        nil
+    fn read_tldr(path: text) -> text:
+        if path.ends_with(".missing"): return ""
+        "tldr:" + path
+    fn update_src(path: text) -> bool:
+        true
+    fn update_tldr(path: text) -> text:
+        if path == self.broken: return "parse error in {path}"
+        ""
+
+fn _imports(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("use "): out = out.push(t.substring(4, t.len()))
+    out
+
+fn _path_of_key(key: text) -> text:
+    "ext/{key}.spl"
+
+fn _src(name: text, body: text) -> text:
+    val p = ".ff_spec_{getpid()}_{name}.spl"
+    file_write_exact(p, body)
+    p
+
+fn _entry(key: text, path: text) -> FileFiberEntryV1:
+    FileFiberEntryV1(module_key: key, path: path, est_bytes: 10, content: "")
+
+describe "FileFiber v1":
+    it "runs a file whose import is produced by another fiber of the run":
+        val a = _src("a", "use b\nfn a(): 1\n")
+        val b = _src("b", "fn b(): 2\n")
+        val r = StubReader(parsed: [], broken: "")
+        val run = file_fiber_run_v1([_entry("a", a), _entry("b", b)], r, _imports, _path_of_key, [0, 0], 1000)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.done_order.len()).to_equal(2)
+        expect(run.table.is_loaded("a")).to_be(true)
+        expect(run.table.is_loaded("b")).to_be(true)
+        expect(run.source[0].starts_with("use b")).to_be(true)
+        file_delete(a)
+        file_delete(b)
+
+    it "import cycles do not deadlock (TLDR published before waiting)":
+        val a = _src("ca", "use cb\n")
+        val b = _src("cb", "use ca\n")
+        val run = file_fiber_run_v1([_entry("ca", a), _entry("cb", b)], StubReader(parsed: [], broken: ""), _imports, _path_of_key, [0], 1000)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.done_order.len()).to_equal(2)
+        file_delete(a)
+        file_delete(b)
+
+    it "fills an import from outside the run through the reader chain":
+        val a = _src("x", "use std_thing\n")
+        val run = file_fiber_run_v1([_entry("x", a)], StubReader(parsed: [], broken: ""), _imports, _path_of_key, [0], 1000)
+        expect(run.error[0]).to_equal("")
+        expect(run.fills).to_equal(1)
+        expect(run.table.is_loaded("std_thing")).to_be(true)
+        file_delete(a)
+
+    it "a failed parse fails the file and its importers, never hangs":
+        val a = _src("fa", "use fb\n")
+        val b = _src("fb", "fn broken(\n")
+        val run = file_fiber_run_v1([_entry("fa", a), _entry("fb", b)], StubReader(parsed: [], broken: b), _imports, _path_of_key, [0, 0], 1000)
+        expect(run.error[1].starts_with("parse error")).to_be(true)
+        expect(run.error[0].starts_with("import fb failed")).to_be(true)
+        file_delete(a)
+        file_delete(b)
+
+    it "a missing source file is an error, not a hang":
+        val run = file_fiber_run_v1([_entry("m", ".ff_spec_{getpid()}_nope.spl")], StubReader(parsed: [], broken: ""), _imports, _path_of_key, [0], 1000)
+        expect(run.error[0].starts_with("open failed")).to_be(true)
+
+    it "completes many files under a tight memory budget across two sockets":
+        var entries: [FileFiberEntryV1] = []
+        var paths: [text] = []
+        for i in 0..12:
+            val body = if i > 0: "use m{i - 1}\n" else: "fn root(): 0\n"
+            val p = _src("m{i}", body)
+            paths = paths.push(p)
+            entries = entries.push(_entry("m{i}", p))
+        val run = file_fiber_run_v1(entries, StubReader(parsed: [], broken: ""), _imports, _path_of_key, [0, 0, 1, 1], 30)
+        var errors = 0
+        for e in run.error:
+            if e != "": errors = errors + 1
+        expect(errors).to_equal(0)
+        expect(run.done_order.len()).to_equal(12)
+        expect(run.sched.reserved).to_equal(0)
+        for p in paths: file_delete(p)
+
+    it "skips the read for pre-read content and lets the host own the one parse":
+        val entries = [FileFiberEntryV1(module_key: "p", path: "virtual/p.spl", est_bytes: 5, content: "use q\n"),
+            FileFiberEntryV1(module_key: "q", path: "virtual/q.spl", est_bytes: 5, content: "fn q(): 0\n")]
+        var run = file_fiber_begin_v1(entries, [0], 100)
+        var parses = 0
+        while not file_fiber_finished_v1(run):
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                parses = parses + 1
+                run.parse_done(i, "host-tldr:" + run.entries[i].module_key, "")
+        file_fiber_end_v1(run)
+        expect(parses).to_equal(2)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.done_order.len()).to_equal(2)
+        expect(run.table.is_loaded("q")).to_be(true)
+
+    it "a host parse error fails the file and its importer":
+        val entries = [FileFiberEntryV1(module_key: "u", path: "virtual/u.spl", est_bytes: 5, content: "use v\n"),
+            FileFiberEntryV1(module_key: "v", path: "virtual/v.spl", est_bytes: 5, content: "broken(\n")]
+        var run = file_fiber_begin_v1(entries, [0], 100)
+        while not file_fiber_finished_v1(run):
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                if run.entries[i].module_key == "v":
+                    run.parse_done(i, "", "syntax error in v")
+                else:
+                    run.parse_done(i, "tldr-u", "")
+        file_fiber_end_v1(run)
+        expect(run.error[1]).to_equal("syntax error in v")
+        expect(run.error[0].starts_with("import v failed")).to_be(true)
