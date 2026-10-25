@@ -4317,6 +4317,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # not force the bootstrap_fixed shortcut. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
   # opts back into the single-instance whole-program lane (SIMPLE_BOOTSTRAP=1).
   # Same knob in resume-stage3-from-admitted.sh; both values are hashed.
+  # Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
+  # (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
+  # set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
+  # the args receipt; unset adds nothing, so existing receipts stay resumable.
+  stage3_per_file_env= stage3_per_file_lane=
+  case "${SIMPLE_FILE_WORKERS:-}" in
+    '') ;;
+    0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
+         stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
+    *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
   stage3_bootstrap_flag= stage3_whole_program_env=
   case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
     '') ;;
@@ -4328,7 +4339,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
-      "SIMPLE_BOOTSTRAP=${stage3_bootstrap_flag}" ${stage3_whole_program_env} \
+      "SIMPLE_BOOTSTRAP=${stage3_bootstrap_flag}" ${stage3_whole_program_env} ${stage3_per_file_env} \
       "SIMPLE_BOOTSTRAP_STAGE3=1" \
       "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
       "SIMPLE_ABI_ADMISSION_RECEIPT=${stage2_admission_receipt_absolute}" \
@@ -5426,7 +5437,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     RUST_LOG="${stage_build_rust_log}" \
     LIBRARY_PATH="${bootstrap_link_library_path}" \
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP="${stage3_bootstrap_flag}" ${stage3_whole_program_env} \
+    SIMPLE_BOOTSTRAP="${stage3_bootstrap_flag}" ${stage3_whole_program_env} ${stage3_per_file_env} \
     SIMPLE_BOOTSTRAP_STAGE3=1 \
     SIMPLE_ABI_POLICY="${simple_abi_policy}" \
     SIMPLE_ABI_ADMISSION_RECEIPT="${stage2_admission_receipt_absolute}" \

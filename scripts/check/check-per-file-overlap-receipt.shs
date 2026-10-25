@@ -1,0 +1,117 @@
+#!/bin/sh
+# check-per-file-overlap-receipt.shs — prove the per-file pipeline overlapped.
+#
+# Reads the file-worker receipts (NativeFileWorkerReceiptV1, "<key>=<value>"
+# lines: module, hir_start_ms, hir_done_ms, deps_ready_ms, mir_done_ms,
+# obj_done_ms, status, object) under one or more directories (searched
+# recursively for *.receipt) and verifies that SOME pair of distinct modules
+# A, B has obj_done(A) < hir_start(B): an object was finished before another
+# module's HIR began, i.e. the whole-program HIR->MIR barrier is gone.
+# Times are monotonic ms; -1 means "not observed by this role" and is ignored.
+#
+# Also reports:
+#   first_object_ms  min(obj_done) - min(hir_start)
+#   objects_per_min  objects / ((max(obj_done) - min(hir_start)) / 60000)
+#
+# Usage: sh scripts/check/check-per-file-overlap-receipt.shs [--selftest] DIR...
+# Verdict (last stdout line):
+#   PASS — <n> receipt(s) checked, overlap <A> obj_done=<t> < <B> hir_start=<t> ... exit 0
+#   FAIL — <n> receipt(s) checked, no obj_done(A) < hir_start(B) pair ...           exit 1
+#   ERROR — nothing was checked (<reason>)                                           exit 2
+# --selftest runs first, always, and is fatal.
+
+set -u
+
+overlap_scan() {
+  # stdin: receipt files' contents, each receipt terminated by a line "@@END".
+  awk '
+    function flush() {
+      if (mod != "") {
+        n++; M[n] = mod; HS[n] = hs; OD[n] = od
+        if (hs >= 0 && (minhs == "" || hs < minhs)) minhs = hs
+        if (od >= 0) {
+          objs++
+          if (minod == "" || od < minod) { minod = od; minod_i = n }
+          if (maxod == "" || od > maxod) maxod = od
+        }
+      }
+      mod = ""; hs = -1; od = -1
+    }
+    BEGIN { mod = ""; hs = -1; od = -1; n = 0; objs = 0; minhs = ""; minod = ""; maxod = "" }
+    /^@@END$/ { flush(); next }
+    { k = $0; sub(/=.*/, "", k); v = substr($0, length(k) + 2)
+      if (k == "module") mod = v
+      else if (k == "hir_start_ms") hs = v + 0
+      else if (k == "obj_done_ms") od = v + 0 }
+    END {
+      flush()
+      if (n == 0) { print "ERROR — nothing was checked (no receipts with a module= line)"; exit 2 }
+      # Best witness: the earliest object vs the latest HIR start of another module.
+      best_b = 0
+      for (j = 1; j <= n; j++)
+        if (j != minod_i && HS[j] >= 0 && (best_b == 0 || HS[j] > HS[best_b])) best_b = j
+      if (minod == "" || best_b == 0 || !(minod < HS[best_b])) {
+        printf "FAIL — %d receipt(s) checked, %d object(s), no obj_done(A) < hir_start(B) pair (no overlap)\n", n, objs
+        exit 1
+      }
+      first = minod - minhs
+      span = maxod - minhs
+      rate = (span > 0) ? objs * 60000 / span : 0
+      printf "first_object_ms=%d\nobjects=%d\nobjects_per_min=%.1f\n", first, objs, rate
+      printf "PASS — %d receipt(s) checked, overlap %s obj_done=%d < %s hir_start=%d; first object %d ms, %.1f objects/min\n", \
+        n, M[minod_i], minod, M[best_b], HS[best_b], first, rate
+    }'
+}
+
+scan_dirs() {
+  found=0
+  for d in "$@"; do
+    [ -d "$d" ] || { echo "ERROR — nothing was checked (not a directory: $d)"; return 2; }
+  done
+  tmp_list=$(find "$@" -type f -name '*.receipt' 2>/dev/null | sort)
+  [ -n "$tmp_list" ] || { echo "ERROR — nothing was checked (no *.receipt under: $*)"; return 2; }
+  printf '%s\n' "$tmp_list" | while IFS= read -r f; do cat "$f"; echo; echo "@@END"; done | overlap_scan
+}
+
+receipt() { # dir module hir_start obj_done
+  printf 'module=%s\nhir_start_ms=%s\nhir_done_ms=-1\ndeps_ready_ms=-1\nmir_done_ms=-1\nobj_done_ms=%s\nstatus=PASS\nobject=/o/%s.o\n' \
+    "$2" "$3" "$4" "$2" >"$1/$2.receipt"
+}
+
+selftest() {
+  st=$(mktemp -d 2>/dev/null || mktemp -d -t pfoverlap) || { echo "ERROR — nothing was checked (selftest: mktemp)"; exit 2; }
+  trap 'rm -rf "$st"' EXIT
+  mkdir -p "$st/ok/sub" "$st/barrier" "$st/empty" "$st/single"
+  # overlap: a's object (t=500) finishes before c's HIR starts (t=700)
+  receipt "$st/ok" a 0 500; receipt "$st/ok" b 100 900; receipt "$st/ok/sub" c 700 1200
+  # whole-program barrier: every HIR starts before any object exists
+  receipt "$st/barrier" a 0 900; receipt "$st/barrier" b 100 950; receipt "$st/barrier" c 200 1000
+  # one module cannot witness a pair
+  receipt "$st/single" a 0 500
+  out=$(scan_dirs "$st/ok"); rc=$?
+  [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^PASS — 3 receipt(s) checked, overlap a obj_done=500 < c hir_start=700' &&
+    printf '%s\n' "$out" | grep -q '^first_object_ms=500$' &&
+    printf '%s\n' "$out" | grep -q '^objects_per_min=150.0$' || { echo "selftest: overlap fixture: rc=$rc $out"; selftest_fail=1; }
+  out=$(scan_dirs "$st/barrier"); rc=$?
+  [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '^FAIL' || { echo "selftest: barrier fixture: rc=$rc $out"; selftest_fail=1; }
+  out=$(scan_dirs "$st/single"); rc=$?
+  [ "$rc" -eq 1 ] || { echo "selftest: single fixture: rc=$rc $out"; selftest_fail=1; }
+  out=$(scan_dirs "$st/empty"); rc=$?
+  [ "$rc" -eq 2 ] || { echo "selftest: empty fixture: rc=$rc $out"; selftest_fail=1; }
+  out=$(scan_dirs "$st/missing"); rc=$?
+  [ "$rc" -eq 2 ] || { echo "selftest: missing-dir fixture: rc=$rc $out"; selftest_fail=1; }
+  rm -rf "$st"; trap - EXIT
+  [ "${selftest_fail:-0}" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+}
+
+selftest_only=0
+case "${1:-}" in --selftest) selftest_only=1; shift ;; esac
+selftest_fail=0
+selftest
+if [ "$selftest_only" -eq 1 ]; then
+  echo "PASS — selftest: 5 fixture(s) checked"
+  exit 0
+fi
+[ "$#" -gt 0 ] || { echo "ERROR — nothing was checked (usage: $0 [--selftest] RECEIPT_DIR...)"; exit 2; }
+scan_dirs "$@"
+exit $?
