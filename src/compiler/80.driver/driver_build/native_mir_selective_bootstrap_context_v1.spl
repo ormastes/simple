@@ -1,0 +1,157 @@
+# Bounded bootstrap transport authority. This leaf neither reads environment
+# state nor installs registries or grants source/runtime/provider admission.
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+pub class NativeMirSelectiveBootstrapOwnerReceiptV1:
+    kind: text
+    digest: text
+    bytes: i64
+    rows: i64
+
+pub class NativeMirSelectiveBootstrapContextV1:
+    source_identity: text
+    context_identity: text
+    physical_manifest_identity: text
+    producer_identity: text
+    backend: text
+    target: text
+    entry_owner: text
+    entry_source: text
+    stage4: bool
+    skip_post_chain: bool
+    owners: [NativeMirSelectiveBootstrapOwnerReceiptV1]
+
+pub fn native_mir_selective_bootstrap_owner_kinds_v1() -> [text]:
+    ["function_registry", "callable_registry", "enum_composite"]
+
+pub fn native_mir_selective_bootstrap_validate_v1(context: NativeMirSelectiveBootstrapContextV1) -> text:
+    for digest in [context.source_identity, context.context_identity,
+            context.physical_manifest_identity, context.producer_identity]:
+        if not sha256_lower_hex_valid(digest): return "bootstrap context identity invalid"
+    if context.backend != "cranelift" and context.backend != "llvm" and context.backend != "llvm-lib":
+        return "bootstrap context backend unsupported"
+    if context.target.len() == 0 or context.target.len() > 256 or
+            context.target.contains(" ") or context.target.contains("\n") or context.target.contains("\r") or context.target.contains("\t") or
+            context.target.split("-").len() < 3:
+        return "bootstrap context target invalid"
+    if context.entry_owner != "app.cli.bootstrap_main" or
+            context.entry_source != "src/app/cli/bootstrap_main.spl":
+        return "bootstrap entry ownership differs"
+    if context.skip_post_chain == context.stage4:
+        return "bootstrap post-chain policy differs"
+    val kinds = native_mir_selective_bootstrap_owner_kinds_v1()
+    if context.owners.len() != kinds.len(): return "bootstrap owner inventory differs"
+    var total_bytes: i64 = 0
+    var index = 0
+    while index < kinds.len():
+        val owner = context.owners[index]
+        if owner.kind != kinds[index] or not sha256_lower_hex_valid(owner.digest):
+            return "bootstrap owner identity differs"
+        if owner.bytes <= 0 or owner.bytes > 67108864 or owner.rows < 0 or owner.rows > 1000000:
+            return "bootstrap owner bound refused"
+        total_bytes = total_bytes + owner.bytes
+        if total_bytes > 134217728: return "bootstrap aggregate owner byte bound refused"
+        index = index + 1
+    ""
+
+fn _bootstrap_context_owner_value_v1(owner: NativeMirSelectiveBootstrapOwnerReceiptV1) -> SdnValue:
+    val fields: Dict<text, SdnValue> = {
+        "kind": SdnValue.String(owner.kind), "digest": SdnValue.String(owner.digest),
+        "bytes": SdnValue.Int(owner.bytes), "rows": SdnValue.Int(owner.rows)}
+    SdnValue.Dict(fields)
+
+pub fn native_mir_selective_bootstrap_encode_v1(context: NativeMirSelectiveBootstrapContextV1) -> Result<text, text>:
+    val reason = native_mir_selective_bootstrap_validate_v1(context)
+    if reason != "": return Err(reason)
+    var owners: [SdnValue] = []
+    for owner in context.owners:
+        owners.push(_bootstrap_context_owner_value_v1(owner))
+    val fields: Dict<text, SdnValue> = {
+        "schema": SdnValue.String("simple/mir-selective-bootstrap-context/v1"),
+        "source_identity": SdnValue.String(context.source_identity),
+        "context_identity": SdnValue.String(context.context_identity),
+        "physical_manifest_identity": SdnValue.String(context.physical_manifest_identity),
+        "producer_identity": SdnValue.String(context.producer_identity),
+        "backend": SdnValue.String(context.backend), "target": SdnValue.String(context.target),
+        "entry_owner": SdnValue.String(context.entry_owner), "entry_source": SdnValue.String(context.entry_source),
+        "stage4": SdnValue.Bool(context.stage4), "skip_post_chain": SdnValue.Bool(context.skip_post_chain),
+        "owners": SdnValue.Array(owners)}
+    val encoded = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if encoded.len() > 16384: return Err("bootstrap context byte bound refused")
+    Ok(encoded)
+
+fn _bootstrap_context_field_v1(value: SdnValue, key: text) -> SdnValue:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.contains_key(key): return fields[key]
+        case _: ()
+    SdnValue.Null
+
+fn _bootstrap_context_text_v1(value: SdnValue, key: text) -> text:
+    val field = _bootstrap_context_field_v1(value, key)
+    field.as_str() ?? ""
+
+fn _bootstrap_context_integer_v1(value: SdnValue, key: text) -> i64:
+    val field = _bootstrap_context_field_v1(value, key)
+    field.as_i64() ?? -1
+
+fn _bootstrap_context_boolean_v1(value: SdnValue, key: text) -> bool:
+    val field = _bootstrap_context_field_v1(value, key)
+    field.as_bool() ?? false
+
+fn _bootstrap_context_field_count_v1(value: SdnValue) -> i64:
+    match value:
+        case SdnValue.Dict(fields): fields.keys().len()
+        case _: -1
+
+pub fn native_mir_selective_bootstrap_decode_v1(blob: text,
+        expected_source: text, expected_context: text,
+        expected_physical_manifest: text, expected_producer: text
+) -> Result<NativeMirSelectiveBootstrapContextV1, text>:
+    if blob.len() <= 0 or blob.len() > 16384:
+        return Err("bootstrap context byte bound refused")
+    val parsed = parse_untrusted(blob)
+    if parsed.is_err(): return Err("bootstrap context SDN refused: " + parsed.unwrap_err())
+    val value = parsed.unwrap()
+    if _bootstrap_context_field_count_v1(value) != 12 or
+            _bootstrap_context_text_v1(value, "schema") != "simple/mir-selective-bootstrap-context/v1":
+        return Err("bootstrap context schema refused")
+    var owners: [NativeMirSelectiveBootstrapOwnerReceiptV1] = []
+    val owner_value = _bootstrap_context_field_v1(value, "owners")
+    match owner_value:
+        case SdnValue.Array(rows):
+            if rows.len() != 3: return Err("bootstrap owner inventory differs")
+            for row in rows:
+                if _bootstrap_context_field_count_v1(row) != 4:
+                    return Err("bootstrap owner shape refused")
+                owners.push(NativeMirSelectiveBootstrapOwnerReceiptV1(
+                    kind: _bootstrap_context_text_v1(row, "kind"),
+                    digest: _bootstrap_context_text_v1(row, "digest"),
+                    bytes: _bootstrap_context_integer_v1(row, "bytes"),
+                    rows: _bootstrap_context_integer_v1(row, "rows")))
+        case _: return Err("bootstrap owner array refused")
+    val context = NativeMirSelectiveBootstrapContextV1(
+        source_identity: _bootstrap_context_text_v1(value, "source_identity"),
+        context_identity: _bootstrap_context_text_v1(value, "context_identity"),
+        physical_manifest_identity: _bootstrap_context_text_v1(value, "physical_manifest_identity"),
+        producer_identity: _bootstrap_context_text_v1(value, "producer_identity"),
+        backend: _bootstrap_context_text_v1(value, "backend"),
+        target: _bootstrap_context_text_v1(value, "target"),
+        entry_owner: _bootstrap_context_text_v1(value, "entry_owner"),
+        entry_source: _bootstrap_context_text_v1(value, "entry_source"),
+        stage4: _bootstrap_context_boolean_v1(value, "stage4"),
+        skip_post_chain: _bootstrap_context_boolean_v1(value, "skip_post_chain"), owners: owners)
+    val reason = native_mir_selective_bootstrap_validate_v1(context)
+    if reason != "": return Err(reason)
+    if context.source_identity != expected_source or context.context_identity != expected_context or
+            context.physical_manifest_identity != expected_physical_manifest or context.producer_identity != expected_producer:
+        return Err("bootstrap context authority differs")
+    # Round-trip rejects unknown fields, wrong scalar types, duplicate keys,
+    # noncanonical escaping, alternate whitespace and trailing data.
+    val canonical = native_mir_selective_bootstrap_encode_v1(context)
+    if canonical.is_err(): return Err(canonical.unwrap_err())
+    if canonical.unwrap() != blob: return Err("bootstrap context is not canonical SDN")
+    Ok(context)

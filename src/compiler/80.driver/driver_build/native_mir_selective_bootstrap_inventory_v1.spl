@@ -1,0 +1,86 @@
+# Complete original inventory contract. READY is a producer assertion, not a
+# replacement for retained-body/declaration/provider admission by its owners.
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub class NativeMirSelectiveBootstrapInventoryRowV1:
+    lookup_name: text
+    emission_name: text
+    source_digest: text
+    state: text
+    reason: text
+    dependencies: [text]
+
+pub fn native_mir_selective_bootstrap_inventory_validate_v1(
+        rows: [NativeMirSelectiveBootstrapInventoryRowV1]) -> text:
+    if rows.len() <= 0 or rows.len() > 65536:
+        return "bootstrap original inventory bound refused"
+    var indices: Dict<text, i64> = {}
+    var emissions: Dict<text, text> = {}
+    var dependency_count: i64 = 0
+    var inventory_bytes: i64 = 0
+    var index = 0
+    while index < rows.len():
+        val row = rows[index]
+        if row.lookup_name.len() <= 0 or row.lookup_name.len() > 4096 or
+                row.emission_name.len() <= 0 or row.emission_name.len() > 4096 or
+                not sha256_lower_hex_valid(row.source_digest):
+            return "bootstrap original row identity refused"
+        if indices.contains_key(row.lookup_name): return "bootstrap original logical row repeats"
+        indices[row.lookup_name] = index
+        if row.state != "READY" and row.state != "HIR_FAILED" and row.state != "EXCLUDED" and row.state != "BLOCKED":
+            return "bootstrap inventory state unsupported"
+        if row.reason.len() > 65536: return "bootstrap original diagnostic byte bound refused"
+        if row.state == "READY":
+            if row.reason != "": return "bootstrap READY row carries a failure diagnostic"
+            if emissions.contains_key(row.emission_name) and emissions[row.emission_name] != row.source_digest:
+                return "bootstrap physical emission has conflicting source identity"
+            emissions[row.emission_name] = row.source_digest
+        elif row.reason.len() <= 0:
+            return "bootstrap failed row lacks original diagnostic"
+        inventory_bytes = inventory_bytes + row.lookup_name.len() + row.emission_name.len() + row.source_digest.len() + row.state.len() + row.reason.len()
+        for provider in row.dependencies:
+            if provider.len() <= 0 or provider.len() > 4096:
+                return "bootstrap dependency name bound refused"
+            inventory_bytes = inventory_bytes + provider.len()
+            if inventory_bytes > 33554432: return "bootstrap original inventory byte bound refused"
+        if inventory_bytes > 33554432: return "bootstrap original inventory byte bound refused"
+        dependency_count = dependency_count + row.dependencies.len()
+        if dependency_count > 1000000: return "bootstrap dependency inventory bound refused"
+        index = index + 1
+    # Complete name indexing precedes edges, preserving cycles and original
+    # source order. Every READY edge must remain entirely within READY state.
+    for row in rows:
+        var seen: Dict<text, bool> = {}
+        for provider in row.dependencies:
+            if not indices.contains_key(provider): return "bootstrap dependency absent from original inventory"
+            if seen.contains_key(provider): return "bootstrap dependency row repeats"
+            seen[provider] = true
+            if row.state == "READY" and rows[indices[provider]].state != "READY":
+                return "bootstrap READY row depends on non-ready provider"
+    ""
+
+pub fn native_mir_selective_bootstrap_ready_emissions_v1(
+        rows: [NativeMirSelectiveBootstrapInventoryRowV1],
+        physical_order: [text]) -> Result<[text], text>:
+    val reason = native_mir_selective_bootstrap_inventory_validate_v1(rows)
+    if reason != "": return Err(reason)
+    var expected: Dict<text, bool> = {}
+    for row in rows:
+        if row.state == "READY": expected[row.emission_name] = true
+    if physical_order.len() != expected.keys().len():
+        return Err("bootstrap physical manifest does not cover READY emissions")
+    var seen: Dict<text, bool> = {}
+    for emission in physical_order:
+        if not expected.contains_key(emission) or seen.contains_key(emission):
+            return Err("bootstrap physical manifest repeats or invents emission")
+        seen[emission] = true
+    # Caller owns the established physical schedule and entry semantics;
+    # never replace it with Dict iteration or a sorted logical source set.
+    Ok(physical_order)
+
+pub fn native_mir_selective_bootstrap_inventory_link_allowed_v1(
+        rows: [NativeMirSelectiveBootstrapInventoryRowV1]) -> bool:
+    if native_mir_selective_bootstrap_inventory_validate_v1(rows) != "": return false
+    for row in rows:
+        if row.state != "READY": return false
+    true

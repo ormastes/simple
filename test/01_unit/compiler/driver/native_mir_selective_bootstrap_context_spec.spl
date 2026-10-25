@@ -1,0 +1,90 @@
+# @req REQ-BOOTSTRAP-OBJECT-PROCESS-CONTEXT
+# Authored source acceptance; execution requires a qualified self-hosted CLI.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_mir_selective_bootstrap_context_v1.*
+
+fn bootstrap_context_fixture_v1(stage4: bool = false) -> NativeMirSelectiveBootstrapContextV1:
+    var owners: [NativeMirSelectiveBootstrapOwnerReceiptV1] = []
+    for kind in ["function_registry", "callable_registry", "enum_composite"]:
+        owners.push(NativeMirSelectiveBootstrapOwnerReceiptV1(kind: kind,
+            digest: sha256_text(kind), bytes: 1024, rows: 3))
+    NativeMirSelectiveBootstrapContextV1(source_identity: sha256_text("source"),
+        context_identity: sha256_text("context"), physical_manifest_identity: sha256_text("physical"),
+        producer_identity: sha256_text("producer"), backend: "cranelift", target: "aarch64-unknown-linux-gnu",
+        entry_owner: "app.cli.bootstrap_main", entry_source: "src/app/cli/bootstrap_main.spl",
+        stage4: stage4, skip_post_chain: not stage4, owners: owners)
+
+fn bootstrap_context_decode_fixture_v1(blob: text) -> Result<NativeMirSelectiveBootstrapContextV1, text>:
+    native_mir_selective_bootstrap_decode_v1(blob, sha256_text("source"),
+        sha256_text("context"), sha256_text("physical"), sha256_text("producer"))
+
+describe "retained HIR bootstrap context authority":
+    it "round trips exact bootstrap owner and process boundary identities in SDN":
+        val original = bootstrap_context_fixture_v1()
+        expect(native_mir_selective_bootstrap_validate_v1(original)).to_equal("")
+        val encoded = native_mir_selective_bootstrap_encode_v1(original)
+        expect(encoded.is_ok()).to_equal(true)
+        val decoded = bootstrap_context_decode_fixture_v1(encoded.unwrap())
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().backend).to_equal("cranelift")
+        expect(decoded.unwrap().owners[0].digest).to_equal(sha256_text("function_registry"))
+        expect(native_mir_selective_bootstrap_encode_v1(decoded.unwrap()).unwrap()).to_equal(encoded.unwrap())
+
+    it "retains serial stage4 post chain policy rather than ambient process policy":
+        val stage4 = bootstrap_context_fixture_v1(true)
+        expect(native_mir_selective_bootstrap_validate_v1(stage4)).to_equal("")
+        expect(bootstrap_context_decode_fixture_v1(native_mir_selective_bootstrap_encode_v1(stage4).unwrap()).unwrap().skip_post_chain).to_equal(false)
+        var incorrect = bootstrap_context_fixture_v1()
+        incorrect.skip_post_chain = false
+        expect(native_mir_selective_bootstrap_validate_v1(incorrect)).to_equal("bootstrap post-chain policy differs")
+
+    it "refuses an entry name or physical source substitution":
+        var wrong_owner = bootstrap_context_fixture_v1()
+        wrong_owner.entry_owner = "fixture.main"
+        expect(native_mir_selective_bootstrap_encode_v1(wrong_owner).is_err()).to_equal(true)
+        var wrong_source = bootstrap_context_fixture_v1()
+        wrong_source.entry_source = "../src/app/cli/bootstrap_main.spl"
+        expect(native_mir_selective_bootstrap_encode_v1(wrong_source).is_err()).to_equal(true)
+
+    it "refuses missing reordered duplicate or oversized actual owner snapshots":
+        var missing = bootstrap_context_fixture_v1()
+        missing.owners = []
+        expect(native_mir_selective_bootstrap_encode_v1(missing).is_err()).to_equal(true)
+        var reordered = bootstrap_context_fixture_v1()
+        reordered.owners = [reordered.owners[1], reordered.owners[0], reordered.owners[2]]
+        expect(native_mir_selective_bootstrap_encode_v1(reordered).is_err()).to_equal(true)
+        var oversized = bootstrap_context_fixture_v1()
+        var owners = oversized.owners
+        owners[0] = NativeMirSelectiveBootstrapOwnerReceiptV1(kind: "function_registry",
+            digest: sha256_text("real-owner"), bytes: 67108865, rows: 3)
+        oversized.owners = owners
+        expect(native_mir_selective_bootstrap_encode_v1(oversized).is_err()).to_equal(true)
+        var duplicate = bootstrap_context_fixture_v1()
+        duplicate.owners = [duplicate.owners[0], duplicate.owners[0], duplicate.owners[2]]
+        expect(native_mir_selective_bootstrap_encode_v1(duplicate).is_err()).to_equal(true)
+
+    it "refuses source context physical manifest and producer identity changes":
+        val blob = native_mir_selective_bootstrap_encode_v1(bootstrap_context_fixture_v1()).unwrap()
+        expect(native_mir_selective_bootstrap_decode_v1(blob, sha256_text("other"), sha256_text("context"), sha256_text("physical"), sha256_text("producer")).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_decode_v1(blob, sha256_text("source"), sha256_text("other"), sha256_text("physical"), sha256_text("producer")).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_decode_v1(blob, sha256_text("source"), sha256_text("context"), sha256_text("other"), sha256_text("producer")).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_decode_v1(blob, sha256_text("source"), sha256_text("context"), sha256_text("physical"), sha256_text("other")).is_err()).to_equal(true)
+
+    it "refuses unknown noncanonical malformed or trailing context data":
+        val blob = native_mir_selective_bootstrap_encode_v1(bootstrap_context_fixture_v1()).unwrap()
+        expect(bootstrap_context_decode_fixture_v1(blob + "other: 1\n").is_err()).to_equal(true)
+        expect(bootstrap_context_decode_fixture_v1(" " + blob).is_err()).to_equal(true)
+        expect(bootstrap_context_decode_fixture_v1(blob.replace("schema:", "unknown:")).is_err()).to_equal(true)
+        expect(bootstrap_context_decode_fixture_v1("{schema: [").is_err()).to_equal(true)
+
+    it "refuses external providers missing target and invalid hashes":
+        var external = bootstrap_context_fixture_v1()
+        external.backend = "my-plugin"
+        expect(native_mir_selective_bootstrap_encode_v1(external).is_err()).to_equal(true)
+        var target = bootstrap_context_fixture_v1()
+        target.target = ""
+        expect(native_mir_selective_bootstrap_encode_v1(target).is_err()).to_equal(true)
+        var source = bootstrap_context_fixture_v1()
+        source.source_identity = "0"
+        expect(native_mir_selective_bootstrap_encode_v1(source).is_err()).to_equal(true)
