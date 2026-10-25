@@ -143,4 +143,3 @@ unchanged historical portion after the current matrix. The new headings clarify
 historical versus current denominators. Whitespace and owned-file checks apply.
 Root owns independent review, PR composition and landing; runtime qualification
 uses the existing modern SSpec runner once its compiler/runner gates pass.
-
