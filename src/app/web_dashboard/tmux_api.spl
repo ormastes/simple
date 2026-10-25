@@ -1,279 +1,216 @@
-# Tmux REST API
-#
-# REST endpoints for tmux session/window/pane management.
-# Mounted under /api/tmux/* in the web dashboard server.
+# Browser JSON interoperability boundary; only checked real tmux operations.
+use std.nogc_sync_mut.tmux.mod.{tmux_probe_checked, tmux_list_sessions_checked,
+    tmux_list_windows_checked, tmux_list_panes_checked, tmux_capture_checked,
+    tmux_new_session_checked, tmux_kill_session_checked, tmux_send_checked,
+    tmux_send_command_checked, tmux_resize_checked}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
+use std.common.text_advanced.{escape_json}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.binary_inspect.{percent_hex_decode_pair}
+use std.convert.{try_parse_int}
 
-use lib.nogc_sync_mut.tmux.mod.{
-    tmux_available, tmux_server_running,
-    tmux_list_sessions, tmux_has_session, tmux_new_session, tmux_kill_session,
-    tmux_list_windows, tmux_list_panes,
-    tmux_capture_pane, tmux_capture_pane_with_history,
-    tmux_send_keys, tmux_send_text, tmux_send_command,
-    tmux_resize_pane,
-    TmuxSession, TmuxWindow, TmuxPane
-}
-use lib.common.text_advanced.{escape_json}
-fn to_int_or(s: text, default: i64) -> i64:
-    if s.len() == 0:
-        return default
-    var start_idx = 0
-    if s[0:1] == "-":
-        start_idx = 1
-        if s.len() == 1:
-            return default
-    var i = start_idx
-    while i < s.len():
-        val c = s[i:i+1]
-        if c < "0" or c > "9":
-            return default
-        i = i + 1
-    s.to_int()
+fn api_error(status: i64, message: text) -> (i64, text, text):
+    (status, "application/json", "{\"error\":\"" + escape_json(message) + "\"}")
 
-# =========================================================================
-# Router
-# =========================================================================
+fn hex_digit(byte: u8) -> bool:
+    (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 70) or (byte >= 97 and byte <= 102)
 
-fn handle_tmux_api(method: text, path: text, body: text) -> (i32, text, text):
-    if not tmux_available():
-        return (503, "application/json", "{\"error\": \"tmux is not installed\"}")
-
-    # Strip /api/tmux prefix and separate query string
-    val full_sub = if path.len() > 9: path[9:] else: ""
-    val qmark_pos = full_sub.index_of("?") ?? -1
-    val sub = if qmark_pos >= 0: full_sub[0:qmark_pos] else: full_sub
-    val query = if qmark_pos >= 0: full_sub[qmark_pos + 1:] else: ""
-
-    # For GET requests, build body-like JSON from query params so endpoints work uniformly
-    val effective_body = if method == "GET" and query != "": _query_to_json(query) else: body
-
-    match sub:
-        "":
-            return api_tmux_status()
-        "/sessions":
-            return api_tmux_sessions(method: method, body: effective_body)
-        "/windows":
-            return api_tmux_windows(effective_body)
-        "/panes":
-            return api_tmux_panes(effective_body)
-        "/capture":
-            return api_tmux_capture(effective_body)
-        "/send":
-            return api_tmux_send(method: method, body: effective_body)
-        "/send-command":
-            return api_tmux_send_cmd(method: method, body: effective_body)
-        "/resize":
-            return api_tmux_resize(method: method, body: effective_body)
-        _:
-            return (404, "application/json", "{\"error\": \"Unknown tmux endpoint\"}")
-
-# =========================================================================
-# Endpoints
-# =========================================================================
-
-fn api_tmux_status() -> (i32, text, text):
-    val running = tmux_server_running()
-    val sessions = tmux_list_sessions()
-    val json = "{\"available\": true, \"server_running\": {running}, \"session_count\": {sessions.len()}}"
-    (200, "application/json", json)
-
-fn api_tmux_sessions(method: text, body: text) -> (i32, text, text):
-    if method == "POST":
-        val name = _extract_json_field(json: body, field: "name")
-        if name == "":
-            return (400, "application/json", "{\"error\": \"name required\"}")
-        match tmux_new_session(name):
-            Ok(n):
-                return (201, "application/json", "{\"created\": \"{n}\"}")
-            Err(e):
-                return (409, "application/json", "{\"error\": \"{escape_json(e)}\"}")
-
-    if method == "DELETE":
-        val name = _extract_json_field(json: body, field: "name")
-        if name == "":
-            return (400, "application/json", "{\"error\": \"name required\"}")
-        match tmux_kill_session(name):
-            Ok(msg):
-                return (200, "application/json", "{\"message\": \"{escape_json(msg)}\"}")
-            Err(e):
-                return (500, "application/json", "{\"error\": \"{escape_json(e)}\"}")
-
-    # GET
-    val sessions = tmux_list_sessions()
-    var parts: [text] = []
-    for s in sessions:
-        val attached_str = if s.attached: "true" else: "false"
-        parts.push("{\"name\": \"{escape_json(s.name)}\", \"windows\": {s.windows}, \"attached\": {attached_str}}")
-    val json = "[{parts.join(', ')}]"
-    (200, "application/json", json)
-
-fn api_tmux_windows(body: text) -> (i32, text, text):
-    val session = _extract_json_field(json: body, field: "session")
-    if session == "":
-        return (400, "application/json", "{\"error\": \"session required\"}")
-
-    val windows = tmux_list_windows(session)
-    var parts: [text] = []
-    for w in windows:
-        val active_str = if w.active: "true" else: "false"
-        parts.push("{\"index\": {w.index}, \"name\": \"{escape_json(w.name)}\", \"active\": {active_str}, \"panes\": {w.panes}}")
-    val json = "[{parts.join(', ')}]"
-    (200, "application/json", json)
-
-fn api_tmux_panes(body: text) -> (i32, text, text):
-    val session = _extract_json_field(json: body, field: "session")
-    val window_str = _extract_json_field(json: body, field: "window")
-    val window_index = to_int_or(window_str, 0)
-
-    if session == "":
-        return (400, "application/json", "{\"error\": \"session required\"}")
-
-    val panes = tmux_list_panes(session, window_index)
-    var parts: [text] = []
-    for p in panes:
-        val active_str = if p.active: "true" else: "false"
-        parts.push("{\"index\": {p.pane_index}, \"active\": {active_str}, \"width\": {p.width}, \"height\": {p.height}, \"command\": \"{escape_json(p.current_command)}\", \"pid\": {p.pid}}")
-    val json = "[{parts.join(', ')}]"
-    (200, "application/json", json)
-
-fn api_tmux_capture(body: text) -> (i32, text, text):
-    val session = _extract_json_field(json: body, field: "session")
-    val window_str = _extract_json_field(json: body, field: "window")
-    val pane_str = _extract_json_field(json: body, field: "pane")
-    val history_str = _extract_json_field(json: body, field: "history")
-
-    if session == "":
-        return (400, "application/json", "{\"error\": \"session required\"}")
-
-    val window_index = to_int_or(window_str, 0)
-    val pane_index = to_int_or(pane_str, 0)
-
-    val result = if history_str != "":
-        tmux_capture_pane_with_history(session: session, window_index: window_index, pane_index: pane_index, history_lines: to_int_or(history_str, 100))
-    else:
-        tmux_capture_pane(session: session, window_index: window_index, pane_index: pane_index)
-
-    val json = "{\"pane_id\": \"{escape_json(result.pane_id)}\", \"rows\": {result.rows}, \"content\": \"{escape_json(result.content)}\"}"
-    (200, "application/json", json)
-
-fn api_tmux_send(method: text, body: text) -> (i32, text, text):
-    if method != "POST":
-        return (405, "application/json", "{\"error\": \"POST required\"}")
-
-    val session = _extract_json_field(json: body, field: "session")
-    val window_str = _extract_json_field(json: body, field: "window")
-    val pane_str = _extract_json_field(json: body, field: "pane")
-    val keys = _extract_json_field(json: body, field: "keys")
-    val text_input = _extract_json_field(json: body, field: "text")
-
-    if session == "":
-        return (400, "application/json", "{\"error\": \"session required\"}")
-
-    val window_index = to_int_or(window_str, 0)
-    val pane_index = to_int_or(pane_str, 0)
-
-    val result = if keys != "":
-        tmux_send_keys(session: session, window_index: window_index, pane_index: pane_index, keys: keys)
-    elif text_input != "":
-        tmux_send_text(session: session, window_index: window_index, pane_index: pane_index, text_input: text_input)
-    else:
-        Err("Either 'keys' or 'text' required")
-
-    match result:
-        Ok(msg):
-            return (200, "application/json", "{\"message\": \"{escape_json(msg)}\"}")
-        Err(e):
-            return (500, "application/json", "{\"error\": \"{escape_json(e)}\"}")
-
-fn api_tmux_send_cmd(method: text, body: text) -> (i32, text, text):
-    if method != "POST":
-        return (405, "application/json", "{\"error\": \"POST required\"}")
-
-    val session = _extract_json_field(json: body, field: "session")
-    val window_str = _extract_json_field(json: body, field: "window")
-    val pane_str = _extract_json_field(json: body, field: "pane")
-    val command = _extract_json_field(json: body, field: "command")
-
-    if session == "" or command == "":
-        return (400, "application/json", "{\"error\": \"session and command required\"}")
-
-    val window_index = to_int_or(window_str, 0)
-    val pane_index = to_int_or(pane_str, 0)
-
-    match tmux_send_command(session: session, window_index: window_index, pane_index: pane_index, command: command):
-        Ok(msg):
-            return (200, "application/json", "{\"message\": \"{escape_json(msg)}\"}")
-        Err(e):
-            return (500, "application/json", "{\"error\": \"{escape_json(e)}\"}")
-
-fn api_tmux_resize(method: text, body: text) -> (i32, text, text):
-    if method != "POST":
-        return (405, "application/json", "{\"error\": \"POST required\"}")
-
-    val session = _extract_json_field(json: body, field: "session")
-    val window_str = _extract_json_field(json: body, field: "window")
-    val pane_str = _extract_json_field(json: body, field: "pane")
-    val width_str = _extract_json_field(json: body, field: "width")
-    val height_str = _extract_json_field(json: body, field: "height")
-
-    if session == "":
-        return (400, "application/json", "{\"error\": \"session required\"}")
-
-    val window_index = to_int_or(window_str, 0)
-    val pane_index = to_int_or(pane_str, 0)
-    val width = to_int_or(width_str, 80)
-    val height = to_int_or(height_str, 24)
-
-    match tmux_resize_pane(session: session, window_index: window_index, pane_index: pane_index, width: width, height: height):
-        Ok(msg):
-            return (200, "application/json", "{\"message\": \"{escape_json(msg)}\"}")
-        Err(e):
-            return (500, "application/json", "{\"error\": \"{escape_json(e)}\"}")
-
-# =========================================================================
-# JSON Helpers
-# =========================================================================
-
-fn _extract_json_field(json: text, field: text) -> text:
-    val search = "\"{field}\""
-    val idx = json.find(search)
-    if idx < 0:
-        return ""
-
-    var pos = idx + search.len()
-    while pos < json.len() and json[pos] != ":":
-        pos = pos + 1
-    pos = pos + 1
-
-    while pos < json.len() and (json[pos] == " " or json[pos] == "\t"):
-        pos = pos + 1
-
-    if pos >= json.len() or json[pos] != "\"":
-        return ""
-    pos = pos + 1
-
-    var value = ""
-    while pos < json.len() and json[pos] != "\"":
-        val ch = json[pos]
-        if ch == "\\":
-            pos = pos + 1
-            if pos < json.len():
-                value = "{value}{json[pos]}"
+fn query_decode(value: text) -> Result<text, text>:
+    val bytes = text_to_bytes(value)
+    var decoded: [u8] = []
+    var index = 0
+    while index < bytes.len():
+        if bytes[index] == 37:
+            if index + 2 >= bytes.len(): return Err("incomplete percent escape")
+            if not hex_digit(bytes[index + 1]) or not hex_digit(bytes[index + 2]): return Err("invalid percent escape")
+            decoded.push(percent_hex_decode_pair((bytes[index + 1] as i64).chr(), (bytes[index + 2] as i64).chr()) as u8)
+            index = index + 3
         else:
-            value = "{value}{ch}"
-        pos = pos + 1
+            decoded.push(if bytes[index] == 43: 32 else: bytes[index])
+            index = index + 1
+    validated_utf8_bytes_to_text_linear(decoded)
 
-    return value
+fn request_fields(method: text, query: text, body: text) -> Result<JsonValue, text>:
+    if text_to_bytes(body).len() > 65536 or text_to_bytes(query).len() > 8192:
+        return Err("request too large")
+    var value = JsonValue.Object([], [])
+    if method == "GET":
+        if body != "": return Err("GET body not supported")
+        var keys: [text] = []
+        var values: [JsonValue] = []
+        if query != "":
+            for pair in query.split("&"):
+                val at = pair.find("=")
+                if at < 0: return Err("query field requires a value")
+                val key = query_decode(pair[0:at])?
+                val field = query_decode(pair[at + 1:])?
+                if keys.contains(key): return Err("duplicate query field")
+                keys.push(key)
+                values.push(JsonValue.Str(field))
+        value = JsonValue.Object(keys, values)
+    else:
+        if query != "": return Err("mutation parameters must be in the JSON body")
+        if body != "":
+            # This API accepts only a flat object. Bound nesting before the
+            # canonical recursive parser; braces inside strings remain data.
+            var depth = 0
+            var quoted = false
+            var escaped = false
+            for byte in text_to_bytes(body):
+                if quoted:
+                    if escaped: escaped = false
+                    elif byte == 92: escaped = true
+                    elif byte == 34: quoted = false
+                elif byte == 34: quoted = true
+                elif byte == 91 or byte == 93: return Err("nested JSON is not supported")
+                elif byte == 123:
+                    depth = depth + 1
+                    if depth > 1: return Err("nested JSON is not supported")
+                elif byte == 125: depth = depth - 1
+            value = json_parse_value_strict(body)?
+    match value:
+        case JsonValue.Object(keys, values):
+            if keys.len() > 12: return Err("too many request fields")
+            for index in 0..keys.len():
+                if not ["name", "session", "window", "pane", "history", "keys", "text", "command", "width", "height"].contains(keys[index]):
+                    return Err("unknown request field")
+                match values[index]:
+                    case JsonValue.Str(field):
+                        if field.contains("\0"): return Err("NUL is not a process argument")
+                        if validated_utf8_bytes_to_text_linear(text_to_bytes(field)).is_err(): return Err("invalid UTF8 field")
+                    case JsonValue.Int(_): ()
+                    case _: return Err("request fields must be strings or integers")
+        case _: return Err("JSON object required")
+    Ok(value)
 
-fn _query_to_json(query: text) -> text:
-    val q = "\""
-    val pairs = query.split("&")
-    var parts: [text] = []
-    for pair in pairs:
-        val kv = pair.split("=")
-        if kv.len() >= 2:
-            parts.push("{q}{kv[0]}{q}: {q}{kv[1]}{q}")
-        elif kv.len() == 1 and kv[0] != "":
-            parts.push("{q}{kv[0]}{q}: {q}{q}")
-    val open = r"{"
-    val close = r"}"
-    "{open}{parts.join(r", ")}{close}"
+fn field_text(fields: JsonValue, name: text) -> Result<text, text>:
+    match json_value_get(fields, name):
+        case nil: Ok("")
+        case Some(value):
+            match value:
+                case JsonValue.Str(content): Ok(content)
+                case _: Err(name + " must be a string")
+
+fn field_number(fields: JsonValue, name: text, default: i64, minimum: i64, maximum: i64) -> Result<i64, text>:
+    var number = default
+    match json_value_get(fields, name):
+        case nil: ()
+        case Some(value):
+            match value:
+                case JsonValue.Int(content): number = content
+                case JsonValue.Str(content):
+                    if content.len() == 0 or content.len() > 9: return Err("invalid " + name)
+                    val parsed = try_parse_int(content)
+                    if parsed == nil: return Err("invalid " + name)
+                    number = parsed.unwrap()
+                case _: return Err("invalid " + name)
+    if number < minimum or number > maximum: return Err("out of range " + name)
+    Ok(number)
+
+fn session_name(value: text) -> bool:
+    val bytes = text_to_bytes(value)
+    if bytes.len() == 0 or bytes.len() > 256 or value.contains(":") or value.contains("."):
+        return false
+    for index in 0..bytes.len():
+        if bytes[index] < 32 or bytes[index] == 127: return false
+        if bytes[index] == 194 and index + 1 < bytes.len():
+            if bytes[index + 1] >= 128 and bytes[index + 1] <= 159: return false
+    true
+
+pub struct TmuxApiRequest:
+    method: text
+    endpoint: text
+    session: text
+    window: i64
+    pane: i64
+    history: i64?
+    width: i64
+    height: i64
+    keys: text
+    literal: text
+    command: text
+
+# Pure preparation always precedes backend access.
+fn prepare_request(method: text, endpoint: text, query: text, body: text) -> Result<TmuxApiRequest, text>:
+    val fields = request_fields(method, query, body)?
+    val name = field_text(fields, if endpoint == "/sessions" and method != "GET": "name" else: "session")?
+    if endpoint != "" and not (endpoint == "/sessions" and method == "GET"):
+        if not session_name(name): return Err("valid session name required")
+    val window = field_number(fields, "window", 0, 0, 100000)?
+    val pane = field_number(fields, "pane", 0, 0, 100000)?
+    val width = field_number(fields, "width", 80, 1, 4096)?
+    val height = field_number(fields, "height", 24, 1, 4096)?
+    var history: i64? = nil
+    if json_value_get(fields, "history") != nil:
+        history = Some(field_number(fields, "history", 0, 0, 100000)?)
+    val keys = field_text(fields, "keys")?
+    val literal = field_text(fields, "text")?
+    val command = field_text(fields, "command")?
+    if endpoint == "/send" and ((keys == "" and literal == "") or (keys != "" and literal != "")):
+        return Err("exactly one of keys or text required")
+    if endpoint == "/send-command" and command == "": return Err("command required")
+    Ok(TmuxApiRequest(method: method, endpoint: endpoint, session: name,
+        window: window, pane: pane, history: history, width: width, height: height,
+        keys: keys, literal: literal, command: command))
+
+pub fn handle_tmux_api(method: text, path: text, body: text) -> (i64, text, text):
+    val question = path.find("?")
+    val clean = if question >= 0: path[0:question] else: path
+    val query = if question >= 0: path[question + 1:] else: ""
+    if clean != "/api/tmux" and not clean.starts_with("/api/tmux/"):
+        return api_error(404, "Unknown tmux endpoint")
+    val endpoint = clean[9:]
+    if not ["", "/sessions", "/windows", "/panes", "/capture", "/send", "/send-command", "/resize"].contains(endpoint):
+        return api_error(404, "Unknown tmux endpoint")
+    val allowed = if endpoint == "/sessions": ["GET", "POST", "DELETE"] elif endpoint == "/send" or endpoint == "/send-command" or endpoint == "/resize": ["POST"] else: ["GET"]
+    if not allowed.contains(method): return api_error(405, "Method not supported")
+    val prepared = prepare_request(method, endpoint, query, body)
+    if prepared.is_err(): return api_error(400, prepared.unwrap_err())
+    val probe = tmux_probe_checked()
+    if probe.is_err(): return api_error(503, "tmux unavailable: " + probe.unwrap_err())
+    val result = execute_request(prepared.unwrap())
+    if result.is_err(): return api_error(502, result.unwrap_err())
+    val status = if endpoint == "/sessions" and method == "POST": 201 else: 200
+    (status, "application/json", result.unwrap())
+
+fn execute_request(request: TmuxApiRequest) -> Result<text, text>:
+    if request.endpoint == "" or (request.endpoint == "/sessions" and request.method == "GET"):
+        val sessions = tmux_list_sessions_checked()?
+        if request.endpoint == "":
+            return Ok("{\"available\":true,\"server_running\":true,\"session_count\":" + str(sessions.len()) + "}")
+        var parts: [text] = []
+        for session in sessions:
+            parts.push("{\"name\":\"" + escape_json(session.name) + "\",\"windows\":" + str(session.windows) + ",\"attached\":" + str(session.attached) + "}")
+        return Ok("[" + parts.join(",") + "]")
+    if request.endpoint == "/sessions":
+        if request.method == "POST":
+            val name = tmux_new_session_checked(request.session)?
+            return Ok("{\"created\":\"" + escape_json(name) + "\"}")
+        val message = tmux_kill_session_checked(request.session)?
+        return Ok("{\"message\":\"" + escape_json(message) + "\"}")
+    if request.endpoint == "/windows":
+        val windows = tmux_list_windows_checked(request.session)?
+        var parts: [text] = []
+        for window in windows:
+            parts.push("{\"index\":" + str(window.index) + ",\"name\":\"" + escape_json(window.name) + "\",\"active\":" + str(window.active) + ",\"panes\":" + str(window.panes) + "}")
+        return Ok("[" + parts.join(",") + "]")
+    if request.endpoint == "/panes":
+        val panes = tmux_list_panes_checked(request.session, request.window)?
+        var parts: [text] = []
+        for pane in panes:
+            parts.push("{\"index\":" + str(pane.pane_index) + ",\"active\":" + str(pane.active) + ",\"width\":" + str(pane.width) + ",\"height\":" + str(pane.height) + ",\"command\":\"" + escape_json(pane.current_command) + "\",\"pid\":" + str(pane.pid) + "}")
+        return Ok("[" + parts.join(",") + "]")
+    if request.endpoint == "/capture":
+        val capture = tmux_capture_checked(request.session, request.window, request.pane, request.history)?
+        return Ok("{\"pane_id\":\"" + escape_json(capture.pane_id) + "\",\"rows\":" + str(capture.rows) + ",\"content\":\"" + escape_json(capture.content) + "\"}")
+    var message: Result<text, text> = Err("Unknown tmux operation")
+    if request.endpoint == "/send":
+        message = tmux_send_checked(request.session, request.window, request.pane,
+            if request.keys != "": request.keys else: request.literal, request.keys == "")
+    elif request.endpoint == "/send-command":
+        message = tmux_send_command_checked(request.session, request.window, request.pane, request.command)
+    elif request.endpoint == "/resize":
+        message = tmux_resize_checked(request.session, request.window, request.pane, request.width, request.height)
+    val completed = message?
+    Ok("{\"message\":\"" + escape_json(completed) + "\"}")

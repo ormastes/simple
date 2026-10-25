@@ -1,4 +1,8 @@
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics_and_tooling}
+use app.web_dashboard.tmux_api.{handle_tmux_api}
+use app.llm_dashboard.http_auth_boundary.{dashboard_header, dashboard_local_origin}
+use std.common.text_bytes.{text_to_bytes}
+use std.convert.{try_parse_int}
 use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_html}
 use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_html}
 use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action_with_overrides, render_llm_dashboard_vllm_control_panel_html}
@@ -22,6 +26,7 @@ use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use app.llm_dashboard.web_login.{
     DashboardAuthSession,
     auth_session_from_headers,
+    auth_session_lookup,
     auth_authenticate_form,
     auth_delete_session,
     auth_login_page,
@@ -41,6 +46,15 @@ fn _status_text(status: i64) -> text:
     match status:
         case 200:
             "OK"
+        case 201: "Created"
+        case 400: "Bad Request"
+        case 403: "Forbidden"
+        case 404: "Not Found"
+        case 405: "Method Not Allowed"
+        case 413: "Payload Too Large"
+        case 431: "Request Header Fields Too Large"
+        case 502: "Bad Gateway"
+        case 503: "Service Unavailable"
         case 302:
             "Found"
         case 401:
@@ -51,7 +65,7 @@ fn _status_text(status: i64) -> text:
 pub fn http_response(status: i64, content_type: text, body: text) -> text:
     var response = "HTTP/1.1 " + str(status) + " " + _status_text(status) + "\r\n"
     response = response + "Content-Type: " + content_type + "\r\n"
-    response = response + "Content-Length: " + str(body.len()) + "\r\n\r\n"
+    response = response + "Content-Length: " + str(text_to_bytes(body).len()) + "\r\nConnection: close\r\n\r\n"
     response + body
 
 pub fn http_redirect(location: text) -> text:
@@ -99,7 +113,7 @@ pub struct DashboardServer:
     fn start():
         print "Starting LLM dashboard web server on http://localhost:{self.port}"
         print "Press Ctrl+C to stop"
-        match TcpListener.bind("0.0.0.0:{self.port}"):
+        match TcpListener.bind("127.0.0.1:{self.port}"):
             Err(e):
                 print "Error: Failed to bind to port {self.port}: {e}"
                 return
@@ -116,7 +130,10 @@ pub struct DashboardServer:
     # method dispatch (verified empirically: same name+signature on a
     # different struct otherwise resolves to the wrong class's method body).
     fn dash_handle_connection(stream: TcpStream):
-        match stream.read_line():
+        if stream.set_read_timeout(Some(15000)).is_err() or stream.set_write_timeout(Some(15000)).is_err():
+            val _ = stream.close()
+            return
+        match stream.read_line_bounded(8192):
             Err(_):
                 val _ = stream.close()
                 return
@@ -131,51 +148,88 @@ pub struct DashboardServer:
 
                 var headers = ""
                 var content_length = 0
+                var length_seen = false
+                var header_count = 0
                 loop:
-                    match stream.read_line():
+                    match stream.read_line_bounded(8192):
                         Ok(header_line):
                             if header_line.trim() == "":
                                 break
+                            header_count = header_count + 1
+                            if header_count > 128 or text_to_bytes(headers).len() + text_to_bytes(header_line).len() > 65536:
+                                val _ = stream.write_text(http_error(431, "Headers too large"))
+                                val _ = stream.close()
+                                return
                             headers = "{headers}{header_line}\n"
-                            if header_line.starts_with("Content-Length:"):
-                                content_length = header_line[15:].trim().to_i64() ?? 0
+                            if header_line.lower().starts_with("transfer-encoding:"):
+                                val _ = stream.write_text(http_error(400, "Transfer-Encoding not supported"))
+                                val _ = stream.close()
+                                return
+                            if header_line.lower().starts_with("content-length:"):
+                                val parsed = try_parse_int(header_line[15:].trim())
+                                if length_seen or parsed == nil:
+                                    val _ = stream.write_text(http_error(400, "Invalid Content-Length"))
+                                    val _ = stream.close()
+                                    return
+                                length_seen = true
+                                content_length = parsed.unwrap()
+                                if content_length < 0 or content_length > 65536:
+                                    val _ = stream.write_text(http_error(413, "Body exceeds 65536 bytes"))
+                                    val _ = stream.close()
+                                    return
                         Err(_):
-                            break
+                            val _ = stream.write_text(http_error(400, "Incomplete headers"))
+                            val _ = stream.close()
+                            return
 
                 var body = ""
-                if method == "POST" and content_length > 0:
-                    match stream.read_bytes(content_length):
+                if content_length > 0:
+                    match stream.read_bytes(content_length as i32):
                         Ok(data):
                             body = data
                         Err(_):
-                            pass_dn
+                            val _ = stream.write_text(http_error(400, "Incomplete or invalid UTF8 body"))
+                            val _ = stream.close()
+                            return
 
                 val response = self.dash_route_request(method, path, body, headers)
                 val _ = stream.write_text(response)
                 val _ = stream.close()
 
-    # Auth-aware wrapper around route_http. Off by default (DASH_AUTH unset)
-    # so localhost dev needs no login; set DASH_AUTH=1 to require the
-    # web_login cookie session before any /agents or /api/ route resolves.
+    # Mux control always needs live operator authentication. The development
+    # bypass applies only to unrelated read-only dashboard surfaces.
     fn dash_route_request(method: text, path: text, body: text, headers: text) -> text:
-        if not _dash_auth_enabled():
-            return self.route_http(method, path, body, "local-dev")
-
         val clean_path = _clean_path(path)
         val session = auth_session_from_headers(headers)
-
         if clean_path == "/login":
+            if not dashboard_local_origin(headers, self.port, method == "POST"):
+                return http_error(403, "Same-origin operator login required")
             return self.dash_handle_login(method, body, session)
         if clean_path == "/logout":
-            if val active = session:
+            if not dashboard_local_origin(headers, self.port, false):
+                return http_error(403, "Local operator origin required")
+            val host = dashboard_header(headers, "host") ?? ""
+            val origin = dashboard_header(headers, "origin") ?? ""
+            val referer = dashboard_header(headers, "referer") ?? ""
+            if origin != "http://" + host and not referer.starts_with("http://" + host + "/"):
+                return http_error(403, "Same-origin logout required")
+            if session != nil:
+                val active: DashboardAuthSession = session!
                 auth_delete_session(active.session_id)
             return http_redirect_with_headers("/login", [auth_clear_cookie_header()])
-
-        match session:
-            case Some(active):
-                self.route_http(method, path, body, active.session_id)
-            case nil:
-                http_redirect("/login")
+        if clean_path.starts_with("/api/tmux"):
+            if not dashboard_local_origin(headers, self.port, method == "POST" or method == "DELETE"):
+                return http_error(403, "Same-origin operator request required")
+            if session != nil:
+                val active: DashboardAuthSession = session!
+                return self.route_http(method, path, body, active.session_id)
+            return http_error(403, "Authenticated operator session required")
+        if not _dash_auth_enabled():
+            return self.route_http(method, path, body, "local-dev")
+        if session != nil:
+            val active: DashboardAuthSession = session!
+            return self.route_http(method, path, body, active.session_id)
+        http_redirect("/login")
 
     fn dash_handle_login(method: text, body: text, session: DashboardAuthSession?) -> text:
         if method == "GET":
@@ -185,8 +239,10 @@ pub struct DashboardServer:
         if method != "POST":
             return http_error(401, "Method not supported")
         val auth_result = auth_authenticate_form(body)
-        if val auth_session = auth_result.0:
-            return http_redirect_with_headers("/", [auth_login_cookie_header(auth_session)])
+        val candidate = auth_result.0
+        if candidate != nil:
+            val verified: DashboardAuthSession = candidate!
+            return http_redirect_with_headers("/", [auth_login_cookie_header(verified)])
         http_response(401, "text/html", auth_login_page(auth_result.1, auth_result.2))
 
     fn render_dashboard_html() -> text:
@@ -206,6 +262,9 @@ pub struct DashboardServer:
 
     fn route_http(method: text, path: text, body: text, session: text?) -> text:
         val clean_path = _clean_path(path)
+        if clean_path.starts_with("/api/tmux"):
+            if auth_session_lookup(session ?? "") == nil:
+                return http_error(403, "Authenticated operator session required")
         if not _session_authenticated(session):
             if _is_agents_path(clean_path):
                 return http_redirect("/login")
@@ -229,7 +288,8 @@ pub struct DashboardServer:
                 return http_error(401, "Method not supported")
             return http_response(200, "application/json", self._route_vllm_control(path))
         if path.starts_with("/api/tmux"):
-            return http_response(200, "application/json", "[]")
+            val reply = handle_tmux_api(method, path, body)
+            return http_response(reply.0, reply.1, reply.2)
         if method != "GET":
             return http_error(401, "Method not supported")
         http_response(200, "text/html", self.render_dashboard_html())
