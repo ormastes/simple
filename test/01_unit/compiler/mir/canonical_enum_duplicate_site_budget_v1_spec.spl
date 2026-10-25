@@ -1,12 +1,7 @@
 # Authored UNRUN: tests the actual duplicate-check helper, not SOURCE admission.
 use std.spec.{describe, it, expect, fail}
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
-use compiler.hir.hir_types.{SymbolId}
-use compiler.mir.mir_types.{MirType}
-use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirOperandKind}
-use compiler.mir.mir_types.{MirConstValue}
-use compiler.mir.canonical_enum_builtin_site_v1.*
-use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_unique_site_v1, canonical_enum_duplicate_site_work_v1}
+use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_record_seen_site_v1, canonical_enum_seen_site_work_v1}
 
 fn duplicate_account_v1(work: i64) -> MirLoopResourceAccountV1:
     var limits = MirLoopResourceLimitsV1()
@@ -15,50 +10,43 @@ fn duplicate_account_v1(work: i64) -> MirLoopResourceAccountV1:
         case Ok(account): account
         case Err(_): fail("duplicate-check test account unavailable")
 
-fn duplicate_site_v1(block: i64, index: i64) -> CanonicalEnumBuiltinSiteV1:
-    CanonicalEnumBuiltinSiteV1(owner: SymbolId(id: 1), block: BlockId(id: block),
-        instruction_index: index, operation: CanonicalEnumBuiltinOperationV1.Payload,
-        abi: 1, enum_runtime_id: 1, discriminant: 0,
-        callee: MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())),
-        operands: [], operand_types: [], result: nil, result_type: MirType.i64())
-
-describe("canonical enum duplicate-site prepayment"):
-    it("refuses one-short before scanning and preserves failed reservation ledger"):
-        val account = duplicate_account_v1(27)
+describe("canonical enum duplicate-map prepayment"):
+    it("refuses one-short before map work with unchanged failed-reserve ledger"):
+        val account = duplicate_account_v1(2099)
         val before = account.snapshot().work_used
-        val rejected = match canonical_enum_unique_site_v1([duplicate_site_v1(0, 0), duplicate_site_v1(0, 1)], 1, account):
+        val rejected = match canonical_enum_record_seen_site_v1({"0:0": true}, 1, 0, 1, account):
             case Err(_): true
             case _: false
         expect(rejected).to_equal(true)
         expect(account.snapshot().work_used).to_equal(before)
 
-    it("accepts exact boundary and distinguishes integer site coordinates"):
-        val account = duplicate_account_v1(40)
-        val rows = [duplicate_site_v1(0, 0), duplicate_site_v1(0, 1), duplicate_site_v1(1, 0)]
-        val first = match canonical_enum_unique_site_v1(rows, 1, account):
-            case Ok(_): true
+    it("accepts exact boundary for a distinct coordinate"):
+        # Charge =1536 work +32 state +512 bytes =2080; initial owner costs20.
+        val account = duplicate_account_v1(2100)
+        val accepted = match canonical_enum_record_seen_site_v1({"0:0": true}, 1, 0, 1, account):
+            case Ok(rows): rows.has("0:1")
             case _: false
-        val second = match canonical_enum_unique_site_v1(rows, 2, account):
-            case Ok(_): true
-            case _: false
-        expect(first).to_equal(true)
-        expect(second).to_equal(true)
-        expect(account.snapshot().work_used).to_equal(40)
+        expect(accepted).to_equal(true)
+        expect(account.snapshot().work_used).to_equal(2100)
 
-    it("rejects a repeated pair after paying its full scan"):
-        val account = duplicate_account_v1(28)
-        val rejected = match canonical_enum_unique_site_v1([duplicate_site_v1(2, 9), duplicate_site_v1(2, 9)], 1, account):
-            case Err(_): true
-            case _: false
-        expect(rejected).to_equal(true)
-        expect(account.snapshot().work_used).to_equal(28)
+    it("rejects the actual repeated key with the duplicate diagnostic"):
+        val account = duplicate_account_v1(2100)
+        val diagnostic = match canonical_enum_record_seen_site_v1({"2:9": true}, 1, 2, 9, account):
+            case Err(message): message
+            case _: "accepted"
+        expect(diagnostic).to_equal("ENUM-ORIGIN: duplicate primitive site")
+        expect(account.snapshot().work_used).to_equal(2100)
 
-    it("rejects overflow and negative scan bounds before multiplication"):
-        val overflow = match canonical_enum_duplicate_site_work_v1(9223372036854775807):
+    it("rejects sum and product overflow and negative counts"):
+        val sum_overflow = match canonical_enum_seen_site_work_v1(9223372036854775807):
             case Err(_): true
             case _: false
-        val negative = match canonical_enum_duplicate_site_work_v1(-1):
+        val product_overflow = match canonical_enum_seen_site_work_v1(18014398509481983):
             case Err(_): true
             case _: false
-        expect(overflow).to_equal(true)
+        val negative = match canonical_enum_seen_site_work_v1(-1):
+            case Err(_): true
+            case _: false
+        expect(sum_overflow).to_equal(true)
+        expect(product_overflow).to_equal(true)
         expect(negative).to_equal(true)
