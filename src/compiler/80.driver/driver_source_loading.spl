@@ -407,6 +407,29 @@ pub fn _driver_canonical_module_name(module_name: text) -> text:
         return "lib." + canonical.substring(4)
     canonical
 
+pub fn driver_composition_overlay_module_name_v1(canonical: text) -> text:
+    """The module a composition overlay file stands in for, or "" when
+    `canonical` is not an overlay spelling.
+    `src/compositions/<overlay>/<rest...>.spl` canonicalizes to
+    `compositions.<overlay>.<rest...>`, but the file is selected (ordered
+    `--source` roots, overlay root first, `_driver_resolve_source_root_entry_import_from_v1`)
+    AS the provider of `<rest...>` -- the spelling every importer writes
+    (`use plugins.backend_registry.selected_cuda_backend.{...}`). The
+    shadowed `src/<rest...>.spl` twin is excluded from the closure, so the
+    overlay must own that key: the per-module HIR lane registers surfaces
+    under the file's first alias and reported "missing module surface for
+    plugins.backend_registry.selected_cuda_backend" while the overlay sat in
+    the registry as `compositions.cuda_static.plugins...` (stage3 per-module
+    run 2026-10-25). Requires at least two segments after the overlay name so
+    a bare `compositions.<overlay>` package file is never renamed."""
+    val prefix = "compositions."
+    if not canonical.starts_with(prefix):
+        return ""
+    val segs = canonical.substring(prefix.len()).split(".")
+    if segs.len() < 3:
+        return ""
+    segs[1:segs.len()].join(".")
+
 fn _driver_module_name_from_repo_rel(rel: text) -> text:
     """Dotted module name for a path ALREADY relative to the repo root.
     `_driver_module_name_from_path` must not be used directly here: its `/src/`
@@ -524,6 +547,13 @@ fn _driver_module_aliases_with_closure(
         # sources keep distinct names matching LLVM's requested entry name.
         val canonical = if repository_source: _driver_canonical_module_name(physical) else: physical
         var names: [text] = []
+        # A composition overlay file is lowered under the name of the module
+        # it replaces (FIRST, so it is the surface key importers resolve);
+        # its `compositions.<overlay>.*` spelling stays as an alias for direct
+        # imports of that form (native_build_worker.spl).
+        if repository_source:
+            names = _driver_push_unique_module_name(names,
+                driver_composition_overlay_module_name_v1(canonical))
         names = _driver_push_unique_module_name(names, canonical)
         names = _driver_push_unique_module_name(names, module_name)
         names = _driver_push_unique_module_name(names, physical)
