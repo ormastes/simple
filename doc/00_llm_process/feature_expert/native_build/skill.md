@@ -141,6 +141,20 @@ link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
   store-side stability gate plus the checksum carry the admission.
 - Record: `doc/08_tracking/bug/phase4_hir_adoption_reported_cached0_and_parse_shards_unpartitioned_2026-10-19.md`.
 
+## Frontend shard admission estimates (2026-10-25)
+
+- Exec admission defaults are the measured 2937-module peaks
+  (`SHARD_PARSE_WORKER_KB_V1` 3,800,000 KiB, `SHARD_HIR_WORKER_KB_V1`
+  6,700,000 KiB, `src/app/cli/shard_mem_clamp.spl`); the old 1650000/3000000
+  were about half the measured worker peaks.
+- Bootstrap lanes are unaffected: they still export
+  `SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000`
+  (`scripts/check/lib/bootstrap-stage3/command-snapshot.shs:301`), and the env
+  var wins over the default. Moving them needs the per-job MiB pricing in
+  `tree-rss-policy.shs` and the inherited-override check in
+  `product-frontend-policy.shs` to move together (open follow-up).
+- Record: `doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md`.
+
 ## Stage 4 live projection is in-process on Linux (2026-10-20)
 
 `stage4_live_runtime_requests` (`native_project/linker.rs`) no longer runs
