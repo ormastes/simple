@@ -23,18 +23,23 @@ fn lower(src: text, path: text, name: text) -> HirModule:
     var lowering = HirLowering.with_filename(path)
     lowering.lower_module(module)
 
+# Guard evaluation reads module sources; these fixtures have no directives.
+fn no_guards() -> Dict<text, text>:
+    {"a/am_a.spl": "", "b/am_b.spl": "", "c/am_c.spl": ""}
+
 fn modules_with(advice: text, b_src: text) -> Dict<text, HirModule>:
     {"am_a": lower(FORWARDER + advice, "a/am_a.spl", "am_a"),
      "am_b": lower(b_src, "b/am_b.spl", "am_b")}
 
 describe "aop_weave_with_match_cache_v1":
     it "builds one complete facts shard per directory":
-        val dirs = aop_directory_facts_from_hir_v1(modules_with(ADVICE_V1, OTHER))
+        val dirs = aop_directory_facts_from_hir_v1(modules_with(ADVICE_V1, OTHER), no_guards())
         expect(dirs.len()).to_equal(2)
         for d in dirs:
             expect(d.complete).to_equal(true)
     it "weaves like the legacy path and reuses shards on an advice-body edit":
         val state = AopMatchDriverStateV1.create()
+        state.sources = no_guards()
         val m1 = modules_with(ADVICE_V1, OTHER)
         expect(validate_aspect_contracts(m1).len()).to_equal(0)
         expect(aop_weave_with_match_cache_v1(state, m1)).to_equal(1)
@@ -48,6 +53,7 @@ describe "aop_weave_with_match_cache_v1":
         expect(state.fallbacks).to_equal(0)
     it "a new matching forwarder in one directory misses only that shard":
         val state = AopMatchDriverStateV1.create()
+        state.sources = no_guards()
         expect(aop_weave_with_match_cache_v1(state, modules_with(ADVICE_V1, OTHER))).to_equal(1)
         val grown = modules_with(ADVICE_V1, OTHER + "\n" + FORWARDER)
         expect(aop_weave_with_match_cache_v1(state, grown)).to_equal(2)
@@ -56,6 +62,29 @@ describe "aop_weave_with_match_cache_v1":
     it "carries function attributes into facts so attr(...) selectors match":
         val src = "@logged\nfn sv_impl(n: i64) -> i64:\n    n\n\n@logged\nfn sv_view(n: i64) -> i64:\n    sv_impl(n)\n\nfn plain_view(n: i64) -> i64:\n    sv_impl(n)\n"
         val m: Dict<text, HirModule> = {"am_c": lower(src, "c/am_c.spl", "am_c")}
-        val dirs = aop_directory_facts_from_hir_v1(m)
+        val dirs = aop_directory_facts_from_hir_v1(m, no_guards())
         val r = pointcut_match_shard_compute_v1(pointcut_selector_parse_v1("attr(logged)"), dirs[0])
         expect(r.sorted_matching_ids).to_equal(["am_c::sv_view"])
+    it "a real @when flip changes only that directory's guard root":
+        val m = modules_with(ADVICE_V1, OTHER)
+        val on_src = "@when(true):\nfn g():\n    pass\n@end\n"
+        val off_src = "@when(false):\nfn g():\n    pass\n@end\n"
+        val on = aop_directory_facts_from_hir_v1(m, {"a/am_a.spl": "", "b/am_b.spl": on_src})
+        val off = aop_directory_facts_from_hir_v1(m, {"a/am_a.spl": "", "b/am_b.spl": off_src})
+        var changed = 0
+        for i in 0..on.len():
+            expect(on[i].complete).to_equal(true)
+            if on[i].facts_key != off[i].facts_key:
+                changed = changed + 1
+        expect(changed).to_equal(1)
+    it "an unevaluable @when makes the directory incomplete so the weave falls back":
+        val state = AopMatchDriverStateV1.create()
+        state.sources = {"a/am_a.spl": "@when(no_such_atom_xyz):\nfn g():\n    pass\n@end\n", "b/am_b.spl": ""}
+        expect(aop_weave_with_match_cache_v1(state, modules_with(ADVICE_V1, OTHER))).to_equal(1)
+        expect(state.fallbacks).to_equal(1)
+        val dirs = aop_directory_facts_from_hir_v1(modules_with(ADVICE_V1, OTHER), state.sources)
+        var incomplete = 0
+        for d in dirs:
+            if not d.complete:
+                incomplete = incomplete + 1
+        expect(incomplete).to_equal(1)
