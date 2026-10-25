@@ -56,6 +56,7 @@ use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envel
 use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
@@ -103,7 +104,15 @@ fn hir_cache_enabled() -> bool:
         return false
     # Requires the front-end cache scope: that is the compiler identity the
     # header is checked against. No scope, no identity, no cache.
-    frontend_parse_cache_scope() != ""
+    _hir_cache_identity_scope() != ""
+
+# Identity the HIR header folds. Equals frontend_parse_cache_scope() whenever
+# the frontend cache is on; with SIMPLE_FRONTEND_CACHE=0 it falls back to the
+# published SIMPLE_FRONTEND_CACHE_SCOPE so the HIR cache keeps working.
+fn _hir_cache_identity_scope() -> text:
+    hir_cache_identity_scope_v1(frontend_parse_cache_scope(),
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "",
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE") ?? "")
 
 fn hir_cache_dir() -> text:
     val root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? ""
@@ -158,7 +167,7 @@ fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
     hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
 fn hir_cache_header() -> text:
-    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
+    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
 
 # `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
 # source + closure digests, but the HEADER additionally folds

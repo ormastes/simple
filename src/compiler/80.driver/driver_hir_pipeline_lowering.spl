@@ -1,5 +1,6 @@
 use compiler.driver.cache.hir_tldr_cache_identity_v1.{hir_tldr_cache_closure_digest_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_digest_allowed_v1, hir_cache_policy_closure_digest_v1}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{
     HirBodyArchiveInputV1, HirBodyArchiveV1,
     hir_body_archive_store_in_owned_scope_v1, hir_body_archive_matches_v1}
@@ -74,6 +75,7 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_content_matches,
     driver_stage3_surface_identity_mismatch,
     driver_hir_mem_snapshot,
+    driver_hir_validation_blob_encode_enabled_v1,
     driver_shown_fatal_count,
     driver_collect_hir_errors,
     driver_admit_nogc_param_effects_v1,
@@ -1077,8 +1079,10 @@ impl CompilerDriver:
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
         # lowering can see, and the key stays sound.
-        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(surfaces), self.ctx.tldr_imports)
+        val hir_closure_digest: text = if hir_cache_digest_allowed_v1(self.ctx.tldr_entry_only, self.ctx.tldr_imports.len(), hir_cache_enabled()):
+            hir_cache_policy_closure_digest_v1(
+                hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(surfaces), self.ctx.tldr_imports),
+                driver_hir_explicit_semantic_policy(self.ctx))
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
@@ -1778,8 +1782,10 @@ impl CompilerDriver:
             bootstrap_hir_modules_reset()
         # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
         # per build; a hit below replaces lowering for that module.
-        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(retained_module_surfaces), self.ctx.tldr_imports)
+        val hir_closure_digest: text = if hir_cache_digest_allowed_v1(self.ctx.tldr_entry_only, self.ctx.tldr_imports.len(), hir_cache_enabled()):
+            hir_cache_policy_closure_digest_v1(
+                hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(retained_module_surfaces), self.ctx.tldr_imports),
+                driver_hir_explicit_semantic_policy(self.ctx))
         else:
             ""
         # HIR shard child (SIMPLE_HIR_SHARD, see driver_hir_cache.spl): visit
@@ -2280,32 +2286,39 @@ impl CompilerDriver:
                         # entries together so the parallel arrays stay in sync;
                         # when every blob refuses, the validator's empty-blobs
                         # contract falls back to validation_module_array.
-                        val validation_blob: text = hir_module_encode_retained_v1(hir_module_copy)
-                        if validation_blob != "":
-                            self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(validation_blob)
-                            # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
-                            # scalar facts parallel to the blobs. Cycle-82 shim proved
-                            # even a support-unit callee's Dict value reads of
-                            # HirFunction arrive erased in this lane (fault at the
-                            # +120 field load on rt_index_get's result); the ONLY
-                            # context that demonstrably walks module.functions values
-                            # is the codec unit's (the generated encoder reads
-                            # node.functions[dk3] on every encode), so the extraction
-                            # lives there (hir_module_has_rt_hal). The blobs
-                            # validation entry must NEVER read a field off a decoded
-                            # HirModule.
-                            # has_rt_hal is a scalar: the functions key array it
-                            # allocates dies with the scope, nothing is promoted,
-                            # and the ctx pushes run after scope end. The claim
-                            # count reads the registry's own array handle (no
-                            # scratch), so it stays outside the scope.
-                            val validation_claim_count: i64 = rt_criticality_claim_keys().len()
-                            val facts_scoped: bool = driver_hir_loop_aux_scope_begin_v1("rt-facts", name)
-                            val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
-                            if facts_scoped and not transient_scope_end():
-                                eprint("[hir-loop-scope] WARNING rt-facts scope end failed; arena retained: module={name}")
-                            self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
-                            self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
+                        # Lazy (2026-10-25): the blob is consumed only by the RT
+                        # validator, which re-decodes it and falls back to
+                        # validation_module_array on refusal (1237/1453 refused).
+                        # Encode only under SIMPLE_HIR_VALIDATION_BLOBS=1. The
+                        # scalar facts below are pushed for EVERY module so the
+                        # RT-policy short-circuit sees full coverage.
+                        if driver_hir_validation_blob_encode_enabled_v1(env_get("SIMPLE_HIR_VALIDATION_BLOBS") ?? ""):
+                            val validation_blob: text = hir_module_encode_retained_v1(hir_module_copy)
+                            if validation_blob != "":
+                                self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(validation_blob)
+                        # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
+                        # scalar facts parallel to the blobs. Cycle-82 shim proved
+                        # even a support-unit callee's Dict value reads of
+                        # HirFunction arrive erased in this lane (fault at the
+                        # +120 field load on rt_index_get's result); the ONLY
+                        # context that demonstrably walks module.functions values
+                        # is the codec unit's (the generated encoder reads
+                        # node.functions[dk3] on every encode), so the extraction
+                        # lives there (hir_module_has_rt_hal). The blobs
+                        # validation entry must NEVER read a field off a decoded
+                        # HirModule.
+                        # has_rt_hal is a scalar: the functions key array it
+                        # allocates dies with the scope, nothing is promoted,
+                        # and the ctx pushes run after scope end. The claim
+                        # count reads the registry's own array handle (no
+                        # scratch), so it stays outside the scope.
+                        val validation_claim_count: i64 = rt_criticality_claim_keys().len()
+                        val facts_scoped: bool = driver_hir_loop_aux_scope_begin_v1("rt-facts", name)
+                        val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
+                        if facts_scoped and not transient_scope_end():
+                            eprint("[hir-loop-scope] WARNING rt-facts scope end failed; arena retained: module={name}")
+                        self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
+                        self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:value-push:done index={source_idx}")
             if focused_future_driver_diag:
