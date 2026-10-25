@@ -33,6 +33,9 @@ use compiler.driver.cache.module_artifacts_v1.{GenericSpecInputsV1, module_tldr_
 use compiler.mono.nominal_type_identity.{mono_type_source_text_v1, mono_generic_uses_of_type_v1}
 use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend_in_borrowed_scope}
+use compiler.driver.cache.module_public_summary_facts_v1.{module_generic_template_decls_of_module_v1}
 
 fn guard() -> ActiveGuardRootV1:
     active_guard_root_empty_v1("profile:default")
@@ -46,6 +49,14 @@ fn pair_entry() -> GenericTemplateEntryV1:
         source_digest: "src:pair")
     project_generic_template_v1(d).unwrap()
 
+# `fn id<T>(x: T) -> T` in module t: a function template has no fields (P-G6).
+fn id_entry() -> GenericTemplateEntryV1:
+    val d = GenericDeclInputV1(module_path: "t", name: "id", params: ["T"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE], fields: [],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:id")
+    project_generic_template_v1(d).unwrap()
+
 fn ctx_with(names: [text]) -> GenericSpecContextV1:
     GenericSpecContextV1(profile_digest: "profile:default", guard_root: guard(),
         generic_import_names: names, generic_imports_unknown: false)
@@ -57,7 +68,7 @@ fn prim_key(name: text) -> text:
 
 # What mono observes for `val p = make_pair(1, 2.0)`: the inferred Pair<i64, f64>.
 fn mono_infer_list(module_id: text) -> GenericSpecializationListV1:
-    generic_specializations_of_mono_v1([""], ["Pair"], [["i64", "f64"]], true, [], module_id,
+    generic_specializations_of_mono_v1([""], ["Pair"], [["i64", "f64"]], true, module_id,
         [pair_entry()], ctx_with(["make_pair", "Pair"]))
 
 fn empty_rr() -> ReverseReferenceReceiptReadV1:
@@ -91,7 +102,7 @@ fn list_of(keys: [[text]]) -> GenericSpecializationListV1:
         owners.push("pkg_a")
         names.push("Pair")
         args.push(k)
-    generic_specializations_of_mono_v1(owners, names, args, true, [], "app", [pair_entry()], ctx_with([]))
+    generic_specializations_of_mono_v1(owners, names, args, true, "app", [pair_entry()], ctx_with([]))
 
 describe "generic-spec list from mono: inferred instantiation":
     it "lists the instance mono inferred and is complete":
@@ -109,29 +120,52 @@ describe "generic-spec list from mono: inferred instantiation":
         expect(t.specs.len()).to_equal(0)
 
     it "an unrenderable mono use makes the list incomplete":
-        val l = generic_specializations_of_mono_v1([""], ["Pair"], [["i64", "f64"]], false, [], "app",
+        val l = generic_specializations_of_mono_v1([""], ["Pair"], [["i64", "f64"]], false, "app",
             [pair_entry()], ctx_with([]))
         expect(l.complete).to_equal(false)
 
-    it "an imported generic function instance with no type use keeps the list incomplete":
-        # `id(1)`: mono places id$i64, but i64 carries no `Name<args>` type.
-        val l = generic_specializations_of_mono_v1([], [], [], true, ["t.id"], "app", [pair_entry()],
+    it "keys an imported generic function instance through its function template (P-G6)":
+        # `id(1)`: mono places id$i64; the `t.id` function template keys it.
+        val l = generic_specializations_of_mono_v1(["t"], ["id"], [["i64"]], true, "app",
+            [pair_entry(), id_entry()], ctx_with(["id"]))
+        expect(l.complete).to_equal(true)
+        expect(l.specs.len()).to_equal(1)
+        expect(l.specs[0].template_symbol).to_equal("t.id")
+        val again = generic_specializations_of_mono_v1(["t"], ["id"], [["i64"]], true, "app",
+            [pair_entry(), id_entry()], ctx_with(["id"]))
+        expect(again.specs[0].concrete_key).to_equal(l.specs[0].concrete_key)
+        val other = generic_specializations_of_mono_v1(["t"], ["id"], [["f64"]], true, "app",
+            [pair_entry(), id_entry()], ctx_with(["id"]))
+        expect(other.specs[0].concrete_key != l.specs[0].concrete_key).to_equal(true)
+
+    it "projects a generic function into the generic-template section (P-G6)":
+        val src = "pub fn id<T>(x: T) -> T:\n    x\n\nfn plain(x: i64) -> i64:\n    x\n"
+        val m = parse_full_frontend_in_borrowed_scope(src, "t.spl", "t", Logger(level: 0))
+        val decls = module_generic_template_decls_of_module_v1(m, src, "t")
+        expect(decls.len()).to_equal(1)
+        expect(decls[0].name).to_equal("id")
+        expect(decls[0].params).to_equal(["T"])
+        val entry = project_generic_template_v1(decls[0]).unwrap()
+        expect(entry.symbol_id).to_equal("t.id")
+
+    it "an imported generic function instance whose template is not visible keeps the list incomplete":
+        val l = generic_specializations_of_mono_v1(["t"], ["id"], [["i64"]], true, "app", [pair_entry()],
             ctx_with(["id"]))
         expect(l.complete).to_equal(false)
         expect(l.specs.len()).to_equal(0)
 
     it "a use whose template is not visible makes the list incomplete, not dropped":
-        val l = generic_specializations_of_mono_v1([""], ["Hidden"], [["i64"]], true, [], "app",
+        val l = generic_specializations_of_mono_v1([""], ["Hidden"], [["i64"]], true, "app",
             [pair_entry()], ctx_with([]))
         expect(l.complete).to_equal(false)
         expect(l.specs.len()).to_equal(0)
 
     it "resolves a use by its owner-qualified symbol, never a same-named template":
-        val ok = generic_specializations_of_mono_v1(["pkg_a"], ["Pair"], [["i64", "f64"]], true, [],
+        val ok = generic_specializations_of_mono_v1(["pkg_a"], ["Pair"], [["i64", "f64"]], true,
             "app", [pair_entry()], ctx_with([]))
         expect(ok.complete).to_equal(true)
         expect(ok.specs.len()).to_equal(1)
-        val other = generic_specializations_of_mono_v1(["pkg_other"], ["Pair"], [["i64", "f64"]], true, [],
+        val other = generic_specializations_of_mono_v1(["pkg_other"], ["Pair"], [["i64", "f64"]], true,
             "app", [pair_entry()], ctx_with([]))
         expect(other.complete).to_equal(false)
         expect(other.specs.len()).to_equal(0)
@@ -160,7 +194,7 @@ describe "generic-spec list from mono: inferred instantiation":
 describe "generic-spec list from mono: planner":
     it "a complete mono list lets the planner rebuild exactly":
         val rr = rr_of_lists(["user_infer.spl", "user_none.spl"],
-            [mono_infer_list("user_infer"), generic_specializations_of_mono_v1([], [], [], true, [],
+            [mono_infer_list("user_infer"), generic_specializations_of_mono_v1([], [], [], true,
                 "user_none", [pair_entry()], ctx_with([]))])
         val mods = [module("pkg_a.spl", [], true), module("user_infer.spl", ["pkg_a.spl"], false),
             module("user_none.spl", ["pkg_a.spl"], false)]
@@ -175,7 +209,7 @@ describe "generic-spec list from mono: planner":
         expect(fb.complete).to_equal(false)
         expect(fb.specs.len()).to_equal(1)
         val rr = rr_of_lists(["user_text.spl", "user_none.spl"], [fb,
-            generic_specializations_of_mono_v1([], [], [], true, [], "user_none", [pair_entry()], ctx_with([]))])
+            generic_specializations_of_mono_v1([], [], [], true, "user_none", [pair_entry()], ctx_with([]))])
         val mods = [module("pkg_a.spl", [], true), module("user_text.spl", ["pkg_a.spl"], false),
             module("user_none.spl", ["pkg_a.spl"], false)]
         val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(

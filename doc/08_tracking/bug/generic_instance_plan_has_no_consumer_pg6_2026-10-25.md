@@ -62,4 +62,4 @@ Still open:
   every claimed key fails closed with a FAILED receipt.
 - Steps 3-4: the linker does not consume `link_objects`, and using objects
   still emit their COMDAT copies. Both are blocked on the producer above.
-- Gap 2 (function templates) is unchanged.
+- Gap 2 is closed: `module_generic_template_decls_of_module_v1` projects generic functions into `generic-template` (no fields; `source_digest` covers signature and body), and mono's imported function instances are passed as uses, so `id(1)` keys as `t.id` + [i64] through `concrete_tldr_key_for_v1`. An instance whose template is not visible still makes the list incomplete.
