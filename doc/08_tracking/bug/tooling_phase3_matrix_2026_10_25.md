@@ -194,6 +194,12 @@ correlated reply. It contains real assertions and no placeholder pass. This
 new regression is authored/UNRUN, and the existing array wire evidence predicts
 failure against the retained candidate. No new MCP build or repair cycle ran.
 
+The startup integration framing gate also now walks exact byte-length frame
+boundaries and requires the expected two replies, replacing header-substring
+counting. Its parser rejects signed-integer overflow before multiplication.
+Negative controls cover short, negative, oversized and overflowing lengths plus
+trailing stdout. This is authored SSpec coverage, not an execution PASS.
+
 ## Independent T32/CMM object collection
 
 While compiler cycle five remained live, two bounded native object diagnostics
