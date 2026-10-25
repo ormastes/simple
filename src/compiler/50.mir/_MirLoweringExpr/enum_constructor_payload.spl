@@ -131,8 +131,24 @@ fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, sym
                     canonical_owners.has(key) and canonical_owners[key] == actual_owner.id
                 case _: return false
         case HirTypeKind.Str:
+            # Both native string MIR shapes (see MirLowering.mir_type_is_str):
+            # the Opaque("str") literal temp and the fat pointer
+            # Tuple([Ptr(U8), U64]) that a declared `text` param/binding
+            # lowers to. Accepting only the literal shape rejected
+            # `[("Location", url)]` against `[(text, text)]`.
             match actual.kind:
                 case MirTypeKind.Opaque(name): return name == "str"
+                case MirTypeKind.Tuple(parts):
+                    if parts.len() != 2: return false
+                    match parts[1].kind:
+                        case MirTypeKind.U64: ()
+                        case _: return false
+                    match parts[0].kind:
+                        case MirTypeKind.Ptr(inner, _):
+                            match inner.kind:
+                                case MirTypeKind.U8: return true
+                                case _: return false
+                        case _: return false
                 case _: return false
         case HirTypeKind.Bool:
             match actual.kind:
