@@ -350,6 +350,11 @@ bootstrap_authority_migrate_complete_legacy() {
 #     `generation=` line via bootstrap_stage3_manifest_value -- the same
 #     accessor bootstrap_stage3_recover_seed_transaction uses to trust that
 #     field), and
+#   - are not named in SIMPLE_BOOTSTRAP_RETAIN_GENERATIONS, an optional
+#     comma-separated finite keep-set of existing safe generation basenames.
+#     Every requested member is validated before the first deletion; missing,
+#     duplicate, unsafe, or symlinked entries fail closed. Unset/empty retains
+#     the historical current-only pruning behavior.
 #   - pass bootstrap_stage3_safe_generation_name (rejects '.', '..', empty,
 #     path separators) -- which transient entries never do: staging dirs are
 #     named `.staging.<nonce>`, in-flight snapshots `.snapshot.<nonce>` /
@@ -378,6 +383,46 @@ bootstrap_authority_prune_generations() {
     generation "${bootstrap_authority_prune_marker}") || return 0
   bootstrap_stage3_safe_generation_name \
     "${bootstrap_authority_prune_current}" || return 0
+
+  # Optional, explicit finite keep-set for retained immutable generations.
+  # This is a deletion safeguard only; it never changes the current marker,
+  # seed fingerprint, cache key, or admission. Validate the ENTIRE set before
+  # deleting anything. Names are comma-separated safe generation basenames,
+  # and every requested member must already be a physical direct-child dir.
+  bootstrap_authority_prune_keep_names=' '
+  bootstrap_authority_prune_keep_csv=${SIMPLE_BOOTSTRAP_RETAIN_GENERATIONS:-}
+  if [ -n "${bootstrap_authority_prune_keep_csv}" ]; then
+    case ",${bootstrap_authority_prune_keep_csv}," in *,,*) return 64 ;; esac
+    bootstrap_authority_prune_keep_remaining=${bootstrap_authority_prune_keep_csv}
+    bootstrap_authority_prune_keep_count=0
+    while :; do
+      case "${bootstrap_authority_prune_keep_remaining}" in
+        *,*)
+          bootstrap_authority_prune_keep_name=${bootstrap_authority_prune_keep_remaining%%,*}
+          bootstrap_authority_prune_keep_remaining=${bootstrap_authority_prune_keep_remaining#*,}
+          bootstrap_authority_prune_keep_last=0
+          ;;
+        *)
+          bootstrap_authority_prune_keep_name=${bootstrap_authority_prune_keep_remaining}
+          bootstrap_authority_prune_keep_remaining=
+          bootstrap_authority_prune_keep_last=1
+          ;;
+      esac
+      bootstrap_stage3_safe_generation_name \
+        "${bootstrap_authority_prune_keep_name}" || return 64
+      case "${bootstrap_authority_prune_keep_names}" in
+        *" ${bootstrap_authority_prune_keep_name} "*) return 64 ;;
+      esac
+      bootstrap_authority_prune_keep_path="${bootstrap_authority_prune_root}/${bootstrap_authority_prune_keep_name}"
+      [ -d "${bootstrap_authority_prune_keep_path}" ] &&
+        [ ! -L "${bootstrap_authority_prune_keep_path}" ] || return 64
+      bootstrap_authority_prune_keep_names="${bootstrap_authority_prune_keep_names}${bootstrap_authority_prune_keep_name} "
+      bootstrap_authority_prune_keep_count=$((bootstrap_authority_prune_keep_count + 1))
+      [ "${bootstrap_authority_prune_keep_count}" -le 256 ] || return 64
+      [ "${bootstrap_authority_prune_keep_last}" -eq 1 ] && break
+    done
+  fi
+
   bootstrap_authority_prune_count=0
   for bootstrap_authority_prune_entry in \
     "${bootstrap_authority_prune_root}"/*; do
@@ -392,6 +437,9 @@ $(basename -- "${bootstrap_authority_prune_entry}")
     esac
     [ "${bootstrap_authority_prune_name}" != \
       "${bootstrap_authority_prune_current}" ] || continue
+    case "${bootstrap_authority_prune_keep_names}" in
+      *" ${bootstrap_authority_prune_name} "*) continue ;;
+    esac
     chmod -R u+w "${bootstrap_authority_prune_entry}" 2>/dev/null || true
     rm -rf "${bootstrap_authority_prune_entry}" || return 1
     bootstrap_authority_prune_count=$((bootstrap_authority_prune_count + 1))
