@@ -96,6 +96,12 @@ remain incomplete. No PR merged, no release qualification claimed.
 
 ## Subsequent independent repairs and inventory recovery
 
+Evidence correction (2026-10-25): earlier PowerShell-piped Python scripts used
+non-ASCII source, which PowerShell 5 can replace with question marks. Their
+Unicode-specific claims below are not accepted as Unicode proof. ASCII transport
+observations remain valid. The replacement candidate checks described below use
+ASCII Python source and explicit Unicode code points.
+
 MCP build attempt 3 uses `app.protocol.wire_stdout`, a checked UTF-8 byte-output
 owner, instead of the Windows-rejecting SOSIX ordinary console gate. Its actual
 LLVM binary passed these distinct native criteria:
@@ -134,3 +140,31 @@ Windows resource-owner work reached six attempts and is recorded in
 `windows_owned_scope_admission_2026_10_25.md`. TEMP lookup and recursive directory
 creation advanced, but native child admission still rejects environment data.
 Do not repeat blocked suites or claim examples passed from infrastructure counts.
+
+## MCP envelope candidate and landing gate
+
+The sixth MCP native attempt compiled and linked `mcp_envelope_candidate.exe`
+with exit 0 and peak process-tree RSS 4165396 KiB. It parses root JSON-RPC fields
+with the shared tokenizer, preserves lexical request IDs, suppresses notification
+replies, validates nested JSON grammar, and decodes extracted string values once.
+Context-tool consumers no longer decode those values twice.
+
+Actual native checks passed: notification suppression (including a nested client
+ID), null-ID rejection, nested-method isolation, escaped root key/method dispatch,
+exact large integer ID, malformed-message recovery, and real Korean file paths
+with both raw UTF-8 and escaped JSON strings (8 cases). A separate Content-Type-
+first framed request preserved a genuine 10-byte Korean/emoji ID and exact byte
+length. Captures: `build/tooling-check/mcp-envelope-wire-results.json`,
+`mcp-envelope-framed.stdout`, and `mcp-envelope-final/`.
+
+These direct wire checks do not replace SSpec execution. The 12 production-parser
+SSpec examples and integration suite remain UNRUN because native child admission
+is blocked. Core compiler/lib/MCP/LSP checks remain incomplete. Both frozen
+compiler and full-CLI rebuilds terminated at the enforced 12 GiB cap (exit 88,
+peaks 12623744 and 12608500 KiB); neither produced a qualified replacement.
+The working/staged direct-env guards passed, and doc/06_spec contains zero
+executable specs. Generic tool-parameter key scoping remains a separate concern.
+
+STATUS: FAIL for landing admission. Focused MCP wire checks PASS; mandatory
+compiler, suite, and full-tool functionality gates have not passed. Do not merge
+over these missing gates or describe authored SSpec examples as executed.
