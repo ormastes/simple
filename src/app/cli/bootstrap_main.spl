@@ -207,11 +207,26 @@ fn bootstrap_stage4_link_or_place_v1(args: [text]) -> i64:
     code
 
 fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
+    # The pool re-executes this binary with the same argv plus the role flag;
+    # without STAGE3/STAGE4 those children land here, not in the capsule branch.
+    if bootstrap_file_worker_requested(args):
+        return run_native_file_worker_v1(args)
+    bootstrap_capsule_shard_child_env(args)
     val worker_args = bootstrap_native_build_worker_args(args)
     val option_error = cli_native_build_option_error(worker_args, true)
     if option_error != "":
         print "Error: " + option_error
         return 1
+    # P-H2: plain `native-build` (no STAGE3/STAGE4) also runs the file-worker
+    # pool when selected; the in-process build then links the per-module
+    # objects from the sealed ledger (SIMPLE_MIR_SHARD_LINK). A FAILED or
+    # MONO-PENDING module blocks the link (prepass returns false).
+    if native_bootstrap_stage3_per_file_selected_v1(
+            env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+            env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""):
+        print "[coordinator-route] per-file worker pool + per-module link"
+        if not bootstrap_capsule_shard_prepass(args, true):
+            return 1
     run_bootstrap_stage3_process_route(args)
 
 fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:
