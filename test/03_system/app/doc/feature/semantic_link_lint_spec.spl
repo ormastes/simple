@@ -25,6 +25,9 @@ fn robust_06_semantic_docs_assert_refusal<T, E>(result: Result<T, E>):
         case Ok(_): false
     expect(refused).to_equal(true)
 
+fn semantic_review_record_v1(document: text, markdown: text, target: text) -> text:
+    "version: 1\nrule: W-DOC-AST-001\ndocument: \"{document}\"\nmarkdown_sha256: \"{sha256_text(markdown)}\"\nstart: 8\nend: {8 + target.len()}\ntarget: \"{target}\"\nkind: transient-forensics\nreason: Preserve original incident source-line evidence\nreviewer: incident-review-owner\nreview_reference: incident-review-42\nexpires_utc: \"2999-12-31\"\n"
+
 describe "semantic Markdown source link lint and fix":
     context "explicit revision-bound source authority":
         it "should diagnose and fix local fragment colon and GitHub range destinations":
@@ -309,4 +312,93 @@ describe "semantic Markdown source link lint and fix":
             val authority = ["--source-file", file, "--source-link", "src/sample.spl", "--package", "pkg", "--module", "sample", "--revision", sha256_text(source)]
             expect(run_lint_command(["lint", markdown_file, "--fix"] + authority)).to_equal(1)
             expect(file_read(markdown_file)).to_equal(markdown)
+            expect(dir_remove(root, true)).to_equal(true)
+
+        it "should admit only the caller-pinned exact reviewed transient destination":
+            step("Prepare exact reviewed transient incident evidence")
+            val root = secure_temp_dir(get_temp_dir(), "semantic-reviewed-").unwrap()
+            val document = root + "/incident.md"
+            val grant_file = root + "/review.sdn"
+            val target = "src/sample.spl:2"
+            val markdown = "[value](" + target + ")"
+            val record = semantic_review_record_v1(document, markdown, target)
+            expect(file_write(document, markdown)).to_equal(true)
+            expect(file_write(grant_file, record)).to_equal(true)
+            val flags = ["--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(record)]
+            step("Exercise root critical lint with explicit reviewed authority")
+            expect(run_lint_command(["lint", document, "--profile=critical"])).to_equal(1)
+            expect(run_lint_command(["lint", document, "--profile=critical"] + flags)).to_equal(0)
+            expect(run_lint_command(["lint", document, "--profile=critical", "--fix-dry-run"] + flags)).to_equal(0)
+            expect(run_lint_command(["lint", document, "--profile=critical", "--fix"] + flags)).to_equal(0)
+            expect(file_read(document)).to_equal(markdown)
+            step("Reject forged stale expired and overscoped review records")
+            expect(run_lint_command(["lint", document, "--semantic-exception-file", grant_file])).to_equal(1)
+            expect(file_write(grant_file, record + "# changed after review\n")).to_equal(true)
+            expect(run_lint_command(["lint", document, "--fix"] + flags)).to_equal(1)
+            expect(file_write(grant_file, record)).to_equal(true)
+            expect(file_write(document, markdown + "\n")).to_equal(true)
+            expect(run_lint_command(["lint", document, "--fix"] + flags)).to_equal(1)
+            expect(file_read(document)).to_equal(markdown + "\n")
+            expect(file_write(document, markdown)).to_equal(true)
+            val invalid = [
+                record.replace("2999-12-31", "1970-01-01"),
+                record.replace("2999-12-31", "2999-02-30"),
+                record.replace("transient-forensics", "maintained-doc"),
+                record.replace("incident-review-owner", ""),
+                record.replace("Preserve original incident source-line evidence", ""),
+                record.replace("incident-review-42", ""),
+                record.replace(document, document + "/**"),
+                record.replace("start: 8", "start: 7"),
+                record + "rule: W-DOC-AST-001\n",
+                record + "unknown_grant: true\n"]
+            for candidate in invalid:
+                expect(file_write(grant_file, candidate)).to_equal(true)
+                expect(run_lint_command(["lint", document, "--fix", "--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(candidate)])).to_equal(1)
+                expect(file_read(document)).to_equal(markdown)
+            val unused = "xxxxxxxx" + target
+            val unused_record = semantic_review_record_v1(document, unused, target)
+            expect(file_write(document, unused)).to_equal(true)
+            expect(file_write(grant_file, unused_record)).to_equal(true)
+            expect(run_lint_command(["lint", document, "--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(unused_record)])).to_equal(1)
+            expect(file_read(document)).to_equal(unused)
+            step("Keep unrelated findings denied and semantic URI failures active")
+            val extended = markdown + "\n[other](src/other.spl:9)"
+            val scoped = semantic_review_record_v1(document, extended, target)
+            expect(file_write(document, extended)).to_equal(true)
+            expect(file_write(grant_file, scoped)).to_equal(true)
+            expect(run_lint_command(["lint", document, "--profile=critical", "--fix", "--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(scoped)])).to_equal(1)
+            expect(file_read(document)).to_equal(extended)
+            val malformed = markdown + "\n[bad](spl:fn@sample.value~bad)"
+            val malformed_record = semantic_review_record_v1(document, malformed, target)
+            expect(file_write(document, malformed)).to_equal(true)
+            expect(file_write(grant_file, malformed_record)).to_equal(true)
+            expect(run_lint_command(["lint", document, "--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(malformed_record)])).to_equal(1)
+            expect(file_read(document)).to_equal(malformed)
+            expect(dir_remove(root, true)).to_equal(true)
+
+        it "should preserve exempted evidence while fixing only the nonexempt source link":
+            step("Prepare reviewed evidence and a separate repairable link")
+            val root = secure_temp_dir(get_temp_dir(), "semantic-reviewed-fix-").unwrap()
+            val document = root + "/incident.md"
+            val source_file = root + "/source.spl"
+            val grant_file = root + "/review.sdn"
+            val source = "fn value() -> i64:\n    1\n"
+            val target = "src/sample.spl:2"
+            val markdown = "[value](" + target + ")\n[repair](" + target + ")"
+            val record = semantic_review_record_v1(document, markdown, target)
+            expect(file_write(source_file, source)).to_equal(true)
+            expect(file_write(document, markdown)).to_equal(true)
+            expect(file_write(grant_file, record)).to_equal(true)
+            val flags = ["--semantic-exception-file", grant_file, "--semantic-exception-sha256", sha256_text(record)]
+            val authority = ["--source-file", source_file, "--source-link", "src/sample.spl", "--package", "pkg", "--module", "sample", "--revision", sha256_text(source)]
+            step("Exercise revision-authenticated selective repair")
+            val doc_result = doc_links_command_v1(["fix-links", "--markdown", document] + flags + authority).unwrap()
+            expect(doc_result.output).to_start_with("[value](" + target + ")\n[repair](spl:fn@sample.value~")
+            expect(file_read(document)).to_equal(markdown)
+            expect(run_lint_command(["lint", document, "--fix-dry-run"] + flags + authority)).to_equal(0)
+            expect(file_read(document)).to_equal(markdown)
+            expect(run_lint_command(["lint", document, "--fix"] + flags + authority)).to_equal(0)
+            expect(file_read(document)).to_start_with("[value](" + target + ")\n[repair](spl:fn@sample.value~")
+            step("Reject reuse after the reviewed document changes")
+            expect(run_lint_command(["lint", document] + flags + authority)).to_equal(1)
             expect(dir_remove(root, true)).to_equal(true)

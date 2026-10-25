@@ -1,0 +1,113 @@
+# REQ-MC-008: trusted invocation pins an already-reviewed, exact transient grant.
+# Review fields describe authorization; they do not authenticate a human.
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.common.time_utils.{timestamp_from_components, timestamp_get_year, timestamp_get_month, timestamp_get_day}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+pub struct SemanticMarkdownExceptionReceiptV1:
+    raw: text
+    pinned_sha256: text
+    document: text
+
+pub struct SemanticMarkdownExceptionScopeV1:
+    start: i64
+    end: i64
+    target: text
+
+pub fn load_semantic_markdown_exception_v1(document: text, record_file: text, pin: text) -> Result<SemanticMarkdownExceptionReceiptV1, SemanticLinkErrorV1>:
+    if not semantic_exception_sha256_v1(pin):
+        return Err(exception_refused_v1("trusted SHA256 pin required"))
+    val raw = match file_read_regular_no_follow_bounded(record_file, 16384):
+        case Ok(value): value
+        case Err(message): return Err(exception_refused_v1(message))
+    if sha256_text(raw) != pin:
+        return Err(exception_refused_v1("record differs from trusted review pin"))
+    Ok(SemanticMarkdownExceptionReceiptV1(raw: raw, pinned_sha256: pin, document: document))
+
+fn exception_refused_v1(message: text) -> SemanticLinkErrorV1:
+    semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "reviewed transient exception refused: " + message)
+
+pub fn semantic_exception_sha256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for index in 0..value.len():
+        val digit = value.slice(index, index + 1)
+        if not ((digit >= "0" and digit <= "9") or (digit >= "a" and digit <= "f")):
+            return false
+    true
+
+fn exception_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, SemanticLinkErrorV1>:
+    match fields[key]:
+        case SdnValue.String(value):
+            if value.trim() == "" or value.len() > 1024:
+                return Err(exception_refused_v1("empty or oversized " + key))
+            Ok(value)
+        case _: Err(exception_refused_v1("text required: " + key))
+
+fn exception_integer_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, SemanticLinkErrorV1>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err(exception_refused_v1("integer required: " + key))
+
+fn exception_expiry_v1(value: text) -> Result<i64, SemanticLinkErrorV1>:
+    if value.len() != 10 or value.slice(4, 5) != "-" or value.slice(7, 8) != "-":
+        return Err(exception_refused_v1("expires_utc requires YYYY-MM-DD"))
+    for index in [0, 1, 2, 3, 5, 6, 8, 9]:
+        val digit = value.slice(index, index + 1)
+        if digit < "0" or digit > "9":
+            return Err(exception_refused_v1("invalid expiry digit"))
+    val year = value.slice(0, 4).to_int() ?? 0
+    val month = value.slice(5, 7).to_int() ?? 0
+    val day = value.slice(8, 10).to_int() ?? 0
+    if year < 1970 or year > 9999 or month < 1 or month > 12 or day < 1 or day > 31:
+        return Err(exception_refused_v1("invalid expiry calendar date"))
+    val midnight = timestamp_from_components(year, month, day, 0, 0, 0, 0)
+    if timestamp_get_year(midnight) != year or timestamp_get_month(midnight) != month or timestamp_get_day(midnight) != day:
+        return Err(exception_refused_v1("invalid expiry calendar date"))
+    # Valid throughout the named UTC day; exclusive next-day boundary.
+    Ok(midnight + 86400000000)
+
+pub fn validate_semantic_markdown_exception_v1(receipt: SemanticMarkdownExceptionReceiptV1, markdown: text) -> Result<SemanticMarkdownExceptionScopeV1, SemanticLinkErrorV1>:
+    if receipt.raw.len() > 16384 or not semantic_exception_sha256_v1(receipt.pinned_sha256) or sha256_text(receipt.raw) != receipt.pinned_sha256:
+        return Err(exception_refused_v1("record exceeds bound or differs from trusted review pin"))
+    val parsed = match parse_with_issues(receipt.raw):
+        case Ok(value): value
+        case Err(message): return Err(exception_refused_v1(message))
+    if not parsed.1.is_empty():
+        return Err(exception_refused_v1("duplicate or invalid SDN fields"))
+    val fields = match parsed.0:
+        case SdnValue.Dict(value): value
+        case _: return Err(exception_refused_v1("SDN mapping required"))
+    val keys = ["version", "rule", "document", "markdown_sha256", "start", "end", "target", "kind", "reason", "reviewer", "review_reference", "expires_utc"]
+    if fields.keys().len() != keys.len():
+        return Err(exception_refused_v1("exact grant fields required"))
+    for key in keys:
+        if not fields.contains_key(key):
+            return Err(exception_refused_v1("missing field: " + key))
+    if exception_integer_v1(fields, "version")? != 1 or exception_text_v1(fields, "rule")? != "W-DOC-AST-001":
+        return Err(exception_refused_v1("unknown version or rule"))
+    val kind = exception_text_v1(fields, "kind")?
+    if kind != "transient-diff" and kind != "transient-forensics":
+        return Err(exception_refused_v1("only transient diff/forensics grants are permitted"))
+    val _reason = exception_text_v1(fields, "reason")?
+    val _reviewer = exception_text_v1(fields, "reviewer")?
+    val _review_reference = exception_text_v1(fields, "review_reference")?
+    if receipt.document == "" or exception_text_v1(fields, "document")? != receipt.document:
+        return Err(exception_refused_v1("document identity differs"))
+    val revision = exception_text_v1(fields, "markdown_sha256")?
+    if not semantic_exception_sha256_v1(revision) or revision != sha256_text(markdown):
+        return Err(exception_refused_v1("Markdown revision differs"))
+    val deadline = exception_expiry_v1(exception_text_v1(fields, "expires_utc")?)?
+    val now = time_now_unix_micros()
+    if now <= 0 or now >= deadline:
+        return Err(exception_refused_v1("expired grant or unavailable clock"))
+    val start = exception_integer_v1(fields, "start")?
+    val end = exception_integer_v1(fields, "end")?
+    val target = exception_text_v1(fields, "target")?
+    if start < 0 or end <= start or end > markdown.len() or markdown.slice(start, end) != target:
+        return Err(exception_refused_v1("exact destination byte interval differs"))
+    Ok(SemanticMarkdownExceptionScopeV1(start: start, end: end, target: target))

@@ -705,7 +705,17 @@ fn _run_lint_with_linter_source(
                     val _ = 0
 
     linter.semantic_markdown_sources = []
+    linter.semantic_markdown_exception = nil
+    linter.semantic_markdown_exception_error = ""
+    if not file_path.ends_with(".md") and (policy.semantic_options.contains_key("--semantic-exception-file") or policy.semantic_options.contains_key("--semantic-exception-sha256")):
+        val _ = lint_fix_refused(file_path, "reviewed semantic exception requires its exact Markdown input", json_output)
+        return 1
     if file_path.ends_with(".md"):
+        match semantic_markdown_lint_exception_v1(file_path, policy.semantic_options):
+            case Ok(receipt): linter.semantic_markdown_exception = receipt
+            case Err(failure):
+                val _ = lint_fix_refused(file_path, failure.message, json_output)
+                return 1
         match semantic_markdown_lint_sources_v1(policy.semantic_options):
             case Ok(sources): linter.semantic_markdown_sources = sources
             case Err(failure):
@@ -727,6 +737,9 @@ fn _run_lint_with_linter_source(
                     analyzed_source = Some(source)
                     lint_result = LintFileResult.LintFileOk(
                         lint_cli_source(linter, file_path, source))
+    if linter.semantic_markdown_exception_error != "":
+        val _ = lint_fix_refused(file_path, linter.semantic_markdown_exception_error, json_output)
+        return 1
     match lint_result:
         case LintFileResult.LintFileOk(results):
             if results.is_empty():
@@ -736,6 +749,13 @@ fn _run_lint_with_linter_source(
                     info("lint", "No issues found in " + file_path)
                 return 0
             else:
+                # A generic writer cannot invalidate a pinned review receipt.
+                # Require a separate reviewed edit even if every semantic
+                # finding was exempted or suppressed by lint configuration.
+                if linter.semantic_markdown_exception != nil and (fix_mode or fix_all or fix_dry_run):
+                    if not collect_easy_fixes(results, fix_all).is_empty():
+                        val _ = lint_fix_refused(file_path, "reviewed semantic exception and generic fixes require separate edits; no changes applied", json_output)
+                        return 1
                 var error_count = 0
                 var warning_count = 0
                 var fix_count = 0
@@ -801,7 +821,7 @@ fn _run_lint_with_linter_source(
                             return 1
                         match analyzed_source:
                             case Some(source):
-                                match apply_semantic_markdown_lint_fix_v1(file_path, source, linter.semantic_markdown_sources, fix_dry_run):
+                                match apply_semantic_markdown_lint_fix_v1(file_path, source, linter.semantic_markdown_sources, fix_dry_run, linter.semantic_markdown_exception):
                                     case Ok(_): pass_do_nothing("semantic owner validated all edits")
                                     case Err(failure):
                                         val _ = lint_fix_refused(file_path, failure.message, json_output)

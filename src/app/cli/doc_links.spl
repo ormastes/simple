@@ -3,6 +3,7 @@ use app.doc.semantic_link_lint.{SemanticMarkdownSourceV1, plan_semantic_markdown
 use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
 use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use compiler.semantics.symbol_id.semantic_markdown_exception.{SemanticMarkdownExceptionReceiptV1, load_semantic_markdown_exception_v1}
 
 pub struct DocLinksCommandResultV1:
     output: text
@@ -27,7 +28,7 @@ pub fn doc_links_command_v1(args: [text]) -> Result<DocLinksCommandResultV1, Sem
             critical = true
             position = position + 1
             continue
-        if not ["--markdown", "--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision"].contains(key) or position + 1 >= args.len() or options.contains_key(key):
+        if not ["--markdown", "--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision", "--semantic-exception-file", "--semantic-exception-sha256"].contains(key) or position + 1 >= args.len() or options.contains_key(key):
             return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "unknown, duplicate, or missing option value"))
         options[key] = args[position + 1]
         position = position + 2
@@ -40,7 +41,12 @@ pub fn doc_links_command_v1(args: [text]) -> Result<DocLinksCommandResultV1, Sem
     val document = open_semantic_link_document_v1(options["--package"], options["--module"], options["--source-file"], options["--revision"])?
     val remote = if options.contains_key("--remote-link"): options["--remote-link"] else: ""
     val bindings = [SemanticMarkdownSourceV1(local_file: options["--source-link"], remote_file: remote, document: document)]
-    val plan = plan_semantic_markdown_links_v1(markdown, bindings, critical)?
+    var receipt: SemanticMarkdownExceptionReceiptV1? = nil
+    if options.contains_key("--semantic-exception-file") or options.contains_key("--semantic-exception-sha256"):
+        if not options.contains_key("--semantic-exception-file") or not options.contains_key("--semantic-exception-sha256"):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "both reviewed exception file and trusted SHA256 pin are required"))
+        receipt = Some(load_semantic_markdown_exception_v1(options["--markdown"], options["--semantic-exception-file"], options["--semantic-exception-sha256"])?)
+    val plan = plan_semantic_markdown_links_v1(markdown, bindings, critical, receipt)?
     if args[0] == "fix-links":
         return Ok(DocLinksCommandResultV1(output: apply_semantic_markdown_links_v1(markdown, plan)?, exit_code: 0))
     var lines: [text] = []
