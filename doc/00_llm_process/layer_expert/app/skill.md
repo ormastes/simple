@@ -100,3 +100,14 @@ Two traps met while pinning it:
   sees `SIMPLE_TEST_DEPTH >= 1` and refuses, so an open-count budget PASSES
   vacuously on a handful of opens. `unset SIMPLE_TEST_DEPTH` before measuring,
   and assert on the printed content as well as the count.
+
+## Windows MCP protocol boundary (2026-10-25)
+
+Treat MCP stdout as a checked UTF-8 byte transport. The POSIX-only SOSIX console
+gate rejects Windows before the first response; admitting the whole platform
+globally would also qualify unrelated text surfaces without evidence. The LSP
+MCP repair uses the existing codec and descriptor-write owner and is verified
+only for the recorded LLVM stdio exchanges. See the
+[design and remaining owner failures](../../../05_design/lsp_mcp_windows_byte_transport.md).
+The T32 startup facade is not the actual MCP server. Native linking and help
+output alone do not prove protocol service or working code-intelligence tools.
