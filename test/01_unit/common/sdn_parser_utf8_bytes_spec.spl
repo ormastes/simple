@@ -1,0 +1,74 @@
+"""SDN parsing keeps UTF-8 content while scanning ASCII syntax as bytes."""
+
+use std.spec.*
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.structural_scalar_value_v1.{sdn_integer_from_span_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn expect_utf8_sdn_text(source: text, wanted: text):
+    var accepted = false
+    match parse(source):
+        case Ok(value):
+            match value:
+                case String(decoded):
+                    accepted = true
+                    expect(decoded).to_equal(wanted)
+                case _: ()
+        case Err(_): ()
+    expect(accepted).to_equal(true)
+
+describe "SDN canonical UTF-8 byte boundary":
+    it "parses a trimmed signed integer through the byte span owner":
+        var accepted = false
+        match parse("  -9223372036854775808  "):
+            case Ok(value):
+                match value:
+                    case Int(number):
+                        accepted = true
+                        expect(number).to_equal(-9223372036854775808)
+                    case _: ()
+            case Err(_): ()
+        expect(accepted).to_equal(true)
+
+    it "preserves multibyte bare and quoted scalar content":
+        expect_utf8_sdn_text("  한글é🙂  ", "한글é🙂")
+        expect_utf8_sdn_text("\"한글,é:🙂\"", "한글,é:🙂")
+        expect_utf8_sdn_text("12é", "12é")
+
+    it "splits collections after multibyte content without splitting quoted syntax":
+        var accepted = false
+        match parse("[\"한글,é:🙂\", 42]"):
+            case Ok(value):
+                match value:
+                    case Array(items):
+                        expect(items.len()).to_equal(2)
+                        match items[0]:
+                            case String(decoded):
+                                accepted = true
+                                expect(decoded).to_equal("한글,é:🙂")
+                            case _: ()
+                        match items[1]:
+                            case Int(number): expect(number).to_equal(42)
+                            case _: accepted = false
+                    case _: ()
+            case Err(_): ()
+        expect(accepted).to_equal(true)
+
+    it "rejects a multibyte integer span and a split UTF-8 boundary":
+        val bytes = text_to_utf8_bytes("12é")
+        expect(bytes.len()).to_equal(4)
+        var whole_rejected = false
+        match sdn_integer_from_span_v1(bytes, 0, bytes.len()):
+            case Err(reason):
+                whole_rejected = true
+                expect(reason).to_equal("invalid_integer_span")
+            case Ok(_): ()
+        expect(whole_rejected).to_equal(true)
+        var split_rejected = false
+        match sdn_integer_from_span_v1(bytes, 0, 3):
+            case Err(reason):
+                split_rejected = true
+                expect(reason).to_equal("invalid_integer_span")
+            case Ok(_): ()
+        expect(split_rejected).to_equal(true)
