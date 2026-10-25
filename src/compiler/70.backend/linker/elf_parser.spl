@@ -74,8 +74,10 @@ struct ElfRelocation:
 
 struct ElfStringTable:
     """Raw string table data and file offset."""
-    data: [u8]         # raw bytes of string table section
+    data: [u8]         # backing bytes (the whole object file for parsed tables)
     offset: i64        # offset of this section in the file
+    win_start: i64 = 0 # first table byte inside `data`
+    win_len: i64 = -1  # table length; -1 = all of `data`
 
 struct ElfObject:
     """Complete parsed ELF object file."""
@@ -110,30 +112,39 @@ fn elf_parse_string_table(bytes: [u8], section: ElfSectionHeader) -> ElfStringTa
         val empty_data: [u8] = []
         return ElfStringTable(data: empty_data, offset: sh_offset)
 
-    # One native slice: per-byte copying here dominated large links.
-    val data: [u8] = bytes[sh_offset:end]
-    ElfStringTable(data: data, offset: sh_offset)
+    # A window over the file bytes: the object is already held whole, so
+    # the table is not copied a second time.
+    ElfStringTable(data: bytes, offset: sh_offset, win_start: sh_offset, win_len: sh_size)
+
+fn elf_strtab_len(strtab: ElfStringTable) -> i64:
+    """Byte length of the string table window."""
+    if strtab.win_len < 0: strtab.data.len() - strtab.win_start else: strtab.win_len
+
+fn elf_strtab_byte(strtab: ElfStringTable, index: i64) -> u8:
+    """Byte at table-relative `index` (caller bounds-checks against elf_strtab_len)."""
+    strtab.data[strtab.win_start + index]
 
 fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     """Look up a NUL-terminated string at byte index in the string table.
 
     Returns empty string if index is out of range or table is empty.
     """
-    if index < 0 or index >= strtab.data.len():
+    if index < 0 or index >= elf_strtab_len(strtab):
         return ""
 
     # Find the NUL with native searches over growing windows, then convert
     # the name bytes once. Building names one character at a time dominated
     # links with millions of symbols.
-    val len = strtab.data.len()
+    val at = strtab.win_start + index
+    val len = strtab.win_start + elf_strtab_len(strtab)
     var window: i64 = 64
     while true:
-        val stop = if index + window < len: index + window else: len
-        val nul = strtab.data[index:stop].index_of(0u8)
+        val stop = if at + window < len: at + window else: len
+        val nul = strtab.data[at:stop].index_of(0u8)
         if nul >= 0:
-            return bytes_to_text(strtab.data[index:index + nul])
+            return bytes_to_text(strtab.data[at:at + nul])
         if stop == len:
-            return bytes_to_text(strtab.data[index:len])
+            return bytes_to_text(strtab.data[at:len])
         window = window * 4
     ""
 
@@ -568,7 +579,7 @@ export elf_parse_object
 export elf_parse_symbols
 export elf_parse_relocations
 export elf_parse_string_table
-export elf_strtab_get
+export elf_strtab_get, elf_strtab_len, elf_strtab_byte
 export elf_symbol_binding
 export elf_symbol_type
 export elf_reloc_sym
