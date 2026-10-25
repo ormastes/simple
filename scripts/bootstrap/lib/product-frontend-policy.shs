@@ -1,13 +1,17 @@
 # Frontend fanout hosts: every host except Windows, whose transcribed owner
 # (command-snapshot.shs) pins one frontend by design. On a fanout host the
 # product share is the enforced process-tree cap itself: the compiler's clamp
-# (src/app/cli/shard_mem_clamp.spl) spends 60% of that budget at 3000000 KiB
-# per HIR shard worker, so the cap decides the worker count -- and
-# tree-rss-policy.shs prices each declared job at that rate on these hosts.
+# (src/app/cli/shard_mem_clamp.spl) reserves 8000000 KiB per parse shard and
+# 12000000 KiB per HIR shard from measured large-closure worker peaks.
+# The clamp retains 40% of the tree budget for the parent and tools.
+# tree-rss-policy.shs prices each declared job at the HIR reservation / 60%;
+# the enforced 48 GiB ceiling therefore admits at most two HIR workers.
+#
 # This is what process-tree-rss-watchdog.pl exports to the tree and what the
-# Linux transcribed lane already does (run_shard_budget = rss_cap). A separate
-# 3000000 KiB share pinned one HIR worker at any --threads. No host-memory
-# query here: the cap already carries the host-fraction bound.
+# Linux transcribed lane already does (run_shard_budget = rss_cap).
+# No independent worker-count pin: measured worker reservation and enforced
+# tree budget are the same values consumed by the CLI admission clamp. No
+# host-memory query here: the cap already carries the host-fraction bound.
 bootstrap_product_frontend_fanout_host() {
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*) return 1 ;;
@@ -32,9 +36,14 @@ bootstrap_product_frontend_policy() {
     if bootstrap_product_frontend_fanout_host; then
         product_policy_default=$product_policy_cap
         product_policy_max=$product_policy_ceiling
+        product_parse_worker_kb=8000000
+        product_hir_worker_kb=12000000
     else
         product_policy_default=3000000
         product_policy_max=3000000
+        # Windows remains on its independently qualified one-frontend policy.
+        product_parse_worker_kb=1650000
+        product_hir_worker_kb=3000000
     fi
     product_policy_share=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-}
     if [ "$product_policy_mode" = diagnostic ]; then
@@ -53,20 +62,24 @@ bootstrap_product_frontend_policy() {
     # parse of the whole closure (~104 ms/file: 137 s at 1315 modules, ~4.7 min
     # at the 2702-module Stage 2 closure) while the HIR shards fanned out. The
     # compiler's clamp already sizes parse shards from the exported tree budget
-    # (60% / 1650000 KiB per shard, bounded by --threads), so the row is dropped
+    # (60% / 8000000 KiB per measured shard, bounded by --threads), so the row is dropped
     # here; the contradiction check below still refuses an inherited explicit
     # fanout request. Bug parse_shard_warmup_pinned_to_one_worker_2026-10-19.
     if bootstrap_product_frontend_fanout_host; then
         product_policy_rows=$(printf '%s\n' "$product_policy_rows" |
-            sed '/^SIMPLE_PARSE_SHARD_MAX=1$/d') || return 1
+            sed '/^SIMPLE_PARSE_SHARD_MAX=1$/d' |
+            sed 's/^SIMPLE_PARSE_SHARD_WORKER_KB=.*/SIMPLE_PARSE_SHARD_WORKER_KB=8000000/' |
+            sed 's/^SIMPLE_HIR_SHARD_WORKER_KB=.*/SIMPLE_HIR_SHARD_WORKER_KB=12000000/') || return 1
     fi
     # Reject inherited contradictory scheduling requests rather than quietly
     # masking them. No eval, host-memory query, or unchecked fanout override.
     [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] &&
         [ "${SIMPLE_PARSE_SHARD_MAX:-1}" = 1 ] &&
-        [ "${SIMPLE_PARSE_SHARD_WORKER_KB:-1650000}" = 1650000 ] &&
-        [ "${SIMPLE_HIR_SHARD_WORKER_KB:-3000000}" = 3000000 ] || return 1
-    product_policy_effective=${product_policy_rows##*=}
+        [ "${SIMPLE_PARSE_SHARD_WORKER_KB:-$product_parse_worker_kb}" = "$product_parse_worker_kb" ] &&
+        [ "${SIMPLE_HIR_SHARD_WORKER_KB:-$product_hir_worker_kb}" = "$product_hir_worker_kb" ] || return 1
+    product_policy_effective=$(printf '%s\n' "$product_policy_rows" |
+        sed -n 's/^SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=//p') || return 1
+    [ -n "$product_policy_effective" ] || return 1
     # An enclosing enforced owner (process-tree-rss-watchdog.pl exports its
     # cap) may already declare a tree budget. A larger one is consistent:
     # this lane's share stays the binding bound. A smaller one is stricter
