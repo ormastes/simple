@@ -1,0 +1,53 @@
+"""Native collect consumption-state decoding; no kernel lifecycle PASS."""
+use std.spec.*
+use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessCollectAdmissionV2,
+    linux_process_collect_decode_v2}
+
+describe "Retained Linux collect consumption state":
+    it "decodes the exact success receipt as consumed":
+        var collected = false
+        match linux_process_collect_decode_v2([0, 1, 1, 1, 0, 137, 0, 0, 4096, 0]):
+            case LinuxProcessCollectAdmissionV2.Collected(receipt):
+                collected = true
+                expect(receipt.exit_code).to_equal(137)
+                expect(receipt.leader_reaped).to_equal(true)
+                expect(receipt.tree_empty).to_equal(true)
+                expect(receipt.memory_peak_bytes).to_equal(4096)
+            case _: ()
+        expect(collected).to_equal(true)
+
+    it "keeps a pre-consumption unlink failure retryable under the same owner":
+        var retryable = false
+        # Linux ENOTEMPTY=39 is emitted before unlink/close consumes the lease.
+        match linux_process_collect_decode_v2([39, 1, 1, 1, 0, 137, 0, 0, 4096, 0]):
+            case LinuxProcessCollectAdmissionV2.Retryable(reason):
+                retryable = true
+                expect(reason).to_contain("39")
+            case _: ()
+        expect(retryable).to_equal(true)
+
+    it "does not retry an invalid or already-consumed native token":
+        var unknown = false
+        match linux_process_collect_decode_v2([22, 1, 1, 1, 0, 137, 0, 0, 4096, 0]):
+            case LinuxProcessCollectAdmissionV2.Unknown(reason):
+                unknown = true
+                expect(reason).to_contain("no retry")
+            case _: ()
+        expect(unknown).to_equal(true)
+
+    it "keeps malformed success delivery unknown rather than collecting twice":
+        var short_unknown = false
+        match linux_process_collect_decode_v2([0]):
+            case LinuxProcessCollectAdmissionV2.Unknown(_): short_unknown = true
+            case _: ()
+        expect(short_unknown).to_equal(true)
+        var unproven_unknown = false
+        match linux_process_collect_decode_v2([0, 1, 0, 1, 0, 0, 0, 0, 4096, 0]):
+            case LinuxProcessCollectAdmissionV2.Unknown(_): unproven_unknown = true
+            case _: ()
+        expect(unproven_unknown).to_equal(true)
+        var malformed_error_unknown = false
+        match linux_process_collect_decode_v2([9223372036854775807, 1, 1, 1, 0, 0, 0, 0, 4096, 0]):
+            case LinuxProcessCollectAdmissionV2.Unknown(_): malformed_error_unknown = true
+            case _: ()
+        expect(malformed_error_unknown).to_equal(true)

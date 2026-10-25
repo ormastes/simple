@@ -1,5 +1,7 @@
 # Independent Linux broker. Its runtime owner holds a pidfd and a cgroup-v2
 # scope across manager crashes; only post-collect evidence becomes terminal.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
 use app.io.args_ops.{get_args}
 use app.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_lock, file_unlock, file_exists, file_is_regular_no_follow, file_hash_sha256}
 use std.common.build_manager.group_process_child_identity_v1.{GroupProcessChildIdentityV1, group_process_child_identity_encode_v1}
@@ -10,7 +12,7 @@ use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, Group
 use std.common.build_manager.grouped_native_charge_evidence.{NativeGroupChargeSampleV1, NativeGroupChargeTraceV1, native_group_charge_trace_encode_v1}
 use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
-use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_peak_memory_v1, linux_process_collect_v1}
+use std.nogc_sync_mut.io.linux_process_owner.{LinuxProcessInputV1, LinuxProcessRequestV1, LinuxProcessLeaseV1, LinuxProcessPollV1, linux_process_start_with_memory_v1, linux_process_poll_v1, linux_process_cancel_v1, linux_process_peak_memory_v1, LinuxProcessCollectAdmissionV2, linux_process_collect_retained_v2}
 use std.nogc_sync_mut.io.linux_process_owner.{linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1, linux_process_child_pid_v1}
 use std.common.build_manager.capacity_request.{BuilderLinuxParentReceiptV1, builder_linux_parent_receipt_encode_v1}
 
@@ -33,14 +35,41 @@ fn native_linux_group_finish_v1(root: text, identity: text,
         lease: LinuxProcessLeaseV1, peak: i64, snapshot_digest: text,
         memory_limit_bytes: i64, memory_policy: text, samples: [NativeGroupChargeSampleV1],
         complete: bool) -> Result<bool, text>:
-    val receipt = linux_process_collect_v1(lease)?
-    if not receipt.terminal or not receipt.leader_reaped or not receipt.tree_empty or
-            receipt.active_processes != 0:
-        return Err("Linux group process tree cleanup not proven")
-    # Once collected, retain the exact receipt while publishing. Never
-    # re-poll/re-collect a consumed token or re-encode samples on I/O retries.
-    native_linux_group_finish_receipt_v1(root, identity, receipt, peak,
-        snapshot_digest, memory_limit_bytes, memory_policy, samples, complete)
+    var last_control = ""
+    var last_collect_error = ""
+    while true:
+        match linux_process_collect_retained_v2(lease):
+            case LinuxProcessCollectAdmissionV2.Collected(receipt):
+                # Consumed exactly once. Persistence owns this exact receipt;
+                # no path returns to poll/collect of the consumed native token.
+                val terminal_peak = if receipt.memory_peak_bytes > peak: receipt.memory_peak_bytes else: peak
+                return native_linux_group_finish_receipt_v1(root, identity, receipt, terminal_peak,
+                    snapshot_digest, memory_limit_bytes, memory_policy, samples, complete)
+            case LinuxProcessCollectAdmissionV2.Retryable(reason):
+                if reason != last_collect_error:
+                    val _marked = native_linux_group_diagnostic_v1(root, identity,
+                        "collect-pending", reason)
+                    last_collect_error = reason
+                val control = native_linux_group_control_v1(root, identity)
+                if control != "" and control != last_control:
+                    if control.ends_with("\ncancel"):
+                        val _cancelled = linux_process_cancel_v1(lease)
+                    val observed = linux_process_poll_v1(lease)
+                    if observed.is_ok():
+                        var frame = native_linux_group_observation_v1(observed.unwrap(), peak)
+                        # Native tree-empty is not yet broker-terminal: the
+                        # retained lease still needs successful collection.
+                        frame.terminal = false
+                        val payload = group_process_observation_encode_v1(identity, frame)
+                        val _responded = file_atomic_write(root + "/broker.control.response", control + "\n" + payload)
+                        last_control = control
+                sleep_ms(100)
+            case LinuxProcessCollectAdmissionV2.Unknown(reason):
+                # Native success may already have consumed the token. Preserve
+                # uncertainty and never issue another native operation on it.
+                val _marked = native_linux_group_diagnostic_v1(root, identity, "collect-unknown", reason)
+                while true:
+                    sleep_ms(1000)
 
 fn native_linux_group_finish_receipt_v1(root: text, identity: text,
         receipt: LinuxProcessPollV1, peak: i64, snapshot_digest: text,
@@ -251,7 +280,7 @@ fn native_linux_group_child_identity_publish_v1(launch: GroupProcessLaunchV1,
 fn native_linux_group_hold_unknown_v1(root: text, identity: text,
         lease: LinuxProcessLeaseV1, snapshot_digest: text, memory_limit_bytes: i64,
         memory_policy: text, reason: text) -> Result<bool, text>:
-    val _marked = file_atomic_write(root + "/broker.authority-unknown", identity + "\n" + reason)
+    val _marked = native_linux_group_diagnostic_v1(root, identity, "authority-unknown", reason)
     var last_cancel = ""
     while true:
         val control = native_linux_group_control_v1(root, identity)
@@ -262,7 +291,18 @@ fn native_linux_group_hold_unknown_v1(root: text, identity: text,
         if observed.is_ok() and observed.unwrap().terminal:
             val peak = linux_process_peak_memory_v1(lease)
             if peak.is_ok():
-                val finished = native_linux_group_finish_v1(root, identity, lease, peak.unwrap(),
+                return native_linux_group_finish_v1(root, identity, lease, peak.unwrap(),
                     snapshot_digest, memory_limit_bytes, memory_policy, [], false)
-                if finished.is_ok(): return finished
         sleep_ms(100)
+
+fn native_linux_group_diagnostic_v1(root: text, identity: text,
+        state: text, reason: text) -> bool:
+    if reason.len() > 4096: return false
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple/group-owner-diagnostic/v1")
+    fields["identity"] = SdnValue.String(identity)
+    fields["state"] = SdnValue.String(state)
+    fields["reason"] = SdnValue.String(reason)
+    val blob = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if blob.len() > 16384: return false
+    file_atomic_write(root + "/broker." + state + ".sdn", blob)

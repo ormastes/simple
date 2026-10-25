@@ -89,8 +89,25 @@ ENODATA from empty `cgroup.subtree_control`. The focused test correction matches
 that prerequisite exactly; it remains UNRUN under the current resource and
 missing-delegation restriction. No further kernel/native attempt was made.
 
-The SFFI source warning audit failed its inventory dependency with
+At checkpoint `b3689cc9ff7`, the SFFI source warning audit failed its inventory dependency with
 `source_variants=411/399 migration=3715/3546`. This is retained evidence, not a
 provider PASS; repository-wide counts were not changed or automatically accepted.
 The existing all-PASS link gate and independently owner-bound original inventory,
 source/provider/context, object adoption and timing admission remain required.
+
+## Review correction: collection consumption state
+
+The existing result field remains `LedgerShardRunV1.all_stopped`; the accidental
+named-field rename in the initial scheduler source checkpoint is corrected.
+`LinuxProcessCollectAdmissionV2` now separates a valid consumed receipt from an
+explicit native pre-consumption error and ambiguous/invalid delivery. An
+unlink failure retains the lease and continues serving fresh probe/cancel
+requests while retrying collection. Native tree-empty without collection is
+reported as nonterminal to the manager. Invalid/consumed tokens, malformed
+success or out-of-range error fields remain unknown and are never retried.
+After one successful collection, only its retained receipt is persisted; no
+post-consumption path goes back to native poll/collect. The fresh collected
+peak is retained if greater than an earlier observation. Diagnostic state
+records use bounded canonical SDN, with no repeated writes of unchanged errors.
+These state-decoder specs are authored UNRUN; no additional kernel, native,
+compiler or resource-heavy attempt was made for this correction.
