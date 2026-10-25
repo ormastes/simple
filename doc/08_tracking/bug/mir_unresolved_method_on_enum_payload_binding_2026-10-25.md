@@ -37,7 +37,19 @@ current stage2 resolves.
 
 ## Compiler fix
 `switch_operators_calls.spl` multi-slot bind path now calls
-`remember_local_hir_type(bound_slot, declared slot type)`. Cases 2/3 remain open.
+`remember_local_hir_type(bound_slot, declared slot type)`.
+
+Cases 2/3 (unverified — needs a stage2 rebuild to confirm zero warnings):
+- Single-slot bind read `enum_single_payload_types[key]` directly, but the
+  declaration-repository lane registers enums names-only and installs payload
+  rows lazily via `ensure_declaration_enum_payloads_v1` — so the row was absent.
+  Now demanded first, with `enum_variant_payload_type_at(key, 0)` fallback.
+- A declared Named struct/class payload now also seeds `struct_value_syms` on
+  the bound local (same as a typed param), so trait-impl methods resolve.
+- `enum_match_expr_type`: trait-object receiver falls back to
+  `lookup_trait_method` for the declared return (`Ok(output)` of `compile_module`).
+- `for_collection_declared_type`: Var iterables fall back to
+  `receiver_declared_type` (the bind's remembered type) when `iter.type_` is nil.
 Remove WAs once a stage2 with the fix shows zero warnings for these sites.
 
 ## Related: native `d[k]` on Dict<text, bool> yields int 1/0 (found via #4504)
@@ -48,3 +60,20 @@ explicit-compare sites: `10.frontend/core/interpreter/module_loader_core.spl`
 :239, :643, :927, :934 (`d[k] == true`) and
 `90.tools/leak_check/static_runner.spl:221` (array, not dict). ~609 bool-valued
 dict declarations exist in `src/compiler`; not audited individually. Open.
+
+## Follow-up: duplicate struct layouts and wrong-enum match arms (2026-10-25)
+
+- **Field-layout collision** (`JoinPoint`, `CostEstimate`, `Diagnostic`, `CompileError`,
+  `TextSpan`, `ElfSymbol`, `CollectionPlanFacts`): `struct_field_order` is keyed by bare
+  name and first-registration wins. `resolve_field_index`
+  (`50.mir/_MirLowering/function_lowering.spl`) already tries the module-qualified
+  `composite_layout_key` first; now the bare tiers fail closed — a bare name flagged in
+  `struct_field_order_conflict_warned` is skipped in the value-provenance tier and is a
+  fatal error (not first-pick) in the final name tier.
+- **`AsmConstraintKind` has no variant `Tuple`/`Struct`**: in
+  `40.mono/monomorphize_integration.spl` (`rewrite_enum_payload`,
+  `mono_relevant_expr_v1`) the `Some(p)` binding of a `HirEnumPayload?` gets a wrong
+  recorded scrutinee type (cross-module SymbolId collision, same class as this bug), and
+  the bare `case Tuple/Struct` arms were resolved by global owner search. Arms are now
+  qualified as `HirEnumPayload.Tuple/Struct`. The payload-binding type inference itself
+  remains the open root cause above.
