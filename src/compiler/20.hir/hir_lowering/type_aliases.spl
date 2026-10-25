@@ -3,7 +3,7 @@
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.*
 use compiler.frontend.parser_types.{ParserTypeParam}
-use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, parser_type_written_any_spans_v1}
 use compiler.common.diagnostics.span.{Span}
 
 # Inspect the declaration template, before substituting caller-owned arguments.
@@ -61,6 +61,19 @@ impl HirLowering:
         if symbol_id.id < 0 or symbol_id.id >= self.symbols.next_symbol_id:
             self.error("invalid type alias symbol", target.span)
             return
+        # Type aliases are declarations, not use-site annotations. Never let
+        # an enclosing expression's type_erasure grant hide Any in a template.
+        val alias_name = self.symbols.symbols[symbol_id.id].name
+        var written_any_spans = parser_type_written_any_spans_v1(target)
+        for parameter in parameters:
+            if parameter.has_default:
+                for default_span in parser_type_written_any_spans_v1(parameter.default):
+                    written_any_spans = written_any_spans.push(default_span)
+        for written_any_span in written_any_spans:
+            if self.forbid_written_any:
+                self.error("[E-ANY-COMPILE-001] type alias `{alias_name}` declared by `{owner}` uses Any outside `unsafe(capabilities: [type_erasure])`; use a generic `<T>`, a concrete type, or a closed enum", written_any_span)
+            else:
+                self.warning("[W-ANY-COMPILE-001] type alias `{alias_name}` declared by `{owner}` uses Any in safe code; use a generic `<T>`, a concrete type, or an explicit `unsafe(capabilities: [type_erasure])` boundary", written_any_span)
         while self.type_alias_positions.len() <= symbol_id.id:
             self.type_alias_positions = self.type_alias_positions.push(-1)
         self.type_alias_positions[symbol_id.id] = self.type_alias_symbol_ids.len()
