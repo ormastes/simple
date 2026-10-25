@@ -178,6 +178,19 @@ Miscompile catalog: [Stage 2 native miscompile classes](../../../07_guide/compil
 - `bootstrap_main` crashes while printing any error (int-boxed text); read it
   with gdb `x/s ($x0>>3)`.
 
+## MIR shard + go-to-end: objectless is not PASS (2026-10-25)
+
+In a MIR shard child, "no codegen outcome and no object" is both the
+objectless-facade route and a go-to-end MIR failure (excluded from
+`ctx.mir_modules`). Run-27e published 8 failed modules as PASS and counted
+`failed_modules=3`. `native_mir_shard_module_passed_v1` now refuses any
+module the child's go-to-end ledger excluded. Every MIR go-to-end failure
+writes an ICE receipt row (phase `mir_lower`). The coordinator prints
+`[mir-shard] failed module: <STATE> <name>`. Trap: a child whose ONLY claim
+fails returns false from `lower_to_mir` and was always counted, so a repro
+needs the bad module plus at least one good module in the same child. Bug:
+`doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.
+
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
 this skill with new open-bug links and concrete gotchas.
