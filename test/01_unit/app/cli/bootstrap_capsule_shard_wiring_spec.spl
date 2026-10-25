@@ -11,7 +11,7 @@ describe "focused capsule shard wiring":
         val source = read_source("src/app/cli/bootstrap_main.spl")
         expect(source).to_contain("bootstrap_capsule_shard_child_env(args)")
         expect(source).to_contain("if not bootstrap_capsule_shard_prepass(args, true):")
-        expect(source).to_contain("if not bootstrap_capsule_shard_prepass(args, false):")
+        expect(source).to_contain("if not bootstrap_capsule_shard_prepass(args, stage3_allow_mir):")
         expect(source).to_contain("return run_exact_stage4_focused_capsule(args)")
         expect(source).to_contain("return run_exact_stage3_focused_capsule(args)")
         expect(source).to_contain("env_set(\"SIMPLE_MIR_SHARD_LINK\", ledger)")
@@ -33,12 +33,20 @@ describe "focused capsule shard wiring":
         expect(source).to_contain("env_set(\"SIMPLE_COMPILER_PHASE_PROFILE_FILE\", \"\")")
         expect(source).to_contain("env_set(\"SIMPLE_BUILD_PROGRESS_EVENTS\", \"\")")
 
-    it "leaves Stage3 MIR unsharded because its AOT reads the whole MIR context":
+    it "routes Stage3 through the per-file pool unless whole-program is requested":
         val main = read_source("src/app/cli/bootstrap_main.spl")
         val aot = read_source("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(main).to_contain("val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(")
+        expect(main).to_contain("env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,")
+        expect(main).to_contain("env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? \"\")")
+        # The sealed-ledger link dispatches before any whole-program lowering;
+        # the single-object lane stays gated on the explicit opt-out.
+        val link_at = aot.index_of("return self.aot_link_mir_shards_v1()")
+        val flat_at = aot.index_of("val bootstrap_flat_aot =")
+        expect(link_at > 0).to_equal(true)
+        expect(flat_at > link_at).to_equal(true)
         expect(aot).to_contain("return \"bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)\"")
-        expect(aot).to_contain("return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)")
-        expect(main).to_contain("bootstrap_compile_context_to_native_local, which reads the whole")
+        expect(aot).to_contain("return CompileResult.CodegenError(\"MIR shard link is unsupported for this build lane\")")
 
     it "maps --parse-shard onto the driver parse shard environment":
         val source = read_source("src/app/cli/bootstrap_main.spl")

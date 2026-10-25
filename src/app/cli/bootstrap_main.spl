@@ -32,6 +32,9 @@ use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{FILE_WORKER_INC_DIR_ENV_V1,
     FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1}
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_commit_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1,
+    NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
+    native_bootstrap_stage3_per_file_selected_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -378,14 +381,21 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 return run_native_file_worker_v1(args)
             bootstrap_capsule_shard_child_env(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":
-            # MIR sharding stays off: Stage3 (SIMPLE_BOOTSTRAP=1, entry
-            # bootstrap_main, no STAGE4) dispatches AOT to
-            # bootstrap_compile_context_to_native_local, which reads the whole
-            # MIR context and emits ONE object (driver_aot_pipeline.spl
-            # aot_compile + native_staged_codegen_eligible_reason_v1). Only
-            # the HIR warm-up is lane-independent.
+            # P-H: with SIMPLE_FILE_WORKERS=1 (or the per-file default) Stage3
+            # runs the file-worker pool and the in-process capsule links the
+            # pool's per-module objects from the sealed ledger
+            # (SIMPLE_MIR_SHARD_LINK -> aot_link_mir_shards_v1); a non-PASS
+            # module (FAILED / MONO-PENDING) returns "fail" and blocks the
+            # link. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 or SIMPLE_FILE_WORKERS=0
+            # keep the single-object whole-program route (HIR warm-up only),
+            # because that lane refuses the shard link.
             if explicit_entry == "src/app/cli/bootstrap_main.spl" and mode == "dynload":
-                if not bootstrap_capsule_shard_prepass(args, false):
+                val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(
+                    env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+                    env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
+                if stage3_allow_mir:
+                    print "[stage3-route] per-file worker pool + per-module link"
+                if not bootstrap_capsule_shard_prepass(args, stage3_allow_mir):
                     return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
