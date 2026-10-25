@@ -39,14 +39,24 @@ fn macro_insert_boundary_check() -> bool:
     if inactive_src.invocations[0].active: return false
     true
 
-fn macro_sorted_names_check() -> bool:
+# Compare scalar text elements explicitly: the current fixed native producer
+# lowers aggregate array != to handle comparison (tracked native oracle gap).
+fn macro_text_arrays_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn macro_sorted_names_result() -> i64:
     val names: [text] = ["zeta", "alpha", "middle", "alpha", "zeta", "beta"]
     var intros: [MacroIntroDecl] = []
     for name in names:
         intros.push(MacroIntroDecl(kind: "fn", name_pattern: name, type_pattern: nil))
     val def = MacroDef(name: "maker", params: [], contract_intros: intros, contract_injects: [])
     val expected: [text] = ["alpha", "beta", "middle", "zeta"]
-    if macro_def_generated_public_names(def) != expected: return false
+    if not macro_text_arrays_equal(macro_def_generated_public_names(def), expected): return 11
     # Projector has its own sorted-unique owner, reached through the public API.
     val source_def = MacroSourceDefV1(def: def, namespace: "macro", body_text: "0",
         nested_macro_names: [], declared_effects: ["zeta", "alpha", "middle", "alpha", "beta"],
@@ -57,15 +67,22 @@ fn macro_sorted_names_check() -> bool:
     val source = MacroModuleSourceV1(package: "pkg", module: "fixture", source_id: "fixture.spl",
         defs: [source_def], invocations: [invocation])
     val projected = project_macro_module_v1(source, [])
-    if projected.generated_public_names != expected: return false
-    if projected.def_table.entries[0].declared_effects != expected: return false
-    if names != ["zeta", "alpha", "middle", "alpha", "zeta", "beta"]: return false
+    if not macro_text_arrays_equal(projected.generated_public_names, expected): return 12
+    if projected.def_table.entries.len() != 1: return 13
+    if not macro_text_arrays_equal(projected.def_table.entries[0].declared_effects, expected): return 14
+    if not macro_text_arrays_equal(names, ["zeta", "alpha", "middle", "alpha", "zeta", "beta"]): return 15
     val empty_def = MacroDef(name: "empty", params: [], contract_intros: [], contract_injects: [])
-    if macro_def_generated_public_names(empty_def).len() != 0: return false
-    true
+    if macro_def_generated_public_names(empty_def).len() != 0: return 16
+    0
+
+fn macro_sorted_names_check() -> bool:
+    macro_sorted_names_result() == 0
 
 fn main() -> i64:
     if not macro_insert_boundary_check(): return 1
-    if not macro_sorted_names_check(): return 2
+    val sorted_result = macro_sorted_names_result()
+    if sorted_result != 0:
+        print "macro sorted names failed: {sorted_result}"
+        return sorted_result
     print "macro array insertion: PASS"
     0
