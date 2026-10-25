@@ -5,12 +5,25 @@ use compiler.semantics.symbol_id.semantic_markdown.{SemanticMarkdownSourceV1, pl
 use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
 use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write}
+use compiler.semantics.symbol_id.semantic_markdown_exception.{SemanticMarkdownExceptionReceiptV1, load_semantic_markdown_exception_v1}
 
 pub fn semantic_markdown_authority_option_v1(arg: text) -> bool:
-    ["--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision"].contains(arg)
+    ["--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision", "--semantic-exception-file", "--semantic-exception-sha256"].contains(arg)
+
+pub fn semantic_markdown_lint_exception_v1(path: text, options: Dict<text, text>) -> Result<SemanticMarkdownExceptionReceiptV1?, SemanticLinkErrorV1>:
+    val has_file = options.contains_key("--semantic-exception-file")
+    val has_pin = options.contains_key("--semantic-exception-sha256")
+    if not has_file and not has_pin:
+        return Ok(nil)
+    if not has_file or not has_pin:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "both reviewed exception file and trusted SHA256 pin are required"))
+    Ok(Some(load_semantic_markdown_exception_v1(path, options["--semantic-exception-file"], options["--semantic-exception-sha256"])?))
 
 pub fn semantic_markdown_lint_sources_v1(options: Dict<text, text>) -> Result<[SemanticMarkdownSourceV1], SemanticLinkErrorV1>:
-    if options.keys().is_empty():
+    var has_source_authority = false
+    for key in ["--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision"]:
+        if options.contains_key(key): has_source_authority = true
+    if not has_source_authority:
         return Ok([])
     for required in ["--source-file", "--source-link", "--package", "--module", "--revision"]:
         if not options.contains_key(required) or options[required] == "":
@@ -37,8 +50,10 @@ impl Linter:
         val critical = match config.profile:
             case Some(profile): profile == LintProfile.Critical
             case nil: false
-        match plan_semantic_markdown_links_v1(content, self.semantic_markdown_sources, critical):
+        match plan_semantic_markdown_links_v1(content, self.semantic_markdown_sources, critical, self.semantic_markdown_exception):
             case Err(failure):
+                if self.semantic_markdown_exception != nil:
+                    self.semantic_markdown_exception_error = failure.message
                 val lint = LintDiag.new("W-DOC-AST-001", LintLevel.Deny, LintCategory.Correctness,
                     "semantic document check refused: " + failure.message)
                 self.results.push(LintRunResult.new(path, 1, 0, lint))
@@ -51,11 +66,11 @@ impl Linter:
                         .with_fix("Use --fix with explicit --source-file, --source-link, --package, --module and --revision authority")
                     self.results.push(LintRunResult.new(path, position.0, position.1, lint))
 
-pub fn apply_semantic_markdown_lint_fix_v1(path: text, content: text, sources: [SemanticMarkdownSourceV1], dry_run: bool) -> Result<bool, SemanticLinkErrorV1>:
+pub fn apply_semantic_markdown_lint_fix_v1(path: text, content: text, sources: [SemanticMarkdownSourceV1], dry_run: bool, reviewed_exception: SemanticMarkdownExceptionReceiptV1? = nil) -> Result<bool, SemanticLinkErrorV1>:
     # Never translate semantic edits to unchecked generic EasyFix replacements.
     # The owner re-authenticates every target and source immediately before the
     # bounded read and atomic publication; external writers are not locked.
-    val plan = plan_semantic_markdown_links_v1(content, sources, false)?
+    val plan = plan_semantic_markdown_links_v1(content, sources, false, reviewed_exception)?
     if plan.diagnostics.is_empty():
         return Ok(true)
     val replacement = apply_semantic_markdown_links_v1(content, plan)?

@@ -3,6 +3,7 @@ use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLin
 use compiler.semantics.symbol_id.semantic_link_source.{SemanticLinkDocumentV1, semantic_link_read_revision_v1, resolve_semantic_links_source_indexed_v1}
 use compiler.semantics.symbol_id.semantic_link_location.{semantic_links_from_lines_v1}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.semantics.symbol_id.semantic_markdown_exception.{SemanticMarkdownExceptionReceiptV1, validate_semantic_markdown_exception_v1}
 
 pub struct SemanticMarkdownSourceV1:
     local_file: text
@@ -22,6 +23,7 @@ pub struct SemanticMarkdownPlanV1:
     revision: text
     diagnostics: [SemanticMarkdownDiagnosticV1]
     sources: [SemanticMarkdownSourceV1]
+    reviewed_exception: SemanticMarkdownExceptionReceiptV1? = nil
 
 struct MarkdownLineTargetV1:
     start: i64
@@ -212,7 +214,7 @@ fn markdown_line_targets_v1(markdown: text) -> Result<[MarkdownLineTargetV1], Se
         destination = false
     Ok(targets)
 
-pub fn plan_semantic_markdown_links_v1(markdown: text, bindings: [SemanticMarkdownSourceV1], critical: bool) -> Result<SemanticMarkdownPlanV1, SemanticLinkErrorV1>:
+pub fn plan_semantic_markdown_links_v1(markdown: text, bindings: [SemanticMarkdownSourceV1], critical: bool, reviewed_exception: SemanticMarkdownExceptionReceiptV1? = nil) -> Result<SemanticMarkdownPlanV1, SemanticLinkErrorV1>:
     if bindings.len() > 4096:
         return Err(semantic_link_error_v1(SemanticLinkFailureV1.CapacityExceeded, "more than 4096 source bindings"))
     val targets = markdown_line_targets_v1(markdown)?
@@ -298,7 +300,19 @@ pub fn plan_semantic_markdown_links_v1(markdown: text, bindings: [SemanticMarkdo
     for diagnostic in diagnostics:
         if diagnostic.message != "semantic URI validated":
             findings.push(diagnostic)
-    Ok(SemanticMarkdownPlanV1(revision: sha256_text(markdown), diagnostics: findings, sources: bindings))
+    if val receipt = reviewed_exception:
+        val scope = validate_semantic_markdown_exception_v1(receipt, markdown)?
+        var matches = 0
+        var retained: [SemanticMarkdownDiagnosticV1] = []
+        for finding in findings:
+            if finding.start == scope.start and finding.end == scope.end and finding.target == scope.target and not finding.target.starts_with("spl:"):
+                matches = matches + 1
+            else:
+                retained.push(finding)
+        if matches != 1:
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "reviewed exception must match exactly one scanner line destination"))
+        findings = retained
+    Ok(SemanticMarkdownPlanV1(revision: sha256_text(markdown), diagnostics: findings, sources: bindings, reviewed_exception: reviewed_exception))
 
 pub fn apply_semantic_markdown_links_v1(markdown: text, plan: SemanticMarkdownPlanV1) -> Result<text, SemanticLinkErrorV1>:
     """Return all replacements or an error; caller performs one atomic publication.
@@ -310,7 +324,7 @@ pub fn apply_semantic_markdown_links_v1(markdown: text, plan: SemanticMarkdownPl
         return Err(semantic_link_error_v1(SemanticLinkFailureV1.CapacityExceeded, "edit plan exceeds bounds"))
     if sha256_text(markdown) != plan.revision:
         return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "Markdown changed after lint planning"))
-    val fresh = plan_semantic_markdown_links_v1(markdown, plan.sources, false)?
+    val fresh = plan_semantic_markdown_links_v1(markdown, plan.sources, false, plan.reviewed_exception)?
     if fresh.diagnostics.len() != plan.diagnostics.len():
         return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "edit plan does not match the Markdown source"))
     for row in 0..fresh.diagnostics.len():
@@ -331,6 +345,8 @@ pub fn apply_semantic_markdown_links_v1(markdown: text, plan: SemanticMarkdownPl
     parts.push(markdown.slice(position, markdown.len()))
     for binding in plan.sources:
         semantic_link_read_revision_v1(binding.document.file, binding.document.revision)?
+    if val receipt = plan.reviewed_exception:
+        val _scope = validate_semantic_markdown_exception_v1(receipt, markdown)?
     Ok(parts.join(""))
 
 
