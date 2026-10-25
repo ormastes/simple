@@ -2797,3 +2797,43 @@ mod tests {
         assert_eq!(value, 0x7654_3210);
     }
 }
+
+/// Raw runtime handle carried by an interpreter value, or None for interpreter
+/// composites (Arc/owned Rust values that the runtime rc table never owns).
+fn rc_runtime_handle(name: &str, args: &[Value]) -> Result<Option<simple_runtime::value::RuntimeValue>, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} requires 1 argument (value)")));
+    }
+    Ok(match &args[0] {
+        Value::Int(raw) => Some(simple_runtime::value::RuntimeValue::from_raw(*raw as u64)),
+        Value::UInt { value, .. } => Some(simple_runtime::value::RuntimeValue::from_raw(*value)),
+        _ => None,
+    })
+}
+
+/// Object-graph refcount (BSM P4): interpreter composites are not rc roots,
+/// so share/retain/release answer false and count/graph_bytes answer -1.
+pub fn rt_rc_share(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_share", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_share(v))))
+}
+
+pub fn rt_rc_retain(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_retain", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_retain(v))))
+}
+
+pub fn rt_rc_release(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_release", args)?;
+    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_release(v))))
+}
+
+pub fn rt_rc_count(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_rc_count", args)?;
+    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_rc_count(v))))
+}
+
+pub fn rt_heap_graph_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = rc_runtime_handle("rt_heap_graph_bytes", args)?;
+    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_heap_graph_bytes(v))))
+}

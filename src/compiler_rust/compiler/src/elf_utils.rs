@@ -504,6 +504,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_transient_heap_promote_share_begin" => value::rt_transient_heap_promote_share_begin as *const () as usize,
         "rt_transient_heap_promote_share_end" => value::rt_transient_heap_promote_share_end as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
+        "rt_rc_share" => value::rt_rc_share as *const () as usize,
+        "rt_rc_retain" => value::rt_rc_retain as *const () as usize,
+        "rt_rc_release" => value::rt_rc_release as *const () as usize,
+        "rt_rc_count" => value::rt_rc_count as *const () as usize,
+        "rt_heap_graph_bytes" => value::rt_heap_graph_bytes as *const () as usize,
         // Diagnostic heap counters. Registered here as well as in
         // codegen::runtime_sffi so a JIT-hosted call resolves to the real
         // counter instead of silently returning nil (which is
