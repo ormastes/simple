@@ -1,0 +1,26 @@
+# Run with SIMPLE_MIRB_TRACE=1 to exercise the real aggregate fast-path trace.
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.llvm_ir_builder.{llvm_ir_builder_build}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn llvm_aggregate_trace_case() -> bool:
+    if not mir_trace_enabled(): return false
+    var owner = MirToLlvm.create("aggregate_trace", CodegenTarget.X86_64, nil)
+    val operands: [MirOperand] = [mir_operand_const_int(17), mir_operand_const_int(29)]
+    val instruction = MirInst(kind: MirInstKind.Aggregate(LocalId(id: 7),
+        AggregateKind.Array(MirType.i64()), operands), span: nil)
+    val instructions: [MirInst] = [instruction]
+    owner.translate_instruction_at(instructions, 0, -1, -1)
+    val emitted = llvm_ir_builder_build(owner.builder)
+    if not emitted.contains("%l7 = call ptr @rt_array_new(i64 2)"): return false
+    if not emitted.contains("@rt_array_push(ptr %l7, i64 17)"): return false
+    if not emitted.contains("@rt_array_push(ptr %l7, i64 29)"): return false
+    if not owner.defined_locals.contains_key(7): return false
+    true
+
+fn main() -> i64:
+    if not llvm_aggregate_trace_case(): return 1
+    print "LLVM aggregate trace: PASS"
+    0
