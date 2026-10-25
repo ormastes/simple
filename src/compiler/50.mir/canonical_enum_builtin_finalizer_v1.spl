@@ -44,10 +44,35 @@ fn canonical_enum_expected_abi_name_v1(operation: CanonicalEnumBuiltinOperationV
         case CanonicalEnumBuiltinOperationV1.Discriminant: "rt_enum_discriminant"
         case CanonicalEnumBuiltinOperationV1.Panic: "rt_panic"
 
+# The owning append-only loop supplies the unique-prefix count. A failed
+# duplicate check returns before insertion. Two collision scans, bounded
+# decimal-key comparisons and replacement growth are prepaid before key/map work.
+pub fn canonical_enum_seen_site_work_v1(prior_count: i64) -> Result<i64, text>:
+    val rows = canonical_enum_sum_v1(prior_count, 1)?
+    # Native resize reinserts old rows; adversarial collisions make this
+    # quadratic even though the ordinary native lookup path remains hashed.
+    canonical_enum_sum_v1(canonical_enum_product_v1(
+        canonical_enum_product_v1(rows, rows)?, 128)?,
+        canonical_enum_product_v1(rows, 512)?)
+
+pub fn canonical_enum_record_seen_site_v1(seen: Dict<text, bool>, prior_count: i64,
+        block: i64, instruction: i64, account: MirLoopResourceAccountV1
+) -> Result<Dict<text, bool>, text>:
+    val rows = canonical_enum_sum_v1(prior_count, 1)?
+    canonical_enum_charge_v1(account, canonical_enum_seen_site_work_v1(prior_count)?,
+        canonical_enum_product_v1(rows, 16)?, canonical_enum_product_v1(rows, 256)?)?
+    val key = "{block}:{instruction}"
+    if seen.has(key): return Err("ENUM-ORIGIN: duplicate primitive site")
+    var updated = seen
+    updated[key] = true
+    Ok(updated)
+
 pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFunction,
         sites: [CanonicalEnumBuiltinSiteV1], account: MirLoopResourceAccountV1
 ) -> Result<CanonicalEnumBuiltinManifestV1, text>:
     canonical_enum_charge_v1(account, 1)?
+    if sites.len() > account.limits().max_sites:
+        return Err("ENUM-ORIGIN: capture count exceeds invocation site limit")
     val function_bound = canonical_enum_function_bound_v1(function, account)?
     if function_bound > 1152921504606846975: return Err("ENUM-BUDGET: function bound overflow")
     # Candidate comparison and final body hashing use the existing serializer;
@@ -69,6 +94,9 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
         if serialize_mir_function(declared) != serialize_mir_function(function):
             return Err("ENUM-ORIGIN: candidate function body differs")
     canonical_enum_charge_v1(account, 32, 16, 32)?
+    # Native empty dictionary eagerly allocates its initial capacity. This
+    # reservation precedes creation, independently of later per-insert growth.
+    canonical_enum_charge_v1(account, 64, 64, 512)?
     var seen: Dict<text, bool> = {}
     var rows: [text] = ["CanonicalEnumBuiltin-v1"]
     var uses: [CanonicalEnumBuiltinCfgUseV1] = []
@@ -84,9 +112,8 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
                 if name != canonical_enum_expected_abi_name_v1(site.operation):
                     return Err("ENUM-ORIGIN: operation and emitted primitive ABI differ")
             case _: return Err("ENUM-ORIGIN: canonical primitive call operand absent")
+        seen = canonical_enum_record_seen_site_v1(seen, index, site.block.id, site.instruction_index, account)?
         val key = "{site.block.id}:{site.instruction_index}"
-        if seen.has(key): return Err("ENUM-ORIGIN: duplicate primitive site")
-        seen[key] = true
         var block_index = -1
         for candidate in 0..function.blocks.len():
             canonical_enum_charge_v1(account, 1)?

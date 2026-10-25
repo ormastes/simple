@@ -1,0 +1,52 @@
+# Authored UNRUN: tests the actual duplicate-check helper, not SOURCE admission.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_record_seen_site_v1, canonical_enum_seen_site_work_v1}
+
+fn duplicate_account_v1(work: i64) -> MirLoopResourceAccountV1:
+    var limits = MirLoopResourceLimitsV1()
+    limits.max_work = work
+    match MirLoopResourceAccountV1.create(limits):
+        case Ok(account): account
+        case Err(_): fail("duplicate-check test account unavailable")
+
+describe("canonical enum duplicate-map prepayment"):
+    it("refuses one-short before map work with unchanged failed-reserve ledger"):
+        val account = duplicate_account_v1(2099)
+        val before = account.snapshot().work_used
+        val rejected = match canonical_enum_record_seen_site_v1({"0:0": true}, 1, 0, 1, account):
+            case Err(_): true
+            case _: false
+        expect(rejected).to_equal(true)
+        expect(account.snapshot().work_used).to_equal(before)
+
+    it("accepts exact boundary for a distinct coordinate"):
+        # Charge =1536 work +32 state +512 bytes =2080; initial owner costs20.
+        val account = duplicate_account_v1(2100)
+        val accepted = match canonical_enum_record_seen_site_v1({"0:0": true}, 1, 0, 1, account):
+            case Ok(rows): rows.has("0:1")
+            case _: false
+        expect(accepted).to_equal(true)
+        expect(account.snapshot().work_used).to_equal(2100)
+
+    it("rejects the actual repeated key with the duplicate diagnostic"):
+        val account = duplicate_account_v1(2100)
+        val diagnostic = match canonical_enum_record_seen_site_v1({"2:9": true}, 1, 2, 9, account):
+            case Err(message): message
+            case _: "accepted"
+        expect(diagnostic).to_equal("ENUM-ORIGIN: duplicate primitive site")
+        expect(account.snapshot().work_used).to_equal(2100)
+
+    it("rejects sum and product overflow and negative counts"):
+        val sum_overflow = match canonical_enum_seen_site_work_v1(9223372036854775807):
+            case Err(_): true
+            case _: false
+        val product_overflow = match canonical_enum_seen_site_work_v1(18014398509481983):
+            case Err(_): true
+            case _: false
+        val negative = match canonical_enum_seen_site_work_v1(-1):
+            case Err(_): true
+            case _: false
+        expect(sum_overflow).to_equal(true)
+        expect(product_overflow).to_equal(true)
+        expect(negative).to_equal(true)
