@@ -44,6 +44,9 @@ pub extern "C" fn rt_fork_shared_heap_v1() -> i64 {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 || libc::getppid() != expected_parent {
                 libc::_exit(127);
             }
+            // Keep the inherited heap registry read-only so the child neither
+            // privatizes nor regrows the parent's table.
+            crate::value::heap::heap_registry_freeze_for_fork_child();
             return 0;
         }
         pid as i64

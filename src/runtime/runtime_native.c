@@ -2204,8 +2204,116 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     }
 }
 
+/* Fork-child overlay (twin of HeapRegistry in
+ * src/compiler_rust/runtime/src/value/heap.rs). A copy-on-write fork child
+ * inherits the parent's whole table; writing it privatizes it page by page and
+ * its first growth allocates a fresh 2x table per child. After
+ * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
+ * read-only: the child's objects use the (now empty) live table and an erase
+ * of an inherited pointer is recorded in the erased set. Bug:
+ * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
+static uintptr_t* rt_core_immortal_frozen = NULL;
+static size_t rt_core_immortal_frozen_cap = 0;
+static uintptr_t* rt_core_immortal_erased = NULL;
+static size_t rt_core_immortal_erased_cap = 0;
+static size_t rt_core_immortal_erased_len = 0;
+static size_t rt_core_immortal_erased_tombs = 0;
+
+static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
+    if (cap == 0) return 0;
+    size_t mask = cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = table[i];
+        if (e == 0) return 0;
+        if (e == p) return 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(uintptr_t p) {
+    return core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap, p) &&
+        (rt_core_immortal_erased_len == 0 ||
+         !core_ptr_table_has(rt_core_immortal_erased, rt_core_immortal_erased_cap, p));
+}
+
+/* caller holds the lock; p is not in the erased set */
+static int core_immortal_erased_add(uintptr_t p) {
+    if ((rt_core_immortal_erased_len + rt_core_immortal_erased_tombs + 1) * 10
+            >= rt_core_immortal_erased_cap * 7) {
+        size_t new_cap = rt_core_immortal_erased_cap == 0 ? 64 : rt_core_immortal_erased_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
+        if (!fresh) return 0;
+        for (size_t k = 0; k < rt_core_immortal_erased_cap; k++) {
+            uintptr_t e = rt_core_immortal_erased[k];
+            if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+            size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+            while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
+            fresh[j] = e;
+        }
+        free(rt_core_immortal_erased);
+        rt_core_immortal_erased = fresh;
+        rt_core_immortal_erased_cap = new_cap;
+        rt_core_immortal_erased_tombs = 0;
+    }
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (rt_core_immortal_erased[i] != 0 && rt_core_immortal_erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+        i = (i + 1) & mask;
+    }
+    if (rt_core_immortal_erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) rt_core_immortal_erased_tombs--;
+    rt_core_immortal_erased[i] = p;
+    rt_core_immortal_erased_len++;
+    return 1;
+}
+
+/* caller holds the lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(uintptr_t p) {
+    if (rt_core_immortal_erased_cap == 0) return 0;
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = rt_core_immortal_erased[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            rt_core_immortal_erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            rt_core_immortal_erased_len--;
+            rt_core_immortal_erased_tombs++;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* Called in the child right after fork() (single-threaded there). A nested
+ * fork keeps the first frozen layer and inherits the small live table. */
+void spl_immortal_registry_freeze_for_fork_child_v1(void) {
+    rt_core_immortal_registry_acquire();
+    if (!rt_core_immortal_frozen) {
+        rt_core_immortal_frozen = rt_core_immortal_registry;
+        rt_core_immortal_frozen_cap = rt_core_immortal_registry_cap;
+        rt_core_immortal_registry = NULL;
+        rt_core_immortal_registry_cap = 0;
+        rt_core_immortal_registry_len = 0;
+        rt_core_immortal_registry_tombs = 0;
+    }
+    rt_core_immortal_registry_release();
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p);
+
 /* caller holds the lock; returns 1 if an entry was erased */
 static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
+    if (core_immortal_live_erase_raw(p)) return 1;
+    if (!rt_core_immortal_frozen || !core_immortal_frozen_live(p)) return 0;
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    return core_immortal_erased_add(p);
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p) {
     if (rt_core_immortal_registry_cap == 0) return 0;
     size_t mask = rt_core_immortal_registry_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
@@ -2245,6 +2353,16 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_immortal_registry_acquire();
+    if (rt_core_immortal_frozen &&
+            core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap,
+                (uintptr_t)ptr)) {
+        /* Inherited address: present, or re-registered after its erase. */
+        if (core_immortal_erased_drop((uintptr_t)ptr)) {
+            atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        }
+        rt_core_immortal_registry_release();
+        return 1;
+    }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
     if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
@@ -2285,6 +2403,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
             i = (i + 1) & mask;
         }
     }
+    if (!found && rt_core_immortal_frozen) found = core_immortal_frozen_live((uintptr_t)ptr);
     rt_core_immortal_registry_release();
     return found;
 }

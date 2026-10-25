@@ -124,6 +124,77 @@ lazy_static! {
     static ref DECLARED_DATA: Mutex<HashMap<i64, DataId>> = Mutex::new(HashMap::new());
     /// Content-addressed dedup cache for string constants: (module, raw bytes) -> data handle.
     static ref STRING_DATA_CACHE: Mutex<HashMap<(i64, Vec<u8>), i64>> = Mutex::new(HashMap::new());
+    /// Function/data handles and signatures owned by one module, released by
+    /// `rt_cranelift_free_module`. Without this every module's signatures,
+    /// declaration handles and string-constant copies stayed in the maps above
+    /// for the process lifetime (bug native_codegen_cranelift_registry_leak_2026-10-25).
+    static ref MODULE_OWNED: Mutex<HashMap<i64, ModuleOwnedHandles>> = Mutex::new(HashMap::new());
+    /// Signature handle -> the one module that consumed it, or SIG_SHARED.
+    static ref SIG_OWNER: Mutex<HashMap<i64, i64>> = Mutex::new(HashMap::new());
+}
+
+/// A signature consumed by two modules is never released with either.
+const SIG_SHARED: i64 = -1;
+
+#[derive(Default)]
+struct ModuleOwnedHandles {
+    sigs: Vec<i64>,
+    funcs: Vec<i64>,
+    data: Vec<i64>,
+}
+
+fn own_func_handle(module: i64, handle: i64) {
+    MODULE_OWNED.lock().unwrap().entry(module).or_default().funcs.push(handle);
+}
+
+fn own_data_handle(module: i64, handle: i64) {
+    MODULE_OWNED.lock().unwrap().entry(module).or_default().data.push(handle);
+}
+
+fn note_sig_use(sig: i64, module: i64) {
+    let mut owners = SIG_OWNER.lock().unwrap();
+    match owners.get(&sig).copied() {
+        None => {
+            owners.insert(sig, module);
+            drop(owners);
+            MODULE_OWNED.lock().unwrap().entry(module).or_default().sigs.push(sig);
+        }
+        Some(owner) if owner == module || owner == SIG_SHARED => {}
+        Some(_) => {
+            owners.insert(sig, SIG_SHARED);
+        }
+    }
+}
+
+/// Drop every handle `module` owns. Its FuncIds/DataIds are meaningless once
+/// the module is gone, and its signatures were consumed by it alone.
+fn release_module_handles(module: i64) {
+    let Some(owned) = MODULE_OWNED.lock().unwrap().remove(&module) else {
+        return;
+    };
+    {
+        let mut owners = SIG_OWNER.lock().unwrap();
+        let mut sigs = SIGNATURES.lock().unwrap();
+        for sig in owned.sigs {
+            if owners.get(&sig) == Some(&module) {
+                owners.remove(&sig);
+                sigs.remove(&sig);
+            }
+        }
+    }
+    {
+        let mut funcs = DECLARED_FUNCS.lock().unwrap();
+        for handle in owned.funcs {
+            funcs.remove(&handle);
+        }
+    }
+    {
+        let mut data = DECLARED_DATA.lock().unwrap();
+        for handle in owned.data {
+            data.remove(&handle);
+        }
+    }
+    STRING_DATA_CACHE.lock().unwrap().retain(|(owner, _), _| *owner != module);
 }
 
 /// Clear all Cranelift SFFI global registries.
@@ -144,6 +215,8 @@ pub fn clear_cranelift_registries() {
     DECLARED_DATA.lock().unwrap().clear();
     STRING_DATA_CACHE.lock().unwrap().clear();
     SIGNATURES.lock().unwrap().clear();
+    MODULE_OWNED.lock().unwrap().clear();
+    SIG_OWNER.lock().unwrap().clear();
     JIT_MODULES.lock().unwrap().clear();
     AOT_MODULES.lock().unwrap().clear();
 }
@@ -501,10 +574,10 @@ pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
 /// Free module resources.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_free_module(module: i64) {
-    if JIT_MODULES.lock().unwrap().remove(&module).is_some() {
-        return;
+    if JIT_MODULES.lock().unwrap().remove(&module).is_none() {
+        AOT_MODULES.lock().unwrap().remove(&module);
     }
-    AOT_MODULES.lock().unwrap().remove(&module);
+    release_module_handles(module);
 }
 
 // ============================================================================
@@ -617,6 +690,8 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
         Some(id) => {
             let handle = next_handle();
             DECLARED_FUNCS.lock().unwrap().insert(handle, id);
+            own_func_handle(module, handle);
+            note_sig_use(sig, module);
             handle
         }
         None => 0,
@@ -733,6 +808,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_string_data(module: i64, bytes_ptr
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
     STRING_DATA_CACHE.lock().unwrap().insert(cache_key, handle);
+    own_data_handle(module, handle);
     handle
 }
 
@@ -832,6 +908,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
 
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    own_data_handle(module, handle);
     handle
 }
 
@@ -928,6 +1005,7 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
     if !is_jit && !is_aot {
         return 0;
     }
+    note_sig_use(sig, module);
 
     let handle = next_handle();
 
@@ -1513,6 +1591,10 @@ pub unsafe extern "C" fn rt_cranelift_call_indirect(
             None => return 0,
         }
     };
+    let owner = ACTIVE_BUILDERS.lock().unwrap().get(&ctx).map(|ab| ab.module_handle);
+    if let Some(module) = owner {
+        note_sig_use(sig, module);
+    }
 
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
@@ -2843,6 +2925,51 @@ mod tests {
                 0
             );
             rt_cranelift_free_module(module);
+        }
+    }
+}
+
+// Not arch-gated: AOT object modules for x86_64 build on every host.
+#[cfg(test)]
+mod owned_handle_tests {
+    use super::*;
+
+    #[test]
+    fn test_free_module_releases_owned_handles() {
+        unsafe {
+            let name = "owned_handles";
+            let a = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            let b = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(a > 0 && b > 0);
+            let own_sig = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(own_sig, CL_TYPE_I64);
+            let shared_sig = rt_cranelift_new_signature(0);
+            let fname = "rt_owned_handle_probe";
+            let func = rt_cranelift_declare_function(a, fname.as_ptr() as i64, fname.len() as i64, own_sig, 1);
+            assert!(func > 0);
+            let other = "rt_owned_handle_other";
+            assert!(rt_cranelift_declare_function(a, other.as_ptr() as i64, other.len() as i64, shared_sig, 1) > 0);
+            assert!(rt_cranelift_declare_function(b, other.as_ptr() as i64, other.len() as i64, shared_sig, 1) > 0);
+            let text = b"owned string constant";
+            let data = rt_cranelift_declare_string_data(a, text.as_ptr() as i64, text.len() as i64);
+            assert!(data > 0);
+            assert_eq!(rt_cranelift_declare_string_data(a, text.as_ptr() as i64, text.len() as i64), data);
+
+            rt_cranelift_free_module(a);
+            assert!(!SIGNATURES.lock().unwrap().contains_key(&own_sig), "module-owned signature released");
+            assert!(!DECLARED_FUNCS.lock().unwrap().contains_key(&func), "function handle released");
+            assert!(!DECLARED_DATA.lock().unwrap().contains_key(&data), "data handle released");
+            assert!(!STRING_DATA_CACHE
+                .lock()
+                .unwrap()
+                .contains_key(&(a, text.to_vec())), "string cache entry released");
+            assert!(SIGNATURES.lock().unwrap().contains_key(&shared_sig), "shared signature kept");
+            // b still declares through the shared signature.
+            let late = "rt_owned_handle_late";
+            assert!(rt_cranelift_declare_function(b, late.as_ptr() as i64, late.len() as i64, shared_sig, 1) > 0);
+            rt_cranelift_free_module(b);
+            assert!(!MODULE_OWNED.lock().unwrap().contains_key(&a));
+            assert!(!MODULE_OWNED.lock().unwrap().contains_key(&b));
         }
     }
 }
