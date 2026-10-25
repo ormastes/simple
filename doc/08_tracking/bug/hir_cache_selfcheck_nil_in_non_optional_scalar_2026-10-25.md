@@ -74,3 +74,41 @@ it); the checked-in `hir_codec.spl` now matches generator output byte for
 byte. Self-check not loosened. Unconfirmed until a stage-3 rerun shows
 `selfcheck_failed` near 0 (whether these two Dict<_, bool> fields are the
 ONLY N source is not proven -- no failing entry is stored to decode).
+
+## Failure-only quarantine diagnostics (2026-10-25, source change pending execution)
+
+The generated required-scalar rejection now appends its owning field to the
+existing `nil_in_non_optional_scalar` reason. Enum fields also include the
+variant, for example `HirExprKind.IntLit.value`; the decoder still rejects
+the same bare `N` token.
+
+When a write-time self-check fails, an operator may set
+`SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR` to a dedicated evidence directory.
+That failure branch alone reads the setting. It writes a payload and an SDN
+manifest under `hir-selfcheck-quarantine-v1`; this namespace is never scanned
+by the HIR cache loader. The manifest is published last with exclusive,
+no-replace file operations. Payload plus reserved metadata is capped at 1 MiB.
+Over-limit payloads record their byte count and omission reason without writing
+the blob. If the setting is empty or capture I/O fails, the original
+self-check refusal remains unchanged.
+
+Focused specs assert `FlatPoolReader.failure_detail` for enum and struct
+fields, and exercise the production quarantine writer with a small payload,
+an over-limit payload, an existing destination, and an empty opt-in directory.
+They verify payload bytes/hash, manifest fields, omission metadata, and
+no-overwrite behavior. They have not been executed with a qualified Simple
+runtime; the new generated-code diagnostic and quarantine artifact remain
+source-reviewed, not runtime-qualified.
+
+The opt-in is available on the canonical CLI worker route without another
+environment allowlist: `src/app/cli/native_build_main.spl:902-912` builds the
+`native_build_worker.spl` command, and `:965-976` launches it with
+`process_spawn_async` after changing only the shard queue/owner variables.
+`src/lib/nogc_sync_mut/io_runtime.spl:659-660` delegates that API to the raw
+process-spawn operation with no replacement environment, so the worker
+inherits the CLI process environment. The builder-owned clean-environment
+lists in `src/app/bootstrap_builder/worker.spl:53-78` and
+`grouped_native_run.spl:157-174` are separate build orchestration routes and
+do not launch this canonical native-build worker; no broad allowlist was
+changed. End-to-end propagation through a qualified CLI/runtime remains
+unexecuted.
