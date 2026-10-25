@@ -11,7 +11,9 @@
 
 The file worker's body-on-demand seam resolves an E-MONO-040 template to its
 owner module and serves the owner's cached HIR body for module-scoped mono.
-Each served instance is cached under its ConcreteTldrKey (set-once).
+Owners are searched only in F's transitive import closure. Each decision is
+cached under a process-local TemplateBodyDecisionKeyV1 (set-once; not a
+ConcreteTldrKey).
 
 ## Expected Outcome
 
@@ -25,7 +27,10 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_missi
     native_file_worker_mono_fallback_reader_v1, native_file_worker_reader_instances_available_v1,
     native_file_worker_reader_instances_enabled_v1}
 use compiler.driver.cache.reader.template_body_loader_v1.{template_body_loader_new_v1,
-    template_body_owner_of_v1, template_body_instance_key_v1}
+    template_body_owner_of_v1, template_body_decision_key_v1, template_body_import_closure_v1}
+
+fn closure() -> [text]:
+    ["std.list", "app.util"]
 
 fn declared() -> Dict<text, [text]>:
     var d: Dict<text, [text]> = {}
@@ -39,12 +44,27 @@ describe "E-MONO-040 path resolved by the loader":
         val names = native_file_worker_missing_templates_v1([
             "E-MONO-040: template std.list.List not visible to module app.main",
             "E-MONO-040: template pair not visible to module app.main"])
-        assert_equal(template_body_owner_of_v1(names[0], declared()), "std.list")
-        assert_equal(template_body_owner_of_v1(names[1], declared()), "app.util")
+        assert_equal(template_body_owner_of_v1(names[0], declared(), closure()), "std.list")
+        assert_equal(template_body_owner_of_v1(names[1], declared(), closure()), "app.util")
 
-    it "treats an ambiguous or unknown name as no owner":
-        assert_equal(template_body_owner_of_v1("Box", declared()), "")
-        assert_equal(template_body_owner_of_v1("nope", declared()), "")
+    it "computes the transitive import closure":
+        var edges: Dict<text, [text]> = {}
+        edges["app.main"] = ["app.util"]
+        edges["app.util"] = ["std.list", "app.main"]
+        val c = template_body_import_closure_v1("app.main", edges)
+        assert_equal(c.len(), 2)
+        assert_true(c.contains("std.list"))
+        assert_false(c.contains("app.main"))
+
+    it "misses an owner outside the import closure even when it is the unique declarer":
+        assert_equal(template_body_owner_of_v1("Box", declared(), ["std.list"]), "")
+        assert_equal(template_body_owner_of_v1("app.other.Box", declared(), ["std.list"]), "")
+        var loader = template_body_loader_new_v1()
+        assert_equal(loader.load(template_body_owner_of_v1("Box", declared(), ["std.list"]), "Box", [], "sha256:a", true).pending_reason, "owner-unknown")
+
+    it "misses when two declarers are inside the closure":
+        assert_equal(template_body_owner_of_v1("Box", declared(), ["app.util", "app.other"]), "")
+        assert_equal(template_body_owner_of_v1("nope", declared(), closure()), "")
 
     it "serves the body so the worker retries with the reader":
         var loader = template_body_loader_new_v1()
@@ -59,19 +79,19 @@ describe "E-MONO-040 path resolved by the loader":
         assert_true(native_file_worker_reader_instances_enabled_v1("", native_file_worker_reader_instances_available_v1()))
         assert_false(native_file_worker_reader_instances_enabled_v1("0", native_file_worker_reader_instances_available_v1()))
 
-describe "ConcreteTldrKey cache":
+describe "body-decision cache":
     it "hits the cache on the second request":
         var loader = template_body_loader_new_v1()
         val first = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
         val second = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
         assert_equal(second.source, "cache")
-        assert_equal(second.instance_key, first.instance_key)
+        assert_equal(second.decision_key, first.decision_key)
         assert_equal(loader.loads, 1)
         assert_equal(loader.hits, 1)
 
     it "keys distinct type arguments separately":
-        val a = template_body_instance_key_v1("app.util", "pair", "sha256:a", ["i64"])
-        val b = template_body_instance_key_v1("app.util", "pair", "sha256:a", ["text"])
+        val a = template_body_decision_key_v1("app.util", "pair", "sha256:a", ["i64"])
+        val b = template_body_decision_key_v1("app.util", "pair", "sha256:a", ["text"])
         assert_false(a == b)
 
     it "invalidates when the owner changes":
@@ -79,8 +99,8 @@ describe "ConcreteTldrKey cache":
         val first = loader.load("app.util", "pair", ["i64"], "sha256:a", true)
         val changed = loader.load("app.util", "pair", ["i64"], "sha256:b", true)
         assert_equal(changed.source, "loaded")
-        assert_false(changed.instance_key == first.instance_key)
-        assert_false(loader.cached(first.instance_key))
+        assert_false(changed.decision_key == first.decision_key)
+        assert_false(loader.cached(first.decision_key))
         assert_equal(loader.invalidations, 1)
 
 describe "fail closed":
