@@ -621,8 +621,7 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     var i = 0
     val path_len = path_text.len()
     while i < path_len:
-        # byte_at, not char_code_at: the loop bound is a BYTE length. Same
-        # mixing defect as _driver_line_end below.
+        # byte_at, not char_code_at: the loop bound is a BYTE length.
         val byte = path_text.byte_at(i)
         if not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46):
             return false
@@ -630,19 +629,24 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     path_text != ""
 
 fn _driver_line_end(content: text, start: i64) -> i64:
-    """Return the exclusive end of one source line without splitting the file.
+    """Return the exclusive end of one source line without splitting the file:
+    the index of the next newline at or after `start`, else `content.len()`.
 
-    `text.index_of` is a runtime text primitive. Keeping the cursor in that
-    primitive avoids a Simple-level `char_code_at` call for every byte of every
-    closure source line, while still retaining just the current range rather
-    than allocating `split("\n")`'s source-sized array."""
-    # Native lowers two-arg index_of to rt_text_find, which returns a raw -1
-    # on a miss (not nil), so `?? content.len()` never fired: a final line
-    # with no trailing newline yielded end=-1, the caller rewound to 0 and
-    # looped forever, growing memory (>8 GB on 10 bootstrap specs, stage-2
-    # in-process run, 2026-09-25). Treat any negative as "to end of text".
-    val end = content.index_of("\n", start) ?? -1
-    if end < 0: content.len() else: end
+    A forward `byte_at` scan, allocation-free and linear over the whole file.
+    It replaces `content.index_of("\n", start)`, which Stage-2-built native code
+    lowered as a full extern-ABI copy of `content` per call (once per line, so
+    O(bytes x lines) memory on large generated sources).
+    History: the index_of form also needed a negative-miss guard, because
+    rt_text_find returns a raw -1 rather than nil (2026-09-25, >8 GB loop on a
+    final unterminated line); the byte scan returns `content.len()` directly."""
+    # @workaround bug=text_method_arg_copied_through_extern_abi_per_call_2026-10-25 reason=stage2_index_of_copies_content_per_line
+    var i = start
+    val n = content.len()
+    while i < n:
+        if content.byte_at(i) == 10:
+            return i
+        i = i + 1
+    n
 
 fn _driver_text_range_starts_with(content: text, start: i64, end: i64, prefix: text) -> bool:
     """Allocation-free prefix check for one source-line range."""
