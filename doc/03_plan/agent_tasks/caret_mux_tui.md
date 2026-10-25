@@ -1,7 +1,8 @@
 # Caret CoreMux A/N2 implementation lanes
 
 2026-10-25. Root accepted the corrected interface shape and discovery slice as
-the next stage; production implementation is not started. User selected A and N2, but
+the next stage; a bounded discovery contract source slice is being implemented,
+not a working full provider. User selected A and N2, but
 neither selection nor these artifacts establish a working provider. No Phase2
 rebuild/seed fallback. Preserve existing concurrent smux changes and unrelated
 golden image modifications; merge owner/root integrates only reviewed scope.
@@ -35,8 +36,10 @@ the shared interfaces and owned paths are accepted.
 | D4 real tmux provider | Sosix mux/tmux_control.spl, framed protocol/parser controls | D1; genuine tmux process, correlated response/notification streams; unsupported atomic plan explicit |
 | D5 legacy connected adapter | hosted_apps/smux_tmux_compat.spl plus hosted smux entry composition | D3; full audited flags/target/format matrix connected to owner; preserve existing flags/output |
 | D6 Caret migration | pane_backend, agent_workspace, standard wrappers and modeled swarm executor composition | D3+D4+D5; preserve existing signatures/semantics and real identities; no caller downgrade; one coordinated caller owner |
+| D6I IDE integration | Actual IDE/editor extension composition and Caret terminal entry; preserve shared semantic UI | D3+D4+D6; wire real child/terminal owner before tests. Existing terminal line model/profile activation is not implementation evidence. Root assigns source paths before edits |
+| D6A all shared-API applications | Web and LLM dashboard REST/WS routes, configured std.tmux families, hosted/OS-shell consumers and runtime-discovered plugins | D3+D4+D5; audit A01–A10, repair owner error/quoting semantics before mounting dormant routes, preserve explicit selection, no silently excluded caller |
 | D7 optional capabilities/UI | terminal extension implementations and existing Caret UI composition | Required CoreMux workflows complete first; only extra features optional; no new renderer |
-| V1 native/spec/manual qualification | system-test lane's plan, real specs, captures/manuals and SDN receipts | Genuine Phase3 admission and full CLI; positive/negative effects, legacy formats and optional refusal independently |
+| V1 native/spec/manual qualification | system-test lane's plan, actual Caret/IDE/all-application SYSTEM SSpecs, captures/manuals and SDN receipts | D6+D6I+D6A and genuine Phase3 admission/full CLI; real application process/terminal/layout/messaging/cleanup effects, legacy formats and optional refusal independently |
 | V2 N2 performance/soak | Two real backends, selected topology, 24h each, bounded floods/disruption | V1 correctness gates; record latency/RSS/cleanup distributions and actual elapsed time |
 | L reviewed landing | Root PR to release/1.0.0 with exact-head review | Required verification PASS, accepted manuals, no unresolved material findings; release tags separate |
 
@@ -114,7 +117,7 @@ The system-test owner writes doc/03_plan/sys_test/caret_mux_tui.md and the TUI
 capture plan, then production-connected modern SSpec once interface code exists.
 Shared helpers and manual step labels are fixed in the detail design; no success
 placeholder or model-only availability test counts as execution. Map every
-REQ-CMUX-001..011 and NFR-CMUX-001..009 to actual assertions/evidence. Retain
+REQ-CMUX-001..012 and NFR-CMUX-001..009 to actual assertions/evidence. Retain
 separate semantic, legacy CLI, optional-capability and provider-native rows.
 
 N2 baseline is two namespaces, two sessions each, four panes/two clients per
@@ -130,3 +133,42 @@ and historical evidence unchanged. Host access stays in Sosix/platform owners.
 Final review checks native generation/runtime/Hello lineage, negative oracle
 sensitivity, actual assertion counts, captures/manual quality and cleanup, not
 just compilation or source hashes. No current row is marked runtime PASS.
+
+## Mandatory application closure and actual execution ownership
+
+Latest explicit user scope includes the complete Caret suite, IDE integration
+and **every application using shared pane/mux APIs**. This is mandatory
+REQ-CMUX-012, not a newly proposed optional feature. The source inventory is
+`doc/09_report/shared_mux_application_inventory_2026-10-25.md`; the system plan
+contains the A01–A10 application-to-test matrix. Runtime plugin/dynamic-selector
+consumers discovered later must join that manifest before qualification.
+
+| Owner lane | Required application rows | Reviewable completion evidence |
+| --- | --- | --- |
+| Caret source owner | A01 dashboard, A02 workspace, A03 workbench GUI/TUI, A10 swarm | Real entrypoints on selected owners, no synthetic PID/pane success; actual command/output and native message delivery, owned child lifecycle |
+| IDE/extension source owner (root assignment required) | A09 IDE/editor/plugin host | Production extension/command reaches real CoreMux; actual IDE process and terminal effects, focus/layout/resize, messages and reopen/cleanup. A line-array renderer cannot close this lane |
+| Shared applications source owner (root assignment required) | A06 web dashboard, A07 LLM dashboard, A08 configured library consumers | Mounted real routes, preserved HTTP/WS protocol, backend failure propagation and safe targets, observable child state, no hardcoded empty success or fallback |
+| SMUX/host composition owners | A04 hosted product, A05 shell/OS registrations | Verified Phase 3-built product; actual owner/client/loader and terminal execution. Guest claims require real guest evidence |
+| System-test owner | Shared contract and complete A01–A10 traceability | Modern `step(...)` SYSTEM scenarios against actual apps/fixtures; helpers `caret_mux_setup`, `caret_mux_check_state`; no new test wrappers or fake backend |
+| Root execution/merge owner | Producer admission, resource schedule, attempts and final integration | Phase 3-only compiler/runtime/Hello lineage; actual native runs, case counts, artifacts, six-cycle ledger, material repair then affected rerun |
+
+Prerequisite failures remain explicit: missing real backend, Phase 3 CLI,
+runtime/provider, application route or native fixture means BLOCKED/NOT_RUN.
+Do not create empty/fake-fail placeholder tests to imply a delivered system
+suite. Once the production route is runnable, the actual scenario must fail
+when its fixture is missing; no opt-in skip can count as a passed feature.
+
+Execution results retain discovered, executed, passed, failed, blocked and
+not-run case counts with binary/source/backend/runtime/host identities. Keep
+original failure output, process-tree terminal receipts, captured native state
+and cleanup artifacts before repair. Fix the owning implementation and rerun
+affected cases only, counting all prior attempts across sessions/worktrees
+toward six. No authored scenario, parsed command, test listing, model snapshot
+or adapter-only result is a replacement for the user's required real SYSTEM
+execution. Existing messaging and independent owner/client suites are reused
+at their actual boundaries, not duplicated or promoted beyond their evidence.
+
+N2 remains additive: all application correctness rows plus both backend latency,
+stress, stale-reference/crash checks and genuine 24-hour soaks are required.
+Source work may proceed within root-approved ownership while native gates are
+blocked, but no lane is reported qualified or finished solely from source.

@@ -15,14 +15,19 @@ failure placeholders, a test-only backend, or a wrapper around existing wrappers
 
 ## Interface agreement and ownership
 
-The architecture owner proposes `common.contracts.mux.core_v1.CoreMuxV1`,
+The approved architecture names `common.contracts.mux.core_v1.CoreMuxV1`,
 `MuxHandleV1`, `MuxObjectRefV1`, `MuxSnapshotV1`, `MuxErrorV1`, `MuxCapabilityV1`,
 `MuxQueryV1`, `MuxCommandV1`, `MuxMutationV1` and `MuxEventBatchV1`.
-`query`, `execute` and `poll_events` reach the real selected backend owner;
+`MuxQueryResultV1` distinguishes Snapshot, ResolvedTarget, Captured, Context,
+RequestReceipt and Capabilities; a query does not always return a snapshot.
+`MuxProviderPortV1` is injected by application composition to avoid a library to
+OS dependency cycle. `mux_query_v1`, `mux_execute_v1` and `mux_poll_events_v1`
+reach the real selected backend owner;
 `mux_connect_v1` selects Smux or Tmux explicitly and binds a namespace.
 Optional acquisition uses `mux_acquire_terminal_layout_v1` and
-`mux_acquire_terminal_presentation_v1`. Names are pending architecture approval
-and real implementation; this plan is not an invented callable interface.
+`mux_acquire_terminal_presentation_v1`. The corrected architecture is approved,
+but full interfaces/providers are not implemented. The bounded discovery and
+validation source slice does not make the complete planned contract callable.
 
 After the contract is concrete, setup uses `caret_mux_setup` to acquire real
 owner handles and owned isolated namespaces. `caret_mux_check_state` queries
@@ -53,14 +58,17 @@ Legacy argv/format compatibility runs separately through actual Caret callers.
 | REQ-CMUX-009 | Launch the ordinary Caret TUI as a real pane child on both backends. Use existing shared semantic UI commands/widgets, checking focus/input and resize. Optional host surfaces use terminal cell geometry only; no new GUI/web/widget system is accepted. |
 | REQ-CMUX-010 | Keep shared semantics, existing Caret caller compatibility, backend-only optional contracts and live host execution as separate result categories. Preserve actual case counts and receipts; source scans, discovery, decoder-only tests and command strings cannot qualify native support. |
 | REQ-CMUX-011 | Admit an actual Phase 3 producer/full CLI or matching standalone runner using generation/runtime/Hello lineage. Compile SMUX with that producer and verify product sanity. Phase 2 rebuilds and seed substitution are disallowed. Native specs and docgen require their own callable CLI path; qualified reviewed changes land by PR to release/1.0.0. |
+| REQ-CMUX-012 | Qualify the complete Caret suite, IDE/editor/extension integration and every actual shared pane/mux consumer through modern SYSTEM SSpec with real application processes, terminals, layouts, messaging and cleanup. Missing application wiring is an implementation blocker; adapter-only or authored coverage cannot close the row. |
 
-For unsupported/refused operation checks, take a fresh owner snapshot immediately
-before and after. Compare revision and mutation-sensitive state: objects, focus,
+For unsupported/refused operation checks, take a fresh non-draining metadata
+snapshot immediately before and after. Compare configuration revision and state: objects, focus,
 geometry, child identity, input sequence, notification delivery, leases and
 cleanup resources. A clock or already-running child's unrelated output can
 advance independently; retain those events separately instead of hiding a
 mutation in a blanket snapshot normalization. Check that no operation-correlated
-events or native side effects occurred. Failure to observe the owner is
+events or native side effects occurred. Capture is effectful: it may ingest child
+output and advance content revision, so it cannot be silently used as the
+read-only refusal snapshot. Failure to observe the owner is
 Unavailable/unknown evidence, never proof of unchanged state.
 
 ## N2 measurements and failure controls
@@ -87,6 +95,40 @@ deadline of 24 hours plus a declared finite teardown allowance. Completion needs
 timer or a PASS marker. An early failure stops and preserves the incomplete run.
 
 ## Reuse and fixture gates
+
+### Every-application execution matrix
+
+The bounded audit is `doc/09_report/shared_mux_application_inventory_2026-10-25.md`.
+Its A01–A10 rows form the mandatory REQ-CMUX-012 application manifest, including
+currently disconnected production routes. Runtime-discovered plugin/dynamic
+callers extend this manifest before acceptance can close.
+
+| Row | Real application system scenario / test owner | Current prerequisite and status |
+| --- | --- | --- |
+| A01 | Caret cs dashboard and agent panes; existing `test/03_system/app/llm_caret/caret_suite_tmux_window_system_spec.spl` plus shared contract | Explicit backend selection, real child/terminal/notifications; NOT_RUN |
+| A02 | Caret workspace CLI/private namespaces; existing `workspace_cli_system_spec.spl`, `workspace_recovery_system_spec.spl`, `agent_team_workspace_system_spec.spl` under the Caret system directory | Actual CLI entry and exact argv/format compatibility on both backends; NOT_RUN |
+| A03 | Caret workbench GUI/TUI and pane team; existing `caret_workbench_prod_spec.spl`, `caret_workbench_e2e_spec.spl`, `workspace_embed_parity_system_spec.spl` | Correlate agent/pane owner identity and visible child output; model assertions stay separate; NOT_RUN |
+| A04 | Phase 3-built hosted SMUX owner and native clients; existing Windows owner/interactive/shared-client fixtures and SMUX SSpecs | Verified producer/runtime, real console/PTy and outer containment; NOT_RUN |
+| A05 | Actual shell/registered OS SMUX; existing `test/03_system/app/simpleos/feature/tmux_simpleos_spec.spl` at its evidence boundary | Hosted route and actual image/loader if guest execution is claimed; no host-model substitute; NOT_RUN |
+| A06 | Actual web-dashboard HTTP/WS; reserved `test/03_system/app/web_dashboard/feature/shared_mux_system_spec.spl` | Fixed-empty-data route must be wired after owner error/quoting repair; BLOCKED/NOT_RUN |
+| A07 | Actual LLM-dashboard terminal HTTP/WS; reserved `test/03_system/app/llm_dashboard/feature/shared_mux_system_spec.spl` | Handler mounting and real input/output/cleanup fixture unproven; BLOCKED/NOT_RUN |
+| A08 | Configured `std.tmux` families through shared native contracts/application composition | Record actual GC/concurrency/provider selection; no forced-family shortcut; NOT_RUN |
+| A09 | Actual IDE, extension activation and live Caret pane; reserved `test/03_system/app/ide/feature/ide_core_mux_system_spec.spl` | Profile activation and line rendering do not implement live CoreMux; BLOCKED/NOT_RUN |
+| A10 | Real swarm/agent consumer; reserved `test/03_system/app/llm_caret/feature/caret_mux_swarm_system_spec.spl` | Synthetic IDs/command logs need real production ownership first; BLOCKED/NOT_RUN |
+
+Each row enters the actual application, not only a handler/backend adapter.
+Observe real PID/terminal identity, child output and dimensions, rendered
+notification before ACK, layout/message effects and terminal cleanup. Both
+backend cohorts require explicitly supported hosts/runtimes. Missing tmux on
+Windows stays BLOCKED for tmux; it never becomes another smux run.
+
+Current new shared/application cases: 0 executed, 0 passed, 0 failed; all
+A01–A10 remain NOT_RUN with the listed blockers. These are not successful
+results or invented binary case counts. Preserve actual discovered/executed/
+passed/failed/blocked/not-run counts and artifacts in SDN after each run,
+including original failures. Fix the real owner and rerun only affected
+criteria using the verified compiler/runtime within the shared six-cycle cap.
+Never replace failed native evidence with source-only checks or passing models.
 
 Reuse `smux_major_features_phase3_spec.spl` (three composition cases), the
 existing Caret messaging suites (13 owned specs), SMUX service/model/protocol

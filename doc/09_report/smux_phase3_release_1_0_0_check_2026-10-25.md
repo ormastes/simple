@@ -6,6 +6,8 @@ Source reviewed: `1e431722b40236eda5e80bd5f5bf06395b0d0d08`, fetched from `origi
 
 No verified Phase3 compiler was found in the bounded current-artifact review. Do not use a directory named stage3 as generation evidence.
 
+Subsequent terminal observation: `C:/dev/simple-phase3-phase4-13d-storage-20261025/phase3-warm-attempt3/evidence/terminal-result.sdn` records `FAILED_OR_BLOCKED`, outer exit1, candidate SHA256 absent and formal qualification none. Its producer is the provisional Phase2 `13d73267...`; source drift is zero. Independent receipt/log review establishes compiler child exit1, not timeout or memory termination: 35 failures (34 HIR, one MIR), 18 failed HIR modules, missing `bootstrap_k1_selected` surface and then missing bootstrap-entry HIR, zero objects and link skipped. The receipt's `termination=job-terminate` is unconditional helper method metadata, not evidence of a kill; the actual result is `reason=child-exit`, cleanup not needed, quiescent1. The earlier live observation is superseded by this terminal evidence; no Phase3 executable or new Hello result was produced. This review did not restart the other owner's build or rebuild Phase2.
+
 - `C:/dev/simple-disk-headroom-warm-bootstrap-storage-20261025/output/stage3/simple.exe`, SHA256 `13d73267e690b2cdd46438315e2bfe6d4d6c0c37bcfc15591a921fc9728b270b`: downstream inputs explicitly identify this as provisional Phase2, diagnostic-only. Retained Hello output is `disk-provider-successor-hello-ok`; that does not change its generation.
 - `C:/dev/simple-phase3-phase4-13d-storage-20261025/phase3/output`: no candidate in the reviewed directory.
 - `C:/dev/simple-fixed-phase3-storage-20261024/phase3/terminal.sdn`: FAILED_RESOURCE, exit88, parse185/1441, no native output.

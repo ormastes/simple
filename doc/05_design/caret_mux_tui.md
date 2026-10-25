@@ -11,7 +11,7 @@ See architecture ../04_architecture/caret_mux_tui.md and the audited caller matr
 |---|---|
 | MuxBackendV1 | Smux, Tmux; no Auto |
 | MuxConnectV1 | backend, namespace, endpoint policy ExistingOnly/CreateOwned, client identity, declared limits |
-| MuxHandleV1 | owner_id:text, owner_generation:u64, lease_id:u64 |
+| MuxHandleV1 | owner_id:text, owner_generation:u64, lease_id:text (opaque owner-incarnation/client token) |
 | MuxObjectRefV1 | owner_id, owner_generation, kind Session/Window/Pane/Client, object_id:text |
 | MuxRequestV1 | client lease, request_id:u64, deadline, command; request ID scoped to lease/generation |
 | MuxCapabilityV1 | operation, support level, backend/version, owner generation, limits, constraints, evidence NotRun/Blocked/Qualified(receipt reference) |
@@ -34,6 +34,15 @@ owner checks kind, generation, membership and client authority.
 ## Public facade and traits
 
 Concrete facade names:
+
+The implemented D1 abstraction is discovery-only: `MuxProviderPortV1.connect`
+returns `MuxDiscoveryV1`, a metadata snapshot containing its actual owner handle.
+It is an abstract provider contract, not an implementation of the future facade
+below. The planned facade validates/registers that observation and returns the
+handle to its caller. Its query surface is presently only Sessions/HasSession;
+the broader command, capture, event and optional capability ports below remain
+design obligations, not callable D1 implementations. Shape constructors and
+validators never authenticate an owner or create a client lease.
 
 - mux_connect_v1(options: MuxConnectV1) -> Result<MuxHandleV1, MuxErrorV1>.
 - mux_disconnect_v1(handle) -> Result<MuxDisconnectV1, MuxErrorV1>; idempotent
