@@ -616,3 +616,24 @@ not feature acceptance authority. Session result V2 continues to project
 
 Runtime and smoke validation is blocked pending an admitted source-compatible
 self-hosted binary; see `doc/03_plan/agent_tasks/backend_target_context_v2.md`.
+
+### 2026-10-24 levelled vector-provider boundary
+
+The runtime vector provider may ship as one DSO per OS/arch containing a
+baseline dispatcher plus one kernel object per architecture level
+(x86-64-v1..v4; NEON/SVE/SVE2; RVV — scalar is level 0 and refuses, it is
+never a SIMD label). This is an *intra-artifact*
+multiversioning choice under the "provider can internally use function
+multiversioning" clause above; the catalog, path + SHA-256 admission, loader
+and V1 wire ABI are unchanged. The architectural constraints it inherits are
+the same ones stated for sibling artifacts: the dispatcher and every
+initialization/relocation closure stay within the baseline ISA; a level is
+admitted only on its complete `-march` feature set plus OS vector state
+(XCR0 `0x06` for v3, `0xe6` for v4 — macOS `hw.optional.avx512*` sysctls
+instead; hwcaps for SVE/SVE2; HWCAP `V` plus `prctl` V-control for RVV),
+never on one headline CPUID bit; the executed level is a receipt fact
+separate from the artifact digest (the `selected_level` getter exists; reason
+codes are an open follow-up); and a lower level is reached only by honest
+fallback or an explicit compile-time cap, never relabelled. Exact tables,
+gates and measured results: design § "Levelled single-DSO provider detail",
+plan § "Levelled single-DSO vector provider".

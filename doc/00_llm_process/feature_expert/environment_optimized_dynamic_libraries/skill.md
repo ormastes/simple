@@ -58,6 +58,20 @@ gates remain unchanged; outstanding aspect options remain unselected. The
 retained feature knowledge receipt does not cover OS kernel/driver code, which
 requires a refreshed `mdsoc_only` route before implementation.
 
+## 2026-10-24 levelled vector provider (one DSO, one object per SIMD level)
+- Code: `src/runtime/providers/vector/vector_level_{private.h,dispatch.c,portable.c}`;
+  `bitmap_provider.c` under `SIMPLE_VECTOR_LEVELLED`. Legacy single-ISA builds unchanged.
+- Levels follow clang: x86_64 L1 `x86-64`, L2 `-v2`, L3 `-v3`, L4 `-v4` (AVX-512
+  intrinsic kernels); aarch64 L1 NEON / L2 SVE / L3 SVE2; riscv64 L1 RVV; L0 = refuse.
+  Baseline dispatcher probes once (CPUID+XGETBV, getauxval/elf_aux_info, macOS sysctl,
+  RVV prctl), caches atomically; `SIMPLE_VECTOR_MAX_LEVEL` caps link no higher objects.
+- Gate: `sh scripts/check/check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]`
+  (Windows .dll native, Linux .so native, aarch64/riscv64 qemu-user, FreeBSD/macOS/
+  Windows-ARM/SimpleOS compile-only). Bench: `src/runtime/test/vector_level_bench.c`.
+- Admission roots now include `/usr/local/lib/simple/providers/` (FreeBSD/macOS).
+- DB staging: exact-length inputs skip padded copy; readback via `raw_read_u32s`
+  (seed DB probe 810 ms -> 2.1 ms/op).
+
 ## Status snapshot 2026-10-25
 
 Verified against `origin/release/1.0.0` @ `57a129fb2b9`: V1 contracts and the
