@@ -7,16 +7,11 @@ use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_operand, serialize_mir_type}
 use compiler.mir.verification_call_identity.{resolved_direct_call_module_hash_v1}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.hir.hir_types.{SymbolId}
-
-# The scalar dictionary owner is authoritative. The generic `.len()` method
-# can route an erased receiver to rt_string_len (tracked native_dict_len bug);
-# do not allocate keys() merely to discover the reservation bound.
-extern fn rt_dict_len<K, V>(dictionary: Dict<K, V>) -> i64
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
 use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_charge_v1,
     canonical_enum_function_bound_v1, canonical_enum_operand_bound_v1,
-    canonical_enum_type_bound_v1, canonical_enum_text_bound_v1}
+    canonical_enum_type_bound_v1, canonical_enum_text_bound_v1,
+    canonical_enum_sum_v1, canonical_enum_product_v1, canonical_enum_dict_count_v1}
 
 fn canonical_enum_local_type_v1(function: MirFunction, operand: MirOperand,
         account: MirLoopResourceAccountV1) -> Result<MirType, text>:
@@ -58,17 +53,16 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
     # Candidate comparison and final body hashing use the existing serializer;
     # prepay their complete output/work bound BEFORE any serialization occurs.
     canonical_enum_charge_v1(account, function_bound * 4, 0, function_bound * 4)?
-    val count = rt_dict_len(module.functions)
-    if count < 0 or (count > 0 and count > 9223372036854775807 / count / 96):
-        return Err("ENUM-BUDGET: module ordering bound overflow")
-    canonical_enum_charge_v1(account, count * count * 96 + count, count)?
+    val count = canonical_enum_dict_count_v1(module.functions, account)?
+    val sort_bound = canonical_enum_product_v1(canonical_enum_product_v1(count, count)?, 96)?
+    canonical_enum_charge_v1(account, canonical_enum_sum_v1(sort_bound, count)?, count)?
     for symbol in module.functions.keys():
         canonical_enum_charge_v1(account, 1)?
         val bound = canonical_enum_function_bound_v1(module.functions[symbol], account)?
         canonical_enum_charge_v1(account, bound, 1, bound)?
     val module_text_bound = canonical_enum_text_bound_v1(module.name, account)?
-    if count > 48038396025285290: return Err("ENUM-BUDGET: module digest rows overflow")
-    canonical_enum_charge_v1(account, module_text_bound + count * 96, count, module_text_bound + count * 96)?
+    val module_rows_bound = canonical_enum_sum_v1(module_text_bound, canonical_enum_product_v1(count, 96)?)?
+    canonical_enum_charge_v1(account, module_rows_bound, count, module_rows_bound)?
     val actual = module.functions.get(function.symbol)
     if actual == nil: return Err("ENUM-ORIGIN: function absent from candidate module")
     if val declared = actual:

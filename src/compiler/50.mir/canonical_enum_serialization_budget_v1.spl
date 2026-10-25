@@ -6,6 +6,17 @@ use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirFunction}
 
+# Existing scalar runtime owner; avoids the tracked erased-receiver Dict.len
+# fallback and does not allocate a keys snapshot before its bound is paid.
+extern fn rt_dict_len<K, V>(dictionary: Dict<K, V>) -> i64
+
+pub fn canonical_enum_dict_count_v1<K, V>(dictionary: Dict<K, V>,
+        account: MirLoopResourceAccountV1) -> Result<i64, text>:
+    canonical_enum_charge_v1(account, 1)?
+    val count = rt_dict_len(dictionary)
+    if count < 0: return Err("ENUM-BUDGET: dictionary owner count unavailable")
+    Ok(count)
+
 pub fn canonical_enum_charge_v1(account: MirLoopResourceAccountV1,
         work: i64, state: i64 = 0, bytes: i64 = 0) -> Result<(), text>:
     if account == nil or work < 0 or state < 0 or bytes < 0:
@@ -16,15 +27,20 @@ pub fn canonical_enum_charge_v1(account: MirLoopResourceAccountV1,
         case Ok(_): Ok(())
         case Err(_): Err("ENUM-BUDGET: actual invocation account exhausted or closed")
 
-fn canonical_enum_sum_v1(left: i64, right: i64) -> Result<i64, text>:
+pub fn canonical_enum_sum_v1(left: i64, right: i64) -> Result<i64, text>:
     if left < 0 or right < 0 or left > 9223372036854775807 - right:
         return Err("ENUM-BUDGET: serialization bound overflow")
     Ok(left + right)
 
+pub fn canonical_enum_product_v1(left: i64, right: i64) -> Result<i64, text>:
+    if left < 0 or right < 0 or (right > 0 and left > 9223372036854775807 / right):
+        return Err("ENUM-BUDGET: serialization product overflow")
+    Ok(left * right)
+
 pub fn canonical_enum_text_bound_v1(value: text, account: MirLoopResourceAccountV1) -> Result<i64, text>:
     canonical_enum_charge_v1(account, 1)?
     val length = value.len()
-    if length < 0 or length > 1537228672809129300:
+    if length < 0 or length > 1537228672809129298:
         return Err("ENUM-BUDGET: text bound overflow")
     # JSON needs at most six output bytes per input byte/scalar plus quotes.
     Ok(length * 6 + 16)
