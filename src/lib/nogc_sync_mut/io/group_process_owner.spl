@@ -2,11 +2,13 @@
 # launcher; live process authority remains entirely in the independent broker.
 export use std.common.build_manager.group_process_protocol.{GroupProcessInputV1, GroupProcessRequestV1, GroupProcessPollV1}
 use std.common.build_manager.group_process_protocol.{GroupProcessLaunchV1, group_process_launch_validate_v1, group_process_launch_encode_v1, group_process_launch_decode_v1, group_process_identity_v1, group_process_observation_decode_v1, group_process_memory_receipt_v1}
+use std.common.build_manager.group_process_child_identity_v1.{GroupProcessChildIdentityV1, group_process_child_identity_decode_v1}
 use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1, GroupedReapReceiptV1}
 use std.common.build_manager.codec.{builder_wire_line_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_create_exclusive, file_exists}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 struct GroupProcessOwnerV1:
@@ -49,8 +51,8 @@ fn _group_process_control_v1(owner: GroupProcessOwnerV1, command: text, budget_m
     val nonce = "n" + str(getpid()) + "_" + str(current_time_ms()) + "_" + str(_group_process_nonce_v1)
     val request = owner.identity_digest + "\n" + nonce + "\n" + command
     if not file_atomic_write(owner.launch.root + "/broker.control.request", request): return Err("cannot publish group challenge")
-    val deadline = current_time_ms() + budget_ms
-    while current_time_ms() < deadline:
+    val deadline = time_now_monotonic_ms() + budget_ms
+    while time_now_monotonic_ms() < deadline:
         if file_exists(owner.launch.root + "/broker.tree.sdn"): return _group_process_terminal_v1(owner)
         match file_read_regular_no_follow_bounded(owner.launch.root + "/broker.control.response", 8192):
             Ok(response):
@@ -65,6 +67,7 @@ fn _group_process_control_v1(owner: GroupProcessOwnerV1, command: text, budget_m
     Err("group broker authority unknown: no fresh challenge response; retry forbidden")
 
 fn group_process_start_v1(root: text, worker_id: text, generation: i64, snapshot_digest: text, cache_identity: text, request: GroupProcessRequestV1, memory_limit_bytes: i64, memory_policy: text = "enforce") -> Result<GroupProcessOwnerV1, text>:
+    if request.mode != "group-root-v1": return Err("native worker requires retained start admission")
     if not _group_process_configured_v1: return Err("group broker launcher unavailable on this host")
     val launch = GroupProcessLaunchV1(root, worker_id, generation, snapshot_digest, cache_identity, memory_limit_bytes, request, memory_policy)
     val invalid = group_process_launch_validate_v1(launch)
@@ -137,3 +140,51 @@ fn group_process_collect_reap_v1(owner: GroupProcessOwnerV1, lease: GroupedActio
 export GroupProcessOwnerV1, group_process_set_launcher_v1
 export group_process_start_v1, group_process_recover_v1, group_process_poll_v1, group_process_cancel_v1
 export group_process_peak_memory_v1, group_process_collect_reap_v1, group_process_reap_path_v1
+
+# After launch is attempted the owner is always returned, even if startup
+# observation is unknown. Callers retain it, cancel/drain through this owner,
+# and never substitute a raw PID or retry a second process for the same slot.
+struct GroupProcessStartAttemptV2:
+    owner: GroupProcessOwnerV1
+    startup_unknown: bool
+    reason: text
+
+fn group_process_start_retained_v2(root: text, worker_id: text, generation: i64,
+        snapshot_digest: text, cache_identity: text, request: GroupProcessRequestV1,
+        memory_limit_bytes: i64) -> Result<GroupProcessStartAttemptV2, text>:
+    if not _group_process_configured_v1: return Err("managed broker launcher unavailable")
+    if _group_process_memory_provider_v1 != "linux":
+        return Err("retained native worker requests currently require the Linux owner")
+    if request.mode != "native-worker-v1": return Err("retained native owner requires versioned native request")
+    val launch = GroupProcessLaunchV1(root, worker_id, generation, snapshot_digest,
+        cache_identity, memory_limit_bytes, request, "enforce")
+    val invalid = group_process_launch_validate_v1(launch)
+    if invalid != "": return Err(invalid)
+    val payload = group_process_launch_encode_v1(launch)
+    if payload == "": return Err("managed native request encoding refused")
+    val owner = GroupProcessOwnerV1(launch, sha256_text(payload), _group_process_memory_provider_v1)
+    if not file_create_exclusive(root + "/broker.claim", owner.identity_digest):
+        return Err("managed native broker root already claimed")
+    if not file_atomic_write(root + "/broker.request.sdn", payload):
+        return Err("managed native request publication failed before launch")
+    match _group_process_launcher_v1.operation(request.broker_program, request.broker_digest,
+            ["--broker-root", root, "--request-digest", owner.identity_digest], root):
+        Ok(true): Ok(GroupProcessStartAttemptV2(owner, false, ""))
+        Ok(false): Ok(GroupProcessStartAttemptV2(owner, true, "broker launch outcome unknown"))
+        Err(reason): Ok(GroupProcessStartAttemptV2(owner, true, reason))
+
+fn group_process_child_identity_v1(owner: GroupProcessOwnerV1) -> Result<GroupProcessChildIdentityV1, text>:
+    val blob = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.child.sdn", 16384)?
+    group_process_child_identity_decode_v1(blob, owner.identity_digest,
+        owner.launch.worker_id, owner.launch.generation, owner.launch.request.producer_digest)
+
+export GroupProcessStartAttemptV2, group_process_start_retained_v2, group_process_child_identity_v1
+
+fn group_process_cancel_bounded_v2(owner: GroupProcessOwnerV1, budget_ms: i64) -> Result<bool, text>:
+    if budget_ms <= 0 or budget_ms > 30000: return Err("managed cancellation control budget refused")
+    val observation = _group_process_control_v1(owner, "cancel", budget_ms)?
+    if not observation.cancelled and not observation.terminal:
+        return Err("group broker has not accepted cancellation")
+    Ok(true)
+
+export group_process_cancel_bounded_v2

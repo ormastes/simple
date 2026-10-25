@@ -1,10 +1,23 @@
 # Slim parent-only envelope admission. No compiler/HIR graph is imported.
 # Workers separately prove source/context and the full declaration repository.
+use compiler.frontend.core.flat_pool_codec.{flat_pool_unescape}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 
+pub struct NativeMirSelectiveLaunchEnvelopeV1:
+    source: text
+    context: text
+    manifest: text
+    producer: text
+    modules: [text]
+    file_digest: text = ""
+
 pub fn native_mir_selective_job_count_v1(dir: text) -> Result<i64, text>:
+    val envelope = native_mir_selective_launch_envelope_v1(dir)?
+    Ok(envelope.modules.len())
+
+pub fn native_mir_selective_launch_envelope_v1(dir: text) -> Result<NativeMirSelectiveLaunchEnvelopeV1, text>:
     val read = file_read_regular_no_follow_bounded("{dir}/selective.manifest", 32 * 1024 * 1024)
     if read.is_err(): return Err("selective MIR job manifest unavailable")
     val lines = read.unwrap().split("\n")
@@ -27,4 +40,17 @@ pub fn native_mir_selective_job_count_v1(dir: text) -> Result<i64, text>:
     val body = covered.join("\n") + "\n"
     if lines[index] != "seal {sha256_text(body)}":
         return Err("selective MIR job manifest seal refused")
-    Ok(jobs)
+    var names: [text] = []
+    var seen: Dict<text, bool> = {}
+    for position in 0..jobs:
+        val fields = lines[8 + providers + position].split("\t")
+        if fields.len() < 9: return Err("selective MIR physical launch row malformed")
+        val name = flat_pool_unescape(fields[1])
+        if name == "" or name.contains("\n") or name.contains("\0") or seen.has(name):
+            return Err("selective MIR physical launch name empty or duplicate")
+        seen[name] = true
+        names.push(name)
+    val producer_header = flat_pool_unescape(lines[4])
+    if producer_header == "": return Err("selective MIR physical launch producer absent")
+    Ok(NativeMirSelectiveLaunchEnvelopeV1(source: lines[1], context: lines[2],
+        manifest: sha256_text(body), producer: sha256_text(producer_header), modules: names, file_digest: sha256_text(read.unwrap())))

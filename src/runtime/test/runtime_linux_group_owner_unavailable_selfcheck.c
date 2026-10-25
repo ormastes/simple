@@ -55,6 +55,15 @@ const uint8_t *rt_string_data(int64_t value) { (void)value; return NULL; }
 #include "../runtime_linux_group_owner_impl.h"
 
 int main(void) {
+    /* Metadata cannot invent a child PID without the retained live owner. */
+    SplArray *identity = rt_linux_group_child_pid_v1(1);
+    assert(identity && identity->len == 2);
+    assert(identity->items[0].as_int == EINVAL && identity->items[1].as_int == 0);
+    free(identity->items); free(identity);
+    identity = rt_linux_group_child_pid_v1(0);
+    assert(identity && identity->len == 2);
+    assert(identity->items[0].as_int == EINVAL && identity->items[1].as_int == 0);
+    free(identity->items); free(identity);
 #ifdef RT_LINUX_GROUP_TEST_OPENSSL
     int image = open("/bin/true", O_RDONLY);
     assert(image >= 0);
@@ -85,6 +94,10 @@ int main(void) {
 #endif
     int parent = rt_lg_parent();
     if (parent < 0) { puts("runtime_linux_group_owner_unavailable_selfcheck: unavailable-no-cgroup2"); return 0; }
+    int memory_delegated = rt_lg_memory_delegated(parent);
+    int delegation_errno = memory_delegated ? 0 : errno;
+    int missing_controller = !memory_delegated &&
+        (delegation_errno == ENODATA || delegation_errno == ENOTSUP);
     int writable = mkdirat(parent, "simple-native-capability-probe", 0700) == 0;
     if (writable) {
         assert(unlinkat(parent, "simple-native-capability-probe", AT_REMOVEDIR) == 0);
@@ -110,11 +123,15 @@ int main(void) {
         "/tmp/native-group-test.stderr", 29);
     assert(started && started->len == 2);
     assert(started->items[0].as_int == 0);
+    /* Match the independently observed prerequisite denial, never any error.
+     * Empty subtree_control is ENODATA; a nonempty list without memory is
+     * ENOTSUP. Neither is evidence of a child, lease, or lifecycle success. */
     assert(started->items[1].as_int == EACCES ||
         started->items[1].as_int == EPERM ||
-        started->items[1].as_int == EROFS);
+        started->items[1].as_int == EROFS ||
+        (missing_controller && started->items[1].as_int == delegation_errno));
     free(started->items); free(started);
-    puts("runtime_linux_group_owner_unavailable_selfcheck: PASS (delegation denied, no child launched)");
+    puts("runtime_linux_group_owner_unavailable_selfcheck: PASS (prerequisite unavailable, no child launched; lifecycle UNRUN)");
     return 0;
 }
 #else

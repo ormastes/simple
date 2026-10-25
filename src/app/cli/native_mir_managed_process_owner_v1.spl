@@ -1,0 +1,240 @@
+# Linux managed lifecycle adapter for the EXISTING MIR ledger pool.
+# Broker owns pidfd/cgroup; numeric child identity is observation only.
+use app.io.env_ops.{env_get, env_vars, cwd, host_os}
+use app.io.file_ops.{path_absolute}
+use app.bootstrap_builder.native_group_linux_launcher.{native_linux_group_broker_launch_v1}
+use app.cli.native_mir_worker_private_paths_v1.{NativeMirWorkerPrivatePathsV1}
+use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{NativeMirSelectiveLaunchEnvelopeV1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, GroupProcessRequestV1,
+    GroupProcessInputV1, group_process_set_launcher_v1, group_process_start_retained_v2,
+    group_process_poll_v1, group_process_cancel_bounded_v2, group_process_collect_reap_v1,
+    group_process_child_identity_v1}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_available_capacity_v1}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub struct NativeMirManagedBrokerPrerequisitesV1:
+    broker: text
+    broker_digest: text
+    directory: text
+    memory_bytes: i64
+    broker_kib: i64
+
+pub struct NativeMirManagedProcessPrerequisitesV1:
+    program: text
+    program_digest: text
+    broker: NativeMirManagedBrokerPrerequisitesV1
+
+pub struct NativeMirManagedProcessConfigV1:
+    program: text
+    program_digest: text
+    broker: text
+    broker_digest: text
+    directory: text
+    manifest_path: text
+    manifest_file_digest: text
+    memory_bytes: i64
+
+pub struct NativeMirManagedWorkerV1:
+    owner: GroupProcessOwnerV1
+    lease: GroupedActionLeaseV1
+    private_root: text
+    spawned_ms: i64
+    startup_unknown: bool
+    startup_reason: text
+
+pub struct NativeMirManagedPollV1:
+    state: text
+    exit_code: i64
+    pid: i64
+    birth_identity: text
+    reaped_ms: i64
+    tree_receipt_digest: text
+    reason: text
+
+var native_mir_managed_launcher_registered_v1 = false
+
+# Pure validation is shared with the existing selective acceptance fixture.
+# A configured digest is an external caller pin, not tool admission issued here.
+pub fn native_mir_managed_prerequisite_reason_v1(platform: text, broker: text,
+        digest: text, worker_kib: i64, broker_kib: i64, timeout_ms: i64) -> text:
+    if platform != "linux": return "managed MIR workers require Linux cgroup-v2/pidfd ownership"
+    if broker == "": return "missing SIMPLE_MIR_GROUP_BROKER_PROGRAM; configure a qualified cached native-worker-v1 broker"
+    if not broker.starts_with("/") or broker.contains("\0"):
+        return "managed MIR broker requires an explicit absolute cached executable path"
+    if not sha256_lower_hex_valid(digest):
+        return "missing or invalid SIMPLE_MIR_GROUP_BROKER_DIGEST; use the externally qualified image pin"
+    if worker_kib <= 0 or broker_kib <= 0 or worker_kib > 1099511627776 - broker_kib:
+        return "explicit bounded SIMPLE_MIR_SELECTIVE_WORKER_KIB and SIMPLE_MIR_SELECTIVE_BROKER_KIB estimates required"
+    if timeout_ms < 1000 or timeout_ms > 86400000:
+        return "managed selective workers require finite --timeout in 1..86400 seconds"
+    ""
+
+# This calls the EXISTING native capacity/delegation probe. It may briefly
+# create/remove an empty private capability cgroup, but launches no child.
+# Do not run this under a source-only/no-kernel-test admission restriction.
+pub fn native_mir_managed_broker_preflight_v1(timeout_ms: i64
+        ) -> Result<NativeMirManagedBrokerPrerequisitesV1, text>:
+    val broker = env_get("SIMPLE_MIR_GROUP_BROKER_PROGRAM") ?? ""
+    val digest = env_get("SIMPLE_MIR_GROUP_BROKER_DIGEST") ?? ""
+    val worker_kib = (env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "").to_i64() ?? -1
+    val broker_kib = (env_get("SIMPLE_MIR_SELECTIVE_BROKER_KIB") ?? "").to_i64() ?? -1
+    val reason = native_mir_managed_prerequisite_reason_v1(host_os(), broker,
+        digest, worker_kib, broker_kib, timeout_ms)
+    if reason != "": return Err(reason)
+    if not file_is_regular_no_follow(broker) or file_hash_sha256(broker) != digest:
+        return Err("configured cached MIR broker differs from its external image pin")
+    val directory = cwd()
+    val capacity = linux_available_capacity_v1(directory)
+    if capacity.is_err():
+        return Err("managed MIR unsupported before export: " + capacity.unwrap_err())
+    val available = capacity.unwrap()
+    val required = (worker_kib + broker_kib) * 1024
+    if required > available.0:
+        return Err("managed MIR worker plus broker does not fit current host/cgroup headroom")
+    Ok(NativeMirManagedBrokerPrerequisitesV1(broker: broker, broker_digest: digest,
+        directory: directory, memory_bytes: worker_kib * 1024, broker_kib: broker_kib))
+
+# The CLI executes this before the retained-HIR exporter or any MIR worker.
+pub fn native_mir_managed_process_preflight_v1(simple_bin: text, timeout_ms: i64
+        ) -> Result<NativeMirManagedProcessPrerequisitesV1, text>:
+    val broker = native_mir_managed_broker_preflight_v1(timeout_ms)?
+    val program = path_absolute(simple_bin)
+    if not file_is_regular_no_follow(program): return Err("managed MIR compiler must be a regular cached executable")
+    val program_digest = file_hash_sha256(program)
+    if not sha256_lower_hex_valid(program_digest) or program_digest != file_hash_sha256("/proc/self/exe"):
+        return Err("managed MIR worker must use this exact running compiler image")
+    if not native_mir_managed_launcher_registered_v1:
+        if not group_process_set_launcher_v1(native_linux_group_broker_launch_v1, "linux"):
+            return Err("managed MIR process owner registration conflicts with existing launcher")
+        native_mir_managed_launcher_registered_v1 = true
+    Ok(NativeMirManagedProcessPrerequisitesV1(program: program,
+        program_digest: program_digest, broker: broker))
+
+# Only immutable manifest ownership is bound after the exporter completes.
+pub fn native_mir_managed_process_config_v1(preflight: NativeMirManagedProcessPrerequisitesV1,
+        export_dir: text, envelope: NativeMirSelectiveLaunchEnvelopeV1
+        ) -> Result<NativeMirManagedProcessConfigV1, text>:
+    if not sha256_lower_hex_valid(envelope.file_digest): return Err("managed MIR manifest file authority absent")
+    val broker = preflight.broker
+    val manifest_path = path_absolute("{export_dir}/selective.manifest")
+    Ok(NativeMirManagedProcessConfigV1(program: preflight.program, program_digest: preflight.program_digest,
+        broker: broker.broker, broker_digest: broker.broker_digest, directory: broker.directory,
+        manifest_path: manifest_path, manifest_file_digest: envelope.file_digest,
+        memory_bytes: broker.memory_bytes))
+
+fn native_mir_managed_environment_v1(paths: NativeMirWorkerPrivatePathsV1) -> Result<[text], text>:
+    val snapshot = env_vars()
+    if snapshot == nil: return Err("managed MIR environment snapshot unavailable")
+    val pairs = snapshot.unwrap()
+    if pairs.len() > 4096: return Err("managed MIR environment count exceeds bound")
+    var environment: [text] = []
+    var bytes: i64 = 0
+    for pair in pairs:
+        val key = pair.0
+        if key == "SIMPLE_NATIVE_BUILD_CACHE_DIR" or key == "TMPDIR" or
+                key == "TEMP" or key == "TMP" or key == "SIMPLE_MIR_WORKER_PRIVATE_ROOT": continue
+        if key.contains("=") or key.contains("\0") or pair.1.contains("\0") or
+                key.len() + pair.1.len() + 1 > 8 * 1024 * 1024 - bytes:
+            return Err("managed MIR environment assignment refused")
+        bytes = bytes + key.len() + pair.1.len() + 1
+        environment.push("{key}={pair.1}")
+    environment.push("SIMPLE_NATIVE_BUILD_CACHE_DIR={paths.native_cache}")
+    environment.push("TMPDIR={paths.temporary}")
+    environment.push("TEMP={paths.temporary}")
+    environment.push("TMP={paths.temporary}")
+    environment.push("SIMPLE_MIR_WORKER_PRIVATE_ROOT={paths.root}")
+    Ok(environment)
+
+pub fn native_mir_managed_worker_start_v1(config: NativeMirManagedProcessConfigV1,
+        envelope: NativeMirSelectiveLaunchEnvelopeV1, paths: NativeMirWorkerPrivatePathsV1,
+        argv: [text], index: i64, generation: i64, timeout_ms: i64
+        ) -> Result<NativeMirManagedWorkerV1, text>:
+    if timeout_ms <= 0 or timeout_ms > 86400000 or generation < 0 or generation >= 1000000000:
+        return Err("managed MIR worker requires an explicit finite lifetime")
+    if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1" or argv.len() < 2 or
+            argv[0] != "run" or argv[1] != "src/app/cli/native_build_worker.spl":
+        return Err("managed MIR requires the existing compiled internal worker route")
+    for arg in argv:
+        if arg == "--interpreter" or arg == "--force-interpreter" or arg == "--mode=interpreter":
+            return Err("managed MIR source/interpreter fallback is forbidden")
+    val environment = native_mir_managed_environment_v1(paths)?
+    val request = GroupProcessRequestV1(program: config.program, producer_digest: config.program_digest,
+        args: argv, environment: environment, directory: config.directory,
+        inputs: [GroupProcessInputV1(config.manifest_path, config.manifest_file_digest)],
+        stdout_path: "{paths.root}/worker.stdout.log", stderr_path: "{paths.root}/worker.stderr.log",
+        timeout_ms: timeout_ms, broker_program: config.broker, broker_digest: config.broker_digest,
+        mode: "native-worker-v1")
+    val worker_id = "mir_" + index.to_text()
+    val cache = sha256_text("managed-mir-owner-v1\n{envelope.source}\n{envelope.context}\n{envelope.producer}")
+    val started = time_now_monotonic_ms()
+    if started <= 0: return Err("managed MIR monotonic launch time unavailable")
+    val attempt = group_process_start_retained_v2(paths.root, worker_id, generation + 1,
+        envelope.manifest, cache, request, config.memory_bytes)?
+    val lease = GroupedActionLeaseV1(group_id: "mir_" + envelope.manifest,
+        action_id: worker_id, worker_id: worker_id, generation: generation + 1,
+        lease_id: attempt.owner.identity_digest, snapshot_digest: envelope.manifest,
+        cache_identity: cache, completed: false)
+    Ok(NativeMirManagedWorkerV1(owner: attempt.owner, lease: lease,
+        private_root: paths.root, spawned_ms: started,
+        startup_unknown: attempt.startup_unknown, startup_reason: attempt.reason))
+
+fn native_mir_managed_unknown_v1(reason: text) -> NativeMirManagedPollV1:
+    NativeMirManagedPollV1(state: "UNKNOWN", exit_code: -1, pid: 0,
+        birth_identity: "", reaped_ms: 0, tree_receipt_digest: "", reason: reason)
+
+pub fn native_mir_managed_worker_poll_v1(worker: NativeMirManagedWorkerV1) -> NativeMirManagedPollV1:
+    val observation = group_process_poll_v1(worker.owner)
+    if observation.is_err(): return native_mir_managed_unknown_v1(observation.unwrap_err())
+    val observed = observation.unwrap()
+    if not observed.terminal:
+        return NativeMirManagedPollV1(state: "ACTIVE", exit_code: -2, pid: 0,
+            birth_identity: "", reaped_ms: 0, tree_receipt_digest: "", reason: "")
+    # Cancel acknowledgement is insufficient: only durable terminal plus the
+    # lease-bound collected receipt authorizes release/replacement of a slot.
+    if not observed.leader_reaped or not observed.tree_empty or observed.active_processes != 0:
+        return native_mir_managed_unknown_v1("managed MIR terminal lacks tree quiescence")
+    val collected = group_process_collect_reap_v1(worker.owner, worker.lease)
+    if collected.is_err(): return native_mir_managed_unknown_v1(collected.unwrap_err())
+    val child = group_process_child_identity_v1(worker.owner)
+    if child.is_err():
+        return NativeMirManagedPollV1(state: "TERMINAL", exit_code: observed.exit_code,
+            pid: 0, birth_identity: "", reaped_ms: time_now_monotonic_ms(),
+            tree_receipt_digest: collected.unwrap().tree_receipt_digest, reason: child.unwrap_err())
+    val identity = child.unwrap()
+    NativeMirManagedPollV1(state: "TERMINAL", exit_code: observed.exit_code,
+        pid: identity.pid, birth_identity: identity.birth_identity,
+        reaped_ms: time_now_monotonic_ms(), tree_receipt_digest: collected.unwrap().tree_receipt_digest,
+        reason: if observed.timed_out: "managed MIR worker timed out" elif observed.cancelled:
+            "managed MIR worker cancelled" else: "")
+
+pub fn native_mir_managed_worker_drain_v1(worker: NativeMirManagedWorkerV1,
+        budget_ms: i64) -> NativeMirManagedPollV1:
+    if budget_ms <= 0 or budget_ms > 30000:
+        return native_mir_managed_unknown_v1("managed drain budget refused; owner retained")
+    val deadline = time_now_monotonic_ms() + budget_ms
+    val cancelled = group_process_cancel_bounded_v2(worker.owner, budget_ms)
+    while time_now_monotonic_ms() < deadline:
+        val observed = native_mir_managed_worker_poll_v1(worker)
+        if observed.state == "TERMINAL": return observed
+        sleep_ms(20)
+    native_mir_managed_unknown_v1(if cancelled.is_err(): cancelled.unwrap_err() else:
+        "managed MIR cancellation accepted; tree cleanup remains unproven, owner retained")
+
+# Relay once after real terminal collection. Logs remain private artifacts;
+# oversize output is not silently read unbounded into the parent heap.
+pub fn native_mir_managed_worker_relay_v1(worker: NativeMirManagedWorkerV1):
+    for leaf in ["worker.stdout.log", "worker.stderr.log"]:
+        val path = "{worker.private_root}/{leaf}"
+        val read = file_read_regular_no_follow_bounded(path, 65536)
+        if read.is_ok():
+            val content = read.unwrap()
+            if content != "": stderr_write(content)
+        else:
+            stderr_write("[managed-mir] bounded diagnostic relay unavailable; retained log: {path}\n")

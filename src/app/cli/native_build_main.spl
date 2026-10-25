@@ -3,6 +3,15 @@
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
+use app.cli.native_mir_worker_launch_ledger_v1.{native_mir_worker_launch_ledger_publish_v1}
+use app.cli.native_mir_worker_private_paths_v1.{NativeMirWorkerOwnedLaunchV1,
+    native_mir_worker_private_paths_v1}
+use app.cli.native_mir_managed_process_owner_v1.{NativeMirManagedWorkerV1,
+    NativeMirManagedProcessConfigV1, NativeMirManagedProcessPrerequisitesV1,
+    native_mir_managed_process_preflight_v1, native_mir_managed_process_config_v1,
+    native_mir_managed_worker_start_v1, native_mir_managed_worker_poll_v1,
+    native_mir_managed_worker_drain_v1, native_mir_managed_worker_relay_v1}
+use std.common.crypto.sha256.{sha256_text}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
@@ -51,7 +60,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory, hir
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_has_unsupported_fallback_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
-    native_mir_selective_job_count_v1}
+    NativeMirSelectiveLaunchEnvelopeV1, native_mir_selective_launch_envelope_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
     ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
@@ -874,16 +883,19 @@ struct LedgerShardRunV1:
     # Every started MIR worker explicitly identified the same recoverable
     # unsupported-lane case; never inferred from exit text or BLOCKED.
     recoverable_no_claim: bool
+    owned_launches: [NativeMirWorkerOwnedLaunchV1]
 
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
-        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
+        simple_bin: text, timeout_ms: i64,
+        private_envelope: NativeMirSelectiveLaunchEnvelopeV1? = nil,
+        managed_config: NativeMirManagedProcessConfigV1? = nil) -> LedgerShardRunV1:
     val old_queue = env_get(queue_env) ?? ""
     val old_owner = env_get(owner_env) ?? ""
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true,
-            protocol_complete: false, recoverable_no_claim: false)
+            protocol_complete: false, recoverable_no_claim: false, owned_launches: [])
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
     var pending: [i64] = []
@@ -899,6 +911,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var workers_finished: i64 = 0
     var recoverable_fallback_receipts: i64 = 0
     var total_claims: i64 = 0
+    var owned_launches: [NativeMirWorkerOwnedLaunchV1] = []
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
         # Slot pool, not waves: a worker starts as soon as any of the
@@ -910,6 +923,10 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var owners: [text] = []
         var indices: [i64] = []
         var started_ms: [i64] = []
+        var private_roots: [text] = []
+        var birth_identities: [text] = []
+        var managed_workers: [NativeMirManagedWorkerV1?] = []
+        var managed_unknown_since: [i64] = []
         while next_pending < pending.len() or pids.len() > 0:
             while pids.len() < window_size and next_pending < pending.len() and
                     not hir_shard_recovery_blocked(queue_dir):
@@ -919,11 +936,41 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 val owner_installed = env_set(owner_env, owner)
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
-                pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
+                var pid: i64 = -1
+                var private_root = ""
+                var birth_identity = ""
+                var managed: NativeMirManagedWorkerV1? = nil
+                val spawned = time_now_monotonic_ms()
+                if owner_installed and private_envelope != nil:
+                    if managed_config == nil:
+                        val _blocked = hir_shard_recovery_block(queue_dir, "managed MIR owner not configured; raw fallback forbidden")
+                    else:
+                        val paths = native_mir_worker_private_paths_v1(queue_dir, index, count, generation)
+                        if paths.is_ok():
+                            val owned_paths = paths.unwrap()
+                            private_root = owned_paths.root
+                            val started = native_mir_managed_worker_start_v1(managed_config.unwrap(),
+                                private_envelope.unwrap(), owned_paths, shard_args, index, generation, timeout_ms)
+                            if started.is_ok():
+                                val retained = started.unwrap()
+                                if retained.startup_unknown:
+                                    eprint "[{label}] owner={owner} startup authority unknown; retained={retained.private_root} reason={retained.startup_reason}"
+                                managed = Some(retained)
+                            else:
+                                val _blocked = hir_shard_recovery_block(queue_dir, started.unwrap_err())
+                        else:
+                            val _blocked = hir_shard_recovery_block(queue_dir, paths.unwrap_err())
+                elif owner_installed:
+                    pid = process_spawn_async(simple_bin, shard_args)
+                pids = pids.push(pid)
+                private_roots = private_roots.push(private_root)
+                birth_identities = birth_identities.push(birth_identity)
+                managed_workers = managed_workers.push(managed)
+                managed_unknown_since = managed_unknown_since.push(0)
                 workers_started = workers_started + 1
                 owners = owners.push(owner)
                 indices = indices.push(index)
-                started_ms = started_ms.push(time_now_monotonic_ms())
+                started_ms = started_ms.push(spawned)
             if pids.len() == 0:
                 break
             # Reap the first live worker that exited, failed to wait, or ran
@@ -932,9 +979,42 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             # timeout, so the kill/seal handling below is unchanged.
             var reap_at: i64 = -1
             var code: i64 = -1
+            var managed_terminal = false
+            var managed_pid: i64 = 0
+            var managed_birth = ""
+            var managed_tree = ""
+            var managed_reaped_ms: i64 = 0
+            var managed_exit: i64 = -1
             i = 0
             while reap_at < 0 and i < pids.len():
-                if pids[i] <= 0:
+                if val worker = managed_workers[i]:
+                    var observed = native_mir_managed_worker_poll_v1(worker)
+                    val now = time_now_monotonic_ms()
+                    if observed.state == "UNKNOWN" and managed_unknown_since[i] == 0:
+                        managed_unknown_since[i] = now
+                    elif observed.state == "ACTIVE":
+                        managed_unknown_since[i] = 0
+                    if observed.state != "TERMINAL" and ((timeout_ms > 0 and now - started_ms[i] >= timeout_ms) or
+                            worker.startup_unknown or (managed_unknown_since[i] > 0 and now - managed_unknown_since[i] >= 30000)):
+                        observed = native_mir_managed_worker_drain_v1(worker, 30000)
+                        if observed.state != "TERMINAL":
+                            val _blocked = hir_shard_recovery_block(queue_dir,
+                                "managed worker authority retained; tree cleanup unknown: " + worker.private_root)
+                            reap_at = i
+                    if observed.state == "TERMINAL":
+                        reap_at = i
+                        managed_terminal = true
+                        managed_pid = observed.pid
+                        managed_birth = observed.birth_identity
+                        managed_tree = observed.tree_receipt_digest
+                        managed_reaped_ms = observed.reaped_ms
+                        managed_exit = observed.exit_code
+                        code = native_build_normalize_exit_code(observed.exit_code)
+                        if observed.reason != "" and code == 0:
+                            code = 1
+                        if observed.reason != "":
+                            eprint "[{label}] managed owner={owners[i]} native_exit={observed.exit_code} reason={observed.reason}"
+                elif pids[i] <= 0:
                     reap_at = i
                 else:
                     val polled = native_build_normalize_exit_code(process_wait(pids[i], SHARD_POOL_POLL_MS))
@@ -944,13 +1024,23 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 i = i + 1
             if reap_at < 0:
                 continue
-            val pid = pids[reap_at]
+            val pid = if managed_workers[reap_at] != nil: managed_pid else: pids[reap_at]
             val owner = owners[reap_at]
             val reaped_index = indices[reap_at]
+            val reaped_root = private_roots[reap_at]
+            val reaped_birth = birth_identities[reap_at]
+            val reaped_started = started_ms[reap_at]
+            val reaped_managed = managed_workers[reap_at]
+            if reaped_managed != nil and managed_terminal and code != 0:
+                native_mir_managed_worker_relay_v1(reaped_managed.unwrap())
             var kept_pids: [i64] = []
             var kept_owners: [text] = []
             var kept_indices: [i64] = []
             var kept_started: [i64] = []
+            var kept_roots: [text] = []
+            var kept_births: [text] = []
+            var kept_managed: [NativeMirManagedWorkerV1?] = []
+            var kept_unknown_since: [i64] = []
             i = 0
             while i < pids.len():
                 if i != reap_at:
@@ -958,21 +1048,45 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     kept_owners = kept_owners.push(owners[i])
                     kept_indices = kept_indices.push(indices[i])
                     kept_started = kept_started.push(started_ms[i])
+                    kept_roots = kept_roots.push(private_roots[i])
+                    kept_births = kept_births.push(birth_identities[i])
+                    kept_managed = kept_managed.push(managed_workers[i])
+                    kept_unknown_since = kept_unknown_since.push(managed_unknown_since[i])
                 i = i + 1
             pids = kept_pids
             owners = kept_owners
             indices = kept_indices
             started_ms = kept_started
-            # -1 is a wait error, not proof of exit. Even a false liveness
-            # probe also means invalid handle; require a real reap result.
-            var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
-            if not owner_stopped and pid > 0:
+            private_roots = kept_roots
+            birth_identities = kept_births
+            managed_workers = kept_managed
+            managed_unknown_since = kept_unknown_since
+            # A successful owned wait is terminal proof. Never probe that PID
+            # afterward: it may already be reused by an unrelated process.
+            # -1 remains unknown; it is not proof of exit or tree quiescence.
+            var owner_stopped = if reaped_managed != nil: managed_terminal else: pid <= 0 or (code != -2 and code != -1)
+            if reaped_managed != nil and not managed_terminal:
+                all_stopped = false
+                val _blocked = hir_shard_recovery_block(queue_dir,
+                    "managed broker retains unresolved child authority; no replacement or link")
+            if reaped_managed == nil and private_envelope == nil and not owner_stopped and pid > 0:
                 val _killed = process_kill(pid)
                 val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                owner_stopped = reaped != -2 and reaped != -1
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
+            if private_envelope != nil:
+                owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owner,
+                    private_root: reaped_root, pid: pid,
+                    birth_identity: if reaped_managed != nil: managed_birth else: reaped_birth,
+                    spawned_ms: reaped_started,
+                    reaped_ms: if reaped_managed != nil: managed_reaped_ms else: time_now_monotonic_ms(),
+                    exit_code: if reaped_managed != nil: managed_exit else: code,
+                    leader_reaped: owner_stopped,
+                    tree_empty: if reaped_managed != nil: managed_terminal else: pid <= 0,
+                    managed_request_identity: if reaped_managed != nil: reaped_managed.unwrap().owner.identity_digest else: "",
+                    tree_receipt_digest: managed_tree))
             val progress = hir_shard_recovery_progress(queue_dir, owner)
             total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
@@ -995,14 +1109,44 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             if fail_fast and failed_workers > 0:
                 var remaining = 0
                 while remaining < pids.len():
-                    if pids[remaining] > 0:
+                    var cancelled_stopped = pids[remaining] <= 0
+                    var cancelled_pid = pids[remaining]
+                    var cancelled_birth = birth_identities[remaining]
+                    var cancelled_tree = ""
+                    var cancelled_request = ""
+                    var cancelled_exit: i64 = -1
+                    var cancelled_end: i64 = 0
+                    if val worker = managed_workers[remaining]:
+                        val drained = native_mir_managed_worker_drain_v1(worker, 30000)
+                        cancelled_stopped = drained.state == "TERMINAL"
+                        cancelled_pid = drained.pid
+                        cancelled_birth = drained.birth_identity
+                        cancelled_request = worker.owner.identity_digest
+                        cancelled_tree = drained.tree_receipt_digest
+                        cancelled_exit = drained.exit_code
+                        cancelled_end = drained.reaped_ms
+                        if cancelled_stopped:
+                            val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
+                        else:
+                            all_stopped = false
+                            val _blocked = hir_shard_recovery_block(queue_dir,
+                                "cancelled managed worker retains unresolved tree authority: " + worker.private_root)
+                    elif private_envelope == nil and pids[remaining] > 0:
                         val _killed = process_kill(pids[remaining])
                         val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                        if reaped != -2 and reaped != -1:
+                            cancelled_stopped = true
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
                             all_stopped = false
                             val _blocked = hir_shard_recovery_block(queue_dir, "cancelled worker could not be reaped")
+                    if private_envelope != nil:
+                        owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owners[remaining],
+                            private_root: private_roots[remaining], pid: cancelled_pid,
+                            birth_identity: cancelled_birth, spawned_ms: started_ms[remaining],
+                            reaped_ms: cancelled_end, exit_code: cancelled_exit,
+                            leader_reaped: cancelled_stopped, tree_empty: cancelled_stopped,
+                            managed_request_identity: cancelled_request, tree_receipt_digest: cancelled_tree))
                     remaining = remaining + 1
                 break
         if fail_fast and failed_workers > 0:
@@ -1033,7 +1177,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     LedgerShardRunV1(code: code, failed_modules: failed_modules,
         total_claims: total_claims, blocked_reason: blocked_reason,
         all_stopped: all_stopped, protocol_complete: protocol_complete,
-        recoverable_no_claim: recoverable_no_claim)
+        recoverable_no_claim: recoverable_no_claim, owned_launches: owned_launches)
 
 # ===== MIR sharding =========================================================
 #
@@ -1084,7 +1228,12 @@ fn native_build_mir_selective_parallel_v1(args: [text]) -> i64:
     val host_request = shard_host_threads_cap(requested,
         env_get("SIMPLE_HOST_MAX_THREADS") ?? "")
     val parent = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_PARENT_KIB") ?? "")
-    val worker = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "")
+    val worker_body = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "")
+    val broker = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_BROKER_KIB") ?? "")
+    if worker_body <= 0 or broker <= 0 or broker > 9223372036854775807 - worker_body:
+        eprint "[mir-selective] explicit worker and broker RSS estimates required"
+        return -1
+    val worker = worker_body + broker
     val exporter = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_EXPORTER_KIB") ?? "")
     val phase = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SELECTIVE_PHASE_KIB") ?? "")
     val declared_tree = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
@@ -1116,34 +1265,73 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
+    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
+    var managed_preflight: NativeMirManagedProcessPrerequisitesV1? = nil
+    if selective:
+        val checked = native_mir_managed_process_preflight_v1(simple_bin, timeout_ms)
+        if checked.is_err():
+            eprint "[mir-selective] pre-export managed capability refused: {checked.unwrap_err()}; exporter and MIR workers not started"
+            return ("fail", "")
+        managed_preflight = Some(checked.unwrap())
     val queue_dir = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if queue_dir == "":
         eprint "[mir-shard] cannot establish invocation ledger"
         # Without an invocation ledger there is no complete worker protocol
         # receipt authorizing the ordinary zero-claim fallback.
         return (native_mir_shard_outcome_v1(1, 0, 0, true, false, false), "")
-    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     var count = native_build_mir_shard_count(parallel)
+    var private_envelope: NativeMirSelectiveLaunchEnvelopeV1? = nil
     if selective:
         if export_dir == "": return ("fail", "")
-        val jobs = native_mir_selective_job_count_v1(export_dir)
+        val jobs = native_mir_selective_launch_envelope_v1(export_dir)
         if jobs.is_err():
             eprint "[mir-selective] physical emission schedule refused: {jobs.unwrap_err()}"
             return ("fail", "")
         # One process owns one physical emission and all of its logical
         # specialization bodies. No previous job's lazy canonical IDs or
         # promoted heap can affect the next emission's output or footprint.
-        count = jobs.unwrap()
+        val envelope = jobs.unwrap()
+        count = envelope.modules.len()
+        private_envelope = Some(envelope)
     print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
+    val old_invocation = env_get("SIMPLE_MIR_WORKER_INVOCATION") ?? ""
+    val old_producer = env_get("SIMPLE_MIR_WORKER_PRODUCER") ?? ""
+    if val envelope = private_envelope:
+        if not env_set("SIMPLE_MIR_WORKER_INVOCATION", sha256_text(queue_dir)) or
+                not env_set("SIMPLE_MIR_WORKER_PRODUCER", envelope.producer):
+            env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
+            env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)
+            env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+            return ("fail", "")
+    var managed_config: NativeMirManagedProcessConfigV1? = nil
+    if val envelope = private_envelope:
+        val configured = native_mir_managed_process_config_v1(managed_preflight.unwrap(), export_dir, envelope)
+        if configured.is_err():
+            env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
+            env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)
+            env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+            eprint "[mir-shard] managed worker admission refused: {configured.unwrap_err()}"
+            return ("fail", "")
+        managed_config = Some(configured.unwrap())
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
-        simple_bin, timeout_ms)
-    env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+        simple_bin, timeout_ms, private_envelope, managed_config)
+    val restored_invocation = env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
+    val restored_producer = env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)
+    val restored_export = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+    if not restored_invocation or not restored_producer or not restored_export:
+        eprint "[mir-shard] parent launch environment restoration failed"
+        return ("fail", "")
+    if val envelope = private_envelope:
+        val recorded = native_mir_worker_launch_ledger_publish_v1(queue_dir, envelope, run.owned_launches)
+        if recorded.is_err():
+            eprint "[mir-shard] parent launch observations could not be retained: {recorded.unwrap_err()}"
+            return ("fail", "")
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules,
         run.total_claims, run.all_stopped, run.protocol_complete,
         run.recoverable_no_claim)
