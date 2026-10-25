@@ -171,3 +171,42 @@ compile-time, memory, or first-object number below is a retained measurement.
 Done gate (umbrella §6) is **not met**: the per-file pipeline is opt-in, its
 first-object overlap has no native receipt, and no retained end-to-end
 compile-time/memory target has been measured.
+
+### Progress 2026-10-25 (evening)
+
+PR states verified with `gh pr view` against base `release/1.0.0`.
+
+**Per-file packages merged:** P-A #4588 `e0efb59638f`, P-B #4597 `7ec523277de`,
+P-C #4589 `d1ee8738d60`, P-D #4603 `cbe361c2497`, P-E #4594 `9314979e6e6`,
+P-F #4592 `1c6ccfb61c4`, P-G1 #4591 `3383735e8cb`, P-G2 #4600 `73c4aef632a`,
+P-G3 #4598 `220b35b4b35`, P-G4 #4625 `7ec28192eb0`, P-G5 #4628 `963f32429a3`,
+P-G5b #4653 `5de3687be0b`, P-G6 #4672 `03e6d90af24`, P-H #4683 `bf4c14a31e1`
+(stage3 and plain native-build go through the file-worker pool, fail-closed).
+E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
+
+**Open:** P-G7 #4696 (instance object producer + link wiring) is OPEN; approved by lead
+reviewer (comment), pending merge. Merge release_phase3 into
+release/1.0.0: #4704 OPEN.
+
+**Default stays off:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`
+(`SIMPLE_FILE_WORKERS` default "0"). Flip waits on a proof run: stage3 -> stage3'
+built with P-H, then a per-file self-rebuild that yields an overlap receipt
+(`scripts/check/check-per-file-overlap-receipt.shs`). No such receipt exists yet.
+
+**Stage evidence (in progress, not a retained measurement):** stage2 built cold
+from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The
+stage3 whole-program run is in progress with 0 MIR errors (was 3211); it is
+single-threaded and CPU-bound.
+
+**Other landings:** #4610 stale lock reclaim / orphan reaping `52ecd8b7725`;
+#4622 Mach-O as conditional build tag `a269ecaecba`; #4623 pre-push gate clear
+error for missing gate script `fc894af98af`; #4633 host-scaled tree RSS cap
+`ae3c1307476`; #4682 llvm-mingw drive-letter admission `784ac5aa304`; seed
+externs #4608 `57a129fb2b9` and #4688 `5bd6f027abb`; spec fixes #4636
+`1cfdf5876ca`, #4635 `33bfd461fbb`, #4638 `4f5e0d91b88`. Also merged since the
+morning: memory #4698 `574b8bb6e70` and #4705 `31bafe03f9e` (HIR / per-module MIR
+eviction), perf #4693 `35fe920618d` (sha256 accelerator), MIR #4706
+`a853ac75861`, stage2 #4684 `dd7cede08a3` and #4697 `7c1e83a584b`.
+
+**Still failing / under investigation:** HIR cache selfcheck (239/1495 hits);
+seed JIT fallback on `native_build_main`.
