@@ -114,7 +114,7 @@ pub fn reader_concrete_instance_by_keys_v1(reader: ConcreteInstanceReaderV1, mod
     for k in use_ref.type_arg_keys:
         val parsed = mt_from_key(k)
         if not parsed.ok:
-            return ConcreteInstanceResultV1(found: false, instance: [], miss_reason: "malformed-type-arg-key")
+            return reader._miss("malformed-type-arg-key")
         args = args.push(parsed.t)
     reader.concrete_instance(module_key, use_ref.generic_decl_id, args)
 
@@ -129,14 +129,19 @@ pub fn reader_detect_generic_uses_v1(section: GenericTemplateSectionV1,
             out = out.push(ref)
     out
 
-# Detect + request every generic use of `module_key` in one pass.
+# Request every usage ref of `module_key`: exactly one result per ref, in
+# order. A ref that cannot be served (module not loaded, unknown template,
+# arity mismatch, malformed key, not Concrete) is a miss with its reason -
+# never dropped, so "no generic uses" is never confused with "not served".
 pub fn reader_request_generic_instances_v1(reader: ConcreteInstanceReaderV1, module_key: text,
         refs: [GenericUseRefV1]) -> [ConcreteInstanceResultV1]:
-    if not reader.has_module(module_key):
-        return []
     var out: [ConcreteInstanceResultV1] = []
-    for r in reader_detect_generic_uses_v1(reader.sections[module_key], refs):
-        out = out.push(reader_concrete_instance_by_keys_v1(reader, module_key, r))
+    for r in refs:
+        val ref: GenericUseRefV1 = r
+        if not reader.has_module(module_key):
+            out = out.push(reader._miss("module-not-loaded"))
+        else:
+            out = out.push(reader_concrete_instance_by_keys_v1(reader, module_key, ref))
     out
 
 export CONCRETE_INSTANCE_SOURCE_CACHE_V1, CONCRETE_INSTANCE_SOURCE_INSTANTIATED_V1
