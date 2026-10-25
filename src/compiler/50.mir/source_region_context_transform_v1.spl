@@ -1,0 +1,46 @@
+# Compiler-owned SOURCE context facts. The caller supplies the authoritative
+# resolved context declaration identity; spelling never authenticates a type.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirTypeKind}
+
+pub fn source_region_function_context_local_v1(
+    func: MirFunction, context_symbol: SymbolId
+) -> Result<LocalId?, text>:
+    if func.source_region_context_abi_v1 == 0:
+        if func.source_region_context_local_v1 != -1 or func.source_region_closure_digest_v1 != "":
+            return Err("SOURCE-CONTEXT-METADATA: partial ordinary-function metadata")
+        return Ok(nil)
+    if (func.source_region_context_abi_v1 != 1 or
+            func.source_region_context_local_v1 < 0 or
+            func.source_region_closure_digest_v1 == "" or
+            context_symbol.id < 0):
+        return Err("SOURCE-CONTEXT-METADATA: unsupported or incomplete authority")
+    if func.signature.is_variadic or func.signature.params.len() == 0:
+        return Err("SOURCE-CONTEXT-SIGNATURE: missing fixed trailing parameter")
+    val arg_index = func.signature.params.len() - 1
+    match func.signature.params[arg_index].kind:
+        case MirTypeKind.Struct(symbol):
+            if symbol.id != context_symbol.id:
+                return Err("SOURCE-CONTEXT-TYPE: trailing parameter has foreign identity")
+        case _:
+            return Err("SOURCE-CONTEXT-TYPE: trailing parameter is not typed context")
+    var found = 0
+    for local in func.locals:
+        if local.id.id == func.source_region_context_local_v1:
+            found = found + 1
+            match local.kind:
+                case LocalKind.Arg(index):
+                    if index != arg_index:
+                        return Err("SOURCE-CONTEXT-LOCAL: hidden parameter index differs")
+                case _:
+                    return Err("SOURCE-CONTEXT-LOCAL: context is not an argument")
+            match local.type_.kind:
+                case MirTypeKind.Struct(symbol):
+                    if symbol.id != context_symbol.id:
+                        return Err("SOURCE-CONTEXT-TYPE: local has foreign identity")
+                case _:
+                    return Err("SOURCE-CONTEXT-TYPE: local is not typed context")
+    if found != 1:
+        return Err("SOURCE-CONTEXT-LOCAL: context local must exist exactly once")
+    Ok(LocalId(id: func.source_region_context_local_v1))
