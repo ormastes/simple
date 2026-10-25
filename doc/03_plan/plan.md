@@ -2,7 +2,7 @@
 
 ## Current coding inventory — 2026-10-25
 
-A separate [source-backed82-scope coding inventory](../09_report/releasephase3_coding_inventory_2026_10_25.md) audits `release_phase3` at `f5c0f468556`: **15 coded-complete but unverified,53 partial,5 selected behaviors absent on this branch,9 requiring authority/requirement decisions**. Partial does not mean wholly uncoded. External reviewed partial packets exist for Reference/FLS and heap provenance; reuse them. The report includes exact source/test evidence, release-side donor comparisons and missing-behavior task boundaries.
+The [source-backed82-scope coding inventory](../09_report/releasephase3_coding_inventory_2026_10_25.md) now records `release_phase3` at `1690b09c34d`: **15 coded-complete but unverified,54 partial,4 selected behaviors absent on this branch,9 requiring authority/requirement decisions**. ASYNC-LOCK-ORDER moved from absent to partial after PR #4605 landed ranked-function and canonical Mutex callback checking; unsupported broader cases remain closed and native SSpecs remain UNRUN. The original f5c0 audit is retained as history. Partial does not mean wholly uncoded. External reviewed Reference/FLS and heap-provenance packets remain available for reuse; exact source/test evidence and task boundaries are in the report.
 
 This is implementation classification only. All selected acceptance remains **UNRUN**; no PASS/FAIL, compiler qualification or release readiness is added. Historical implementation labels and provenance below remain a frozen snapshot.
 

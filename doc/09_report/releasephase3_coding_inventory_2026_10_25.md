@@ -1,5 +1,19 @@
 # Release Phase3 selected-scope coding inventory — 2026-10-25
 
+## Current source update at1690b09c34d
+
+Current reviewed target: `1690b09c34dd45df444d95bb02eeda568dd9f0b0`. Relative to the retained f5c0 audit below, **ASYNC-LOCK-ORDER changes from absent to partial**. Current counts are **15 coded_complete_unverified,54 partial,4 absent,9 requirement_ambiguous;82 total**. No acceptance PASS/FAIL or runtime qualification is added.
+
+The static checker landed through [PR #4605](https://github.com/ormastes/simple/pull/4605), merge `c306b03ec743077cbe7b201722939c6c2fb19ad6`. Actual production owners now include `src/compiler/10.frontend/core/static_lock_level.spl:25`, `static_lock_level_graph.spl`, `static_lock_level_metadata.spl` and `static_lock_level_resources.spl:53`. Fresh parsing invokes the checker at `core/frontend.spl:180`; cached/bridge acquisition invokes it at `_FlatAstBridge/module_assembly.spl:1445` and :1568. The implementation covers ranked synchronous function effects and explicit canonical scalar Mutex callback lifetimes, with bounded proof work and source diagnostics.
+
+The existing selected full row remains **partial**: manual guards, general aliases/nominal-effect inference, configured wildcard imports, async suspension and reviewed exception manifests are unsupported and rejected within the checked boundary. These refusals protect the implemented subset; they do not implement the broader cases. The real source-based acceptance file `test/03_system/app/compiler/feature/static_lock_level_spec.spl:42` covers positive ordering, descending/recursive calls, callback resource lifetimes and unsupported cases; compiled/native SSpec execution remains **UNRUN**. See `doc/09_report/static_lock_level_2026-10-25.md:19` for qualification limits. Runtime TSan remains a separate mechanism.
+
+The complete target delta was checked: besides the inventory docs and static checker, [PR #4606](https://github.com/ormastes/simple/pull/4606) (`b553bc7c77c`) changes HIR recovery scheduling, and [PR #4607](https://github.com/ormastes/simple/pull/4607) (`1690b09c34d`) repairs optional generated fold traversal. Neither closes another named full-scope residual in the82-row coding inventory; the other81 classifications remain unchanged. The optional-fold focused native results are bound to their older source pin and are not static-checker acceptance.
+
+The four current absent selected behaviors are **FORMAL-PHYSICAL-ACCOUNTING, FORMAL-C5-HEAP, DEVICE-HIP-AMDGPU and ISA-REFERENCE-SHARDS**. External partial packets and reuse-first task boundaries below still apply. The old static-checker absent row and task are retained only as historical f5c0 evidence; further static work must extend the landed owner, not start another checker.
+
+## Retained historical audit atf5c0f468556
+
 Target source: `f5c0f4685565588a5e68f7f87c2b52f8b3d74787` (`release_phase3`). Compared release source: `032c2fb82b2c66634df5d54d73cc3ed8237668ff` (`release/1.0.0`). These are immutable audit pins, not a promise about a later moving branch tip.
 
 This is a bounded semantic source review of all82 selected plan scopes. Four Sol agents inspected66 rows; the coordinating Astra inspected16 rows, reviewed all four reports, and checked critical completion/refusal/absence anchors against exact source. No compiler, build, test runner, proof checker, doc generator, benchmark or runtime acceptance was executed. No acceptance PASS or FAIL is added; selected acceptance remains UNRUN. Documentation-only validation is reported separately below.
