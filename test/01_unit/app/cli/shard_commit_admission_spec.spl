@@ -1,0 +1,30 @@
+# @cover src/app/cli/shard_mem_clamp.spl
+# Purpose: shard pool admits each further worker by LIVE commit headroom
+# against the measured worker footprint (s3-wa: 5 workers at a fixed 6 GB
+# estimate exhausted the host commit limit and all died together).
+use std.spec
+use app.cli.shard_mem_clamp.{shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1}
+
+describe "measured commit admission":
+    it "takes the larger of static estimate and measured peak":
+        expect(shard_commit_estimate_kib_v1(6000000, 0)).to_equal(6000000)
+        expect(shard_commit_estimate_kib_v1(6000000, 18000000)).to_equal(18000000)
+
+    it "always admits the first worker and keeps static cap when headroom is unknown":
+        expect(shard_commit_spawn_admit_v1(0, 4000000, 18000000, [])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(-1, 4000000, 18000000, [100, 200])).to_equal(true)
+
+    it "reserves the growth still owed by live workers":
+        # 94 GB headroom, 4 GB reserve, 18 GB measured peak, 4 workers at 1 GB:
+        # need 18 + 4*17 = 86 GB of the 90 GB usable -> admit a 5th
+        expect(shard_commit_spawn_admit_v1(94000000, 4000000, 18000000, [1000000, 1000000, 1000000, 1000000])).to_equal(true)
+        # a 5th live young worker makes the 6th need 18 + 5*17 = 103 GB -> refuse
+        expect(shard_commit_spawn_admit_v1(94000000, 4000000, 18000000, [1000000, 1000000, 1000000, 1000000, 1000000])).to_equal(false)
+
+    it "counts workers already at their peak as owing nothing":
+        expect(shard_commit_spawn_admit_v1(30000000, 4000000, 18000000, [18000000, 19000000])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(20000000, 4000000, 18000000, [18000000])).to_equal(false)
+
+    it "treats an unreadable live worker as owing a full estimate":
+        expect(shard_commit_spawn_admit_v1(40000000, 4000000, 18000000, [-1])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(39000000, 4000000, 18000000, [-1])).to_equal(false)

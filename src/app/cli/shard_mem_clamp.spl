@@ -279,6 +279,32 @@ pub fn shard_threads_tree_cap_for(requested: i64, budget_kb: i64,
 # Keep the existing 40% tree reserve, or the measured parent peak if larger.
 # A known tree that cannot fit one estimate admits no HIR child, including N=1.
 # The final compiler worker is outside this pool calculation and remains guarded.
+# ===== measured commit admission ============================================
+#
+# The start-time cap above divides headroom by a FIXED per-worker estimate.
+# s3-wa (2026-10-25) admitted 5 HIR workers at 6 GB each; their real commit
+# was far higher, the host commit limit (RAM + pagefile) ran out, and all five
+# died together on failed allocations. The slot pool therefore also gates each
+# further spawn on LIVE system commit headroom against the measured footprint:
+#   est  = max(static estimate, largest private KiB any worker has reached)
+#   need = est for the new worker + (est - current) for every live worker
+#          that has not yet grown to est
+# A worker is always admitted when none is live (no deadlock, serial floor),
+# and an unknown headroom (-1, probe unavailable) keeps the static cap.
+pub fn shard_commit_estimate_kib_v1(static_kib: i64, observed_peak_kib: i64) -> i64:
+    if observed_peak_kib > static_kib: observed_peak_kib else: static_kib
+
+pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
+    if headroom_kib < 0: return true
+    if live_private_kib.len() == 0: return true
+    var need = est_kib
+    for current in live_private_kib:
+        if current < 0:
+            need = need + est_kib
+        elif current < est_kib:
+            need = need + (est_kib - current)
+    headroom_kib - reserve_kib >= need
+
 pub fn shard_threads_parent_cap_for(requested: i64, budget_kb: i64,
         avail_kb: i64, tree_kb: i64, host_clamp: bool, parent_peak_kb: i64) -> i64:
     if requested <= 0: return 0
