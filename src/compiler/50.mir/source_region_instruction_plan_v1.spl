@@ -40,37 +40,34 @@ fn source_region_plan_storage_v1(module: MirModule, type_: MirType) -> bool:
     match type_.kind:
         case Struct(symbol):
             if symbol.id < 0: return false
-            for key in module.types.keys():
-                if key.id == symbol.id:
-                    match module.types[key].kind:
-                        case Struct(_): return true
-                        case _: return false
+            if val definition = module.types.get(symbol):
+                match definition.kind:
+                    case Struct(_): return true
+                    case _: return false
         case _: ()
     false
 
 fn source_region_plan_facade_v1(module: MirModule, symbol: SymbolId, arity: i64, context_type: MirType) -> Result<MirOperand, text>:
-    for key in module.functions.keys():
-        if key.id == symbol.id:
-            val facade = module.functions[key]
-            if facade.signature.is_variadic or facade.signature.params.len() != arity:
-                return Err("SOURCE-STORE: facade signature arity is unavailable")
-            if facade.signature.params[0] != context_type:
-                return Err("SOURCE-STORE: facade context identity differs")
-            var parameter = 1
-            while parameter < arity:
-                if facade.signature.params[parameter].kind != MirTypeKind.I64:
-                    return Err("SOURCE-STORE: facade scalar parameter type differs")
-                parameter = parameter + 1
-            match facade.signature.return_type.kind:
-                case Result(ok, error_type):
-                    if ok.kind != MirTypeKind.I64:
-                        return Err("SOURCE-STORE: facade must return Result<i64,E>")
-                    match error_type.kind:
-                        case Struct(symbol) | Enum(symbol):
-                            if symbol.id < 0: return Err("SOURCE-STORE: unresolved facade error identity")
-                        case _: return Err("SOURCE-STORE: unresolved facade error type")
-                case _: return Err("SOURCE-STORE: facade lacks typed Result return")
-            return Ok(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(facade.name), MirType(kind: MirTypeKind.FuncPtr(facade.signature)))))
+    if val facade = module.functions.get(symbol):
+        if facade.signature.is_variadic or facade.signature.params.len() != arity:
+            return Err("SOURCE-STORE: facade signature arity is unavailable")
+        if facade.signature.params[0] != context_type:
+            return Err("SOURCE-STORE: facade context identity differs")
+        var parameter = 1
+        while parameter < arity:
+            if facade.signature.params[parameter].kind != MirTypeKind.I64:
+                return Err("SOURCE-STORE: facade scalar parameter type differs")
+            parameter = parameter + 1
+        match facade.signature.return_type.kind:
+            case Result(ok, error_type):
+                if ok.kind != MirTypeKind.I64:
+                    return Err("SOURCE-STORE: facade must return Result<i64,E>")
+                match error_type.kind:
+                    case Struct(symbol) | Enum(symbol):
+                        if symbol.id < 0: return Err("SOURCE-STORE: unresolved facade error identity")
+                    case _: return Err("SOURCE-STORE: unresolved facade error type")
+            case _: return Err("SOURCE-STORE: facade lacks typed Result return")
+        return Ok(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(facade.name), MirType(kind: MirTypeKind.FuncPtr(facade.signature)))))
     Err("SOURCE-STORE: resolved facade declaration unavailable")
 
 fn source_region_plan_result_v1(facade: MirOperand) -> MirType:
@@ -117,11 +114,10 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
             var fields: [MirFieldDef] = []
             match base_type.kind:
                 case Struct(symbol):
-                    for key in module.types.keys():
-                        if key.id == symbol.id:
-                            match module.types[key].kind:
-                                case Struct(actual): fields = actual
-                                case _: return Err("SOURCE-STORE: destination is not a struct layout")
+                    if val definition = module.types.get(symbol):
+                        match definition.kind:
+                            case Struct(actual): fields = actual
+                            case _: return Err("SOURCE-STORE: destination is not a struct layout")
                 case _: return Err("SOURCE-STORE: unknown destination storage")
             if field < 0 or field >= fields.len():
                 return Err("SOURCE-STORE: destination slot is not declared")
@@ -148,11 +144,10 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
             match kind:
                 case Struct(symbol):
                     destination_symbol = symbol.id
-                    for key in module.types.keys():
-                        if key.id == symbol.id:
-                            match module.types[key].kind:
-                                case Struct(actual): fields = actual
-                                case _: return Err("SOURCE-STORE: constructor lacks struct layout")
+                    if val definition = module.types.get(symbol):
+                        match definition.kind:
+                            case Struct(actual): fields = actual
+                            case _: return Err("SOURCE-STORE: constructor lacks struct layout")
                 case _: return Err("SOURCE-STORE: unsupported array/tuple/variant birth")
             if fields.len() == 0 or fields.len() != operands.len():
                 return Err("SOURCE-STORE: constructor does not initialize every physical field")
@@ -254,11 +249,10 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
                 case Ok(type_):
                     match type_.kind:
                         case Struct(symbol):
-                            for key in module.types.keys():
-                                if key.id == symbol.id:
-                                    match module.types[key].kind:
-                                        case Struct(actual): fields = actual
-                                        case _: return Err("SOURCE-STORE: field read lacks struct layout")
+                            if val definition = module.types.get(symbol):
+                                match definition.kind:
+                                    case Struct(actual): fields = actual
+                                    case _: return Err("SOURCE-STORE: field read lacks struct layout")
                         case _: return Err("SOURCE-STORE: field read storage is unclassified")
                 case Err(error): return Err(error)
             if field < 0 or field >= fields.len(): return Err("SOURCE-STORE: field read slot is undeclared")
