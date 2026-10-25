@@ -1,0 +1,55 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.common.source_region_dictionary_publication_v1.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
+use compiler.hir.hir_types.{SymbolId}
+
+fn dictionary_publication_types_v1() -> Dict<SymbolId, MirTypeDef>:
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[SymbolId(id: 7)] = MirTypeDef(symbol: SymbolId(id: 7), name: "Child",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "id", type_: MirType.i64(), offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    types
+
+fn dictionary_publication_child_v1() -> MirType:
+    MirType(kind: MirTypeKind.Struct(SymbolId(id: 7)))
+
+describe "Dictionary Get16 physical publication codec preconditions":
+    it "LLVM publishes the preserved raw data word without a header offset":
+        match source_region_dictionary_publication_layout_v1(dictionary_publication_types_v1(), dictionary_publication_child_v1(), MirType.i64(), 1):
+            case Ok(layout):
+                expect(layout.nominal.id).to_equal(7)
+                expect(layout.layout_digest.len()).to_equal(64)
+                match source_region_dictionary_publication_llvm_v1(layout, "%child", "%word"):
+                    case Ok(line): expect(line).to_equal("  %child = inttoptr i64 %word to ptr")
+                    case Err(_): assert(false)
+            case Err(_): assert(false)
+
+    it "Cranelift preserves the stored tagged word exactly":
+        match source_region_dictionary_publication_layout_v1(dictionary_publication_types_v1(), dictionary_publication_child_v1(), MirType.i64(), 2):
+            case Ok(layout):
+                match source_region_dictionary_publication_cranelift_v1(layout, 4097):
+                    case Ok(word): expect(word).to_equal(4097)
+                    case Err(_): assert(false)
+                match source_region_dictionary_publication_llvm_v1(layout, "%child", "%word"):
+                    case Err(error): expect(error).to_equal("SOURCE-DICTIONARY-PUBLICATION-LLVM-REPRESENTATION")
+                    case Ok(_): assert(false)
+            case Err(_): assert(false)
+
+    it "rejects the wrong backend representation instead of normalizing arbitrary bits":
+        for representation in [0, 3, 4, 5, 6]:
+            match source_region_dictionary_publication_layout_v1(dictionary_publication_types_v1(), dictionary_publication_child_v1(), MirType.i64(), representation):
+                case Err(error): expect(error).to_equal("SOURCE-DICTIONARY-PUBLICATION-REPRESENTATION")
+                case Ok(_): assert(false)
+
+    it "rejects an unresolved nominal destination":
+        match source_region_dictionary_publication_layout_v1({}, dictionary_publication_child_v1(), MirType.i64(), 1):
+            case Err(error): expect(error).to_equal("SOURCE-DICTIONARY-PUBLICATION-LAYOUT")
+            case Ok(_): assert(false)
+
+    it "rejects scalar destinations and non-native input types":
+        match source_region_dictionary_publication_layout_v1(dictionary_publication_types_v1(), MirType.i64(), MirType.i64(), 1):
+            case Err(error): expect(error).to_equal("SOURCE-DICTIONARY-PUBLICATION-NOMINAL")
+            case Ok(_): assert(false)
+        match source_region_dictionary_publication_layout_v1(dictionary_publication_types_v1(), dictionary_publication_child_v1(), MirType(kind: MirTypeKind.Bool), 2):
+            case Err(error): expect(error).to_equal("SOURCE-DICTIONARY-PUBLICATION-WORD")
+            case Ok(_): assert(false)
