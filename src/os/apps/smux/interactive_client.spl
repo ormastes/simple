@@ -77,12 +77,13 @@ fn arrange(client: TerminalClient) -> Result<bool, text>:
 
 # Recover view metadata only. Never replay the input/action which addressed a
 # removed window against a different child. Every request retains its lease.
-fn recover_removed_window(client: TerminalClient) -> Result<TerminalClient, text>:
-    val ids = windows(client)
-    if ids.is_err(): return Err(ids.unwrap_err())
-    if ids.unwrap().len() == 0: return Err("session has no windows")
+fn recover_window_view(client: TerminalClient, removed: bool) -> Result<TerminalClient, text>:
     var next = client
-    next.window = ids.unwrap()[0]
+    if removed:
+        val ids = windows(client)
+        if ids.is_err(): return Err(ids.unwrap_err())
+        if ids.unwrap().len() == 0: return Err("session has no windows")
+        next.window = ids.unwrap()[0]
     val selected = select_pane(next)
     if selected.is_err(): return Err(selected.unwrap_err())
     next = selected.unwrap()
@@ -163,6 +164,12 @@ fn apply_action(client: TerminalClient, action: ClientInputAction, terminal: i64
         if ids.is_err(): return Err(ids.unwrap_err())
         next.pane = client_next_id(ids.unwrap(), client.pane)
         next.copy = false
+    elif action.kind == "toggle-zoom":
+        val reply = request(client, "client-zoom " + client.session + " " + client.window + " " + client.pane)
+        if reply.is_err(): return Err(reply.unwrap_err())
+        # Keep the current pane after restore, and discard only stale copy UI.
+        next.copy = false
+        next.layout = -1
     elif action.kind == "new-window":
         val created = request(client, "new-window " + client.session + " window")
         if created.is_err(): return Err(created.unwrap_err())
@@ -366,8 +373,11 @@ pub fn smux_interactive_attach(address: text, token: text, session: text, client
                         if acknowledged.is_err(): error = acknowledged.unwrap_err()
                         else: notification_ack = 0
             refresh = now + 50
-        if error == smux_missing_window_reply(client.window):
-            val recovered = recover_removed_window(client)
+        val removed_window = error == smux_missing_window_reply(client.window)
+        val hidden_pane = error == "smux: frame failed: cursor pane is hidden by window zoom: " + client.pane or error == "smux: input pane is hidden by window zoom: " + client.pane
+        if removed_window or hidden_pane:
+            # The refused action is never replayed into the replacement pane.
+            val recovered = recover_window_view(client, removed_window)
             if recovered.is_err(): error = recovered.unwrap_err()
             else:
                 client = recovered.unwrap()

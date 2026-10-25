@@ -2,7 +2,7 @@
 # Failed native handles remain in the returned state; no test-only close seam.
 use os.apps.smux.service.{ServiceState}
 use os.apps.smux.child_lifecycle.{close_owned_children}
-use os.apps.smux.window_layout_service.{window_layout_rects}
+use os.apps.smux.window_layout_service.{window_base_rects, apply_window_viewports, commit_window_geometry}
 use os.apps.smux.mux_rects.{MuxRect}
 
 pub struct PaneClosePending:
@@ -14,6 +14,7 @@ pub struct PaneCloseUpdate:
     state: ServiceState
     pending: [PaneClosePending]
     closed: bool
+    uncertain: bool = false
 
 pub fn pane_close_window_pending(pending: [PaneClosePending], session_id: text, window_id: text) -> bool:
     for request in pending:
@@ -56,7 +57,7 @@ pub fn remove_closed_pane_state(st: ServiceState, session_id: text, window_id: t
         i = i + 1
     if survivor == "": return Err("final pane requires checked window deletion")
     var remaining: [MuxRect] = []
-    for rect in window_layout_rects(st, session_id, window_id):
+    for rect in window_base_rects(st, session_id, window_id):
         if rect.pane_id != pane_id: remaining.push(rect)
     var result = st.remove_pane(pi).replace_window(wi, window.with_geometry(remaining, window.canvas_cols, window.canvas_rows))
     if target.focus:
@@ -66,7 +67,7 @@ pub fn remove_closed_pane_state(st: ServiceState, session_id: text, window_id: t
             if pane.pane.session_id == session_id and pane.pane.window_id == window_id:
                 result = result.replace_pane(i, pane.with_focus(pane.pane.id == survivor))
             i = i + 1
-    return Ok(result)
+    return Ok(apply_window_viewports(result, session_id, window_id))
 
 pub fn close_pane_state(st: ServiceState, pending: [PaneClosePending], session_id: text, window_id: text, pane_id: text) -> PaneCloseUpdate:
     val pi = st.find_pane_idx(pane_id)
@@ -97,4 +98,10 @@ pub fn close_pane_state(st: ServiceState, pending: [PaneClosePending], session_i
     val removed = remove_closed_pane_state(released, session_id, window_id, pane_id)
     if removed.is_err():
         return PaneCloseUpdate(state: released, pending: requests, closed: false)
-    return PaneCloseUpdate(state: removed.unwrap(), pending: pane_close_forget(requests, session_id, window_id), closed: true)
+    # Restore surviving native viewports before removing metadata. If resize
+    # fails, keep the released target record and pending close for retry; all
+    # other mutations are already excluded by that exact pending intent.
+    val resized = commit_window_geometry(released, removed.unwrap(), session_id, window_id)
+    if resized.is_err():
+        return PaneCloseUpdate(state: released, pending: requests, closed: false, uncertain: resized.uncertain)
+    return PaneCloseUpdate(state: resized.state, pending: pane_close_forget(requests, session_id, window_id), closed: true)

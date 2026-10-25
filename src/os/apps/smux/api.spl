@@ -55,7 +55,8 @@ use os.apps.smux.client_notifications.{smux_notifications_clear_recipient, smux_
 use os.apps.smux.mux_rects.{MuxRect, mux_layout_known}
 use os.apps.smux.window_layout_service.{
     window_layout_name, window_layout_rects, arrange_window_state as _arrange_window,
-    split_window_state, resize_pane_state
+    split_window_state, resize_pane_state, focus_window_state, toggle_zoom_state,
+    WindowGeometryUpdate
 }
 use std.sosix.time.{sosix_time_now_unix_micros as time_now_unix_micros}
 
@@ -72,6 +73,12 @@ var _split_checkpoints: [SplitCheckpoint] = []
 var _closing_sessions: [text] = []
 var _closing_windows: [text] = []
 var _closing_panes: [PaneClosePending] = []
+
+# Incomplete compensation leaves native geometry unknown. Keep every handle
+# and admit only the existing checked window/session teardown paths.
+fn _geometry_quarantine(window_id: text, outcome: WindowGeometryUpdate):
+    if outcome.uncertain and not _closing_windows.contains(window_id):
+        _closing_windows.push(window_id)
 
 # =========================================================================
 # Test support
@@ -488,6 +495,7 @@ pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, directi
     val before = _svc
     val added_id = id_text(before.next_id)
     val result = split_window_state(before, added_id, session_id, window_id, pane_id, direction)
+    _geometry_quarantine(window_id, result)
     if result.is_err(): return Err(result.unwrap_err())
     val committed = result.unwrap()
     val checkpoint = split_checkpoint_capture(before, committed, session_id, window_id, added_id)
@@ -516,6 +524,7 @@ pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: tex
     if match_index < 0:
         return Err("split rollback checkpoint missing")
     val restored = split_checkpoint_restore(_svc, _split_checkpoints[match_index])
+    _geometry_quarantine(window_id, restored)
     if restored.is_err():
         return Err(restored.unwrap_err())
     var remaining: [SplitCheckpoint] = []
@@ -536,6 +545,7 @@ pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool
         return smux_kill_window(session_id, window_id).is_ok()
     if smux_session_closing(session_id) or _closing_windows.contains(window_id): return false
     val updated = close_pane_state(_svc, _closing_panes, session_id, window_id, pane_id)
+    if updated.uncertain and not _closing_windows.contains(window_id): _closing_windows.push(window_id)
     if updated.closed:
         var kept: [SplitCheckpoint] = []
         for saved in _split_checkpoints:
@@ -547,17 +557,27 @@ pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
     if smux_window_closing(session_id, window_id): return false
-    if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
-        return false
-    var st = _svc
-    var i = 0
-    while i < st.pane_count:
-        val pr = st.get_pane(i)
-        if pr.pane.session_id == session_id and pr.pane.window_id == window_id:
-            st = st.replace_pane(i, pr.with_focus(pr.pane.id == pane_id))
-        i = i + 1
-    _svc = st
+    val updated = focus_window_state(_svc, session_id, window_id, pane_id)
+    _geometry_quarantine(window_id, updated)
+    if updated.is_err(): return false
+    _svc = updated.state
     return true
+
+pub fn smux_zoomed_pane(session_id: text, window_id: text) -> text:
+    val wi = _svc.find_window_idx(window_id)
+    if wi < 0 or _svc.get_window(wi).session_id != session_id: return ""
+    return _svc.get_window(wi).zoom_pane
+
+# A valid target toggles the entire window. Empty success means restored (or
+# an unchanged single-pane window), never an unsupported default implementation.
+pub fn smux_toggle_zoom(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
+    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
+    val updated = toggle_zoom_state(_svc, session_id, window_id, pane_id)
+    _geometry_quarantine(window_id, updated)
+    if updated.is_err(): return Err(updated.error)
+    val zoom = updated.state.get_window(updated.state.find_window_idx(window_id)).zoom_pane
+    _svc = updated.state
+    return Ok(zoom)
 
 pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, text>:
     var i = 0
@@ -569,10 +589,11 @@ pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, t
     return Err("no focused pane in window: " + window_id)
 
 # Native provider resizing precedes the corresponding VT/service commit.
-# Providers without a resize capability retain their documented grid-only path.
+# Piped/no-child panes permit grid-only changes; owned PTYs require resizing.
 pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val result = resize_pane_state(_svc, session_id, window_id, pane_id, cols, rows)
+    _geometry_quarantine(window_id, result)
     if result.is_err(): return Err(result.unwrap_err())
     val updated = result.unwrap()
     val pane = updated.get_pane(updated.find_pane_idx(pane_id)).pane
@@ -715,13 +736,14 @@ pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
 # Commit metadata and pane grids once after complete validation. Child handles,
 # process IDs, focus and output owners are retained by PaneRecord.resize.
 # A capable provider receives each resize first; failure triggers best-effort
-# rollback before any service metadata is committed. Legacy providers remain
-# explicitly grid-only. Actual child geometry still requires runtime evidence.
+# rollback before any service metadata is committed. Owned PTYs refuse missing
+# resize support. Actual child geometry still requires runtime evidence.
 pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<[MuxRect], text>:
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     if not mux_layout_known(name):
         return Err("invalid layout: " + name)
     val planned = _arrange_window(_svc, session_id, window_id, name, cols, rows)
+    _geometry_quarantine(window_id, planned)
     if planned.is_err():
         return Err(planned.unwrap_err())
     val changed = planned.unwrap()
@@ -734,6 +756,7 @@ pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: i
 pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: int) -> Result<[MuxRect], text>:
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
     val planned = _arrange_window(_svc, session_id, window_id, "", cols, rows)
+    _geometry_quarantine(window_id, planned)
     if planned.is_err():
         return Err(planned.unwrap_err())
     val changed = planned.unwrap()

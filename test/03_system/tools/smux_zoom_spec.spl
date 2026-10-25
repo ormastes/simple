@@ -1,0 +1,305 @@
+"""
+REQ-CMUX-004/005/008/010: authoritative window zoom and restore.
+Source-authored NOT_RUN. Pure state controls are not native resize evidence.
+The final case requires admitted Windows ConPTY and the linked PID owner.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+# @cover src/os/apps/smux/window_layout_service.spl 80%
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.window_layout_service.{window_base_rects, window_layout_rects,
+    window_viewport_rects, toggle_zoom_plan, focus_window_plan, arrange_window_plan,
+    split_window_plan, resize_pane_plan, geometry_failure, layout_resize_capable}
+use os.apps.smux.split_checkpoint.{split_checkpoint_capture, split_checkpoint_restore}
+use os.apps.smux.pane_lifecycle.{remove_closed_pane_state}
+use os.apps.smux.frame_snapshot.{smux_frame_from_state, smux_frame_validate}
+use os.apps.smux.client_input.{client_input_new, client_input_feed}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_list_sessions, smux_split_pane, smux_toggle_zoom,
+    smux_zoomed_pane, smux_window_rects, smux_arrange_window, smux_kill_session,
+    smux_kill_window, smux_close_pane, smux_new_window, smux_pane_spawn_pty,
+    smux_send_command, smux_capture, smux_capture_frame}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.sosix.process.{sosix_process_exists}
+use std.sosix.pty.{sosix_pty_cleanup_pending}
+
+fn zoom_setup() -> ServiceState:
+    val rects = [MuxRect(pane_id: "p1", col: 0, row: 0, cols: 39, rows: 24),
+        MuxRect(pane_id: "p2", col: 40, row: 0, cols: 40, rows: 24)]
+    var st = ServiceState.empty().with_next_id(30)
+    st = st.add_session(MuxSession.create("s", "zoom"))
+    st = st.add_window(MuxWindow.create("w", "s", "window").with_geometry(rects, 80, 24))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p1", "w", "s")).resize(39, 24).with_focus(true).feed_screen("VISIBLE"))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p2", "w", "s")).resize(40, 24).feed_screen("HIDDEN"))
+    return st
+
+fn zoom_check_rect(rect: MuxRect, pane: text, col: i64, row: i64, cols: i64, rows: i64):
+    expect(rect.pane_id).to_equal(pane)
+    expect(rect.col).to_equal(col)
+    expect(rect.row).to_equal(row)
+    expect(rect.cols).to_equal(cols)
+    expect(rect.rows).to_equal(rows)
+
+fn zoom_cleanup(session: text) -> bool:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var result = smux_kill_session(session)
+    var attempts = 0
+    while result.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        result = smux_kill_session(session)
+        attempts = attempts + 1
+    return result.is_ok()
+
+fn zoom_output(session: text, window: text, pane: text, marker: text) -> text:
+    var output = ""
+    var attempt = 0
+    while attempt < 200 and not output.contains(marker):
+        val capture = smux_capture(session, window, pane, 40)
+        if capture.is_ok(): output = capture.unwrap().content
+        if not output.contains(marker): sosix_sleep_ms(25)
+        attempt = attempt + 1
+    return output
+
+# Expected dimensions are absent from the command itself: only the child can
+# produce the full marker by measuring its actual inherited console viewport.
+fn zoom_probe(session: text, window: text, pane: text, label: text, dimensions: text) -> bool:
+    val command = "powershell.exe -NoProfile -Command \"Write-Output ('" + label + "_' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)\""
+    val sent = smux_send_command(session, window, pane, command)
+    val output = zoom_output(session, window, pane, label + "_" + dimensions)
+    return sent.is_ok() and output.contains(label + "_" + dimensions)
+
+describe "authoritative smux window zoom":
+    it "refuses missing resize capability for owned PTYs but permits grid-only panes":
+        val plain = zoom_setup()
+        expect(layout_resize_capable(plain, [0, 1], false)).to_equal(true)
+        # Pure ownership-policy control: this synthetic handle is never passed
+        # to a provider and cannot count as an unsupported-provider runtime test.
+        val owned = plain.replace_pane(0, plain.get_pane(0).with_pty(123, 456))
+        expect(layout_resize_capable(owned, [0], false)).to_equal(false)
+        expect(layout_resize_capable(owned, [1], false)).to_equal(true)
+        expect(layout_resize_capable(owned, [0], true)).to_equal(true)
+
+    it "keeps the base map while displaying only the full-canvas target":
+        step("Zoom a service-owned pane without replacing the base geometry")
+        val before = zoom_setup()
+        val zoomed = toggle_zoom_plan(before, "s", "w", "p2").unwrap()
+        expect(before.get_window(0).zoom_pane).to_equal("")
+        expect(zoomed.get_window(0).zoom_pane).to_equal("p2")
+        expect(zoomed.get_window(0).manual_cols).to_equal(80)
+        expect(window_layout_rects(zoomed, "s", "w").len()).to_equal(1)
+        zoom_check_rect(window_layout_rects(zoomed, "s", "w")[0], "p2", 0, 0, 80, 24)
+        zoom_check_rect(window_base_rects(zoomed, "s", "w")[0], "p1", 0, 0, 39, 24)
+        zoom_check_rect(window_base_rects(zoomed, "s", "w")[1], "p2", 40, 0, 40, 24)
+        expect(window_viewport_rects(zoomed, "s", "w").len()).to_equal(2)
+        expect(zoomed.get_pane(0).focus).to_equal(false)
+        expect(zoomed.get_pane(1).focus).to_equal(true)
+
+    it "restores an already zoomed window even when another valid pane is targeted":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val restored = toggle_zoom_plan(zoomed, "s", "w", "p2").unwrap()
+        expect(restored.get_window(0).zoom_pane).to_equal("")
+        expect(restored.get_pane(0).pane.cols).to_equal(39)
+        expect(restored.get_pane(1).pane.cols).to_equal(40)
+        expect(restored.get_pane(0).focus).to_equal(true)
+        expect(window_layout_rects(restored, "s", "w").len()).to_equal(2)
+
+    it "leaves a single-pane window unzoomed like tmux resize-pane -Z":
+        val single = zoom_setup().remove_pane(1).replace_window(0, MuxWindow.create("w", "s", "window"))
+        val result = toggle_zoom_plan(single, "s", "w", "p1").unwrap()
+        expect(result.get_window(0).zoom_pane).to_equal("")
+        expect(result.pane_count).to_equal(1)
+
+    it "rejects foreign and missing targets without changing the zoom owner":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        expect(toggle_zoom_plan(zoomed, "other", "w", "p1").is_err()).to_equal(true)
+        expect(toggle_zoom_plan(zoomed, "s", "other", "p1").is_err()).to_equal(true)
+        expect(toggle_zoom_plan(zoomed, "s", "w", "missing").is_err()).to_equal(true)
+        expect(zoomed.get_window(0).zoom_pane).to_equal("p1")
+
+    it "preserves zoom on same-pane focus and restores before changing focus":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val same = focus_window_plan(zoomed, "s", "w", "p1").unwrap()
+        expect(same.get_window(0).zoom_pane).to_equal("p1")
+        val other = focus_window_plan(same, "s", "w", "p2").unwrap()
+        expect(other.get_window(0).zoom_pane).to_equal("")
+        expect(other.get_pane(1).focus).to_equal(true)
+        expect(other.get_pane(0).pane.cols).to_equal(39)
+
+    it "preserves the reference map through shared-canvas shrink and growth":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val small = arrange_window_plan(zoomed, "s", "w", "", 60, 20).unwrap()
+        expect(small.get_window(0).zoom_pane).to_equal("p1")
+        expect(small.get_pane(0).pane.cols).to_equal(60)
+        expect(small.get_pane(1).pane.cols).to_equal(30)
+        expect(small.get_window(0).manual_cols).to_equal(80)
+        val grown = arrange_window_plan(small, "s", "w", "", 80, 24).unwrap()
+        val restored = toggle_zoom_plan(grown, "s", "w", "p1").unwrap()
+        zoom_check_rect(window_layout_rects(restored, "s", "w")[0], "p1", 0, 0, 39, 24)
+        zoom_check_rect(window_layout_rects(restored, "s", "w")[1], "p2", 40, 0, 40, 24)
+
+    it "restores before a named layout and retains that layout for later toggles":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val named = arrange_window_plan(zoomed, "s", "w", "even-vertical", 80, 24).unwrap()
+        expect(named.get_window(0).zoom_pane).to_equal("")
+        expect(named.get_window(0).layout).to_equal("even-vertical")
+        val again = toggle_zoom_plan(named, "s", "w", "p2").unwrap()
+        val restored = toggle_zoom_plan(again, "s", "w", "p2").unwrap()
+        expect(restored.get_window(0).layout).to_equal("even-vertical")
+        expect(window_base_rects(restored, "s", "w")[0].rows).to_equal(window_base_rects(named, "s", "w")[0].rows)
+
+    it "splits base geometry and restores the pre-split zoom through its checkpoint":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val split = split_window_plan(zoomed, "p3", "s", "w", "p1", "vertical").unwrap()
+        expect(split.get_window(0).zoom_pane).to_equal("")
+        expect(split.get_pane(0).pane.cols).to_equal(19)
+        expect(split.get_pane(2).pane.cols).to_equal(19)
+        val checkpoint = split_checkpoint_capture(zoomed, split, "s", "w", "p3")
+        val refocused = focus_window_plan(split, "s", "w", "p2").unwrap()
+        val refused = split_checkpoint_restore(refocused, checkpoint)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("split rollback focus changed while restoring zoom")
+        expect(refused.state.get_window(0).zoom_pane).to_equal("")
+        expect(refused.state.get_pane(1).focus).to_equal(true)
+        # No child handle exists in this control; this is geometry rollback only.
+        val restored = split_checkpoint_restore(split, checkpoint).unwrap()
+        expect(restored.get_window(0).zoom_pane).to_equal("p1")
+        expect(restored.pane_count).to_equal(2)
+        expect(restored.get_pane(0).pane.cols).to_equal(80)
+        expect(window_base_rects(restored, "s", "w")[0].cols).to_equal(39)
+        val plain = zoom_setup()
+        val plain_split = split_window_plan(plain, "p3", "s", "w", "p1", "vertical").unwrap()
+        val plain_checkpoint = split_checkpoint_capture(plain, plain_split, "s", "w", "p3")
+        val added_focus = focus_window_plan(plain_split, "s", "w", "p3").unwrap()
+        val retained = split_checkpoint_restore(added_focus, plain_checkpoint)
+        expect(retained.is_err()).to_equal(true)
+        expect(retained.unwrap_err()).to_equal("split rollback added pane has independent focus")
+        expect(retained.state.pane_count).to_equal(3)
+        expect(retained.state.get_pane(2).focus).to_equal(true)
+
+    it "refuses invalid split and overlap without losing the saved zoom map":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        expect(split_window_plan(zoomed, "p3", "s", "w", "p1", "diagonal").is_err()).to_equal(true)
+        expect(resize_pane_plan(zoomed, "s", "w", "p1", 70, 24).is_err()).to_equal(true)
+        expect(zoomed.get_window(0).zoom_pane).to_equal("p1")
+        expect(zoomed.get_pane(0).pane.cols).to_equal(80)
+
+    it "restores before an explicit valid pane resize":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val resized = resize_pane_plan(zoomed, "s", "w", "p1", 30, 24).unwrap()
+        expect(resized.get_window(0).zoom_pane).to_equal("")
+        expect(resized.get_pane(0).pane.cols).to_equal(30)
+        expect(resized.get_pane(1).pane.cols).to_equal(40)
+
+    it "unzooms when removing a hidden pane and preserves failed cleanup authority":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val removed = remove_closed_pane_state(zoomed, "s", "w", "p2").unwrap()
+        expect(removed.get_window(0).zoom_pane).to_equal("")
+        expect(removed.get_pane(0).pane.cols).to_equal(39)
+        val owned = zoomed.replace_pane(1, zoomed.get_pane(1).with_child(123))
+        expect(remove_closed_pane_state(owned, "s", "w", "p2").is_err()).to_equal(true)
+        expect(owned.get_pane(1).child_pid).to_equal(123)
+        expect(owned.get_window(0).zoom_pane).to_equal("p1")
+        # A pure typed-outcome check is not a simulated native failure test.
+        val uncertain = geometry_failure(owned, "diagnostic only", true)
+        expect(uncertain.uncertain).to_equal(true)
+        expect(uncertain.is_err()).to_equal(true)
+        expect(uncertain.state.get_pane(1).child_pid).to_equal(123)
+
+    it "deletes zoom state with its checked window and final session owner":
+        smux_reset_for_test()
+        val session = smux_create_session("zoom-delete")
+        val window = smux_list_windows(session.id)[0]
+        val first = smux_list_panes(session.id, window.id)[0]
+        val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
+        val other = smux_new_window(session.id, "retained")
+        expect(smux_toggle_zoom(session.id, window.id, first.id).is_ok()).to_equal(true)
+        expect(smux_kill_window(session.id, window.id).is_ok()).to_equal(true)
+        expect(smux_zoomed_pane(session.id, window.id)).to_equal("")
+        expect(smux_list_windows(session.id)[0].id).to_equal(other.id)
+        val last = smux_list_panes(session.id, other.id)[0]
+        expect(smux_close_pane(session.id, other.id, last.id)).to_equal(true)
+        expect(smux_list_sessions().len()).to_equal(0)
+
+    it "renders only the zoomed pane and refuses a hidden cursor before capture":
+        val zoomed = toggle_zoom_plan(zoom_setup(), "s", "w", "p1").unwrap()
+        val frame = smux_frame_from_state(zoomed, "s", "w", "p1").unwrap()
+        expect(frame).to_contain("VISIBLE")
+        expect(frame.contains("HIDDEN")).to_equal(false)
+        expect(smux_frame_validate(zoomed, "s", "w", "p2")).to_equal("cursor pane is hidden by window zoom: p2")
+        val restored = toggle_zoom_plan(zoomed, "s", "w", "p1").unwrap()
+        expect(smux_frame_from_state(restored, "s", "w", "p1").unwrap()).to_contain("HIDDEN")
+
+    it "binds prefix-z and the real dispatcher while refusing hidden interactive input":
+        val prefix = client_input_feed(client_input_new(), "\x02")
+        val key = client_input_feed(prefix.state, "z")
+        expect(key.actions.len()).to_equal(1)
+        expect(key.actions[0].kind).to_equal("toggle-zoom")
+        smux_reset_for_test()
+        val session = smux_create_session("zoom-wire")
+        val window = smux_list_windows(session.id)[0]
+        val first = smux_list_panes(session.id, window.id)[0]
+        val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
+        val scope = session.id + " " + window.id
+        expect(smux_remote_dispatch("client-request " + session.id + " unknown invalid client-zoom " + scope + " " + first.id).starts_with("smux: client request failed:")).to_equal(true)
+        expect(smux_zoomed_pane(session.id, window.id)).to_equal("")
+        val zoom_reply = smux_interactive_dispatch("client-zoom " + scope + " " + first.id)
+        expect(zoom_reply).to_equal("smux: zoom " + first.id)
+        expect(smux_remote_reply_ok(zoom_reply)).to_equal(true)
+        val listing = smux_interactive_dispatch("client-panes " + scope)
+        expect(listing).to_contain(first.id + " 80x24")
+        expect(listing.contains(second.id + " ")).to_equal(false)
+        expect(smux_interactive_dispatch("input " + scope + " " + second.id + " 41")).to_equal("smux: input pane is hidden by window zoom: " + second.id)
+        val restored_reply = smux_interactive_dispatch("client-zoom " + scope + " " + second.id)
+        expect(restored_reply).to_equal("smux: zoom restored")
+        expect(smux_remote_reply_ok(restored_reply)).to_equal(true)
+        val unknown_reply = smux_interactive_dispatch("client-zoom " + scope + " missing")
+        expect(smux_remote_reply_ok(unknown_reply)).to_equal(false)
+        for malformed in ["smux: zoom failed: resize", "smux: zoom id", "smux: zoom id0",
+            "smux: zoom id01", "smux: zoom id1 extra", "smux: zoom id1\n",
+            "smux: zoom restored extra", "smux: zoom restored\n"]:
+            expect(smux_remote_reply_ok(malformed)).to_equal(false)
+        expect(smux_kill_session(session.id).is_ok()).to_equal(true)
+
+    it "measures actual ConPTY zoom, shared resize, restored child viewports and cleanup":
+        step("Create two real ConPTY children and measure the original split sizes")
+        smux_reset_for_test()
+        val session = smux_create_session("zoom-native")
+        val window = smux_list_windows(session.id)[0]
+        val first = smux_list_panes(session.id, window.id)[0]
+        val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
+        val target = smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /d /q")
+        val sibling = smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /d /q")
+        val target_pid = if target.is_ok(): target.unwrap() else: -1
+        val sibling_pid = if sibling.is_ok(): sibling.unwrap() else: -1
+        val base_first = zoom_probe(session.id, window.id, first.id, "BASE_A", "39x24")
+        val base_second = zoom_probe(session.id, window.id, second.id, "BASE_B", "40x24")
+        step("Zoom one child, preserve the hidden child, and reflow the shared canvas")
+        val zoom = smux_toggle_zoom(session.id, window.id, first.id)
+        val zoom_size = zoom_probe(session.id, window.id, first.id, "ZOOM_A", "80x24")
+        val hidden_size = zoom_probe(session.id, window.id, second.id, "HIDDEN_B", "40x24")
+        val reflow = smux_arrange_window(session.id, window.id, 100, 30)
+        val reflow_size = zoom_probe(session.id, window.id, first.id, "REFLOW_A", "100x30")
+        val alive = target_pid > 0 and sibling_pid > 0 and sosix_process_exists(target_pid) and sosix_process_exists(sibling_pid)
+        val restored = smux_toggle_zoom(session.id, window.id, second.id)
+        val restored_first = zoom_probe(session.id, window.id, first.id, "RESTORE_A", "48x30")
+        val restored_second = zoom_probe(session.id, window.id, second.id, "RESTORE_B", "50x30")
+        val capture = smux_capture_frame(session.id, window.id, first.id)
+        step("Complete checked teardown before asserting observations")
+        val cleaned = zoom_cleanup(session.id)
+        val target_remains = target_pid > 0 and sosix_process_exists(target_pid)
+        val sibling_remains = sibling_pid > 0 and sosix_process_exists(sibling_pid)
+        expect(cleaned).to_equal(true)
+        expect(target.is_ok() and sibling.is_ok()).to_equal(true)
+        expect(base_first and base_second).to_equal(true)
+        expect(zoom.is_ok() and zoom_size and hidden_size).to_equal(true)
+        expect(reflow.is_ok() and reflow_size and alive).to_equal(true)
+        expect(restored.is_ok() and restored_first and restored_second).to_equal(true)
+        expect(capture.is_ok()).to_equal(true)
+        expect(target_remains or sibling_remains).to_equal(false)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)

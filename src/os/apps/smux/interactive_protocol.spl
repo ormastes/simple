@@ -2,7 +2,7 @@
 use os.apps.smux.api.{smux_list_windows, smux_list_panes,
     smux_send_text, smux_capture_frame, smux_select_layout, smux_arrange_window, smux_split_pane,
     smux_pane_spawn_pty, smux_rollback_split, smux_capture_history,
-    smux_list_clients, smux_attach, smux_window_layout}
+    smux_list_clients, smux_attach, smux_window_layout, smux_toggle_zoom, smux_zoomed_pane}
 use os.apps.smux.contract.{MuxWindow, MuxPane}
 use os.apps.smux.session_targets.{smux_resolve_session}
 use os.apps.smux.lifecycle_reply.{smux_missing_window_reply, smux_missing_session_reply}
@@ -121,7 +121,7 @@ pub fn smux_interactive_dispatch(line: text) -> text:
     val parts = line.trim().split(" ")
     if parts.len() == 0: return ""
     val verb = parts[0]
-    if verb != "input" and verb != "frame" and verb != "client-size" and verb != "client-panes" and verb != "client-layout" and verb != "client-split" and verb != "client-history":
+    if verb != "input" and verb != "frame" and verb != "client-size" and verb != "client-panes" and verb != "client-layout" and verb != "client-split" and verb != "client-history" and verb != "client-zoom":
         return ""
     if parts.len() < 3: return "smux: interactive command requires session and window"
     val session = session_identity(parts[1])
@@ -144,8 +144,10 @@ pub fn smux_interactive_dispatch(line: text) -> text:
     if verb == "client-panes":
         if parts.len() != 3: return "smux: client-panes requires session and window"
         var reply = "smux: panes[" + parts[1] + "]:\n"
+        val zoom = smux_zoomed_pane(session, window.id)
         for pane in smux_list_panes(session, window.id):
-            reply = reply + pane.id + " " + pane.cols.to_text() + "x" + pane.rows.to_text() + "\n"
+            if zoom == "" or zoom == pane.id:
+                reply = reply + pane.id + " " + pane.cols.to_text() + "x" + pane.rows.to_text() + "\n"
         return reply
     if verb == "client-layout":
         if parts.len() != 6: return "smux: client-layout requires session window name cols rows"
@@ -166,8 +168,15 @@ pub fn smux_interactive_dispatch(line: text) -> text:
     if parts.len() < 4: return "smux: interactive command requires pane"
     val selected_pane = target_pane(session, window.id, parts[3])
     if selected_pane.is_err(): return "smux: " + selected_pane.unwrap_err()
+    if verb == "client-zoom":
+        if parts.len() != 4: return "smux: client-zoom requires session window pane"
+        val result = smux_toggle_zoom(session, window.id, parts[3])
+        if result.is_err(): return "smux: zoom failed: " + result.unwrap_err()
+        return if result.unwrap() == "": "smux: zoom restored" else: "smux: zoom " + result.unwrap()
     if verb == "input":
         if parts.len() != 5: return "smux: input requires session window pane hex"
+        val zoom = smux_zoomed_pane(session, window.id)
+        if zoom != "" and zoom != parts[3]: return "smux: input pane is hidden by window zoom: " + parts[3]
         val decoded = smux_input_hex_decode(parts[4])
         if decoded.is_err(): return "smux: input failed: " + decoded.unwrap_err()
         val sent = smux_send_text(session, window.id, parts[3], decoded.unwrap())
