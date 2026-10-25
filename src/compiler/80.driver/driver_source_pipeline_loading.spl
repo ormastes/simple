@@ -40,6 +40,7 @@ use compiler.driver.driver_source_loading.{
     _driver_text_bucket_set_new,
     _driver_unique_physical_sources
 }
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
 use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1, native_group_source_paths_v1}
@@ -263,6 +264,17 @@ impl CompilerDriver:
                 self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
+            match native_source_root_paths_v1(request.binding.source_roots,
+                    request.snapshot.snapshot_root):
+                case Ok(roots):
+                    if roots != closure_source_roots:
+                        self.ctx.add_error("preclosed source root authority mismatch")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
             admitted_preclosed = Some(selected.unwrap())
             preclosed_snapshot_root = request.snapshot.snapshot_root
             driver_inputs = []
@@ -1232,6 +1244,13 @@ impl CompilerDriver:
         # closure, but the existing parser still needs closure mode to preserve
         # its entry-source semantics.
         if admitted_preclosed != nil:
+            match driver_preclosed_source_aliases_v1(all_sources,
+                    closure_source_roots, preclosed_snapshot_root):
+                case Ok(sources): all_sources = sources
+                case Err(reason):
+                    self.ctx.add_error(reason)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
             if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
                 self.ctx.add_error("preclosed entry parser mode unavailable")
                 driver_entry_scan_cache_release()
