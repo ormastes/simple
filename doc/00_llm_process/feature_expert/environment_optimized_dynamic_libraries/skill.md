@@ -57,3 +57,12 @@ This is documentation evidence only. Existing selected contracts and promotion
 gates remain unchanged; outstanding aspect options remain unselected. The
 retained feature knowledge receipt does not cover OS kernel/driver code, which
 requires a refreshed `mdsoc_only` route before implementation.
+
+## Status snapshot 2026-10-25
+
+Verified against `origin/release/1.0.0` @ `57a129fb2b9`: V1 contracts and the
+composite selector are source-landed (DONE as source); executed provider
+selection/ABI/fallback evidence is PARTIAL (system spec bodies still pending);
+compile-mode per-module dynlibs and import libraries are OPEN
+(`doc/08_tracking/bug/dynload_mode_emits_no_per_module_dynlibs_2026-10-24.md`).
+Full table: `doc/03_plan/compiler/environment_optimized_dynamic_libraries.md`.
