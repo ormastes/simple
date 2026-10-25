@@ -1134,7 +1134,7 @@ bootstrap_free_space_kb() {
   printf '%s\n' "${bfsk_line}"
 }
 bootstrap_check_disk_space() {
-  bcds_min_gb=${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-10}
+  bcds_min_gb=${SIMPLE_BOOTSTRAP_MIN_FREE_GB:-${MIN_FREE_GB:-10}}
   case "${bcds_min_gb}" in ''|*[!0-9]*) bcds_min_gb=10 ;; esac
   [ "${bcds_min_gb}" -gt 0 ] || return 0
   bcds_min_kb=$((bcds_min_gb * 1024 * 1024))
@@ -1154,7 +1154,7 @@ bootstrap_check_disk_space() {
     bcds_worst_gb=$((bcds_worst_kb / 1024 / 1024))
     bcds_short_gb=$(((bcds_min_kb - bcds_worst_kb + 1024 * 1024 - 1) / 1024 / 1024))
     echo "error: insufficient disk space to start a bootstrap: ${bcds_worst_gb} GB free on the filesystem holding ${bcds_worst_path}, need at least ${bcds_min_gb} GB (short by ~${bcds_short_gb} GB)" >&2
-    echo "error: a bootstrap that starts below this floor has previously died SILENTLY when disk filled mid-build; free space first (see rust-authority generation GC in scripts/bootstrap/bootstrap-authority-wiring.shs, and build/w/rust-authority-* / bootstrap.generations/ as the largest reclaimable consumers) or override with SIMPLE_BOOTSTRAP_MIN_FREE_GB=<n> if this host is intentionally tight" >&2
+    echo "error: a bootstrap that starts below this floor has previously died SILENTLY when disk filled mid-build; free space first (see rust-authority generation GC in scripts/bootstrap/bootstrap-authority-wiring.shs, and build/w/rust-authority-* / bootstrap.generations/ as the largest reclaimable consumers) or override with SIMPLE_BOOTSTRAP_MIN_FREE_GB=<n> (or MIN_FREE_GB=<n>) if this host is intentionally tight" >&2
     return 1
   fi
 }
@@ -1263,6 +1263,35 @@ bootstrap_step_mark() {
     printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >>"${progress_log}" 2>/dev/null || true
   fi
 }
+# Kill every non-detached descendant so a failed/terminated run leaves no
+# orphans (launcher, rustc, helpers, watcher) holding output ownership. The
+# session guard makes this shell the leader of its own group (PID == PGID), so
+# a group signal reaches exactly this run's tree. Windows has no reliable group
+# signal for native children: taskkill /T each tracked child instead.
+bootstrap_reap_descendants() {
+  [ "${bootstrap_session_pid:-}" = "$$" ] || return 0
+  trap '' HUP INT QUIT TERM
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      for bootstrap_reap_pid in $(jobs -p 2>/dev/null); do
+        bootstrap_reap_win=$(cat "/proc/${bootstrap_reap_pid}/winpid" 2>/dev/null || printf '%s' "${bootstrap_reap_pid}")
+        taskkill //T //F //PID "${bootstrap_reap_win}" >/dev/null 2>&1 || true
+      done
+      ;;
+  esac
+  kill -TERM -- "-$$" 2>/dev/null || true
+  bootstrap_reap_i=0
+  while [ "${bootstrap_reap_i}" -lt 3 ]; do
+    bootstrap_reap_left=
+    for bootstrap_reap_pid in $(pgrep -g "$$" 2>/dev/null); do
+      [ "${bootstrap_reap_pid}" = "$$" ] || bootstrap_reap_left="${bootstrap_reap_left} ${bootstrap_reap_pid}"
+    done
+    [ -n "${bootstrap_reap_left}" ] || return 0
+    sleep 1; bootstrap_reap_i=$((bootstrap_reap_i + 1))
+  done
+  # shellcheck disable=SC2086
+  kill -KILL ${bootstrap_reap_left} 2>/dev/null || true
+}
 bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
@@ -1308,6 +1337,9 @@ bootstrap_cleanup() {
       portable_lock_release "${bootstrap_lock_handle}"
       bootstrap_lock_handle=
     fi
+  fi
+  if [ "${bootstrap_status}" -ne 0 ] || [ -n "${bootstrap_abnormal_signal:-}" ]; then
+    bootstrap_reap_descendants
   fi
   exit "${bootstrap_status}"
 }
