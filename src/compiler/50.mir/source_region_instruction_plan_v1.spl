@@ -188,7 +188,19 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
                     result_type: alias_result, destination: Some(epoch), success: success))
                 field_index = field_index + 1
             return Ok(Some(SourceRegionInstructionPlanV1(steps: steps, locals: locals, next_local: first_local + 2 + fields.len() * 2)))
-        case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | GetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Load(_, _) | GetElementPtr(_, _, _):
+        case Const(_, _, type_):
+            if not source_region_plan_scalar_v1(type_):
+                return Err("SOURCE-STORE: rich constant provenance is unavailable")
             return Ok(nil)
+        case Cast(_, operand, target) | Bitcast(_, operand, target):
+            if not source_region_plan_scalar_v1(target):
+                return Err("SOURCE-STORE: cast cannot manufacture mutable storage provenance")
+            match source_region_plan_operand_type_v1(func, operand):
+                case Ok(type_):
+                    if not source_region_plan_scalar_v1(type_):
+                        return Err("SOURCE-STORE: pointer/aggregate cast is unclassified")
+                case Err(error): return Err(error)
+            return Ok(nil)
+        case Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | GetField(_, _, _): return Ok(nil)
         case _:
             return Err("SOURCE-STORE: unclassified allocation/store/call effect")
