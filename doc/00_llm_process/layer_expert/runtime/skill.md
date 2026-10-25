@@ -108,3 +108,11 @@ run.
   ABI exports are owned solely by `src/runtime/runtime_simd_dispatch.c`. Rust
   SIMD lane helpers must retain mangled Rust symbols; adding `#[no_mangle]` to
   those helpers recreates the 23-symbol runtime-cdylib link failure.
+
+## Windows owned-scope admission (2026-10-25)
+
+`rt_dir_create_cpath` now shares the recursive worker instead of trying to mkdir
+`C:`. An actual native probe progressed beyond capture-directory creation and
+failed environment validation. Checked admission preserves its reason; existing
+token APIs retain their signatures. This is partial evidence, not child-launch
+PASS. See [bounded owner evidence](../../../08_tracking/bug/windows_owned_scope_admission_2026_10_25.md).
