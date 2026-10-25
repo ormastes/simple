@@ -37,7 +37,7 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 use compiler.driver.driver_log_helpers.{log_phase}
-use compiler.driver.hir_admission_order_v1.{hir_admission_path_order_v1}
+use compiler.driver.hir_admission_order_v1.{hir_admission_path_order_v1, hir_admission_identity_key_v1, hir_admission_unadmitted_indices_v1, hir_admission_group_positions_v1}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
@@ -326,6 +326,11 @@ fn driver_nogc_param_effect_admission_round_v1(
     var errors: [text] = []
     var fatal_errors: [text] = []
     var admitted: [HirModule] = []
+    # Index surfaces by canonical path once (was a full scan per module);
+    # groups keep original surface order for the conflict check.
+    var surface_paths: [text] = []
+    for surface in surfaces: surface_paths.push(surface.canonical_path)
+    val surfaces_by_path = hir_admission_group_positions_v1(surface_paths)
     for raw_actual in actual_modules:
         var actual: HirModule = raw_actual
         actual.nogc_param_effects_checked = false
@@ -339,8 +344,10 @@ fn driver_nogc_param_effect_admission_round_v1(
         var strict = false
         var matched = false
         var conflicting = false
-        for surface in surfaces:
-            if surface.canonical_path == actual_path:
+        if surfaces_by_path.contains_key(actual_path):
+            val surface_positions: [i64] = surfaces_by_path[actual_path]
+            for surface_position in surface_positions:
+                val surface = surfaces[surface_position]
                 if matched and strict != surface.nogc_strict: conflicting = true
                 strict = surface.nogc_strict
                 matched = true
@@ -437,13 +444,13 @@ fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
             # No new proof can resolve the remaining dependency component.
             # Unknown providers and cycles retain their actual diagnostics.
             return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
+        var pending_keys: [text] = []
+        for actual in pending: pending_keys.push(hir_admission_identity_key_v1(actual.name, actual.path))
+        var admitted_keys: [text] = []
+        for checked in receipt.modules: admitted_keys.push(hir_admission_identity_key_v1(checked.name, checked.path))
         var next: [HirModule] = []
-        for actual in pending:
-            var admitted = false
-            for checked in receipt.modules:
-                if actual.name == checked.name and actual.path == checked.path:
-                    admitted = true
-            if not admitted: next.push(actual)
+        for pending_index in hir_admission_unadmitted_indices_v1(pending_keys, admitted_keys):
+            next.push(pending[pending_index])
         for checked in receipt.modules: providers.push(checked)
         pending = next
         round = round + 1
@@ -465,11 +472,20 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
         log_phase("phase3:hir:ownership_admission:failed")
         return
     var modules: Dict<text, HirModule> = ctx.hir_modules
+    # Map identity -> every dict key (aliases) once, instead of rescanning
+    # all keys per admitted module.
+    val module_keys: [text] = modules.keys()
+    var identities: [text] = []
+    for key in module_keys:
+        val previous: HirModule = modules[key]
+        identities.push(hir_admission_identity_key_v1(previous.name, previous.path))
+    val keys_by_identity = hir_admission_group_positions_v1(identities)
     for actual in admission.modules:
-        for key in modules.keys():
-            val previous: HirModule = modules[key]
-            if previous.name == actual.name and previous.path == actual.path:
-                modules[key] = actual
+        val identity = hir_admission_identity_key_v1(actual.name, actual.path)
+        if keys_by_identity.contains_key(identity):
+            val positions: [i64] = keys_by_identity[identity]
+            for position in positions:
+                modules[module_keys[position]] = actual
         if val entry = ctx.bootstrap_entry_hir:
             if entry.name == actual.name and entry.path == actual.path:
                 ctx.bootstrap_entry_hir = actual
