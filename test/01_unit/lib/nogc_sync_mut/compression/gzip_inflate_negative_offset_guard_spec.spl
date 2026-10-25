@@ -1,11 +1,12 @@
-extern fn rt_file_read_text(path: text) -> text
-
-fn _contains_gzip_inflate_negative_guard(path: text) -> bool:
-    val source = rt_file_read_text(path) ?? ""
-    return source.to_contain("fn deflate_block_parse(data, offset):") and
-        source.to_contain("if offset < 0:\n        return nil") and
-        source.to_contain("val header_byte = data[offset].to_i64()")
+use std.nogc_sync_mut.compression.gzip.inflate.{deflate_block_parse}
 
 describe "GZIP inflate negative offset guards":
-    it "guards legacy block parsing before indexed reads":
-        expect(_contains_gzip_inflate_negative_guard("src/lib/nogc_sync_mut/compression/gzip/inflate.spl")).to_equal(true)
+    it "rejects negative legacy block offsets before indexed reads":
+        val stored: [u8] = [1, 1, 0, 254, 255, 97]
+        expect(deflate_block_parse(stored, -1) == nil).to_equal(true)
+        expect(deflate_block_parse(stored, -9223372036854775807) == nil).to_equal(true)
+        if val block = deflate_block_parse(stored, 0):
+            expect(block.data).to_equal([97])
+            expect(block.next_offset).to_equal(6)
+        else:
+            expect(false).to_equal(true)
