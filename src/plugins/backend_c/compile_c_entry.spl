@@ -3,6 +3,7 @@
 # Uses the canonical plugin owners for C backend implementation modules.
 # backend.spl facade MUST be renamed to backend.spl.bak to prevent cascade loading.
 
+$txt
 use compiler.backend.common.bootstrap_guard.{BOOTSTRAP_NO_C}
 when not BOOTSTRAP_NO_C:
     use plugins.backend_c.c_backend.*
@@ -65,14 +66,14 @@ fn convert_decl_visibility(idx: i64) -> Visibility:
 fn convert_flat_type(type_expr_idx: i64) -> Type:
     if type_expr_idx <= 0:
         return Type(kind: TypeKind.Infer, span: make_span())
-    val tag = expr_tag[type_expr_idx]
+    val tag = expr_owner_tag(type_expr_idx)
     if tag == EXPR_IDENT:
-        Type(kind: TypeKind.Named(expr_s_val[type_expr_idx], []), span: make_span())
+        Type(kind: TypeKind.Named(expr_owner_str(type_expr_idx), []), span: make_span())
     elif tag == EXPR_INDEX:
         # Generic type like Array<T> stored as Index(Array, T)
-        val base_name = expr_s_val[expr_left[type_expr_idx]]
+        val base_name = expr_owner_str(expr_owner_left(type_expr_idx))
         var type_args: [Type] = []
-        val arg_idx = expr_right[type_expr_idx]
+        val arg_idx = expr_owner_right(type_expr_idx)
         if arg_idx >= 0:
             type_args = type_args.push(convert_flat_type(arg_idx))
         Type(kind: TypeKind.Named(base_name, type_args), span: make_span())
@@ -82,23 +83,23 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
-    val tag = expr_tag[idx]
+    val tag = expr_owner_tag(idx)
     val span = make_span()
     if tag == EXPR_INT_LIT:
-        Expr(kind: ExprKind.IntLit(expr_i_val[idx]), span: span)
+        Expr(kind: ExprKind.IntLit(expr_owner_int(idx)), span: span)
     elif tag == EXPR_FLOAT_LIT:
-        Expr(kind: ExprKind.FloatLit(expr_f_val[idx].to_float()), span: span)
+        Expr(kind: ExprKind.FloatLit(expr_owner_float(idx).to_float()), span: span)
     elif tag == EXPR_STRING_LIT:
-        Expr(kind: ExprKind.StringLit(expr_s_val[idx], nil), span: span)
+        Expr(kind: ExprKind.StringLit(expr_owner_str(idx), nil), span: span)
     elif tag == EXPR_BOOL_LIT:
-        Expr(kind: ExprKind.BoolLit(expr_i_val[idx] != 0), span: span)
+        Expr(kind: ExprKind.BoolLit(expr_owner_int(idx) != 0), span: span)
     elif tag == EXPR_NIL_LIT:
         Expr(kind: ExprKind.NilLit, span: span)
     elif tag == EXPR_IDENT:
-        Expr(kind: ExprKind.Ident(expr_s_val[idx]), span: span)
+        Expr(kind: ExprKind.Ident(expr_owner_str(idx)), span: span)
     elif tag == EXPR_CALL:
-        val callee = convert_flat_expr(expr_left[idx])
-        val arg_indices = expr_args[idx]
+        val callee = convert_flat_expr(expr_owner_left(idx))
+        val arg_indices = expr_owner_args(idx)
         var args: [CallArg] = []
         var ai = 0
         while ai < arg_indices.len():
@@ -111,22 +112,22 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ai = ai + 1
         Expr(kind: ExprKind.Call(callee, args), span: span)
     elif tag == EXPR_BINARY:
-        val left = convert_flat_expr(expr_left[idx])
-        val right = convert_flat_expr(expr_right[idx])
+        val left = convert_flat_expr(expr_owner_left(idx))
+        val right = convert_flat_expr(expr_owner_right(idx))
         # Binary op is stored as the token kind in i_val; decode it with the
         # shared #148 mapping rather than defaulting to Add (silent miscompile).
-        Expr(kind: ExprKind.Binary(op_kind_to_binop(expr_i_val[idx]), left, right), span: span)
+        Expr(kind: ExprKind.Binary(op_kind_to_binop(expr_owner_int(idx)), left, right), span: span)
     elif tag == EXPR_UNARY:
-        val operand = convert_flat_expr(expr_left[idx])
-        Expr(kind: ExprKind.Unary(op_kind_to_unaryop(expr_i_val[idx]), operand), span: span)
+        val operand = convert_flat_expr(expr_owner_left(idx))
+        Expr(kind: ExprKind.Unary(op_kind_to_unaryop(expr_owner_int(idx)), operand), span: span)
     elif tag == EXPR_FIELD_ACCESS:
-        val obj = convert_flat_expr(expr_left[idx])
-        val field_name = expr_s_val[idx]
+        val obj = convert_flat_expr(expr_owner_left(idx))
+        val field_name = expr_owner_str(idx)
         Expr(kind: ExprKind.Field(obj, field_name), span: span)
     elif tag == EXPR_METHOD_CALL:
-        val obj = convert_flat_expr(expr_left[idx])
-        val method_name = expr_s_val[idx]
-        val m_arg_indices = expr_args[idx]
+        val obj = convert_flat_expr(expr_owner_left(idx))
+        val method_name = expr_owner_str(idx)
+        val m_arg_indices = expr_owner_args(idx)
         var m_args: [CallArg] = []
         var mai = 0
         while mai < m_arg_indices.len():
@@ -139,11 +140,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
             mai = mai + 1
         Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
     elif tag == EXPR_INDEX:
-        val obj = convert_flat_expr(expr_left[idx])
-        val index = convert_flat_expr(expr_right[idx])
+        val obj = convert_flat_expr(expr_owner_left(idx))
+        val index = convert_flat_expr(expr_owner_right(idx))
         Expr(kind: ExprKind.Index(obj, index), span: span)
     elif tag == EXPR_ARRAY_LIT:
-        val elem_indices = expr_args[idx]
+        val elem_indices = expr_owner_args(idx)
         var elems: [Expr] = []
         var ei = 0
         while ei < elem_indices.len():
@@ -152,7 +153,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         Expr(kind: ExprKind.ArrayLit(elems), span: span)
     elif tag == EXPR_INTERPOLATED_STRING:
         # Interpolated strings: s_val has the template, args have the expressions
-        val parts = expr_args[idx]
+        val parts = expr_owner_args(idx)
         var interpolations: [Interpolation] = []
         var ii = 0
         while ii < parts.len():
@@ -163,10 +164,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
             ii = ii + 1
-        Expr(kind: ExprKind.StringLit(expr_s_val[idx], interpolations), span: span)
+        Expr(kind: ExprKind.StringLit(expr_owner_str(idx), interpolations), span: span)
     elif tag == EXPR_IF:
-        val cond = convert_flat_expr(expr_left[idx])
-        val then_stmts = expr_stmts[idx]
+        val cond = convert_flat_expr(expr_owner_left(idx))
+        val then_stmts = expr_owner_stmts(idx)
         var then_body: [Stmt] = []
         var ti = 0
         while ti < then_stmts.len():
@@ -175,16 +176,16 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val then_block = Block(stmts: then_body, span: span)
         Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
     elif tag == EXPR_RETURN:
-        val ret_expr = convert_flat_expr(expr_left[idx])
+        val ret_expr = convert_flat_expr(expr_owner_left(idx))
         Expr(kind: ExprKind.Return(ret_expr), span: span)
     elif tag == EXPR_LAMBDA:
-        val body_expr = convert_flat_expr(expr_left[idx])
+        val body_expr = convert_flat_expr(expr_owner_left(idx))
         var lambda_params: [LambdaParam] = []
-        val lp_names = expr_args[idx]
+        val lp_names = expr_owner_args(idx)
         var lpi = 0
         while lpi < lp_names.len():
             lambda_params = lambda_params.push(LambdaParam(
-                name: expr_s_val[lp_names[lpi]],
+                name: expr_owner_str(lp_names[lpi]),
                 has_type_: false,
                 type_: Type(kind: TypeKind.Infer, span: span),
                 span: span
@@ -192,24 +193,24 @@ fn convert_flat_expr(idx: i64) -> Expr:
             lpi = lpi + 1
         Expr(kind: ExprKind.Lambda(lambda_params, body_expr), span: span)
     elif tag == EXPR_NULL_COALESCE:
-        val lhs = convert_flat_expr(expr_left[idx])
-        val rhs = convert_flat_expr(expr_right[idx])
+        val lhs = convert_flat_expr(expr_owner_left(idx))
+        val rhs = convert_flat_expr(expr_owner_right(idx))
         Expr(kind: ExprKind.NullCoalesce(lhs, rhs), span: span)
     elif tag == EXPR_OPTIONAL_CHAIN:
-        val obj = convert_flat_expr(expr_left[idx])
-        Expr(kind: ExprKind.OptionalChain(obj, expr_s_val[idx]), span: span)
+        val obj = convert_flat_expr(expr_owner_left(idx))
+        Expr(kind: ExprKind.OptionalChain(obj, expr_owner_str(idx)), span: span)
     elif tag == EXPR_STRUCT_LIT:
-        val struct_name = expr_s_val[idx]
-        val field_exprs = expr_args[idx]
+        val struct_name = expr_owner_str(idx)
+        val field_exprs = expr_owner_args(idx)
         var fields: [(text, Expr)] = []
         var fi = 0
         while fi < field_exprs.len():
             val field_idx = field_exprs[fi]
-            fields = fields.push((expr_s_val[field_idx], convert_flat_expr(expr_left[field_idx])))
+            fields = fields.push((expr_owner_str(field_idx), convert_flat_expr(expr_owner_left(field_idx))))
             fi = fi + 1
         Expr(kind: ExprKind.StructLit(struct_name, fields), span: span)
     elif tag == EXPR_TUPLE:
-        val tuple_args = expr_args[idx]
+        val tuple_args = expr_owner_args(idx)
         var tuple_elems: [Expr] = []
         var tui = 0
         while tui < tuple_args.len():
@@ -223,10 +224,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
     elif tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
         Expr(kind: ExprKind.NilLit, span: span)
     elif tag == EXPR_EXISTS_CHECK:
-        val inner = convert_flat_expr(expr_left[idx])
+        val inner = convert_flat_expr(expr_owner_left(idx))
         Expr(kind: ExprKind.ExistsCheck(inner), span: span)
     elif tag == EXPR_TRY:
-        val try_inner = convert_flat_expr(expr_left[idx])
+        val try_inner = convert_flat_expr(expr_owner_left(idx))
         Expr(kind: ExprKind.Try(try_inner), span: span)
     else:
         # Fallback for unhandled expression types

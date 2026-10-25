@@ -23,15 +23,15 @@
 # Outside any higher-order argument, each call argument keeps its own
 # transform (`xs.find(_ > 3)` -> `xs.find(\__p0: __p0 > 3)`).
 #
-# Operates on the compiler's arena-based AST (expr_tag[], expr_left[], etc.).
+# Operates on the compiler's arena-based AST (expr_owner_tag(), expr_owner_left(), etc.).
 # Applied to each call argument after parsing.
 
+$txt
 use compiler.core.ast_expr.{
     EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL,
     EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IF, EXPR_ARRAY_LIT, EXPR_DICT_LIT,
     EXPR_NULL_COALESCE, EXPR_CAST, EXPR_SPREAD, EXPR_LAMBDA, EXPR_TUPLE,
     EXPR_SLICE, EXPR_MATCH, EXPR_INTERPOLATED_STRING,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts, expr_i_val,
     expr_ident, expr_binary, expr_unary, expr_call, expr_method_call,
     expr_field_access, expr_index, expr_if_expr, expr_array_lit, expr_dict_lit,
     expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice,
@@ -55,10 +55,10 @@ fn placeholder_rebuild_call(original: i64, new_left: i64, new_args: [i64]) -> i6
     """Rebuild a call/method call keeping argument names and explicit call
     type arguments (`f<T>(...)`); the former rebuild dropped both."""
     val names = expr_get_arg_names(original)
-    val rebuilt = if expr_tag[original] == EXPR_CALL:
+    val rebuilt = if expr_owner_tag(original) == EXPR_CALL:
         expr_call_named(new_left, new_args, names, 0)
     else:
-        expr_method_call_named(new_left, expr_s_val[original], new_args, names, 0)
+        expr_method_call_named(new_left, expr_owner_str(original), new_args, names, 0)
     val type_args = expr_get_call_type_args(original)
     if type_args.len() > 0:
         expr_set_call_type_args(rebuilt, type_args)
@@ -132,11 +132,11 @@ fn placeholder_callee_name_is_higher_order(name: text) -> bool:
 
 fn placeholder_callee_expr_is_higher_order(callee: i64) -> bool:
     """`f(...)` / `obj.f(...)` callee expression form of the name check."""
-    if callee < 0 or callee >= expr_tag.len():
+    if callee < 0 or callee >= expr_owner_len():
         return false
-    val tag = expr_tag[callee]
+    val tag = expr_owner_tag(callee)
     if tag == EXPR_IDENT or tag == EXPR_FIELD_ACCESS:
-        return placeholder_callee_name_is_higher_order(expr_s_val[callee])
+        return placeholder_callee_name_is_higher_order(expr_owner_str(callee))
     false
 
 fn placeholder_enter_call_arg(callee_is_higher_order: bool) -> i64:
@@ -210,12 +210,12 @@ var _ph_max_number: i64 = 0
 
 fn detect_placeholder_mode(eid: i64):
     """Scan expression to detect unnumbered `_` vs numbered `_N` usage."""
-    if eid < 0 or eid >= expr_tag.len():
+    if eid < 0 or eid >= expr_owner_len():
         return
-    val tag = expr_tag[eid]
+    val tag = expr_owner_tag(eid)
 
     if tag == EXPR_IDENT:
-        val name = expr_s_val[eid]
+        val name = expr_owner_str(eid)
         if name == "_":
             _ph_has_unnumbered = true
         elif is_numbered_placeholder(name):
@@ -226,20 +226,20 @@ fn detect_placeholder_mode(eid: i64):
         return
 
     if tag == EXPR_BINARY:
-        detect_placeholder_mode(expr_left[eid])
-        detect_placeholder_mode(expr_right[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
+        detect_placeholder_mode(expr_owner_right(eid))
         return
 
     if tag == EXPR_UNARY:
-        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
         return
 
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
         # Nested call arguments are scanned too: an argument that is still
         # raw here belongs to this transform (an already-transformed one is
         # an EXPR_LAMBDA, which is never scanned).
-        detect_placeholder_mode(expr_left[eid])
-        val call_args = expr_args[eid]
+        detect_placeholder_mode(expr_owner_left(eid))
+        val call_args = expr_owner_args(eid)
         var ci = 0
         while ci < call_args.len():
             detect_placeholder_mode(call_args[ci])
@@ -247,28 +247,28 @@ fn detect_placeholder_mode(eid: i64):
         return
 
     if tag == EXPR_FIELD_ACCESS:
-        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
         return
 
     if tag == EXPR_INDEX:
-        detect_placeholder_mode(expr_left[eid])
-        detect_placeholder_mode(expr_right[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
+        detect_placeholder_mode(expr_owner_right(eid))
         return
 
     if tag == EXPR_SLICE:
-        detect_placeholder_mode(expr_left[eid])
-        detect_placeholder_mode(expr_right[eid])
-        detect_placeholder_mode(expr_extra[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
+        detect_placeholder_mode(expr_owner_right(eid))
+        detect_placeholder_mode(expr_owner_extra(eid))
         return
 
     if tag == EXPR_IF:
-        detect_placeholder_mode(expr_left[eid])
-        detect_placeholder_mode(expr_right[eid])
-        detect_placeholder_mode(expr_extra[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
+        detect_placeholder_mode(expr_owner_right(eid))
+        detect_placeholder_mode(expr_owner_extra(eid))
         return
 
     if tag == EXPR_ARRAY_LIT:
-        val items = expr_args[eid]
+        val items = expr_owner_args(eid)
         var i = 0
         while i < items.len():
             detect_placeholder_mode(items[i])
@@ -276,7 +276,7 @@ fn detect_placeholder_mode(eid: i64):
         return
 
     if tag == EXPR_TUPLE:
-        val items = expr_args[eid]
+        val items = expr_owner_args(eid)
         var i = 0
         while i < items.len():
             detect_placeholder_mode(items[i])
@@ -284,8 +284,8 @@ fn detect_placeholder_mode(eid: i64):
         return
 
     if tag == EXPR_DICT_LIT:
-        val keys = expr_args[eid]
-        val vals = expr_stmts[eid]
+        val keys = expr_owner_args(eid)
+        val vals = expr_owner_stmts(eid)
         var i = 0
         while i < keys.len():
             detect_placeholder_mode(keys[i])
@@ -294,20 +294,20 @@ fn detect_placeholder_mode(eid: i64):
         return
 
     if tag == EXPR_NULL_COALESCE:
-        detect_placeholder_mode(expr_left[eid])
-        detect_placeholder_mode(expr_right[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
+        detect_placeholder_mode(expr_owner_right(eid))
         return
 
     if tag == EXPR_CAST:
-        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
         return
 
     if tag == EXPR_SPREAD:
-        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
         return
 
     if tag == EXPR_INTERPOLATED_STRING:
-        val parts = expr_args[eid]
+        val parts = expr_owner_args(eid)
         var i = 0
         while i < parts.len():
             detect_placeholder_mode(parts[i])
@@ -319,7 +319,7 @@ fn detect_placeholder_mode(eid: i64):
         # Arms are a scoping boundary: case _: uses `_` as a wildcard
         # pattern, not a placeholder — recursing into arm bodies would
         # miscount them. The placeholder is in the scrutinee only.
-        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_owner_left(eid))
         return
 
 # ===== Main Transform Entry Point =====
@@ -392,21 +392,21 @@ fn mark_placeholder_pattern_tree(eid: i64, expr_limit: i64):
         return
     _ph_pattern_node_marks[eid] = true
 
-    val left = expr_left[eid]
+    val left = expr_owner_left(eid)
     if left >= 0:
         mark_placeholder_pattern_tree(left, expr_limit)
-    val right = expr_right[eid]
+    val right = expr_owner_right(eid)
     if right >= 0:
         mark_placeholder_pattern_tree(right, expr_limit)
-    val extra = expr_extra[eid]
+    val extra = expr_owner_extra(eid)
     if extra >= 0:
         mark_placeholder_pattern_tree(extra, expr_limit)
 
     # EXPR_MATCH stores arm arena IDs in ARGS, not expression IDs. A match is
     # not a valid pattern subtree, so never interpret those IDs as children.
-    if expr_tag[eid] == EXPR_MATCH:
+    if expr_owner_tag(eid) == EXPR_MATCH:
         return
-    val children = expr_args[eid]
+    val children = expr_owner_args(eid)
     var child_index = 0
     while child_index < children.len():
         mark_placeholder_pattern_tree(children[child_index], expr_limit)
@@ -432,10 +432,10 @@ fn module_has_placeholder_ident(limit: i64) -> bool:
     See doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
     """
     var i = 0
-    val n = if limit < expr_tag.len(): limit else: expr_tag.len()
+    val n = if limit < expr_owner_len(): limit else: expr_owner_len()
     while i < n:
-        if expr_tag[i] == EXPR_IDENT:
-            val name = expr_s_val[i]
+        if expr_owner_tag(i) == EXPR_IDENT:
+            val name = expr_owner_str(i)
             if placeholder_ident_name(name):
                 return true
         i = i + 1
@@ -451,7 +451,7 @@ fn transform_placeholder_call_args_after_interpolation():
     placeholder arguments. Snapshot the arena size: wrapping an argument
     allocates new nodes, which must not be walked again by this pass.
     """
-    val initial_expr_count = expr_tag.len()
+    val initial_expr_count = expr_owner_len()
     # PERF: exact no-op precondition. See module_has_placeholder_ident above.
     if not module_has_placeholder_ident(initial_expr_count):
         return
@@ -465,7 +465,7 @@ fn transform_placeholder_call_args_after_interpolation_known_present():
     # Snapshot from this module's authoritative arena owner. A caller-facing
     # expr_count() can be a re-export/private copy under staged self-hosting and
     # is not a safe bound for indexing this module's expr_tag arrays.
-    val initial_expr_count = expr_tag.len()
+    val initial_expr_count = expr_owner_len()
     # Build the marks array in a LOCAL and assign the module-global ONCE. Under
     # the Rust-seed interpreter, `.push()` on a module-global array lands in a
     # per-call copy while `.len()` in a while condition (and later indexed
@@ -489,9 +489,9 @@ fn transform_placeholder_call_args_after_interpolation_known_present():
 
     var eid = 0
     while eid < initial_expr_count:
-        val tag = expr_tag[eid]
+        val tag = expr_owner_tag(eid)
         if not _ph_pattern_node_marks[eid] and (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
-            val old_args = expr_args[eid]
+            val old_args = expr_owner_args(eid)
             val old_names = expr_get_arg_names(eid)
             var new_args: [i64] = []
             var changed = false
@@ -502,7 +502,7 @@ fn transform_placeholder_call_args_after_interpolation_known_present():
                 if old_arg >= 0 and old_arg < initial_expr_count:
                     # Existing shorthand already produced a lambda during
                     # parsing. Do not traverse or wrap it a second time.
-                    if expr_tag[old_arg] != EXPR_LAMBDA:
+                    if expr_owner_tag(old_arg) != EXPR_LAMBDA:
                         new_arg = transform_placeholder_lambda(old_arg)
                 new_args.push(new_arg)
                 if new_arg != old_arg:
@@ -520,30 +520,30 @@ fn count_placeholders(eid: i64) -> i64:
     Does NOT recurse into nested call/method-call arguments (they get their
     own independent transform).
     """
-    if eid < 0 or eid >= expr_tag.len():
+    if eid < 0 or eid >= expr_owner_len():
         return 0
-    val tag = expr_tag[eid]
+    val tag = expr_owner_tag(eid)
 
     if tag == EXPR_IDENT:
-        val name = expr_s_val[eid]
+        val name = expr_owner_str(eid)
         if name == "_":
             return 1
         return 0
 
     if tag == EXPR_BINARY:
-        val l = count_placeholders(expr_left[eid])
-        val r = count_placeholders(expr_right[eid])
+        val l = count_placeholders(expr_owner_left(eid))
+        val r = count_placeholders(expr_owner_right(eid))
         return l + r
 
     if tag == EXPR_UNARY:
-        return count_placeholders(expr_left[eid])
+        return count_placeholders(expr_owner_left(eid))
 
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
         # Raw nested call arguments belong to this transform (see the
         # higher-order scoping note at the top); transformed ones are lambdas
         # and count 0.
-        var call_total = count_placeholders(expr_left[eid])
-        val call_args = expr_args[eid]
+        var call_total = count_placeholders(expr_owner_left(eid))
+        val call_args = expr_owner_args(eid)
         var ci = 0
         while ci < call_args.len():
             call_total = call_total + count_placeholders(call_args[ci])
@@ -551,28 +551,28 @@ fn count_placeholders(eid: i64) -> i64:
         return call_total
 
     if tag == EXPR_FIELD_ACCESS:
-        return count_placeholders(expr_left[eid])
+        return count_placeholders(expr_owner_left(eid))
 
     if tag == EXPR_INDEX:
-        val l = count_placeholders(expr_left[eid])
-        val r = count_placeholders(expr_right[eid])
+        val l = count_placeholders(expr_owner_left(eid))
+        val r = count_placeholders(expr_owner_right(eid))
         return l + r
 
     if tag == EXPR_SLICE:
-        val l = count_placeholders(expr_left[eid])
-        val r = count_placeholders(expr_right[eid])
-        val e = count_placeholders(expr_extra[eid])
+        val l = count_placeholders(expr_owner_left(eid))
+        val r = count_placeholders(expr_owner_right(eid))
+        val e = count_placeholders(expr_owner_extra(eid))
         return l + r + e
 
     if tag == EXPR_IF:
-        val c = count_placeholders(expr_left[eid])
-        val t = count_placeholders(expr_right[eid])
-        val e = count_placeholders(expr_extra[eid])
+        val c = count_placeholders(expr_owner_left(eid))
+        val t = count_placeholders(expr_owner_right(eid))
+        val e = count_placeholders(expr_owner_extra(eid))
         return c + t + e
 
     if tag == EXPR_ARRAY_LIT:
         var total = 0
-        val items = expr_args[eid]
+        val items = expr_owner_args(eid)
         var i = 0
         while i < items.len():
             total = total + count_placeholders(items[i])
@@ -581,7 +581,7 @@ fn count_placeholders(eid: i64) -> i64:
 
     if tag == EXPR_TUPLE:
         var total = 0
-        val items = expr_args[eid]
+        val items = expr_owner_args(eid)
         var i = 0
         while i < items.len():
             total = total + count_placeholders(items[i])
@@ -590,8 +590,8 @@ fn count_placeholders(eid: i64) -> i64:
 
     if tag == EXPR_DICT_LIT:
         var total = 0
-        val keys = expr_args[eid]
-        val vals = expr_stmts[eid]
+        val keys = expr_owner_args(eid)
+        val vals = expr_owner_stmts(eid)
         var i = 0
         while i < keys.len():
             total = total + count_placeholders(keys[i])
@@ -600,15 +600,15 @@ fn count_placeholders(eid: i64) -> i64:
         return total
 
     if tag == EXPR_NULL_COALESCE:
-        val l = count_placeholders(expr_left[eid])
-        val r = count_placeholders(expr_right[eid])
+        val l = count_placeholders(expr_owner_left(eid))
+        val r = count_placeholders(expr_owner_right(eid))
         return l + r
 
     if tag == EXPR_CAST:
-        return count_placeholders(expr_left[eid])
+        return count_placeholders(expr_owner_left(eid))
 
     if tag == EXPR_SPREAD:
-        return count_placeholders(expr_left[eid])
+        return count_placeholders(expr_owner_left(eid))
 
     if tag == EXPR_INTERPOLATED_STRING:
         # Bug (2026-07-30, string_template_multi_placeholder_slot_not_found):
@@ -624,7 +624,7 @@ fn count_placeholders(eid: i64) -> i64:
         # unbound ("variable `__pN` not found"). Collapse to presence
         # (0 or 1) so the whole template shares one slot; see the matching
         # note in replace_placeholders's EXPR_INTERPOLATED_STRING arm.
-        val parts = expr_args[eid]
+        val parts = expr_owner_args(eid)
         var i = 0
         while i < parts.len():
             if count_placeholders(parts[i]) > 0:
@@ -634,7 +634,7 @@ fn count_placeholders(eid: i64) -> i64:
 
     if tag == EXPR_MATCH:
         # Count placeholders in scrutinee only; arms are a scoping boundary.
-        return count_placeholders(expr_left[eid])
+        return count_placeholders(expr_owner_left(eid))
 
     0
 
@@ -649,12 +649,12 @@ fn replace_placeholders(eid: i64) -> i64:
     Does NOT recurse into nested call/method-call arguments — those get their
     own independent transform via the call-arg parsing path.
     """
-    if eid < 0 or eid >= expr_tag.len():
+    if eid < 0 or eid >= expr_owner_len():
         return eid
-    val tag = expr_tag[eid]
+    val tag = expr_owner_tag(eid)
 
     if tag == EXPR_IDENT:
-        val name = expr_s_val[eid]
+        val name = expr_owner_str(eid)
         if name == "_":
             val new_name = "__p{_ph_counter}"
             _ph_counter = _ph_counter + 1
@@ -670,20 +670,20 @@ fn replace_placeholders(eid: i64) -> i64:
         return eid
 
     if tag == EXPR_BINARY:
-        val new_left = replace_placeholders(expr_left[eid])
-        val new_right = replace_placeholders(expr_right[eid])
-        return placeholder_retain_span(eid, expr_binary(expr_i_val[eid], new_left, new_right, 0))
+        val new_left = replace_placeholders(expr_owner_left(eid))
+        val new_right = replace_placeholders(expr_owner_right(eid))
+        return placeholder_retain_span(eid, expr_binary(expr_owner_int(eid), new_left, new_right, 0))
 
     if tag == EXPR_UNARY:
-        val new_operand = replace_placeholders(expr_left[eid])
-        return placeholder_retain_span(eid, expr_unary(expr_i_val[eid], new_operand, 0))
+        val new_operand = replace_placeholders(expr_owner_left(eid))
+        return placeholder_retain_span(eid, expr_unary(expr_owner_int(eid), new_operand, 0))
 
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
         # Raw nested arguments share this lambda's parameters (counted by
         # count_placeholders); already-transformed ones are lambdas and are
         # returned unchanged. Names and explicit type args are preserved.
-        val new_left = replace_placeholders(expr_left[eid])
-        val old_args = expr_args[eid]
+        val new_left = replace_placeholders(expr_owner_left(eid))
+        val old_args = expr_owner_args(eid)
         var new_args: [i64] = []
         var i = 0
         while i < old_args.len():
@@ -692,28 +692,28 @@ fn replace_placeholders(eid: i64) -> i64:
         return placeholder_rebuild_call(eid, new_left, new_args)
 
     if tag == EXPR_FIELD_ACCESS:
-        val new_base = replace_placeholders(expr_left[eid])
-        return placeholder_retain_span(eid, expr_field_access(new_base, expr_s_val[eid], 0))
+        val new_base = replace_placeholders(expr_owner_left(eid))
+        return placeholder_retain_span(eid, expr_field_access(new_base, expr_owner_str(eid), 0))
 
     if tag == EXPR_INDEX:
-        val new_base = replace_placeholders(expr_left[eid])
-        val new_index = replace_placeholders(expr_right[eid])
+        val new_base = replace_placeholders(expr_owner_left(eid))
+        val new_index = replace_placeholders(expr_owner_right(eid))
         return placeholder_retain_span(eid, expr_index(new_base, new_index, 0))
 
     if tag == EXPR_SLICE:
-        val new_base = replace_placeholders(expr_left[eid])
-        val new_start = replace_placeholders(expr_right[eid])
-        val new_end = replace_placeholders(expr_extra[eid])
+        val new_base = replace_placeholders(expr_owner_left(eid))
+        val new_start = replace_placeholders(expr_owner_right(eid))
+        val new_end = replace_placeholders(expr_owner_extra(eid))
         return placeholder_retain_span(eid, expr_slice(new_base, new_start, new_end, 0))
 
     if tag == EXPR_IF:
-        val new_cond = replace_placeholders(expr_left[eid])
-        val new_then = replace_placeholders(expr_right[eid])
-        val new_else = replace_placeholders(expr_extra[eid])
+        val new_cond = replace_placeholders(expr_owner_left(eid))
+        val new_then = replace_placeholders(expr_owner_right(eid))
+        val new_else = replace_placeholders(expr_owner_extra(eid))
         return placeholder_retain_span(eid, expr_if_expr(new_cond, new_then, new_else, 0))
 
     if tag == EXPR_ARRAY_LIT:
-        val old_items = expr_args[eid]
+        val old_items = expr_owner_args(eid)
         var new_items: [i64] = []
         var i = 0
         while i < old_items.len():
@@ -722,7 +722,7 @@ fn replace_placeholders(eid: i64) -> i64:
         return placeholder_retain_span(eid, expr_array_lit(new_items, 0))
 
     if tag == EXPR_TUPLE:
-        val old_items = expr_args[eid]
+        val old_items = expr_owner_args(eid)
         var new_items: [i64] = []
         var i = 0
         while i < old_items.len():
@@ -731,8 +731,8 @@ fn replace_placeholders(eid: i64) -> i64:
         return placeholder_retain_span(eid, expr_tuple(new_items, 0))
 
     if tag == EXPR_DICT_LIT:
-        val old_keys = expr_args[eid]
-        val old_vals = expr_stmts[eid]
+        val old_keys = expr_owner_args(eid)
+        val old_vals = expr_owner_stmts(eid)
         var new_keys: [i64] = []
         var new_vals: [i64] = []
         var i = 0
@@ -743,16 +743,16 @@ fn replace_placeholders(eid: i64) -> i64:
         return placeholder_retain_span(eid, expr_dict_lit(new_keys, new_vals, 0))
 
     if tag == EXPR_NULL_COALESCE:
-        val new_left = replace_placeholders(expr_left[eid])
-        val new_right = replace_placeholders(expr_right[eid])
+        val new_left = replace_placeholders(expr_owner_left(eid))
+        val new_right = replace_placeholders(expr_owner_right(eid))
         return placeholder_retain_span(eid, expr_null_coalesce(new_left, new_right, 0))
 
     if tag == EXPR_CAST:
-        val new_val = replace_placeholders(expr_left[eid])
-        return placeholder_retain_span(eid, expr_cast(new_val, expr_i_val[eid], 0))
+        val new_val = replace_placeholders(expr_owner_left(eid))
+        return placeholder_retain_span(eid, expr_cast(new_val, expr_owner_int(eid), 0))
 
     if tag == EXPR_SPREAD:
-        val new_inner = replace_placeholders(expr_left[eid])
+        val new_inner = replace_placeholders(expr_owner_left(eid))
         return placeholder_retain_span(eid, expr_spread(new_inner, 0))
 
     if tag == EXPR_INTERPOLATED_STRING:
@@ -761,7 +761,7 @@ fn replace_placeholders(eid: i64) -> i64:
         # interpolated string shares a SINGLE slot (reserved once from
         # _ph_counter), instead of each occurrence grabbing its own
         # incrementing slot.
-        val old_parts = expr_args[eid]
+        val old_parts = expr_owner_args(eid)
         var has_bare = false
         var i = 0
         while i < old_parts.len():
@@ -784,14 +784,14 @@ fn replace_placeholders(eid: i64) -> i64:
         # Carry the verbatim template text across the rebuild -- see
         # expr_interpolated_string_with_text's doc comment: dropping it makes
         # MIR lower the whole literal, placeholders and all, to "".
-        return placeholder_retain_span(eid, expr_interpolated_string_with_text(expr_s_val[eid], new_parts, 0))
+        return placeholder_retain_span(eid, expr_interpolated_string_with_text(expr_owner_str(eid), new_parts, 0))
 
     if tag == EXPR_MATCH:
         # Replace placeholders in the scrutinee only.
         # Arms are a scoping boundary: arm bodies and patterns are left
         # unchanged so that `case _:` wildcards are not mis-replaced.
-        val new_scrutinee = replace_placeholders(expr_left[eid])
-        val arms = expr_args[eid]
+        val new_scrutinee = replace_placeholders(expr_owner_left(eid))
+        val arms = expr_owner_args(eid)
         return placeholder_retain_span(eid, expr_match_expr(new_scrutinee, arms, 0))
 
     # For any other expression type, return as-is
@@ -808,12 +808,12 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
     template denote the SAME bound value, not independent positional lambda
     parameters.
     """
-    if eid < 0 or eid >= expr_tag.len():
+    if eid < 0 or eid >= expr_owner_len():
         return eid
-    val tag = expr_tag[eid]
+    val tag = expr_owner_tag(eid)
 
     if tag == EXPR_IDENT:
-        val name = expr_s_val[eid]
+        val name = expr_owner_str(eid)
         if name == "_":
             return placeholder_retain_span(eid, expr_ident("__p{slot}", 0))
         if _ph_has_numbered and not _ph_has_unnumbered:
@@ -826,20 +826,20 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         return eid
 
     if tag == EXPR_BINARY:
-        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val new_right = replace_placeholders_fixed_slot(expr_right[eid], slot)
-        return placeholder_retain_span(eid, expr_binary(expr_i_val[eid], new_left, new_right, 0))
+        val new_left = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val new_right = replace_placeholders_fixed_slot(expr_owner_right(eid), slot)
+        return placeholder_retain_span(eid, expr_binary(expr_owner_int(eid), new_left, new_right, 0))
 
     if tag == EXPR_UNARY:
-        val new_operand = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        return placeholder_retain_span(eid, expr_unary(expr_i_val[eid], new_operand, 0))
+        val new_operand = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        return placeholder_retain_span(eid, expr_unary(expr_owner_int(eid), new_operand, 0))
 
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
         # Interpolation regions are parsed with the transform suppressed, so
         # `{self.f(_.1)}` reaches here with a raw `_`: it is the template's
         # bound value, not a new lambda.
-        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val old_args = expr_args[eid]
+        val new_left = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val old_args = expr_owner_args(eid)
         var new_args: [i64] = []
         var i = 0
         while i < old_args.len():
@@ -848,28 +848,28 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         return placeholder_rebuild_call(eid, new_left, new_args)
 
     if tag == EXPR_FIELD_ACCESS:
-        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        return placeholder_retain_span(eid, expr_field_access(new_base, expr_s_val[eid], 0))
+        val new_base = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        return placeholder_retain_span(eid, expr_field_access(new_base, expr_owner_str(eid), 0))
 
     if tag == EXPR_INDEX:
-        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val new_index = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        val new_base = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val new_index = replace_placeholders_fixed_slot(expr_owner_right(eid), slot)
         return placeholder_retain_span(eid, expr_index(new_base, new_index, 0))
 
     if tag == EXPR_SLICE:
-        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val new_start = replace_placeholders_fixed_slot(expr_right[eid], slot)
-        val new_end = replace_placeholders_fixed_slot(expr_extra[eid], slot)
+        val new_base = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val new_start = replace_placeholders_fixed_slot(expr_owner_right(eid), slot)
+        val new_end = replace_placeholders_fixed_slot(expr_owner_extra(eid), slot)
         return placeholder_retain_span(eid, expr_slice(new_base, new_start, new_end, 0))
 
     if tag == EXPR_IF:
-        val new_cond = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val new_then = replace_placeholders_fixed_slot(expr_right[eid], slot)
-        val new_else = replace_placeholders_fixed_slot(expr_extra[eid], slot)
+        val new_cond = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val new_then = replace_placeholders_fixed_slot(expr_owner_right(eid), slot)
+        val new_else = replace_placeholders_fixed_slot(expr_owner_extra(eid), slot)
         return placeholder_retain_span(eid, expr_if_expr(new_cond, new_then, new_else, 0))
 
     if tag == EXPR_ARRAY_LIT:
-        val old_items = expr_args[eid]
+        val old_items = expr_owner_args(eid)
         var new_items: [i64] = []
         var i = 0
         while i < old_items.len():
@@ -878,7 +878,7 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         return placeholder_retain_span(eid, expr_array_lit(new_items, 0))
 
     if tag == EXPR_TUPLE:
-        val old_items = expr_args[eid]
+        val old_items = expr_owner_args(eid)
         var new_items: [i64] = []
         var i = 0
         while i < old_items.len():
@@ -887,8 +887,8 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         return placeholder_retain_span(eid, expr_tuple(new_items, 0))
 
     if tag == EXPR_DICT_LIT:
-        val old_keys = expr_args[eid]
-        val old_vals = expr_stmts[eid]
+        val old_keys = expr_owner_args(eid)
+        val old_vals = expr_owner_stmts(eid)
         var new_keys: [i64] = []
         var new_vals: [i64] = []
         var i = 0
@@ -899,20 +899,20 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         return placeholder_retain_span(eid, expr_dict_lit(new_keys, new_vals, 0))
 
     if tag == EXPR_NULL_COALESCE:
-        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val new_right = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        val new_left = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val new_right = replace_placeholders_fixed_slot(expr_owner_right(eid), slot)
         return placeholder_retain_span(eid, expr_null_coalesce(new_left, new_right, 0))
 
     if tag == EXPR_CAST:
-        val new_val = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        return placeholder_retain_span(eid, expr_cast(new_val, expr_i_val[eid], 0))
+        val new_val = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        return placeholder_retain_span(eid, expr_cast(new_val, expr_owner_int(eid), 0))
 
     if tag == EXPR_SPREAD:
-        val new_inner = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_inner = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
         return placeholder_retain_span(eid, expr_spread(new_inner, 0))
 
     if tag == EXPR_INTERPOLATED_STRING:
-        val old_parts = expr_args[eid]
+        val old_parts = expr_owner_args(eid)
         var new_parts: [i64] = []
         var i = 0
         while i < old_parts.len():
@@ -921,11 +921,11 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         # Carry the verbatim template text across the rebuild -- see
         # expr_interpolated_string_with_text's doc comment: dropping it makes
         # MIR lower the whole literal, placeholders and all, to "".
-        return placeholder_retain_span(eid, expr_interpolated_string_with_text(expr_s_val[eid], new_parts, 0))
+        return placeholder_retain_span(eid, expr_interpolated_string_with_text(expr_owner_str(eid), new_parts, 0))
 
     if tag == EXPR_MATCH:
-        val new_scrutinee = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val arms = expr_args[eid]
+        val new_scrutinee = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)
+        val arms = expr_owner_args(eid)
         return placeholder_retain_span(eid, expr_match_expr(new_scrutinee, arms, 0))
 
     # For any other expression type, return as-is
@@ -978,17 +978,17 @@ fn transform_interpolated_placeholder_args(start_expr: i64):
     val prev = set_placeholder_transform_suppressed(false)
     var idx = start_expr
     while idx < limit:
-        val tag = expr_tag[idx]
+        val tag = expr_owner_tag(idx)
         if (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
-            val args = expr_args[idx]
+            val args = expr_owner_args(idx)
             var new_args: [i64] = []
             var changed = false
             var i = 0
             while i < args.len():
                 val a = args[i]
                 var out = a
-                if (a >= 0 and a < expr_tag.len() and
-                        expr_tag[a] == EXPR_INTERPOLATED_STRING):
+                if (a >= 0 and a < expr_owner_len() and
+                        expr_owner_tag(a) == EXPR_INTERPOLATED_STRING):
                     _ph_has_unnumbered = false
                     _ph_has_numbered = false
                     _ph_max_number = 0
