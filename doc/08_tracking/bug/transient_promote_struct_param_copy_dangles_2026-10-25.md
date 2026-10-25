@@ -71,7 +71,7 @@ both `rt_alloc` and `rt_transient_heap_promote`):
 ## Fix
 
 Both wrappers now take `mut value: T`. A `mut` parameter is bound by
-reference (`is_mut_param`, `function_lowering.spl:674`), so the extern sees
+reference (`is_mut_param`, `function_lowering.spl:673`), so the extern sees
 the caller's root. The fixed instance is a pure forward: no `rt_alloc`.
 
 Not done, and deliberately so: eliding the Bug #167 copy for parameters that
