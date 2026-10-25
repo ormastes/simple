@@ -44,6 +44,21 @@ static const uint64_t dict_desc[]={1,4,64,2,(uintptr_t)dict_rows,1};
 static const uint64_t tagged_rows[]={0,8,1,0,8,8,2,2};
 static const uint64_t tagged_desc[]={1,4,64,2,(uintptr_t)tagged_rows,1};
 
+/* Deliberate fault injection into an actual registered dictionary. The
+ * production provider must reject the projected bits even if insertion was
+ * bypassed by corruption; no forged pointer is dereferenced by this helper. */
+typedef struct ProjectionEntryV1 {
+    int64_t key,value; uint64_t hash; int8_t occupied;
+} ProjectionEntryV1;
+static int64_t replace_projected_value(int64_t dictionary,int64_t key,int64_t value) {
+    _Static_assert(sizeof(ProjectionEntryV1)==32,"actual entry stride");
+    FixtureDictHeaderV1* d=(FixtureDictHeaderV1*)(uintptr_t)(dictionary&~INT64_C(7));
+    ProjectionEntryV1* rows=(ProjectionEntryV1*)d->entries;
+    for(int64_t i=0;i<d->capacity;++i) if(rows[i].occupied==1 && rows[i].key==key) {
+        int64_t old=rows[i].value; rows[i].value=value; return old;
+    }
+    assert(0); return 0;
+}
 static int64_t fixed_work(int operation) {
     int64_t result=rt_source_region_bound_v1(operation,0,0,0);
     assert(result>0); return result;
@@ -118,14 +133,86 @@ int main(void) {
     assert(put(c,g,d,4,(int64_t)(uintptr_t)preexisting)==SR_FOREIGN);
     assert(put(c,g,d,4,0)==SR_FOREIGN);
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
+    /* Output validation is distinct from put's input check. */
+    assert(replace_projected_value(d,INT64_MIN,foreign)==child);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,(int64_t)(uintptr_t)preexisting)==foreign);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,child|1)==(int64_t)(uintptr_t)preexisting);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN); /* raw recipe cannot accept tag1 */
+    assert(replace_projected_value(d,INT64_MIN,child)==(child|1));
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(sr_find((uintptr_t)child));
+    assert(metadata && metadata->bytes==8);
+    metadata->bytes=16;
+    assert(get(c,g,d,INT64_MIN)==SR_INCOMPLETE);
+    metadata->bytes=8;
+    uint64_t child_generation=metadata->generation;
+    metadata->generation=child_generation+1;
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    metadata->generation=child_generation;
+    assert(get(c,g,d,INT64_MIN)==child);
+    int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
+    assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
+    assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
+
     int64_t allowance=rt_source_region_dict_observation_bound_v1(); assert(allowance>0);
     assert(rt_source_region_bound_v1(14,d,allowance-1,0)==SR_CAPACITY);
     int64_t short_work=dict_work(14,d);
     assert(rt_source_region_dict_put_v1(c,g,current,d,4,child,short_work-1)==SR_CAPACITY);
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
+    /* Output validation is distinct from put's input check. */
+    assert(replace_projected_value(d,INT64_MIN,foreign)==child);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,(int64_t)(uintptr_t)preexisting)==foreign);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,child|1)==(int64_t)(uintptr_t)preexisting);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN); /* raw recipe cannot accept tag1 */
+    assert(replace_projected_value(d,INT64_MIN,child)==(child|1));
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(sr_find((uintptr_t)child));
+    assert(metadata && metadata->bytes==8);
+    metadata->bytes=16;
+    assert(get(c,g,d,INT64_MIN)==SR_INCOMPLETE);
+    metadata->bytes=8;
+    uint64_t child_generation=metadata->generation;
+    metadata->generation=child_generation+1;
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    metadata->generation=child_generation;
+    assert(get(c,g,d,INT64_MIN)==child);
+    int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
+    assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
+    assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
+
     /* An unclassified ordinary alias path cannot mutate SOURCE storage. */
     assert(!rt_dict_set(d,4,child));
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
+    /* Output validation is distinct from put's input check. */
+    assert(replace_projected_value(d,INT64_MIN,foreign)==child);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,(int64_t)(uintptr_t)preexisting)==foreign);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    assert(replace_projected_value(d,INT64_MIN,child|1)==(int64_t)(uintptr_t)preexisting);
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN); /* raw recipe cannot accept tag1 */
+    assert(replace_projected_value(d,INT64_MIN,child)==(child|1));
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(sr_find((uintptr_t)child));
+    assert(metadata && metadata->bytes==8);
+    metadata->bytes=16;
+    assert(get(c,g,d,INT64_MIN)==SR_INCOMPLETE);
+    metadata->bytes=8;
+    uint64_t child_generation=metadata->generation;
+    metadata->generation=child_generation+1;
+    assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
+    metadata->generation=child_generation;
+    assert(get(c,g,d,INT64_MIN)==child);
+    int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
+    assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
+    assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
+
     assert(!rt_dict_clear(d));
     assert(get(c,g,d,INT64_MIN)==child && epoch(c,g)==current);
     int64_t copied_before_rehash=unclassified_copy(d);
@@ -143,6 +230,11 @@ int main(void) {
     assert(tagged>0);
     assert(put(c,g,tagged,-7,child|1)==1);
     assert(get(c,g,tagged,-7)==(child|1));
+    assert(replace_projected_value(tagged,-7,child)==(child|1));
+    assert(get(c,g,tagged,-7)==SR_FOREIGN); /* tagged recipe cannot accept raw */
+    assert(replace_projected_value(tagged,-7,child|1)==child);
+    assert(get(c,g,tagged,-7)==(child|1));
+
     current=epoch(c,g);
     assert(put(c,g,tagged,-7,child|2)==SR_FOREIGN);
     assert(epoch(c,g)==current);
