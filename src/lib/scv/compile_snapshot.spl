@@ -19,6 +19,7 @@ use std.common.text_bytes.{utf8_bytes_valid}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
     secure_temp_dir_raw, file_publish_noreplace_raw}
@@ -280,6 +281,42 @@ fn scv_compile_snapshot_read_text_v1(path: text) -> text:
     loaded.unwrap()
 
 fn scv_compile_snapshot_open_v1(
+    root: text, snapshot_root: text, revision_id: text, commit_id: text,
+    tree_id: text, inventory_digest: text
+) -> ScvCompileSnapshotV1:
+    # Only compact authority escapes this read. The full manifest, row/field
+    # splits and integrity-check buffers must not live until a child finishes.
+    # Materialization retains its separate per-file scratch owners.
+    if transient_array_scope_state_v1() != 0:
+        return scv_compile_snapshot_open_unscoped_v1(
+            root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    # File metadata adapters lazily cache the platform in a process-global
+    # array. Initialize it while allocations are persistent, before owning
+    # scratch, so no global can retain an array retired with this read.
+    val _platform_is_windows = host_is_windows_host()
+    if not transient_scope_begin():
+        return scv_compile_snapshot_open_unscoped_v1(
+            root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    val opened = scv_compile_snapshot_open_unscoped_v1(
+        root, snapshot_root, revision_id, commit_id, tree_id, inventory_digest)
+    val state = transient_array_scope_state_v1()
+    if state != 1:
+        if state == 2:
+            val ended = transient_scope_end()
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-state-invalid")
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-pause-failed")
+    val retained = transient_promote(opened)
+    val ended = transient_scope_end()
+    # Allocate errors after retirement; opened may now refer to freed storage.
+    if not retained:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-promote-failed")
+    if not ended:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-scratch-end-failed")
+    opened
+
+fn scv_compile_snapshot_open_unscoped_v1(
     root: text, snapshot_root: text, revision_id: text, commit_id: text,
     tree_id: text, inventory_digest: text
 ) -> ScvCompileSnapshotV1:
