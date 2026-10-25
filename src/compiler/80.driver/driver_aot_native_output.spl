@@ -1,4 +1,7 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use compiler.driver.driver_build.native_mir_codegen_observation_v1.{
+    native_mir_codegen_observation_begin_v1, native_mir_codegen_observation_end_v1,
+    native_mir_codegen_observation_publish_object_v1}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -3630,10 +3633,17 @@ fn _compile_frozen_module_capsule(
     if ice_gate != "":
         return _aot_compile_failure(name,
             ice_boundary_fail(name, capsule.cache_source, "codegen", backend_name, ice_gate))
-    match _compile_selected_module(backend_name, is_release, opt_level,
+    val observation = match native_mir_codegen_observation_begin_v1(name):
+        case Ok(value): value
+        case Err(reason): return _aot_compile_failure(name, reason)
+    val compiled = _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
-        capsule.target_cpu, backend_session):
+        capsule.target_cpu, backend_session)
+    val observed = native_mir_codegen_observation_end_v1(observation, compiled.is_ok())
+    if observed.is_err():
+        return _aot_compile_failure(name, observed.unwrap_err())
+    match compiled:
         case Err(error):
             if group_member_id != "":
                 log_phase("native_group:codegen:error member={group_member_id} backend={backend_name}")
@@ -3697,6 +3707,9 @@ fn _compile_frozen_module_capsule(
             # fail at the write site with a name that says what happened.
             if (_sffi_file_read_text(receipt_path) ?? "") != receipt:
                 return _aot_compile_failure(name, "capsule-receipt-write-unverified")
+            val published = native_mir_codegen_observation_publish_object_v1(observation, capsule)
+            if published.is_err(): return _aot_compile_failure(name, published.unwrap_err())
+            if not published.unwrap(): return _aot_compile_failure(name, "worker-object-result-empty")
             Ok(object_path)
 
 fn _runtime_std_compile_members_with_session_v1(
