@@ -52,6 +52,7 @@ All names begin `rt_source_region_` and end `_v1`:
 | capabilities | none | supported representation bits; full SOURCE admission is separate |
 | bound | operation, descriptor, capacity, metric | metric 0 work / 1 state fields / 2 allocation bytes, or error |
 | create | prepaid_work | control token |
+| created_generation | immediate successful birth token | infallible generation; prepaid before create, compiler-sealed birth only |
 | allocation_prepare | descriptor, capacity, prepaid_work | prepared registry revision |
 | alloc | control, generation, epoch, descriptor, capacity, prepared_revision, prepaid_work | allocation identity |
 | generation | control, prepaid_work | lifetime generation |
@@ -71,13 +72,26 @@ except alloc and allocation_prepare. Bounds do not authorize operations and cann
 
 ## Existing owner association and bounded operations
 
-Extend existing owner entries with control identity, allocation incarnation,
-descriptor identity and control-record kind. Rehash must preserve all metadata;
+Keep ordinary owner entries at their existing two-word size. A positive i64
+extent leaves the high size_t bit free on this 64-bit provider: only SOURCE
+entries use it to encode a checked aligned pointer to SOURCE-only metadata
+{extent, region, generation, descriptor, control-kind}. All actual extent
+readers decode through one canonical helper. Rehash preserves the encoded word
+directly; ordinary frees do no additional identity lookup. SOURCE metadata
+allocation is prepaid and freed once with its actual owner. Region generation
+is checked on destination/child association and retirement, preventing a
+recycled control address from admitting old allocations.
+
+Rehash must preserve all metadata;
 free/removal retires association before address reuse. Each provider is separate:
 the struct extent registry cannot certify native container backing storage.
 
-Prepay the existing registry capacity per identity lookup, then probe at most
-that capacity with early termination. There is no additional collision cap.
+Existing insertion records a monotonic upper bound on successful probe count
+within the probes it already performs; deletion retains that bound and rehash
+resets/rebuilds it. Every present pointer is therefore within that bound, and
+absence is proved by exhausting the same bound, even across tombstones. Exact
+identity queries/stores prepay this owner-derived bound, not total registry
+capacity. New pointer insertion still prepays capacity; there is no new cap.
 Read/write operations never resize or traverse the registry. Reuse existing
 owner locks through nonwaiting acquisition; contention is Incomplete. Prepay
 every lookup including destination, control and incoming child separately.
@@ -87,8 +101,8 @@ no callback/allocation/resize and validates the immediate child before store.
 Allocation registry growth requires a separate construction preparation before
 allocation. Its bound must include old-capacity traversal and worst-case rehash
 insertion probes, checked multiplication and metadata bytes. A stale prepared
-registry revision cancels without allocation/publication. A store prepays full existing-capacity lookup bounds in this correctness
-baseline; it never pays for registry resizing. The native memory-owner route
+registry revision cancels without allocation/publication. A store prepays the maintained maximum-successful-probe bound; it never pays
+for registry resizing. The native memory-owner route
 now prepares both existing registries before
 allocation, retaining one TLS preparation record and rejecting changed raw or
 struct revisions. Guarded/hardened allocators remain Incomplete.
@@ -106,8 +120,9 @@ rejected; region attachment/adoption is absent from this ABI.
 
 ## Capability and evidence status
 
-Native raw-struct primitive tests PASS in standalone and composed native
-active-transient modes. Native containers, pure and hosted provider admission
+Earlier raw-struct primitive revisions passed in standalone and composed
+native active-transient modes. Revised metadata/probe/tagged-edge version
+currently awaits exact source review and its final authorized execution. Native containers, pure and hosted provider admission
 remain UNRUN/OPEN. Full parser/HIR SOURCE acceptance remains UNRUN. None may
 advertise full closure from per-allocation epoch checks.
 Every unsupported provider must return Incomplete before authority or mutation.
@@ -121,3 +136,8 @@ metadata scan, actual registry growth and all metric category charges. Alias
 work covers the combined stamp/begin/commit operation, not three reuses of a
 small allowance. Native operations revalidate live bounds under the existing
 nonwaiting owner lock before any paid scan, allocation or mutation.
+
+Representation 2 is supported only for an exact compiler-certified Struct edge:
+require low tag bits exactly 1, normalize the owner lookup, and preserve the
+original tagged word in the store. Zero cannot be committed to a nonnullable
+Struct edge; zeroed constructor storage is not a completed published value.

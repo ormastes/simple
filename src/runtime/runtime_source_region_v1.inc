@@ -42,7 +42,7 @@ static int sr_try_lock(void) {
 static RtStructAllocation* sr_find(uintptr_t ptr) {
     if (!ptr || !rt_struct_alloc_cap) return NULL;
     size_t index = rt_transient_raw_hash(ptr) & (rt_struct_alloc_cap - 1);
-    for (size_t probes = 0; probes < rt_struct_alloc_cap; ++probes) {
+    for (size_t probes = 0; probes < rt_struct_alloc_max_success_probe_v1; ++probes) {
         RtStructAllocation* entry = &rt_struct_allocs[index];
         if (!entry->ptr) return NULL;
         if (entry->ptr == ptr) return entry;
@@ -51,13 +51,18 @@ static RtStructAllocation* sr_find(uintptr_t ptr) {
     return NULL;
 }
 
-static RtSourceRegionV1* sr_control(int64_t token) {
+static RtSourceRegionV1* sr_control_any_owner(int64_t token) {
     RtStructAllocation* entry = sr_find((uintptr_t)token);
-    return entry && entry->source_control &&
-        entry->bytes == sizeof(RtSourceRegionV1) &&
-        ((RtSourceRegionV1*)(uintptr_t)token)->execution_owner ==
-            (uintptr_t)&sr_execution_owner_v1
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
+    return metadata && metadata->control &&
+        metadata->bytes == sizeof(RtSourceRegionV1) &&
+        metadata->generation == ((RtSourceRegionV1*)(uintptr_t)token)->generation
         ? (RtSourceRegionV1*)(uintptr_t)token : NULL;
+}
+
+static RtSourceRegionV1* sr_control(int64_t token) {
+    RtSourceRegionV1* r=sr_control_any_owner(token);
+    return r && r->execution_owner==(uintptr_t)&sr_execution_owner_v1 ? r : NULL;
 }
 
 static int64_t sr_validate(RtSourceRegionV1* r, int64_t generation) {
@@ -89,7 +94,7 @@ static int sr_descriptor(const uint64_t* d, int64_t capacity) {
          * silently truncate an ordinary native SetField. */
         if (s[0] != i * 8 || s[1] != 8 || s[0] > d[2] ||
             s[1] > d[2] - s[0] || s[2] < 1 || s[2] > 3 ||
-            (s[2] == 1 ? s[3] != 0 : s[3] != 1)) return 0;
+            (s[2] == 1 ? s[3] != 0 : (s[3] != 1 && s[3] != 2))) return 0;
         /* No immutable certification owner exists in this struct provider. */
         if (s[2] == 3) return 0;
     }
@@ -118,7 +123,7 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
     int64_t capacity, int64_t metric) {
     if (operation < 1 || operation > 12 || metric < 0 || metric > 2) return SR_INCOMPLETE;
     uint64_t cap = rt_struct_alloc_cap;
-    uint64_t work = 16 * cap + 512, fields = 0, bytes = 0;
+    uint64_t work = 16 * rt_struct_alloc_max_success_probe_v1 + 512, fields = 0, bytes = 0;
     if (operation == 1 || operation == 12) {
         uint64_t next = 0;
         if (!cap) next = 256;
@@ -130,13 +135,17 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
             }
         }
         /* Registry rehash reserves old traversal, both insertion probes and
-         * metadata restoration probes, and the actual new table allocation. */
+         * the actual new table allocation; encoded metadata needs no extra lookup. */
         if (next) {
-            fields += next * 6;
+            fields += next * 2;
             bytes += next * sizeof(RtStructAllocation);
-            work += cap * next * 2 + cap + next;
+            work += cap * next + cap + next;
         }
-        if (operation == 1) { bytes += sizeof(RtSourceRegionV1); fields += 11; }
+        if (operation == 1) {
+            bytes += sizeof(RtSourceRegionV1)+sizeof(RtSourceAllocationMetadataV1);
+            fields += 16;
+            work += cap;
+        }
     }
     if (operation == 2 || operation == 12) {
         const uint64_t* d = (const uint64_t*)(uintptr_t)descriptor;
@@ -144,7 +153,11 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
         if (!sr_descriptor_header(d, capacity)) return SR_INCOMPLETE;
         if (d[3] > ((uint64_t)INT64_MAX - work) / 16) return SR_CAPACITY;
         work += d[3] * 16;
-        if (operation == 2) { bytes += d[2]; fields += d[3]; }
+        if (operation == 2) {
+            bytes += d[2]+sizeof(RtSourceAllocationMetadataV1);
+            fields += d[3]+5;
+            work += cap; /* insertion of a not-yet-allocated pointer */
+        }
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
         if (operation == 2) {
             int64_t rw=rt_transient_raw_source_bound_v1(0);
@@ -227,18 +240,24 @@ int64_t rt_source_region_create_v1(int64_t fuel) {
     }
     /* Control state is explicitly retained, outside the observed graph. */
     RtSourceRegionV1* r = (RtSourceRegionV1*)rt_observed_calloc_v1(1, sizeof(*r));
-    int ok = r && (rt_struct_alloc_cap || rt_struct_alloc_resize(256));
+    RtSourceAllocationMetadataV1* metadata=(RtSourceAllocationMetadataV1*)rt_observed_calloc_v1(1,sizeof(*metadata));
+    size_t metadata_bits=0;
+    int ok = r && rt_struct_source_metadata_bits_v1(metadata,&metadata_bits) &&
+        (rt_struct_alloc_cap || rt_struct_alloc_resize(256));
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10 >=
         rt_struct_alloc_cap * 7) {
         ok = rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP &&
             rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
     }
-    if (ok) ok = rt_struct_alloc_insert_raw((uintptr_t)r, sizeof(*r));
-    if (!ok) { free(r); rt_struct_alloc_lock_release(); return SR_CAPACITY; }
+    if (ok) {
+        metadata->bytes=sizeof(*r); metadata->control=1;
+        ok = rt_struct_alloc_insert_raw((uintptr_t)r,metadata_bits);
+    }
+    if (!ok) { free(metadata); free(r); rt_struct_alloc_lock_release(); return SR_CAPACITY; }
     r->generation = rt_source_region_next_generation_v1++;
     r->epoch = 1;
     r->execution_owner = (uintptr_t)&sr_execution_owner_v1;
-    sr_find((uintptr_t)r)->source_control = 1;
+    metadata->region=(uintptr_t)r; metadata->generation=r->generation;
     rt_source_region_registry_changed_v1();
     rt_struct_alloc_lock_release(); return (int64_t)(uintptr_t)r;
 }
@@ -274,14 +293,18 @@ int64_t rt_source_region_alloc_v1(int64_t control, int64_t generation,
     if (!error) {
         const uint64_t* d = (const uint64_t*)(uintptr_t)descriptor;
         /* Raw/transient registry capacity was prepared before allocation. */
-        ptr = rt_alloc((int64_t)d[2]);
-        if (!ptr) error = sr_fail(r, SR_CAPACITY);
-        else {
-            rt_struct_alloc_insert_raw((uintptr_t)ptr, (size_t)d[2]);
-            RtStructAllocation* entry = sr_find((uintptr_t)ptr);
-            entry->source_region = (uintptr_t)r;
-            entry->source_descriptor = d;
-            entry->source_incarnation = ++r->serial;
+        RtSourceAllocationMetadataV1* metadata=(RtSourceAllocationMetadataV1*)rt_observed_calloc_v1(1,sizeof(*metadata));
+        size_t metadata_bits=0;
+        if (!rt_struct_source_metadata_bits_v1(metadata,&metadata_bits)) {
+            free(metadata); error=sr_fail(r,SR_CAPACITY);
+        } else {
+            ptr = rt_alloc((int64_t)d[2]);
+            if (!ptr) { free(metadata); error=sr_fail(r,SR_CAPACITY); }
+        }
+        if (!error) {
+            metadata->bytes=(size_t)d[2]; metadata->region=(uintptr_t)r;
+            metadata->descriptor=d; metadata->generation=r->generation; ++r->serial;
+            rt_struct_alloc_insert_raw((uintptr_t)ptr,metadata_bits);
             ++r->members;
             rt_source_region_registry_changed_v1();
         }
@@ -328,8 +351,10 @@ int64_t rt_source_region_write_begin_v1(int64_t c, int64_t g, int64_t e,
     RtStructAllocation* dst = sr_find((uintptr_t)destination);
     if (!error && r->epoch != (uint64_t)e) error = SR_STALE;
     if (!error && (r->lease || r->ticket)) error = SR_CONFLICT;
-    if (!error && (!dst || dst->source_region != (uintptr_t)r)) error = SR_FOREIGN;
-    if (!error && (slot < 0 || (uint64_t)slot >= dst->source_descriptor[3])) error = SR_INCOMPLETE;
+    RtSourceAllocationMetadataV1* destination_metadata=rt_struct_source_metadata_v1(dst);
+    if (!error && (!destination_metadata || destination_metadata->control ||
+        destination_metadata->region != (uintptr_t)r || destination_metadata->generation != r->generation)) error = SR_FOREIGN;
+    if (!error && (slot < 0 || (uint64_t)slot >= destination_metadata->descriptor[3])) error = SR_INCOMPLETE;
     if (!error && (r->serial >= INT64_MAX || r->epoch >= INT64_MAX)) error = sr_fail(r, SR_CAPACITY);
     if (!error) { r->ticket = ++r->serial; r->destination = (uintptr_t)destination; r->slot = (uint64_t)slot; }
     int64_t result = error ? error : (int64_t)r->ticket;
@@ -343,12 +368,24 @@ int64_t rt_source_region_write_commit_v1(int64_t c, int64_t g, int64_t ticket,
     int64_t error = sr_validate(r, g);
     if (!error && (ticket <= 0 || r->ticket != (uint64_t)ticket)) error = SR_CONSUMED;
     RtStructAllocation* dst = !error ? sr_find(r->destination) : NULL;
-    if (!error && (!dst || dst->source_region != (uintptr_t)r)) error = SR_FOREIGN;
+    RtSourceAllocationMetadataV1* destination_metadata=rt_struct_source_metadata_v1(dst);
+    if (!error && (!destination_metadata || destination_metadata->control ||
+        destination_metadata->region != (uintptr_t)r || destination_metadata->generation != r->generation)) error = SR_FOREIGN;
     if (!error) {
-        const uint64_t* s = (const uint64_t*)(uintptr_t)dst->source_descriptor[4] + r->slot * 4;
-        if (s[2] == 2 && value) {
-            RtStructAllocation* child = sr_find((uintptr_t)value);
-            if (!child || child->source_region != (uintptr_t)r) error = SR_FOREIGN;
+        const uint64_t* s = (const uint64_t*)(uintptr_t)destination_metadata->descriptor[4] + r->slot * 4;
+        if (s[2] == 2) {
+            uintptr_t identity=(uintptr_t)value;
+            /* repr2 certifies an exact statically typed Struct, never Any.
+             * Nullability is not part of descriptor v1: zero is construction
+             * storage only and cannot be committed as a completed edge. */
+            if (!identity || (s[3] == 2 && (identity & 7) != 1) ||
+                (s[3] == 1 && (identity & 7) != 0)) error=SR_FOREIGN;
+            if (s[3] == 2) identity &= ~(uintptr_t)7;
+            RtStructAllocation* child = !error ? sr_find(identity) : NULL;
+            RtSourceAllocationMetadataV1* child_metadata=rt_struct_source_metadata_v1(child);
+            if (!error && (!child_metadata || child_metadata->control ||
+                child_metadata->region != (uintptr_t)r || child_metadata->generation != r->generation))
+                error = SR_FOREIGN;
         }
         if (!error) { memcpy((void*)(dst->ptr + s[0]), &value, 8); ++r->epoch; }
         /* Every attempted ticket commit is one-use, including rejection. */
@@ -383,7 +420,9 @@ int64_t rt_source_region_release_v1(int64_t c, int64_t g, int64_t f) {
         !r->closed || r->lease || r->ticket || r->members ? SR_CONFLICT : 0;
     if (!error) {
         RtStructAllocation* entry = sr_find((uintptr_t)c);
+        RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
         *entry = (RtStructAllocation){.ptr = RT_STRUCT_ALLOC_TOMBSTONE};
+        free(metadata);
         --rt_struct_alloc_len; ++rt_struct_alloc_tombs;
         rt_source_region_registry_changed_v1();
         free(r);
@@ -391,17 +430,16 @@ int64_t rt_source_region_release_v1(int64_t c, int64_t g, int64_t f) {
     rt_struct_alloc_lock_release(); return error;
 }
 
-static void rt_source_region_retire_locked_v1(uintptr_t ptr) {
-    RtStructAllocation* entry = sr_find(ptr);
-    if (!entry) return;
-    if (entry->source_control) {
-        /* External control frees cannot be admitted. Control release has its
-         * own path and retains records until consumers and members end. */
-        ((RtSourceRegionV1*)ptr)->closed = 1;
-        return;
+static void rt_source_region_retire_locked_v1(RtSourceAllocationMetadataV1* metadata) {
+    if (metadata->region) {
+        /* Retirement runs under the existing registry owner lock. Even an
+         * unadmitted foreign raw free must revoke the original region, rather
+         * than silently discarding its association. No fresh authority issued. */
+        RtSourceRegionV1* r = sr_control_any_owner((int64_t)metadata->region);
+        if (r && r->generation == metadata->generation) {
+            r->closed=1;
+            if (!metadata->control && r->members) --r->members;
+        }
     }
-    if (entry->source_region) {
-        RtSourceRegionV1* r = sr_control((int64_t)entry->source_region);
-        if (r) { r->closed = 1; if (r->members) --r->members; }
-    }
+    free(metadata);
 }

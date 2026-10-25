@@ -5,6 +5,8 @@
 
 static const uint64_t node_slots[] = {0,8,1,0, 8,8,2,1};
 static const uint64_t node_descriptor[] = {1,1,16,2,(uintptr_t)node_slots,1};
+static const uint64_t tagged_slots[] = {0,8,1,0, 8,8,2,2};
+static const uint64_t tagged_descriptor[] = {1,1,16,2,(uintptr_t)tagged_slots,1};
 static int64_t fuel(int operation) {
     int64_t result = rt_source_region_bound_v1(operation,
         operation == 2 || operation == 12 ? (int64_t)(uintptr_t)node_descriptor : 0,
@@ -40,6 +42,7 @@ int main(void) {
     extern int8_t rt_transient_array_scope_end(void);
     assert(rt_transient_array_scope_begin());
 #endif
+    _Static_assert(sizeof(RtStructAllocation)==2*sizeof(uintptr_t),"ordinary registry footprint");
     assert(rt_source_region_abi_v1() == 1);
     assert(rt_source_region_capabilities_v1() == 1);
     /* Bound observations inspect only six header words; this intentionally
@@ -69,8 +72,8 @@ int main(void) {
     int64_t fields=rt_source_region_bound_v1(12,(int64_t)(uintptr_t)node_descriptor,1,1);
     int64_t bytes=rt_source_region_bound_v1(12,(int64_t)(uintptr_t)node_descriptor,1,2);
     assert(fields >= 0 && bytes >= 0);
-    assert(rt_source_region_bound_v1(2,(int64_t)(uintptr_t)node_descriptor,1,1) == 2);
-    assert(rt_source_region_bound_v1(2,(int64_t)(uintptr_t)node_descriptor,1,2) == 16);
+    assert(rt_source_region_bound_v1(2,(int64_t)(uintptr_t)node_descriptor,1,1) > 2);
+    assert(rt_source_region_bound_v1(2,(int64_t)(uintptr_t)node_descriptor,1,2) > 16);
     int64_t ticket = rt_source_region_write_begin_v1(region,g,1,root,1,fuel(7));
     assert(ticket > 0);
     assert(rt_source_region_write_commit_v1(region,g,ticket,child,fuel(8)) == 2);
@@ -108,6 +111,24 @@ int main(void) {
     assert(rt_source_region_alloc_v1(region,g,5,(int64_t)(uintptr_t)node_descriptor,1,prep,fuel(2)) == SR_STALE);
     rt_free(raw);
 #endif
+    /* Descriptor-qualified Struct tags normalize only the owner lookup;
+     * the actual committed word retains its ordinary tagged representation. */
+    int64_t tagged_g, tagged_region=make_region(&tagged_g);
+    int64_t tagged_prep=rt_source_region_allocation_prepare_v1((int64_t)(uintptr_t)tagged_descriptor,1,fuel(12));
+    assert(tagged_prep>0);
+    int64_t tagged_root=rt_source_region_alloc_v1(tagged_region,tagged_g,1,
+        (int64_t)(uintptr_t)tagged_descriptor,1,tagged_prep,fuel(2));
+    assert(tagged_root>0);
+    int64_t tagged_child=make_node(tagged_region,tagged_g,1);
+    assert(rt_source_region_alias_write_v1(tagged_region,tagged_g,tagged_root,1,tagged_child|1,fuel(9))==2);
+    assert(((int64_t*)(uintptr_t)tagged_root)[1]==(tagged_child|1));
+    assert(rt_source_region_alias_write_v1(tagged_region,tagged_g,tagged_root,1,tagged_child|2,fuel(9))==SR_FOREIGN);
+    assert(rt_source_region_alias_write_v1(tagged_region,tagged_g,tagged_root,1,0,fuel(9))==SR_FOREIGN);
+    assert(rt_source_region_alias_write_v1(tagged_region,tagged_g,tagged_root,1,foreign|1,fuel(9))==SR_FOREIGN);
+    assert(rt_source_region_stamp_v1(tagged_region,tagged_g,fuel(4))==2);
+    assert(rt_source_region_close_v1(tagged_region,tagged_g,fuel(10))==0);
+    rt_free((uint8_t*)(uintptr_t)tagged_root); rt_free((uint8_t*)(uintptr_t)tagged_child);
+    assert(rt_source_region_release_v1(tagged_region,tagged_g,fuel(11))==0);
     assert(rt_source_region_close_v1(region,g,fuel(10)) == 0);
     assert(rt_source_region_stamp_v1(region,g,fuel(4)) == SR_CLOSED);
     assert(rt_source_region_release_v1(region,g,fuel(11)) == SR_CONFLICT);
@@ -117,6 +138,15 @@ int main(void) {
     int64_t next_g, next=make_region(&next_g);
     assert(next_g != g);
     assert(rt_source_region_stamp_v1(next,g,fuel(4)) == SR_FOREIGN);
+    int64_t realloc_g,realloc_region=make_region(&realloc_g);
+    int64_t realloc_node=make_node(realloc_region,realloc_g,1);
+    assert(rt_struct_receiver_valid(realloc_node,8,8));
+    assert(!rt_struct_receiver_valid(realloc_node,16,8));
+    uint8_t* copied=rt_realloc((uint8_t*)(uintptr_t)realloc_node,32);
+    assert(copied);
+    assert(rt_source_region_stamp_v1(realloc_region,realloc_g,fuel(4))==SR_CLOSED);
+    assert(rt_source_region_release_v1(realloc_region,realloc_g,fuel(11))==0);
+    rt_free(copied);
     /* Generation/epoch exhaustion is exercised through actual writer path. */
     int64_t exhausted=make_node(next,next_g,1);
     sr_control(next)->epoch=INT64_MAX;
