@@ -1,0 +1,85 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Template-symbol relocation (module-scoped mono, E-MONO-041)
+
+An instance copied from template module T into user module F must not keep
+T's SymbolIds. A call to T's private non-generic helper becomes a reference
+to T's module-qualified object symbol (`t.helper`, the same spelling
+`qualify_imported_function_symbol` produces), T reports that helper as
+must-export, and a reference with no stable object symbol (a closure-valued
+T constant) is E-MONO-041 with the instance not placed.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:generics
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mono.monomorphize_integration.{run_monomorphization_module_scoped_v1}
+use compiler.mono.mono_template_symbol_relocation_v1.{must_export_for_templates,
+    mono_template_reachable_helpers_v1}
+use compiler.monomorphize.hir_subst.body_subst.{collect_body_symbol_refs_v1}
+
+val TEMPLATE_SRC = "fn helper(x: i64) -> i64:\n    x\n\nfn wrap<X>(v: X) -> i64:\n    helper(1)\n"
+val CLOSURE_TEMPLATE_SRC = "val bump = \\x: x + 1\n\nfn wrap<X>(v: X) -> i64:\n    bump(1)\n"
+val USER_SRC = "use t.{wrap}\n\nfn main() -> i64:\n    wrap(2)\n"
+
+fn lower_v1(source: text, name: text) -> HirModule:
+    val path = "testdata/{name}.spl"
+    val ast = parse_full_frontend(source, path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast)
+
+fn instance_v1(module: HirModule) -> HirFunction?:
+    for key in module.functions.keys():
+        val f: HirFunction = module.functions[key]
+        if f.name.contains("$"): return Some(f)
+    None
+
+fn function_named_v1(module: HirModule, name: text) -> HirFunction?:
+    for key in module.functions.keys():
+        val f: HirFunction = module.functions[key]
+        if f.name == name: return Some(f)
+    None
+
+fn referenced_names_v1(module: HirModule, func: HirFunction) -> [text]:
+    var names: [text] = []
+    for raw in collect_body_symbol_refs_v1(func.body):
+        if val sym = module.symbols.get_symbol_raw(raw):
+            names.push(sym.name)
+    names
+
+describe "template-symbol relocation":
+    it "references the template's private helper by its module-qualified name":
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = lower_v1(TEMPLATE_SRC, "t")
+        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), templates)
+        expect(diags.len()).to_equal(0)
+        val inst = instance_v1(out)
+        expect(inst.?).to_equal(true)
+        val names = referenced_names_v1(out, inst.unwrap())
+        expect(names).to_contain("t.helper")
+        expect(names).not_to_contain("helper")
+
+    it "marks the helper reachable from a generic template as must-export":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val reachable = mono_template_reachable_helpers_v1(t)
+        val helper = function_named_v1(t, "helper").unwrap()
+        val key = "{helper.symbol.id}"
+        expect(reachable.has(key)).to_equal(true)
+        expect(must_export_for_templates(helper, reachable.has(key))).to_equal(true)
+        expect(must_export_for_templates(helper, false)).to_equal(false)
+
+    it "fails closed with E-MONO-041 for an unrelocatable closure reference":
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = lower_v1(CLOSURE_TEMPLATE_SRC, "t")
+        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), templates)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-041: cannot relocate closure `bump` from t into f")
+        expect(instance_v1(out).?).to_equal(false)
