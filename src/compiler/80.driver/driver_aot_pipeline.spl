@@ -16,8 +16,7 @@ use compiler.driver.cache.cache_validator.{source_to_cache_path}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
 use compiler.driver.bootstrap_k1_selected.{
-    bootstrap_compile_to_native_local,
-    bootstrap_compile_context_to_native_local
+    bootstrap_compile_to_native_local
 }
 use compiler.common.driver_core_types.{
     CompileResult,
@@ -53,6 +52,8 @@ use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, go_to_end_writ
     go_to_end_blocked_modules_v1,
     GO_TO_END_UNATTRIBUTED_V1}
 use std.io_runtime.{exit}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mir_done_publish_v1}
+use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 
 fn native_build_cache_dir() -> text:
@@ -125,7 +126,8 @@ impl CompilerDriver:
         # to whole-program MIR; name the reason so a bootstrap default that
         # did not take effect is visible in the stage log.
         val staged_reason = self.native_staged_codegen_eligible_reason_v1()
-        if staged_batch > 0 and staged_reason != "":
+        if staged_batch > 0 and staged_reason != "" and
+                (env_get_opt(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "") != "":
             print "[staged-codegen] refused batch={staged_batch} reason={staged_reason}; MIR is held whole-program"
             stdout_flush()
         self.native_staged_codegen = NativeStagedCodegenStateV1.begin(
@@ -178,7 +180,7 @@ impl CompilerDriver:
             log_debug("low-memory: evicting HIR modules")
             self.ctx.evict_hir()
 
-        val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         if bootstrap_flat_aot:
             log_phase("aot:flat_mir_passes:skipped")
             log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
@@ -312,8 +314,9 @@ impl CompilerDriver:
         log_phase("aot:format:start")
         val format = self.ctx.options.output_format
         log_phase("aot:format:done")
-        # bootstrap_compile_context_to_native_local emits exactly ONE object,
-        # hardcoded as `<output>.app.cli.bootstrap_main.o`, and links only that.
+        # This Stage-3 fixed-entry route has a validated closure in
+        # `ctx.mir_modules`; use the normal per-module native output path so
+        # every admitted provider is emitted and linked.
         # It is the "compile the bootstrap CLI" path, so SIMPLE_BOOTSTRAP=1 is
         # not on its own enough to route here: the Stage-2 admission probe sets
         # that variable while building hello_world.spl, and the resulting link
@@ -329,9 +332,9 @@ impl CompilerDriver:
             if self.ctx.sources[aot_bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
                 aot_bootstrap_entry_requested = true
             aot_bootstrap_entry_idx = aot_bootstrap_entry_idx + 1
-        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             log_phase("aot:bootstrap_native_context_dispatch")
-            return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
+            return self.compile_to_native(output)
         if driver_output_format_is_smf(format):
             return self.compile_to_smf(output)
         if driver_output_format_is_self_contained(format):
@@ -461,6 +464,7 @@ impl CompilerDriver:
         # Bootstrap-flat skips the MIR pass chain and may dispatch to the
         # fixed-entry context compiler, which reads the entry MIR itself.
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+                (env_get_opt("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1" and
                 (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             return "bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)"
         # SMF / self-contained / both re-iterate ctx.mir_modules after codegen.
@@ -652,6 +656,10 @@ impl CompilerDriver:
         # A forked child installed its own owner inside lower_to_mir; read it
         # only now so the seal/complete below are the child's, never the root's.
         val owner = native_mir_shard_owner_v1()
+        # File-worker receipts: MIR-done is observable only here (lowering and
+        # object emission share this child); the worker copies the stamp.
+        if shard_lowered and (env_get_opt("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "":
+            val _mir_done = native_file_worker_mir_done_publish_v1(queue, owner, time_now_monotonic_ms())
         if native_mir_fork_disarm_v1():
             # The fork point (the claim loop) was never reached: an early
             # return or a lowering failure. Nothing forked; this process stays

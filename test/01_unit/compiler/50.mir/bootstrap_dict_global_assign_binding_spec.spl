@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# MIR: ambient-bootstrap dict globals get a store target
+
+`lower_static` defers every dict-literal module `var` to the runtime module
+initializer, the only producer of its static and `global_statics_by_id`
+mirror. The ambient-bootstrap (SIMPLE_BOOTSTRAP=1) branch of `lower_module`
+never ran that initializer, so every `D = x` in a function body aborted with
+"assignment target has no local binding" (~113 sites in the stage3
+whole-program MIR run). Bug mir_bootstrap_dict_global_no_binding_2026-10-25.
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+val dict_src = "var REG: Dict<text, text> = \{\}\n\nfn reset():\n    var kept: Dict<text, text> = \{\}\n    REG = kept\n"
+val unbound_src = "fn bad():\n    missing_name = 1\n"
+
+fn bootstrap_lower_errors(src: text) -> i64:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["app.reg"] = parse_full_frontend(src, "app/reg.spl", "app.reg", log)
+    sources.push(SourceFile(path: "app/reg.spl", content: src, module_name: "app.reg"))
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app/reg.spl", surfaces)
+    val hir = hir_lowering.lower_module(modules["app.reg"])
+    val providers: [HirModule] = []
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target)
+    val mir = lowering.lower_bootstrap_closure_module(hir, providers)
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    lowering.errors.len() + (if mir.is_err(): 1 else: 0)
+
+describe "ambient-bootstrap dict global assignment":
+    it "lowers an assignment to a module-level dict var":
+        expect(bootstrap_lower_errors(dict_src)).to_equal(0)
+
+    it "still fails closed on a genuinely unbound assignment target":
+        expect(bootstrap_lower_errors(unbound_src)).to_be_greater_than(0)

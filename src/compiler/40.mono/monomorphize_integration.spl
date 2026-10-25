@@ -30,6 +30,8 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
+use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v2, mono_relocation_error_v1, mono_template_closure_qualified_v1, mono_template_reject_unplanned_refs_v1, mono_target_declared_names_v1}
+use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_full_v1, collect_body_relocation_refs_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
@@ -283,6 +285,11 @@ class MonomorphizationPass:
     # tables they are projected from.
     discovery_method_names: Dict<text, bool> = {}
     discovery_field_names: Dict<text, bool> = {}
+    # Module-scoped mode (`process_module_scoped_v1`, opt-in
+    # per-file lane): only `module_scoped_target_v1`'s roots are
+    # rewritten, and an unresolvable generic call there is E-MONO-040.
+    module_scoped_v1: bool = false
+    module_scoped_target_v1: text = ""
 
 pub struct MonoInvocationOutputV1:
     modules: Dict<text, HirModule>
@@ -675,6 +682,169 @@ impl MonomorphizationPass:
         if publish_placements and placement_valid and self.diagnostics.len() == 0 and not self.invocation_failed_v1():
             mono_selective_emission_publish_v1(placements)
         result
+
+    me process_module_scoped_v1(module_name: text, module: HirModule, templates: Dict<text, HirModule>) -> HirModule:
+        """Module-scoped monomorphization (design true_per_file_pipeline_v1
+        §4 P4; build_runner_fiber_scheduler_v1 §8).
+
+        Rewrites ONLY `module`'s roots and constant initializers, drains the
+        worklist for the instances it requested, and places every instance
+        into `module`'s OWN function table flagged `is_comdat_instance`, so
+        each object carries its own `linkonce_odr` + comdat copy and the
+        linker keeps one. `templates` are read-only template providers: they
+        are collected, never rewritten or returned. Instance names use the
+        same `mangled_name` as the global pass, so identical instances
+        requested by different modules spell one symbol."""
+        self.module_scoped_v1 = true
+        self.module_scoped_target_v1 = module_name
+        self.declared_global_types = {}
+        mono_instance_profile_v1 = {}
+        if self.invocation_budget == nil: mono_diag_refresh_v1()
+        val template_keys: [text] = templates.keys()
+        for tname in template_keys:
+            if tname == module_name:
+                continue
+            val provider: HirModule = templates[tname]
+            self.module_paths[tname] = provider.path
+            self.collect_declared_globals(provider, tname)
+            self.collect_generics(provider, tname)
+        self.module_paths[module_name] = module.path
+        self.collect_declared_globals(module, module_name)
+        self.collect_generics(module, module_name)
+        self.current_module = module_name
+        var funcs: Dict<SymbolId, HirFunction> = {}
+        val function_values: [HirFunction] = module.functions.values()
+        for function_index in sorted_function_indices(function_values):
+            val func: HirFunction = function_values[function_index]
+            if is_generic_function(func) or func.is_generic_template:
+                funcs[func.symbol] = func
+                continue
+            funcs[func.symbol] = self.rewrite_function(func)
+        var consts: Dict<SymbolId, HirConst> = module.constants
+        val const_keys: [SymbolId] = consts.keys()
+        for const_key in const_keys:
+            val const: HirConst = consts[const_key]
+            if const.value == nil:
+                continue
+            val no_stmts: [HirStmt] = []
+            val wrapped = HirBlock(stmts: no_stmts, has: true, value: const.value, span: Span.empty())
+            val rewritten_block = self.rewrite_block(wrapped, nil)
+            consts[const_key] = HirConst(
+                symbol: const.symbol, name: const.name, type_: const.type_,
+                value: rewritten_block.value, is_mutable: const.is_mutable,
+                visibility: const.visibility, is_public: const.is_public,
+                is_volatile: const.is_volatile,
+                has_fixed_address: const.has_fixed_address,
+                fixed_address: const.fixed_address)
+        self.drain_worklist()
+        var out = module
+        if self.module_symbols.has(module_name):
+            out.symbols = self.module_symbols[module_name]
+        out.constants = consts
+        val specialized_keys: [text] = self.specialized_functions.keys()
+        # Template-symbol relocation (E-MONO-041): an instance body copied
+        # from template module T still names T's SymbolIds. Rewrite each
+        # T function/constant reference to its module-qualified object
+        # symbol; an instance with an unrelocatable reference is NOT placed
+        # (the module falls back to MONO-PENDING via the diagnostic).
+        var plans: Dict<text, MonoTemplateRelocationPlanV1> = {}
+        var reloc_next = self.next_symbol
+        # P-B: placed instances are already valid ids in this module.
+        var keep: Dict<text, bool> = {}
+        for mangled in specialized_keys:
+            val km: text = mangled
+            val ks: HirFunction = self.specialized_functions[km]
+            keep["{ks.symbol.id}"] = true
+        val closure_qualified = mono_template_closure_qualified_v1()
+        val target_names = mono_target_declared_names_v1(module)
+        for mangled in specialized_keys:
+            val m: text = mangled
+            var spec: HirFunction = self.specialized_functions[m]
+            var owner = module_name
+            if self.spec_module.has(m):
+                owner = self.spec_module[m]
+            if owner != module_name and templates.has(owner):
+                val provider: HirModule = templates[owner]
+                if not plans.has(owner):
+                    val made = mono_template_relocation_plan_v2(provider, owner, reloc_next, closure_qualified, target_names)
+                    reloc_next = made.next_symbol
+                    plans[owner] = made
+                    self.register_relocated_symbols_v1(out, made, module_name)
+                val plan: MonoTemplateRelocationPlanV1 = plans[owner]
+                # Nominal types (nested type arguments included) the body
+                # names are transported T -> F by declared module + name,
+                # exactly like an instance signature (E-MONO-042 on failure).
+                val refs = collect_body_relocation_refs_v1(spec.body)
+                # Fresh relocation ids come from `reloc_next`; the type
+                # transport must allocate past them.
+                if self.next_symbol < reloc_next:
+                    self.next_symbol = reloc_next
+                val type_map = self.relocate_body_type_ids_v1(refs.types, owner, module_name, keep)
+                if self.next_symbol > reloc_next:
+                    reloc_next = self.next_symbol
+                if self.module_symbols.has(module_name):
+                    # The transport may hand back a new table: keep it, and
+                    # keep the relocated function rows on it.
+                    out.symbols = self.module_symbols[module_name]
+                    for planned_owner in plans.keys():
+                        val po: text = planned_owner
+                        self.register_relocated_symbols_v1(out, plans[po], module_name)
+                val reject = mono_template_reject_unplanned_refs_v1(provider, plan, refs.symbols, keep)
+                val relocated = relocate_template_body_full_v1(spec.body, plan.names, plan.ids, reject, type_map, keep, true)
+                if relocated.diagnostics.len() > 0:
+                    for what in relocated.diagnostics:
+                        val wt: text = what
+                        self.diagnostics = self.diagnostics.push(mono_relocation_error_v1(wt, owner, module_name))
+                    continue
+                spec.body = relocated.body
+            var attr: FunctionAttr = spec.func_attr
+            attr.is_comdat_instance = true
+            spec.func_attr = attr
+            funcs[spec.symbol] = spec
+            out.symbols.register_preserved_symbol(HirSymbol(
+                id: spec.symbol, name: spec.name, kind: SymbolKind.Function,
+                type_: nil, scope: ScopeId(id: 0), span: spec.span,
+                visibility: Visibility.Private, is_public: false,
+                is_mutable: false, defining_module: module_name,
+                builtin_method_tag: BUILTIN_METHOD_NONE))
+        if out.symbols.next_symbol_id < reloc_next:
+            out.symbols.next_symbol_id = reloc_next
+        out.functions = funcs
+        self.prune_consumed_templates(out)
+
+    me relocate_body_type_ids_v1(type_ids: [i64], source_module: text, target_module: text, keep: Dict<text, bool>) -> Dict<text, i64>:
+        """T-numbered nominal type id -> F id for every distinct id a body
+        names. Each id is transported alone through `relocate_mono_types`
+        (declared module + name); a failed one is left out, so the relocating
+        walk reports it unmapped (fail closed) next to the E-MONO-042 row."""
+        var out: Dict<text, i64> = {}
+        for raw in type_ids:
+            val id: i64 = raw
+            val key = "{id}"
+            if out.has(key) or keep.has(key):
+                continue
+            val probe = HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+            if val moved = self.relocate_mono_types([probe], source_module, target_module, "body type of template {source_module}"):
+                val moved_type: HirType = moved[0]
+                match moved_type.kind:
+                    case HirTypeKind.Named(target_id, _args): out[key] = target_id.id
+                    case _: ()
+        out
+
+    me register_relocated_symbols_v1(out: HirModule, plan: MonoTemplateRelocationPlanV1, module_name: text):
+        """Give every relocated T symbol a row in F's table under its fresh
+        id, named by its object symbol and owned by T."""
+        val keys: [text] = plan.names.keys()
+        for k in keys:
+            val key: text = k
+            val kind_name: text = plan.kinds[key]
+            val kind = if kind_name == "const": SymbolKind.Const elif kind_name == "method": SymbolKind.Method else: SymbolKind.Function
+            out.symbols.register_preserved_symbol(HirSymbol(
+                id: SymbolId(id: plan.ids[key]), name: plan.names[key], kind: kind,
+                type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+                visibility: Visibility.Public, is_public: true,
+                is_mutable: false, defining_module: plan.template_module,
+                builtin_method_tag: BUILTIN_METHOD_NONE))
 
     # ========================================================================
     # Step 1: Collect Generic Definitions
@@ -3013,9 +3183,9 @@ impl MonomorphizationPass:
         match payload:
             Some(p):
                 match p:
-                    case Tuple(values):
+                    case HirEnumPayload.Tuple(values):
                         HirEnumPayload.Tuple(self.rewrite_exprs(values))
-                    case Struct(fields):
+                    case HirEnumPayload.Struct(fields):
                         HirEnumPayload.Struct(self.rewrite_named_exprs(fields))
             nil:
                 nil
@@ -3061,8 +3231,55 @@ impl MonomorphizationPass:
         call site are used verbatim; otherwise they are inferred from the
         argument types. A generic call that can be neither is left as-is and
         recorded as a loud diagnostic (the post-mono verifier also counts it)."""
-        self.rewrite_template_call_v1(self.callee_generic_name(callee), callee,
+        val gname = self.callee_generic_name(callee)
+        if gname == "" and self.module_scoped_v1:
+            self.module_scoped_visibility_check_v1(callee, type_args)
+        self.rewrite_template_call_v1(gname, callee,
             args, type_args, expected_result, call_span)
+
+    me module_scoped_visibility_check_v1(callee: HirExpr, type_args: [HirType]):
+        """Module-scoped fail-closed rule: a call in the target module whose
+        callee carries generic evidence (explicit type args, an imported
+        signature that is not concrete, or no declaration at all) but names
+        no template in the caller-supplied visible set is E-MONO-040."""
+        if callee == nil or self.current_module != self.module_scoped_target_v1:
+            return
+        var sid = SymbolId(id: -1)
+        var name = ""
+        match callee.kind:
+            case HirExprKind.Var(s):
+                sid = s
+                name = self.sym_name(s)
+            case HirExprKind.NamedVar(s, n):
+                sid = s
+                name = n
+            case _: return
+        if self.callee_local_plain(sid):
+            return
+        if self.sym_names.has(mono_sym_key(self.current_module, sid.id)):
+            return
+        var evidence = type_args.len() > 0
+        if not evidence and self.module_symbols.has(self.current_module):
+            val table: SymbolTable = self.module_symbols[self.current_module]
+            match table.get_symbol_raw(sid.id):
+                Some(row):
+                    val sym_row: HirSymbol = row
+                    if sym_row.kind == SymbolKind.Function and sym_row.type_ != nil:
+                        val sig: HirType = sym_row.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                        evidence = not hir_type_is_concrete(sig)
+                nil:
+                    evidence = true
+        else:
+            evidence = true
+        if not evidence:
+            return
+        val code_key = "E-MONO-040|{name}"
+        if self.reported_once.has(code_key):
+            return
+        self.reported_once[code_key] = true
+        self.diagnostics = self.diagnostics.push(
+            "E-MONO-040: template {name} not visible to module {self.current_module}")
+        self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
 
     me rewrite_template_call_v1(gname: text, callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType?, call_span: Span?) -> HirExprKind:
         val new_args = self.rewrite_call_args(args)
@@ -3947,9 +4164,9 @@ impl MonomorphizationPass:
                 match payload:
                     Some(p):
                         match p:
-                            case Tuple(values):
+                            case HirEnumPayload.Tuple(values):
                                 self.mono_relevant_exprs_v1(values)
-                            case Struct(fields):
+                            case HirEnumPayload.Struct(fields):
                                 self.mono_relevant_named_v1(fields)
                     nil:
                         false
@@ -4692,6 +4909,14 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
     means the output is NOT monomorphic and must not reach canonical MIR."""
     var pass_ = MonomorphizationPass.create()
     val result = pass_.process_modules(modules)
+    (result, pass_.get_stats(), pass_.diagnostics)
+
+fn run_monomorphization_module_scoped_v1(module: HirModule, templates: Dict<text, HirModule>) -> (HirModule, MonoStats, [text]):
+    """Monomorphize ONE module against the caller-supplied visible templates
+    (see `MonomorphizationPass.process_module_scoped_v1`). Instances land in
+    `module` with COMDAT linkage; `templates` are never modified."""
+    var pass_ = MonomorphizationPass.create()
+    val result = pass_.process_module_scoped_v1(module.name, module, templates)
     (result, pass_.get_stats(), pass_.diagnostics)
 
 # Cycle-121: the processed-modules dict travels through this module-global

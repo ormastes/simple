@@ -93,3 +93,6 @@ advisory; do NOT promote shadow to authoritative before real interface digests
 populate the key. Shadow sees recompiled modules only (legacy hits bypass it).
 C5 block cache (`cache/block/`) and the C9 gateway (`src/app/cache_gateway/`)
 exist but have no consumers.
+
+- 2026-10-25: landed cache protocol: `.spab` (opt-in `SIMPLE_FRONTEND_SPAB=1`), DigestV1 (unknown algo = miss, at most 3 per side), GuardIdV1, single-flight, usage ledger, reference-aware eviction, Lean gates `check-cache-protocol-formal.shs` / `check-cache-formal-source-binding.shs`. See `doc/07_guide/tooling/bootstrap_options.md`.
+- 2026-10-25: Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. Object cache: `driver_aot_native_output.spl` (`driver_native_build_cache_dir`, scope dir + `build_cache.sdn`).

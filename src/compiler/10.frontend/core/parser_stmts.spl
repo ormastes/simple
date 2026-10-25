@@ -86,7 +86,7 @@ use compiler.core.ast.{elif_new}
 # Refutable let-else divergence check (see parse_refutable_val_else_stmt):
 use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE}
 use compiler.core.ast.{STMT_RETURN, STMT_BREAK, STMT_CONTINUE, STMT_EXPR}
-use compiler.core.ast.{stmt_tag, stmt_expr}
+use compiler.core.ast_stmt.{stmt_get_tag, stmt_get_expr, stmt_set_expr}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
 use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL}
 use compiler.core.types.{is_array_generic_tag}
@@ -94,11 +94,11 @@ use compiler.core.types.{TYPE_RESULT, is_result_tag}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, parser_error_count}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_error_count}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
-use compiler.core.parser.{par_fixed_array_elem, par_fixed_array_size}
+use compiler.core.parser.{parser_fixed_array_elem, parser_fixed_array_size}
 use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{rt_is_debug_mode_enabled}
 use compiler.core.parser.{parser_diagnostics_suppressed_get}
@@ -772,7 +772,7 @@ fn try_parse_collection_algorithm_stmt() -> i64:
     if call < 0:
         parser_error("@collection_algorithm requires an adaptive set or map initializer with a known family")
         return decl
-    stmt_expr[decl] = call
+    stmt_set_expr(decl, call)
     stmt_i64_set(decl, "EXPR", call)
     decl
 
@@ -1349,11 +1349,11 @@ fn parse_statement() -> i64:
 fn stmt_diverges(s: i64) -> bool:
     if s < 0:
         return false
-    val tag = stmt_tag[s]
+    val tag = stmt_get_tag(s)
     if tag == STMT_RETURN or tag == STMT_BREAK or tag == STMT_CONTINUE:
         return true
     if tag == STMT_EXPR:
-        val e = stmt_expr[s]
+        val e = stmt_get_expr(s)
         if e >= 0:
             val et = expr_get_tag(e)
             if et == EXPR_RETURN or et == EXPR_BREAK or et == EXPR_CONTINUE:
@@ -1384,12 +1384,14 @@ fn parse_refutable_val_else_stmt(ctor_name: text) -> i64:
     val callee = expr_ident(ctor_name, 0)
     parser_expect(TOK_LPAREN)   # consume '('
     var pat_args: [i64] = []
+    val val_pattern_ph_prev = set_placeholder_transform_suppressed(true)
     if par_kind_get() != TOK_RPAREN:
         pat_args.push(parse_or())
         while par_kind_get() == TOK_COMMA:
             parser_advance()
             pat_args.push(parse_or())
     parser_expect(TOK_RPAREN)   # consume ')'
+    set_placeholder_transform_suppressed(val_pattern_ph_prev)
     val pattern = expr_call(callee, pat_args, 0)
 
     parser_expect(100)          # consume '='
@@ -1569,8 +1571,8 @@ fn parse_var_decl_stmt() -> i64:
         type_looks_named = type_start_kind == TOK_IDENT and type_start_text.len() > 0 and type_start_text[0:1] >= "A" and type_start_text[0:1] <= "Z"
         type_tag = parser_parse_type()
         has_type_annotation = true
-        fixed_array_elem = par_fixed_array_elem
-        fixed_array_size = par_fixed_array_size
+        fixed_array_elem = parser_fixed_array_elem()
+        fixed_array_size = parser_fixed_array_size()
 
     # Type inference for var declarations handled after initialization
 
@@ -1710,7 +1712,9 @@ fn parse_if_stmt() -> i64:
 
         if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
             parser_advance()
+            val if_pattern_ph_prev = set_placeholder_transform_suppressed(true)
             val pattern_idx = parse_or()
+            set_placeholder_transform_suppressed(if_pattern_ph_prev)
             val pattern_tag = expr_get_tag(pattern_idx)
             if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_FIELD_ACCESS and pattern_tag != EXPR_IDENT:
                 parser_error("expected identifier or constructor pattern after if val/var")
@@ -1908,7 +1912,9 @@ fn parse_while_stmt() -> i64:
     # and breaks when the pattern stops matching (desugared to a match).
     if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
         parser_advance()  # consume val/var
+        val while_pattern_ph_prev = set_placeholder_transform_suppressed(true)
         val pattern_idx = parse_or()
+        set_placeholder_transform_suppressed(while_pattern_ph_prev)
         val pattern_tag = expr_get_tag(pattern_idx)
         if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_FIELD_ACCESS and pattern_tag != EXPR_IDENT:
             parser_error("expected identifier or constructor pattern after while val/var")
@@ -1933,7 +1939,7 @@ fn parse_while_stmt() -> i64:
             val match_stmt = stmt_match_stmt(init_expr, arm_indices, match_span)
             var loop_body: [i64] = []
             loop_body.push(match_stmt)
-            val true_expr2 = expr_ident("true", 0)
+            val true_expr2 = expr_bool_lit(1, 0)
             expr_set_span(true_expr2, flat_span_new(decision_start, decision_start + 1, decision_line, decision_col))
             return stmt_while_stmt(true_expr2, loop_body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
@@ -2400,6 +2406,7 @@ fn parse_receive_stmt() -> i64:
         elif kind == 44:
             parser_advance()
             var patterns: [i64] = []
+            val receive_pattern_ph_prev = set_placeholder_transform_suppressed(true)
             patterns.push(parse_expr())
             while true:
                 kind = par_kind_get()
@@ -2422,6 +2429,7 @@ fn parse_receive_stmt() -> i64:
                     parser_advance()
                 kind = par_kind_get()
                 patterns.push(parse_expr())
+            set_placeholder_transform_suppressed(receive_pattern_ph_prev)
             var guard_expr_idx: i64 = -1
             if par_kind_get() == 40:
                 parser_advance()
@@ -2482,7 +2490,9 @@ fn parse_if_expr() -> i64:
         if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
             form = 3
             parser_advance()
+            val if_expr_pattern_ph_prev = set_placeholder_transform_suppressed(true)
             pattern_idx = parse_or()
+            set_placeholder_transform_suppressed(if_expr_pattern_ph_prev)
             val pattern_tag = expr_get_tag(pattern_idx)
             if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_FIELD_ACCESS and pattern_tag != EXPR_IDENT:
                 parser_error("expected identifier or constructor pattern after if val/var")

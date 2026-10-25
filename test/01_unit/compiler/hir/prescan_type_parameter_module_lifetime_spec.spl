@@ -1,0 +1,80 @@
+# @req: REQ-HIR-PRESCAN-LIFETIME-001
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserTypeParam}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.hir.hir_types.{HirTypeKind, SymbolKind, ScopeKind}
+use compiler.hir.hir_definitions.{HirTypeParam}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_symbol_table_methods.*
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+fn module_lifetime_parameter(name: text) -> ParserTypeParam:
+    ParserTypeParam(name: name, bounds: [], has_default: false,
+        default: Type(kind: TypeKind.Infer, span: Span.empty()), span: Span.empty())
+
+describe "Generic type parameters belong to one lowering module":
+    it "keeps a declared type parameter resolvable within its owning module":
+        var lowering = HirLowering.with_filename("generic_owner.spl")
+        lowering.begin_module("generic_owner.spl")
+        lowering.symbols.push_scope(ScopeKind.Class)
+        val parameters = lowering.project_imported_owner_type_parameters(
+            [module_lifetime_parameter("Element")], "generic_owner")
+        val parameter: HirTypeParam = parameters[0]
+        step("Resolve the actual registered binder through the production named-type path")
+        val resolved = lowering.lower_named_symbol_kind(parameter.symbol, [], Span.empty())
+        val is_parameter = match resolved:
+            case HirTypeKind.TypeParam(name, bounds): name == "Element" and bounds.len() == 0
+            case _: false
+        expect(is_parameter).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "resolves a recycled numeric symbol as the new module's enum":
+        var lowering = HirLowering.with_filename("generic_owner.spl")
+        lowering.begin_module("generic_owner.spl")
+        lowering.symbols.push_scope(ScopeKind.Class)
+        val parameters = lowering.project_imported_owner_type_parameters(
+            [module_lifetime_parameter("Element")], "generic_owner")
+        val parameter: HirTypeParam = parameters[0]
+        expect(lowering.prescan_type_parameters.contains_key(parameter.symbol.id)).to_equal(true)
+        step("Reset through the shared owner used by ordinary HIR cache shards")
+        lowering.begin_module("enum_owner.spl")
+        val enum_symbol = lowering.symbols.define("Status", SymbolKind.Enum, Option.None,
+            Span.empty(), Visibility.Public, false, Option.Some("enum_owner"))
+        expect(enum_symbol.id).to_equal(parameter.symbol.id)
+        val resolved = lowering.lower_named_symbol_kind(enum_symbol, [], Span.empty())
+        val is_named = match resolved:
+            case HirTypeKind.Named(owner, arguments): owner.id == enum_symbol.id and arguments.len() == 0
+            case _: false
+        expect(is_named).to_equal(true)
+        expect(lowering.prescan_type_parameters.keys().len()).to_equal(0)
+
+describe "Generic type parameter arena detachment", tag: ["only-compiled"]:
+    it "detaches transient binders while preserving phase memo state":
+        var lowering = HirLowering.with_filename("generic_arena.spl")
+        lowering.begin_module("generic_arena.spl")
+        lowering.surface_index_by_name["retained.provider"] = 17
+        val input = module_lifetime_parameter("Element")
+        step("Register a real type parameter in the module transient arena")
+        if not transient_scope_begin(): panic("generic parameter scope unavailable")
+        lowering.symbols.push_scope(ScopeKind.Class)
+        val parameters = lowering.project_imported_owner_type_parameters([input], "generic_owner")
+        val parameter: HirTypeParam = parameters[0]
+        val registered = lowering.prescan_type_parameters.contains_key(parameter.symbol.id)
+        if not transient_scope_pause(): panic("generic parameter pause unavailable")
+        lowering.begin_module("after_generic_arena.spl")
+        # Compute before reclaiming: a failed negative control must not read
+        # the stale arena's type values after they have been freed.
+        val detached = lowering.prescan_type_parameters.keys().len() == 0
+        if not transient_scope_end(): panic("generic parameter scope close unavailable")
+        step("Require all module binders detached and the retained phase memo still usable")
+        expect(registered).to_equal(true)
+        expect(detached).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(lowering.surface_index_by_name.get("retained.provider") ?? -1).to_equal(17)

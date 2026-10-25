@@ -124,7 +124,7 @@ impl MirToC:
             val func: MirFunction = module.functions[_sym]
             val fn_name = func.name
             val body = MirBody.from_function(func)
-            self.emit_forward_declaration(fn_name, body)
+            self.emit_forward_declaration(fn_name, body, func.is_comdat)
         self.builder.emit_header_raw("")
         self.builder.emit_blank()
 
@@ -133,7 +133,7 @@ impl MirToC:
             val func: MirFunction = module.functions[_sym]
             val fn_name = func.name
             val body = MirBody.from_function(func)
-            self.translate_function(fn_name, body)
+            self.translate_function(fn_name, body, func.is_comdat)
 
         # Emit extern "C" wrappers for @export("C") functions and classes
         self.emit_export_wrappers(module)
@@ -203,18 +203,24 @@ impl MirToC:
                 case _:
                     eprint("Warning: [C-backend] unhandled type kind in emit_type_definitions full def, skipping")
 
-    me emit_forward_declaration(name: text, body: MirBody):
-        """Emit forward declaration for a function to both header and impl."""
+    me emit_forward_declaration(name: text, body: MirBody, is_comdat: bool = false):
+        """Emit forward declaration for a function to both header and impl.
+
+        A COMDAT instance is private to each requesting object (it is
+        re-instantiated wherever used), so it is declared in the impl only."""
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
         var params: [text] = []
         for i in 0..body.arg_count:
             val param_ty = self.get_local_type_from_body(body, i)
             params = params.push(param_ty + r" _l" + i)
         val params_str = if params.len() == 0: "void" else: params.join(", ")
+        if is_comdat:
+            self.builder.emit_forward_decl(r"SPL_COMDAT_INSTANCE " + ret_ty, name, params_str)
+            return
         self.builder.emit_forward_decl(ret_ty, name, params_str)
         self.builder.emit_header_raw(ret_ty + r" " + name + r"(" + params_str + r");")
 
-    me translate_function(name: text, body: MirBody):
+    me translate_function(name: text, body: MirBody, is_comdat: bool = false):
         """Translate a MIR function to C++."""
         # Build local type map
         self.local_types = {}
@@ -232,7 +238,7 @@ impl MirToC:
         val params_str = if params.len() == 0: "void" else: params.join(", ")
 
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
-        self.builder.start_function(ret_ty, name, params_str)
+        self.builder.start_function(if is_comdat: r"SPL_COMDAT_INSTANCE " + ret_ty else: ret_ty, name, params_str)
 
         # Declare all non-argument locals at function top
         for local in body.locals:

@@ -1016,6 +1016,8 @@ impl MirLowering:
                 ()
         if fa.align > 0:
             result.align = fa.align
+        if fa.is_comdat_instance:
+            result.is_comdat = true
         if fa.is_global:
             result.is_global = true
         # SIMD optimization requirement transport. Without this the
@@ -1766,12 +1768,15 @@ impl MirLowering:
             if not self.struct_value_syms.contains(base_local.id) or self.struct_value_syms[base_local.id] != owner:
                 self.error_fatal("Result Err field has conflicting value provenance", Some(base.span))
                 return 0
+        var layout_owner = ""
         # Numeric SymbolIds are local to each module and can collide in an
         # entry-closure build. A lowered local's name-keyed provenance is
         # therefore authoritative when available.
         if self.struct_value_syms.contains(base_local.id):
             val value_name = self.struct_value_syms[base_local.id]
-            if self.struct_field_order.contains(value_name):
+            # A bare name registered with conflicting field lists is ambiguous:
+            # skip it so the module-qualified tier below decides.
+            if self.struct_field_order.contains(value_name) and not self.struct_field_order_conflict_warned.contains(value_name):
                 val value_fields = self.struct_field_order[value_name]
                 var value_idx = 0
                 while value_idx < value_fields.len():
@@ -1808,6 +1813,7 @@ impl MirLowering:
                 val qualified_key = self.composite_layout_key(q_type_symbol)
                 if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):
                     val qualified_fields = self.struct_field_order[qualified_key]
+                    layout_owner = qualified_key
                     var q_idx = 0
                     while q_idx < qualified_fields.len():
                         if qualified_fields[q_idx] == field_name:
@@ -1859,6 +1865,12 @@ impl MirLowering:
                         print "[field-idx-collision] type={present_trace_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
             if val present_type_symbol = optional_fm_type_symbol:
                 val type_symbol: HirSymbol = present_type_symbol
+                if self.struct_field_order_conflict_warned.contains(type_symbol.name):
+                    # Fail closed: the bare name maps to several distinct field
+                    # lists and the module-qualified key missed; picking the
+                    # first registration reads another type's offset.
+                    self.error_fatal("field '{field_name}' on ambiguous struct/class name '{type_symbol.name}': no module-qualified layout matched and the bare name has conflicting field lists", Some(base.span))
+                    return 0
                 if self.struct_field_order.has(type_symbol.name):
                     val named_fields = self.struct_field_order[type_symbol.name]
                     var named_idx = 0
@@ -1876,6 +1888,15 @@ impl MirLowering:
                     self.error_fatal("provider layout for '{fallback_symbol.name}' was never registered in this consumer (field '{field_name}')", Some(base.span))
         if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
+        # The EXACT (module-qualified) layout was found and no tier names this
+        # field: the source names a field the struct does not have. Bare-name
+        # and value-provenance tiers can hold another same-named struct, so
+        # only the qualified tier arms this check. Before it, index 0 silently
+        # wrote CompileOptions.mode for `options.target_opt_ctx = ...` and
+        # Stage 3 panicked in CompileMode.to_text. Fail closed.
+        # See doc/08_tracking/bug/missing_struct_field_store_writes_field0_2026-10-25.md
+        if layout_owner != "":
+            self.error_fatal("no field '{field_name}' on '{layout_owner}'", Some(base.span))
         0  # Default fallback when type is unknown
 
     me resolve_base_struct_name(base: HirExpr, base_local: LocalId) -> text?:

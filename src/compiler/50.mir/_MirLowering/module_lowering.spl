@@ -2684,15 +2684,6 @@ impl MirLowering:
             if provider_session_valid and self.provider_session_links_ready[provider_index]:
                 provider_links = self.provider_session_links[provider_index]
                 provider_links_built = true
-            if provider_module.name != module.name and not layout_demand:
-                val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
-                for dk_35 in provider_struct_keys:
-                    # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
-                    val provider_struct_def: HirStruct = provider_module.structs[dk_35]
-                    if provider_struct_def == nil:
-                        continue
-                    self.register_provider_struct(provider_struct_def, provider_module.symbols,
-                        consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
             # CoreLexer); their absence of classes/enums must not hide them.
             # So do impl-only providers: `impl Imported:` extension modules
@@ -2715,6 +2706,17 @@ impl MirLowering:
                             provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
                         provider_funcs.push(provider_func)
                     provider_links_built = true
+                if not layout_demand:
+                    # After the link table: relocated struct defaults may name
+                    # provider callables (`AspectParamsV1.defaults()`).
+                    val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
+                    for dk_35 in provider_struct_keys:
+                        # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
+                        val provider_struct_def: HirStruct = provider_module.structs[dk_35]
+                        if provider_struct_def == nil:
+                            continue
+                        self.register_provider_struct(provider_struct_def, provider_module.symbols,
+                            consumer_composite_names.has(provider_struct_def.name), provider_links)
                 if not layout_demand:
                     val provider_class_keys: [SymbolId] = provider_module.classes.keys()
                     for dk_33 in provider_class_keys:
@@ -2876,6 +2878,17 @@ impl MirLowering:
                 self.lower_static(bs_static_const)
                 bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
+            # `lower_static` deliberately defers every dict-literal global
+            # (`var D: Dict<K, V> = {}`) to the runtime initializer, which is
+            # the only producer of its static + `global_statics_by_id` mirror.
+            # This branch never ran that initializer, so each `D = x` in a
+            # function body missed `find_global_static` and aborted with
+            # "assignment target has no local binding" (~113 sites in the
+            # stage3 whole-program MIR run, all dict globals). Run it here,
+            # after the accumulator reset so its init function is kept, and
+            # before any body is lowered -- same order as the non-bootstrap
+            # path. Bug mir_bootstrap_dict_global_no_binding_2026-10-25.
+            self.lower_runtime_module_initializers(module, bs_const_vals, 0)
             val bootstrap_function_values: [HirFunction] = module.functions.values()
             val bootstrap_function_indices = hir_function_symbol_order(bootstrap_function_values)
             val bootstrap_function_count = bootstrap_function_indices.len()

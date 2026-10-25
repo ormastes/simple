@@ -1,0 +1,43 @@
+use app.io.cli_ops.{cli_current_exe_path, cli_kernel_executable_path, get_args}
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+
+# The native collector supplies the independently hashed executable SHA256.
+# Each environment profile starts a new process, avoiding a warmed identity cache.
+var assertions = 0
+
+fn checked(condition: bool, label: text):
+    if not condition:
+        print "windows-current-executable failed ordinal={assertions + 1} check={label}"
+    assert(condition)
+    assertions = assertions + 1
+
+fn lower_hex_sha256(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..64:
+        if not "0123456789abcdef".contains(value.substring(index, index + 1)):
+            return false
+    true
+
+fn main() -> i64:
+    val args = get_args()
+    checked(args.len() > 0, "expected digest argument exists")
+    val expected = args[args.len() - 1]
+    checked(lower_hex_sha256(expected), "external executable digest is lowerhex64")
+    val current = cli_current_exe_path()
+    val kernel = cli_kernel_executable_path()
+    if kernel == "" or current != kernel:
+        print "windows-current-executable actual kernel={kernel} current={current} expected={expected}"
+    checked(kernel != "", "kernel image identity is nonempty")
+    checked(current == kernel, "current image equals real kernel image")
+    checked(file_exists(current), "current executable exists")
+    val current_hash = file_hash_sha256(current)
+    val kernel_hash = file_hash_sha256(kernel)
+    if current_hash != expected or kernel_hash != expected:
+        print "windows-current-executable actual kernel={kernel} current={current} current_hash={current_hash} kernel_hash={kernel_hash} expected={expected}"
+    checked(lower_hex_sha256(current_hash), "real current file SHA256 is lowerhex64")
+    checked(current_hash == expected, "current file equals externally pinned executable")
+    checked(kernel_hash == expected, "kernel image equals externally pinned executable")
+    checked(cli_current_exe_path() == current, "process identity cache preserves image")
+    print "windows-current-executable assertions={assertions}"
+    0

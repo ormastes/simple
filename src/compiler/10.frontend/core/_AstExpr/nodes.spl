@@ -90,19 +90,19 @@ const EXPR_CUSTOM_BLOCK = 57  # kind{raw payload}, canonical CustomBlock bridge
 # (accessors, desugar, parser, lint), so they are declared `pub`: a private
 # static is file-only and the Cranelift AOT backend rejects importing one
 # (cranelift_private_static_cross_module_2026-10-24).
-pub var expr_tag: [i64] = []
-pub var expr_span: [i64] = []
-pub var expr_i_val: [i64] = []
-pub var expr_f_val: [text] = []
-pub var expr_s_val: [text] = []
-pub var expr_left: [i64] = []
-pub var expr_right: [i64] = []
-pub var expr_extra: [i64] = []
-pub var expr_args: [[i64]] = []
+var expr_tag: [i64] = []
+var expr_span: [i64] = []
+var expr_i_val: [i64] = []
+var expr_f_val: [text] = []
+var expr_s_val: [text] = []
+var expr_left: [i64] = []
+var expr_right: [i64] = []
+var expr_extra: [i64] = []
+var expr_args: [[i64]] = []
 # Explicit call type handles belong to the type arena, not the expression arena.
 var expr_call_type_args: [[i64]] = []
 var expr_arg_names: [[text]] = []
-pub var expr_stmts: [[i64]] = []
+var expr_stmts: [[i64]] = []
 var expr_asm_kinds: [[text]] = []
 var expr_asm_locations: [[text]] = []
 var expr_asm_clobbers: [[text]] = []
@@ -384,6 +384,36 @@ fn expr_owner_str_set(idx: i64, value: text):
     expr_s_val[idx] = value
 fn expr_owner_extra_set(idx: i64, value: i64):
     expr_extra[idx] = value
+
+fn expr_owner_left_set(idx: i64, value: i64):
+    expr_left[idx] = value
+
+fn expr_owner_right_set(idx: i64, value: i64):
+    expr_right[idx] = value
+
+# Owner accessors for the asm match-arm pools (ParseContext stage 2): other
+# modules read and write them only through these, so the storage stays
+# private and cross-module writes reach the owner.
+fn asm_arm_owner_archs(idx: i64) -> [text]: asm_arm_archs[idx]
+fn asm_arm_owner_os(idx: i64) -> text: asm_arm_os[idx]
+fn asm_arm_owner_abi(idx: i64) -> text: asm_arm_abi[idx]
+fn asm_arm_owner_backend(idx: i64) -> text: asm_arm_backend[idx]
+fn asm_arm_owner_ver_ops(idx: i64) -> [text]: asm_arm_ver_ops[idx]
+fn asm_arm_owner_ver_vals(idx: i64) -> [i64]: asm_arm_ver_vals[idx]
+fn asm_arm_owner_asm_text(idx: i64) -> text: asm_arm_asm_text[idx]
+fn asm_arm_owner_is_compile_error(idx: i64) -> bool: asm_arm_is_compile_error[idx]
+fn asm_arm_owner_error_msg(idx: i64) -> text: asm_arm_error_msg[idx]
+fn asm_arm_owner_is_wildcard(idx: i64) -> bool: asm_arm_is_wildcard[idx]
+
+fn asm_arm_owner_set_asm_text(idx: i64, value: text):
+    asm_arm_asm_text[idx] = value
+
+fn asm_arm_owner_set_is_compile_error(idx: i64, value: bool):
+    asm_arm_is_compile_error[idx] = value
+
+fn asm_arm_owner_set_error_msg(idx: i64, value: text):
+    asm_arm_error_msg[idx] = value
+
 
 # ----- Arena generation diagnostics helpers (lane L6) -----
 
@@ -831,16 +861,16 @@ fn expr_asm_operands(text_value: text, values: [i64], names: [text],
 
 # ===== Asm Match Arm Arena =====
 # Parallel arrays for target-qualified asm match arms
-pub var asm_arm_archs: [[text]] = []       # arch list per arm (pipe groups)
-pub var asm_arm_os: [text] = []            # os per arm ("" = wildcard)
-pub var asm_arm_abi: [text] = []           # abi per arm ("" = wildcard)
-pub var asm_arm_backend: [text] = []       # backend per arm ("" = wildcard)
-pub var asm_arm_ver_ops: [[text]] = []     # version constraint ops per arm
-pub var asm_arm_ver_vals: [[i64]] = []     # version constraint values per arm
-pub var asm_arm_asm_text: [text] = []      # asm body text per arm
-pub var asm_arm_is_compile_error: [bool] = []  # is compile_error arm
-pub var asm_arm_error_msg: [text] = []     # error message for compile_error arms
-pub var asm_arm_is_wildcard: [bool] = []   # is wildcard (_) arm
+var asm_arm_archs: [[text]] = []       # arch list per arm (pipe groups)
+var asm_arm_os: [text] = []            # os per arm ("" = wildcard)
+var asm_arm_abi: [text] = []           # abi per arm ("" = wildcard)
+var asm_arm_backend: [text] = []       # backend per arm ("" = wildcard)
+var asm_arm_ver_ops: [[text]] = []     # version constraint ops per arm
+var asm_arm_ver_vals: [[i64]] = []     # version constraint values per arm
+var asm_arm_asm_text: [text] = []      # asm body text per arm
+var asm_arm_is_compile_error: [bool] = []  # is compile_error arm
+var asm_arm_error_msg: [text] = []     # error message for compile_error arms
+var asm_arm_is_wildcard: [bool] = []   # is wildcard (_) arm
 
 fn asm_arm_new(archs: [text], os: text, abi: text, backend: text,
                ver_ops: [text], ver_vals: [i64], asm_text: text,
@@ -1134,3 +1164,130 @@ pub fn flat_expr_pools_clear_chunks_v1() -> [text]:
 export flat_expr_pools_dump, flat_expr_pools_restore, flat_expr_pools_clear_chunks_v1
 
 export expr_set_call_type_args, expr_owner_call_type_args
+
+# ===== ExprStoreState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct ExprStoreState:
+    expr_env_mirror_high_slot: [i64]
+    expr_tag: [i64]
+    expr_span: [i64]
+    expr_i_val: [i64]
+    expr_f_val: [text]
+    expr_s_val: [text]
+    expr_left: [i64]
+    expr_right: [i64]
+    expr_extra: [i64]
+    expr_args: [[i64]]
+    expr_call_type_args: [[i64]]
+    expr_arg_names: [[text]]
+    expr_stmts: [[i64]]
+    expr_asm_kinds: [[text]]
+    expr_asm_locations: [[text]]
+    expr_asm_clobbers: [[text]]
+    expr_asm_outputs: [[i64]]
+    expr_count_slot: [i64]
+    asm_arm_archs: [[text]]
+    asm_arm_os: [text]
+    asm_arm_abi: [text]
+    asm_arm_backend: [text]
+    asm_arm_ver_ops: [[text]]
+    asm_arm_ver_vals: [[i64]]
+    asm_arm_asm_text: [text]
+    asm_arm_is_compile_error: [bool]
+    asm_arm_error_msg: [text]
+    asm_arm_is_wildcard: [bool]
+
+pub fn expr_store_state_take() -> ExprStoreState:
+    val s = ExprStoreState(
+        expr_env_mirror_high_slot: expr_env_mirror_high_slot,
+        expr_tag: expr_tag,
+        expr_span: expr_span,
+        expr_i_val: expr_i_val,
+        expr_f_val: expr_f_val,
+        expr_s_val: expr_s_val,
+        expr_left: expr_left,
+        expr_right: expr_right,
+        expr_extra: expr_extra,
+        expr_args: expr_args,
+        expr_call_type_args: expr_call_type_args,
+        expr_arg_names: expr_arg_names,
+        expr_stmts: expr_stmts,
+        expr_asm_kinds: expr_asm_kinds,
+        expr_asm_locations: expr_asm_locations,
+        expr_asm_clobbers: expr_asm_clobbers,
+        expr_asm_outputs: expr_asm_outputs,
+        expr_count_slot: expr_count_slot,
+        asm_arm_archs: asm_arm_archs,
+        asm_arm_os: asm_arm_os,
+        asm_arm_abi: asm_arm_abi,
+        asm_arm_backend: asm_arm_backend,
+        asm_arm_ver_ops: asm_arm_ver_ops,
+        asm_arm_ver_vals: asm_arm_ver_vals,
+        asm_arm_asm_text: asm_arm_asm_text,
+        asm_arm_is_compile_error: asm_arm_is_compile_error,
+        asm_arm_error_msg: asm_arm_error_msg,
+        asm_arm_is_wildcard: asm_arm_is_wildcard
+    )
+    expr_tag = []
+    expr_span = []
+    expr_i_val = []
+    expr_f_val = []
+    expr_s_val = []
+    expr_left = []
+    expr_right = []
+    expr_extra = []
+    expr_args = []
+    expr_call_type_args = []
+    expr_arg_names = []
+    expr_stmts = []
+    expr_asm_kinds = []
+    expr_asm_locations = []
+    expr_asm_clobbers = []
+    expr_asm_outputs = []
+    expr_count_slot = [0]
+    asm_arm_archs = []
+    asm_arm_os = []
+    asm_arm_abi = []
+    asm_arm_backend = []
+    asm_arm_ver_ops = []
+    asm_arm_ver_vals = []
+    asm_arm_asm_text = []
+    asm_arm_is_compile_error = []
+    asm_arm_error_msg = []
+    asm_arm_is_wildcard = []
+    expr_env_mirror_high_slot = [0]
+    s
+
+pub fn expr_store_state_install(s: ExprStoreState):
+    expr_env_mirror_high_slot = s.expr_env_mirror_high_slot
+    expr_tag = s.expr_tag
+    expr_span = s.expr_span
+    expr_i_val = s.expr_i_val
+    expr_f_val = s.expr_f_val
+    expr_s_val = s.expr_s_val
+    expr_left = s.expr_left
+    expr_right = s.expr_right
+    expr_extra = s.expr_extra
+    expr_args = s.expr_args
+    expr_call_type_args = s.expr_call_type_args
+    expr_arg_names = s.expr_arg_names
+    expr_stmts = s.expr_stmts
+    expr_asm_kinds = s.expr_asm_kinds
+    expr_asm_locations = s.expr_asm_locations
+    expr_asm_clobbers = s.expr_asm_clobbers
+    expr_asm_outputs = s.expr_asm_outputs
+    expr_count_slot = s.expr_count_slot
+    asm_arm_archs = s.asm_arm_archs
+    asm_arm_os = s.asm_arm_os
+    asm_arm_abi = s.asm_arm_abi
+    asm_arm_backend = s.asm_arm_backend
+    asm_arm_ver_ops = s.asm_arm_ver_ops
+    asm_arm_ver_vals = s.asm_arm_ver_vals
+    asm_arm_asm_text = s.asm_arm_asm_text
+    asm_arm_is_compile_error = s.asm_arm_is_compile_error
+    asm_arm_error_msg = s.asm_arm_error_msg
+    asm_arm_is_wildcard = s.asm_arm_is_wildcard
+
+export ExprStoreState, expr_store_state_take, expr_store_state_install

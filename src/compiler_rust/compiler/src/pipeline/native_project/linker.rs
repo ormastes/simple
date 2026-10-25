@@ -14,7 +14,7 @@ use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_bootstrap_tools_sqlite_runtime, stage_sqlite_runtime_dll,
-    build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
+    build_core_c_runtime_supplement_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
     external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
@@ -1583,7 +1583,7 @@ int main(int argc, char** argv) {
             // when supplying the C-only bootstrap runtime exports.
             && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))
         {
-            let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
+            let core = build_core_c_runtime_supplement_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
                 .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
@@ -1596,7 +1596,7 @@ int main(int argc, char** argv) {
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
         let host_gpu_core_runtime = if host_gpu_lane {
             Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                build_core_c_runtime_supplement_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
             )
         } else {
@@ -2141,7 +2141,7 @@ int main(int argc, char** argv) {
                     // from inside the runtime. That is why this needs no
                     // `--allow-multiple-definition`, unlike the Windows
                     // native_all + core-C layering below.
-                    let core_c = build_core_c_runtime_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
+                    let core_c = build_core_c_runtime_supplement_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
                         .ok_or_else(|| {
                             "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
                         })?;
@@ -2281,7 +2281,7 @@ int main(int argc, char** argv) {
                         //     detection for the WHOLE link, permanently masking
                         //     the ~475-symbol collision class instead of
                         //     surfacing it.
-                        //   * any platform: build_core_c_runtime_library
+                        //   * any platform: build_core_c_runtime_supplement_library
                         //     returning None now aborts a previously-working
                         //     build.
                         // The Windows lane needs this supplement because
@@ -2317,7 +2317,7 @@ int main(int argc, char** argv) {
                         // build" attempt failed with 475 collisions: compiling
                         // it INTO the crate gives the linker no such choice.
                         let core_c_runtime =
-                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                            build_core_c_runtime_supplement_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(external_tool_path(core_c_runtime));
                         // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured

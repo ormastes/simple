@@ -75,3 +75,25 @@ describe "cache daemon request queue":
         val e = cache_daemon_handle_request_v1(host, req(["op: evict"]), "", 3)
         expect(cache_queue_field_v1(e, "evicted")).to_equal("")
         val _b = env_set("SIMPLE_CACHE_MAX_BYTES", "")
+
+describe "cache daemon admit-before-plan":
+    it "rejects an over-budget join before any work is scheduled":
+        val _a = env_set("SIMPLE_CACHE_MAX_BYTES", "100")
+        val host = admitted_host()
+        val r = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: sha256:big",
+            "id: a", "branch: main", "source: a.spl", "bytes: 500"]), "", 1)
+        expect(cache_queue_field_v1(r, "reason")).to_equal("over-budget")
+        expect(host.artifact_flights.inflight_count()).to_equal(0)
+        expect(host.artifact_usage.len()).to_equal(0)
+        val _b = env_set("SIMPLE_CACHE_MAX_BYTES", "")
+
+    it "evicts LRU and reserves the budget row when it admits a leader":
+        val _a = env_set("SIMPLE_CACHE_MAX_BYTES", "100")
+        val host = admitted_host()
+        val _u = cache_daemon_handle_request_v1(host, req(["op: use", "branch: main", "source: a.spl", "digest: sha256:v1", "bytes: 80", "path: old.bin"]), "", 1)
+        val r = cache_daemon_handle_request_v1(host, req(["op: join", "kind: tldr", "digest: sha256:v9",
+            "id: a", "branch: main", "source: b.spl", "bytes: 50"]), "", 2)
+        expect(cache_queue_field_v1(r, "role")).to_equal("1")
+        expect(host.artifact_usage.len()).to_equal(1)
+        expect(host.artifact_usage[0].source).to_equal("b.spl")
+        val _b = env_set("SIMPLE_CACHE_MAX_BYTES", "")

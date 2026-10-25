@@ -1626,6 +1626,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // were implemented -- see
     // doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
     insert_simple!("rt_io_file_open", io_file::rt_io_file_open);
+    insert_simple!("rt_io_file_open_read", io_file::rt_io_file_open_read);
+    insert_simple!("rt_io_file_open_write", io_file::rt_io_file_open_write);
+    insert_simple!("rt_io_file_open_append", io_file::rt_io_file_open_append);
     insert_simple!("rt_io_file_read", io_file::rt_io_file_read);
     insert_simple!("rt_io_file_read_all", io_file::rt_io_file_read_all);
     insert_simple!("rt_io_file_read_line", io_file::rt_io_file_read_line);

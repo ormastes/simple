@@ -10,6 +10,7 @@ User-facing guides for the Simple programming language. For specifications see `
 |-------|-------------|
 | [getting_started.md](getting_started.md) | Installation, first program, language basics |
 | [build.md](build.md) | Build system, SDN config, bootstrap |
+| [tooling/bootstrap_options.md](tooling/bootstrap_options.md) | Bootstrap shard knobs, Stage 3 state, cache protocol (.spab, DigestV1, Lean gates) |
 | [cli.md](cli.md) | CLI commands, arguments, stats |
 
 ## Language

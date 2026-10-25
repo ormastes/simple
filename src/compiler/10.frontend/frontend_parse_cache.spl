@@ -41,7 +41,7 @@ use std.io_runtime.{
     file_hash_sha256_or_empty, dir_create_all, getpid,
     file_move_cross_device, file_delete
 }
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_text_native_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -71,6 +71,9 @@ pub fn frontend_parse_cache_promote_transient_owner() -> bool:
     true
 var _fe_cache_hits: i64 = 0
 var _fe_cache_misses: i64 = 0
+# Hits refused because the native digest was unavailable (frontend_cache_hit
+# path never runs the pure-Simple SHA-256 fallback; such an entry is a MISS).
+var _fe_cache_native_digest_unavailable: i64 = 0
 # Counts SUCCESSFUL stores. A module must be written exactly once per process:
 # a second write for the same module means the parse ran twice (the miss path
 # re-entered) and the cache is paying its cost without buying anything.
@@ -137,6 +140,7 @@ fn frontend_parse_cache_header() -> text:
 # foreign entry returns: the caller cannot tell the difference and must not
 # need to, because both answers are "reparse".
 pub fn frontend_parse_cache_load(key: text) -> text:
+    _fe_cache_last_verify_us = 0
     if key == "" or not frontend_parse_cache_enabled():
         return ""
     val path = frontend_parse_cache_path(key)
@@ -166,7 +170,17 @@ pub fn frontend_parse_cache_entry_blob(after_header: text) -> text:
     if not line.starts_with(FRONTEND_CACHE_CHECKSUM_PREFIX) or line.len() != FRONTEND_CACHE_CHECKSUM_PREFIX.len() + 64:
         return ""
     val blob = after_header.substring(c_end + 1, after_header.len())
-    if blob == "" or sha256_text(blob) != line.substring(FRONTEND_CACHE_CHECKSUM_PREFIX.len(), line.len()):
+    if blob == "":
+        return ""
+    # Native digest only (O(bytes)): an unavailable accelerator is a MISS,
+    # never the pure-Simple fallback that made a hit slower than a parse.
+    val v0 = _fpc_now_us()
+    val sum = sha256_text_native_or_empty(blob)
+    _fe_cache_last_verify_us = _fpc_now_us() - v0
+    if sum == "":
+        frontend_cache_note_native_digest_unavailable()
+        return ""
+    if sum != line.substring(FRONTEND_CACHE_CHECKSUM_PREFIX.len(), line.len()):
         return ""
     blob
 
@@ -258,3 +272,25 @@ export frontend_parse_cache_store_phase3_immutable_v1
 export frontend_parse_cache_record_header_valid_v2
 export frontend_parse_cache_note_hit, frontend_parse_cache_note_miss
 export frontend_parse_cache_hits, frontend_parse_cache_misses
+
+pub fn frontend_cache_note_native_digest_unavailable():
+    _fe_cache_native_digest_unavailable = _fe_cache_native_digest_unavailable + 1
+
+pub fn frontend_cache_native_digest_unavailable() -> i64:
+    _fe_cache_native_digest_unavailable
+
+export frontend_cache_note_native_digest_unavailable, frontend_cache_native_digest_unavailable
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# Microseconds the last line-cache hit spent in its native digest (profile only).
+var _fe_cache_last_verify_us: i64 = 0
+
+fn _fpc_now_us() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+
+pub fn frontend_parse_cache_last_verify_us() -> i64:
+    _fe_cache_last_verify_us
+
+export frontend_parse_cache_last_verify_us

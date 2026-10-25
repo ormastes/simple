@@ -1,0 +1,77 @@
+# Replay import names without expanding the admitted physical source frontier.
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{
+    _driver_physical_source_key_strict_v1, _driver_entry_import_dirname,
+    driver_closure_import_specs_v1, driver_resolve_closure_import_v1,
+    driver_closure_native_owner_v1}
+
+pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
+        source_roots: [text], snapshot_root: text) -> Result<[SourceFile], text>:
+    val snapshot = _driver_physical_source_key_strict_v1(snapshot_root)
+    if snapshot == "": return Err("PRECLOSED_ALIAS_SNAPSHOT_INVALID")
+    var physical_rows: Dict<text, i64> = {}
+    var physical_order: [i64] = []
+    var name_owners: Dict<text, text> = {}
+    var index = 0
+    while index < sources.len():
+        val source = sources[index]
+        val physical = _driver_physical_source_key_strict_v1(source.path)
+        if physical == "" or not physical.starts_with(snapshot + "/"):
+            return Err("PRECLOSED_ALIAS_SOURCE_OUTSIDE_SNAPSHOT: " + source.path)
+        if physical_rows.contains_key(physical):
+            val prior = sources[physical_rows[physical]]
+            if prior.content != source.content:
+                return Err("PRECLOSED_ALIAS_CONTENT_CONFLICT: " + source.path)
+        else:
+            physical_rows[physical] = index
+            physical_order = physical_order.push(index)
+        if name_owners.contains_key(source.module_name) and
+                name_owners[source.module_name] != physical:
+            return Err("PRECLOSED_ALIAS_EXISTING_OWNER_CONFLICT: " + source.module_name)
+        name_owners[source.module_name] = physical
+        index = index + 1
+    # Originals retain their order and canonical names. Only alias rows follow.
+    var result: [SourceFile] = []
+    for original in sources:
+        result = result.push(original)
+    var seen_imports: Dict<text, text> = {}
+    for source_index in physical_order:
+        val source = sources[source_index]
+        val importer_dir = _driver_entry_import_dirname(source.path)
+        val importer_module = if source.module_name.ends_with(".__init__"):
+            source.module_name[0:source.module_name.len() - 9]
+        else: source.module_name
+        for spec in driver_closure_import_specs_v1(source.path):
+            val alias = if spec.starts_with(".") and not spec.starts_with(".."):
+                importer_module + spec
+            else: spec
+            val selected = driver_resolve_closure_import_v1(spec, source_roots, importer_dir)
+            val selected_path = match selected:
+                case SourceRootResolutionV1.Found(path): path
+                case SourceRootResolutionV1.Ambiguous(directory):
+                    return Err("SOURCE_ROOT_AMBIGUOUS: preclosed import '" + spec + "' in '" + source.path + "' under '" + directory + "'")
+                case SourceRootResolutionV1.Missing:
+                    # Same distinction as the ordinary entry closure loader.
+                    if alias.contains("."):
+                        return Err("PRECLOSED_ALIAS_IMPORT_MISSING: " + source.path + "|" + spec)
+                    continue
+            val owner = driver_closure_native_owner_v1(selected_path, alias, importer_dir)
+            val physical = _driver_physical_source_key_strict_v1(owner)
+            if physical == "" or not physical.starts_with(snapshot + "/") or
+                    not physical_rows.contains_key(physical):
+                return Err("PRECLOSED_ALIAS_PROVIDER_NOT_ADMITTED: " + source.path + "|" + spec + "|" + owner)
+            val binding = importer_dir + "|" + alias
+            if seen_imports.contains_key(binding) and seen_imports[binding] != physical:
+                return Err("PRECLOSED_ALIAS_IMPORTER_CONFLICT: " + source.path + "|" + spec + "|" + seen_imports[binding] + "|" + physical)
+            seen_imports[binding] = physical
+            if name_owners.contains_key(alias):
+                if name_owners[alias] != physical:
+                    return Err("PRECLOSED_ALIAS_OWNER_CONFLICT: " + source.path + "|" + spec + "|" + name_owners[alias] + "|" + physical)
+                continue
+            val admitted = sources[physical_rows[physical]]
+            result = result.push(SourceFile(path: admitted.path,
+                authored_path: admitted.authored_path, content: admitted.content,
+                module_name: alias))
+            name_owners[alias] = physical
+    Ok(result)

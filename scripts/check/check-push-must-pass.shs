@@ -410,6 +410,16 @@ push_gate_defer_collect() {
 
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
+    # Fail closed with a clear ERROR when the gate script is absent from this
+    # checkout (sparse worktree). `sh <missing>` otherwise exits 127 with only
+    # a terse "No such file" line, which agents read as a broken host and
+    # route around with --no-verify.
+    if [ ! -f "$1" ]; then
+        echo "push-must-check: ERROR — gate $_gate_id not run: script $1 is missing from this checkout (sparse worktree?). Materialise scripts/ and config/ in full (git sparse-checkout add scripts config), or push from a full checkout. A missing gate is never a pass (gate verdict ERROR, push blocked)." >&2
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        [ "$_gate_blocking" = true ] && return 1
+        return 0
+    fi
     if [ "$_gate_blocking" = true ] && [ -n "$PUSH_PAR_DIR" ]; then
         push_gate_defer_launch "$_gate_id" "$@"
         return 0
@@ -754,6 +764,8 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-mir-transient-scope-boundary:tree:sh scripts/check/check-mir-transient-scope-boundary.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-mir-transient-scope-boundary.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-per-file-overlap-receipt:tree:sh scripts/check/check-per-file-overlap-receipt.shs --selftest')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-per-file-overlap-receipt.shs" --selftest || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-concat-nul:tree:sh scripts/check/check-runtime-concat-nul.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-concat-nul.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tcp-write-nosigpipe:tree:tcp_probe_root=$(mktemp -d) && SIMPLE_TCP_CHECK_OUT=$tcp_probe_root/probe sh scripts/check/check-tcp-write-nosigpipe.shs')
