@@ -7,7 +7,7 @@
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_write, file_size, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
-use std.nogc_sync_mut.io.windows_redirected_process.{windows_redirected_spawn_with_memory, windows_redirected_wait, windows_redirected_completion, windows_redirected_is_running, windows_redirected_failure_reason, windows_redirected_quarantine}
+use std.nogc_sync_mut.io.windows_redirected_process.{windows_redirected_spawn_checked_with_memory, windows_redirected_wait, windows_redirected_completion, windows_redirected_is_running, windows_redirected_failure_reason, windows_redirected_quarantine}
 use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
@@ -337,7 +337,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     var report = ""
     if memory_scoped:
         _memscope_sequence = _memscope_sequence + 1
-        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val temporary = env_get("TMPDIR")
         report = (if temporary == "": "/tmp" else: temporary) + "/simple-memscope-{getpid()}-{time_now_unix_micros()}-{_memscope_sequence}"
         val tasks = if scope.budget.max_pids > 0: " --property=TasksMax={scope.budget.max_pids}" else: ""
         command = command + "/usr/bin/systemd-run --user --scope --quiet --property=MemoryMax={memory_bytes} --property=MemorySwapMax=0 --property=OOMPolicy=continue" + tasks + " -- /bin/sh -c " + _shell_quote(_MEMSCOPE_SUPERVISOR) + " sh " + _shell_quote(report) + " "
@@ -800,7 +800,11 @@ fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
     # JobObject owner; CPU/RSS measurements remain explicitly unavailable.
     val started = time_now_unix_micros()
     _windows_scope_sequence = _windows_scope_sequence + 1
-    val temporary = env_get("TMPDIR") ?? env_get("TEMP") ?? ""
+    # env_ops.env_get is total text: absence is the empty string, not nil.
+    # Coalescing this nonoptional result can discard an existing native value.
+    var temporary = env_get("TMPDIR")
+    if temporary == "":
+        temporary = env_get("TEMP")
     if temporary == "":
         return ObservedProcessResult("", "owned Windows temporary root unavailable",
             _unavailable_usage(0, -1), false, false, -1)
@@ -808,12 +812,13 @@ fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
     val output = prefix + ".out"
     val error = prefix + ".err"
     proc_slot_acquire()
-    val token = windows_redirected_spawn_with_memory(cmd, args, output, error,
-        scope.timeout_ms, scope.max_output_bytes, scope.budget.max_tree_charge_bytes)
-    if token < 0:
-        proc_slot_release()
-        return ObservedProcessResult("", "owned Windows process admission failed",
-            _unavailable_usage(0, -1), false, false, -1)
+    val token = match windows_redirected_spawn_checked_with_memory(cmd, args, output, error,
+            scope.timeout_ms, scope.max_output_bytes, scope.budget.max_tree_charge_bytes):
+        case Ok(value): value
+        case Err(reason):
+            proc_slot_release()
+            return ObservedProcessResult("", "owned Windows process admission failed: " + reason,
+                _unavailable_usage(0, -1), false, false, -1)
     var raw_exit = windows_redirected_wait(token, 0)
     if windows_redirected_is_running(token):
         # An observation error has already requested owned cancellation. Give

@@ -228,6 +228,8 @@ const char* rt_random_hex(int64_t len) {
     return encoded;
 }
 
+static int rt_dir_create_all_cpath(const char* path);
+
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
 bool rt_dir_create_cpath(const char* path, bool recursive) {
@@ -240,35 +242,10 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #endif
     }
 
-    char* tmp = spl_strdup(path);
-    if (!tmp) return false;
-    size_t len = strlen(tmp);
-    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
-        tmp[--len] = '\0';
-    }
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            char saved = *p;
-            *p = '\0';
-#if defined(_WIN32)
-            if (_mkdir(tmp) != 0 && errno != EEXIST) {
-#else
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-#endif
-                *p = saved;
-                free(tmp);
-                return false;
-            }
-            *p = saved;
-        }
-    }
-#if defined(_WIN32)
-    bool ok = _mkdir(tmp) == 0 || errno == EEXIST;
-#else
-    bool ok = mkdir(tmp, 0755) == 0 || errno == EEXIST;
-#endif
-    free(tmp);
-    return ok;
+    /* Keep one recursive walk: it skips Windows drive/extended-path roots
+     * rather than trying mkdir("C:"), and treats backslashes as ordinary
+     * filename bytes on POSIX. */
+    return rt_dir_create_all_cpath(path) != 0;
 }
 
 #define RT_VALUE_TAG_MASK 0x7ULL
