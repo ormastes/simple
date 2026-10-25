@@ -1011,33 +1011,79 @@ impl MonomorphizationPass:
             for owner_param in owner.type_params:
                 val owner_tp: HirTypeParam = owner_param
                 owner_names = owner_names.push(owner_tp.name)
+            # The flat-AST bridge carries class-body methods in synthetic
+            # inherent impls, leaving HirClass.methods empty. Preserve those
+            # exact owner/impl binder aliases for canonicalization; the call
+            # still binds one argument per owner parameter, not per alias.
+            var static_methods: Dict<text, SymbolId> = {}
+            var canonical_params: Dict<i64, [HirTypeParam]> = {}
             for method_name in owner.methods.keys():
                 val method_symbol: SymbolId = owner.methods[method_name]
+                static_methods[method_name] = method_symbol
+                canonical_params[method_symbol.id] = owner.type_params
+            for raw_impl in module.impls:
+                val owner_impl: HirImpl = raw_impl
+                if owner_impl.has_trait_ or owner_impl.type_params.len() != owner.type_params.len(): continue
+                var exact_target = false
+                match owner_impl.type_.kind:
+                    case HirTypeKind.Named(impl_owner, target_args):
+                        exact_target = mono_type_identity(module.symbols, impl_owner, module_name) == identity and
+                            mono_impl_target_is_canonical(target_args, owner_impl.type_params)
+                    case _: ()
+                if not exact_target: continue
+                var same_binders = true
+                var binder_index = 0
+                while binder_index < owner.type_params.len():
+                    val impl_parameter: HirTypeParam = owner_impl.type_params[binder_index]
+                    val owner_parameter: HirTypeParam = owner.type_params[binder_index]
+                    if impl_parameter.name != owner_parameter.name:
+                        same_binders = false
+                    binder_index = binder_index + 1
+                if not same_binders: continue
+                var aliases: [HirTypeParam] = []
+                for parameter in owner.type_params: aliases = aliases.push(parameter)
+                for parameter in owner_impl.type_params: aliases = aliases.push(parameter)
+                for method_name in owner_impl.methods.keys():
+                    val method_symbol: SymbolId = owner_impl.methods[method_name]
+                    if module.functions[method_symbol] == nil: continue
+                    val method: HirFunction = module.functions[method_symbol]
+                    if not method.is_static or method.type_params.len() != 0: continue
+                    if static_methods.has(method_name):
+                        val prior_symbol: SymbolId = static_methods[method_name]
+                        if prior_symbol.id != method_symbol.id:
+                            self.generic_method_rejected["static::{identity}::{method_name}"] = "duplicate static owner template"
+                            continue
+                    static_methods[method_name] = method_symbol
+                    canonical_params[method_symbol.id] = aliases
+            for method_name in static_methods.keys():
+                val method_symbol: SymbolId = static_methods[method_name]
                 if module.functions[method_symbol] == nil: continue
                 val method: HirFunction = module.functions[method_symbol]
                 # Mixed owner/method generic scopes retain their existing
                 # route until their separate argument binding is qualified.
                 if not method.is_static or method.type_params.len() != 0: continue
-                # A signature that never names an owner parameter (e.g.
-                # PureTensor.zeros -> PureTensor<f64>, ScalableVec.min_lanes)
-                # offers no binding evidence; templating it would make every
-                # call unspecializable (E-MONO-032/033). Keep the erased route.
-                var mentions_owner = hir_type_mentions_any_param(method.return_type, owner_names)
-                for method_param in method.params:
-                    val signature_param: HirParam = method_param
-                    if hir_type_mentions_any_param(signature_param.type_, owner_names):
+                val key = "static::{identity}::{method_name}"
+                if self.generic_method_rejected.has(key): continue
+                val name = "{identity}::static::{method_name}"
+                val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                    original_symbol: method.symbol, template_name: name,
+                    canonical_type_params: canonical_params[method_symbol.id],
+                    bound_type_params: owner.type_params, inherent_method: true)
+                # Inspect the exact-symbol canonical signature. A raw
+                # Named(impl_T, []) is an owner binding too, but guessing from
+                # its display name would capture unrelated same-named types.
+                val signature = mono_template_recipe_signature_v1(method, recipe)
+                # Owner-free signatures offer no binding evidence and retain
+                # their existing route (e.g. PureTensor.zeros -> PureTensor<f64>).
+                var mentions_owner = hir_type_mentions_any_param(signature.return_type, owner_names)
+                for param_type in signature.param_types:
+                    if hir_type_mentions_any_param(param_type, owner_names):
                         mentions_owner = true
                 if not mentions_owner: continue
-                val key = "static::{identity}::{method_name}"
-                val name = "{identity}::static::{method_name}"
                 if self.has_template_v1(name) or self.generic_methods.has(key):
                     self.generic_method_rejected[key] = "duplicate static owner template"
                     continue
-                val recipe = MonoTemplateRecipeV1(module_name: module_name,
-                    original_symbol: method.symbol, template_name: name,
-                    canonical_type_params: owner.type_params,
-                    bound_type_params: owner.type_params, inherent_method: true)
-                self.archive_template_signatures[name] = mono_template_recipe_signature_v1(method, recipe)
+                self.archive_template_signatures[name] = signature
                 if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
                     self.generic_functions[name] = method
                 self.template_recipes[name] = recipe
