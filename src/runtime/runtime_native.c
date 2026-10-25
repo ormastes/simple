@@ -1523,6 +1523,7 @@ typedef struct RtCoreSourceDictBackingV1 {
 typedef struct RtCoreSourceDictRegistrationV1 {
     RtCoreDict* dictionary;
     RtCoreSourceDictBackingV1* backing;
+    int64_t capacity; /* actual current backing allocation, not mutable header */
 } RtCoreSourceDictRegistrationV1;
 #define RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1 ((uintptr_t)2)
 static RtCoreSourceDictRegistrationV1* rt_core_source_dict_registration_v1(uintptr_t entry) {

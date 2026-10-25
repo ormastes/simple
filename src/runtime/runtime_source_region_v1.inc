@@ -95,7 +95,7 @@ static int sr_descriptor(const uint64_t* d, int64_t capacity) {
          * silently truncate an ordinary native SetField. */
         if (s[0] != i * 8 || s[1] != 8 || s[0] > d[2] ||
             s[1] > d[2] - s[0] || s[2] < 1 || s[2] > 3 ||
-            (s[2] == 1 ? s[3] != 0 : (s[3] != 1 && s[3] != 2))) return 0;
+            (s[2] == 1 ? s[3] != 0 : (s[3] != 1 && s[3] != 2 && !(s[2]==2 && s[3]==4)))) return 0;
         /* No immutable certification owner exists in this struct provider. */
         if (s[2] == 3) return 0;
     }
@@ -188,7 +188,7 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
 
 int64_t rt_source_region_bound_v1(int64_t operation, int64_t descriptor,
     int64_t capacity, int64_t metric) {
-    if (operation>=13 && operation<=16) {
+    if (operation>=13 && operation<=17) {
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
         return rt_source_region_dict_bound_v1(operation,descriptor,capacity,metric);
 #else
@@ -371,6 +371,10 @@ int64_t rt_source_region_write_begin_v1(int64_t c, int64_t g, int64_t e,
     if (!error && (!destination_metadata || destination_metadata->control ||
         destination_metadata->region != (uintptr_t)r || destination_metadata->generation != r->generation)) error = SR_FOREIGN;
     if (!error && (slot < 0 || (uint64_t)slot >= destination_metadata->descriptor[3])) error = SR_INCOMPLETE;
+    if (!error) {
+        const uint64_t* row=(const uint64_t*)(uintptr_t)destination_metadata->descriptor[4]+(uint64_t)slot*4;
+        if (row[2]==2 && row[3]==4) error=SR_INCOMPLETE; /* only op17 owns Dict edges */
+    }
     if (!error && (r->serial >= INT64_MAX || r->epoch >= INT64_MAX)) error = sr_fail(r, SR_CAPACITY);
     if (!error) { r->ticket = ++r->serial; r->destination = (uintptr_t)destination; r->slot = (uint64_t)slot; }
     int64_t result = error ? error : (int64_t)r->ticket;
@@ -390,6 +394,7 @@ int64_t rt_source_region_write_commit_v1(int64_t c, int64_t g, int64_t ticket,
     if (!error) {
         const uint64_t* s = (const uint64_t*)(uintptr_t)destination_metadata->descriptor[4] + r->slot * 4;
         if (s[2] == 2) {
+            if (s[3]==4) error=SR_INCOMPLETE; /* no dictionary lookup under region lock */
             uintptr_t identity=(uintptr_t)value;
             /* repr2 certifies an exact statically typed Struct, never Any.
              * Nullability is not part of descriptor v1: zero is construction
@@ -419,6 +424,34 @@ int64_t rt_source_region_alias_write_v1(int64_t c, int64_t g, int64_t destinatio
     if (epoch < 0) return epoch;
     int64_t ticket = rt_source_region_write_begin_v1(c, g, epoch, destination, slot, f);
     return ticket < 0 ? ticket : rt_source_region_write_commit_v1(c, g, ticket, value, f);
+}
+
+/* C owner only: caller retains the qualified dictionary owner lock. No
+ * allocation, callback, reserve or dictionary registry access under this lock. */
+int64_t rt_source_region_native_struct_dict_write_v1(int64_t c,int64_t g,
+    int64_t destination,int64_t slot,int64_t dictionary,int64_t work) {
+    if (!sr_allow(9,0,0,work)) return sr_allow_failure_v1;
+    RtSourceRegionV1* r=sr_control(c);
+    int64_t error=sr_validate(r,g);
+    if (!error && (r->lease || r->ticket)) error=SR_CONFLICT;
+    RtStructAllocation* dst=!error ? sr_find((uintptr_t)destination) : NULL;
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(dst);
+    if (!error && (!metadata || metadata->control || metadata->region!=(uintptr_t)r ||
+        metadata->generation!=r->generation)) error=SR_FOREIGN;
+    const uint64_t* row=NULL;
+    if (!error && (!sr_descriptor_header(metadata->descriptor,1) ||
+        metadata->bytes!=metadata->descriptor[2] || slot<0 ||
+        (uint64_t)slot>=metadata->descriptor[3])) error=SR_INCOMPLETE;
+    if (!error) {
+        row=(const uint64_t*)(uintptr_t)metadata->descriptor[4]+(uint64_t)slot*4;
+        if (row[0]!=(uint64_t)slot*8 || row[1]!=8 || row[2]!=2 || row[3]!=4 ||
+            row[0]>metadata->bytes || 8>metadata->bytes-row[0] || dictionary<=0 ||
+            ((uintptr_t)dictionary&7)!=1) error=SR_INCOMPLETE;
+    }
+    if (!error && r->epoch>=INT64_MAX) error=SR_CAPACITY;
+    if (!error) { memcpy((void*)(dst->ptr+row[0]),&dictionary,8); ++r->epoch; }
+    int64_t result=error ? error : (int64_t)r->epoch;
+    rt_struct_alloc_lock_release(); return result;
 }
 
 int64_t rt_source_region_close_v1(int64_t c, int64_t g, int64_t f) {

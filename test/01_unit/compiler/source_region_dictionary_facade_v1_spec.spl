@@ -85,6 +85,28 @@ fn dictionary_fixture_finish_v1(fixture: DictionaryFacadeFixtureV1):
         rt_free(fixture.struct_rows)
 
 describe "SOURCE dictionary shared-account facade":
+    it "charges actual op17 without allocation and leaves the saved view stale":
+        val rows = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([0, 8, 2, 4])
+        val descriptor = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([1, 1, 8, 1, rows, 1])
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        val root = source_region_alloc_v1(fixture.context, descriptor, 1).unwrap()
+        val saved = source_region_stamp_v1(fixture.context).unwrap()
+        val before = fixture.account.snapshot()
+        val advanced = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_struct_dict_write_v1(fixture.context, root, 0, fixture.dictionary).unwrap()
+        val after = fixture.account.snapshot()
+        expect(advanced).to_be_greater_than(saved)
+        expect(after.work_used).to_be_greater_than(before.work_used)
+        expect(after.state_fields).to_equal(before.state_fields)
+        expect(after.output_bytes).to_equal(before.output_bytes)
+        val old_view = source_region_read_begin_v1(fixture.context, saved)
+        expect(old_view.is_err()).to_equal(true)
+        expect(source_region_stamp_v1(fixture.context).unwrap()).to_equal(advanced)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            dictionary_fixture_finish_v1(fixture)
+            rt_free(descriptor)
+            rt_free(rows)
+
     it "charges the shared owner and preserves actual missing/insert/remove results":
         val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
         val initial = fixture.account.snapshot()
