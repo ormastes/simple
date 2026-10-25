@@ -19,7 +19,7 @@ kept; the owning item PR carries the banner).
 | A | Core semantic cache (C0 schema, CAS, formal rules) | [`semantic_incremental_build_v2_plan_2026-08-09.md`](semantic_incremental_build_v2_plan_2026-08-09.md), [`c0_schema_freeze_2026-08-09.md`](c0_schema_freeze_2026-08-09.md), [`cache_invalidation_formal_verification_2026-10-24.md`](../../../05_design/compiler/incremental_build/cache_invalidation_formal_verification_2026-10-24.md) | [`semantic_incremental_build_cache_aop_formal_2026-08-09.md`](../../../05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md) (superseded banner), [`global_cas_interpreter_cache_option_c_plan_2026-07-24.md`](global_cas_interpreter_cache_option_c_plan_2026-07-24.md) | partial — budgets/admit-before-plan #4506; Lean gates per 10-24 doc |
 | B | TLDR / incremental build (execution authority) | [`phase3_incremental_build_completion_2026-10-13.md`](../phase3_incremental_build_completion_2026-10-13.md), [`src_based_tldr_build_v1.md`](../../../05_design/compiler/incremental_build/src_based_tldr_build_v1.md) | [`incremental_build_tldr_scv_implementation_2026-10-10.md`](../incremental_build_tldr_scv_implementation_2026-10-10.md), `phase3_entry_object_cache_acceptance.md`, [`stage3_native_cache_incrementality_2026-08-07.md`](../bootstrap/stage3_native_cache_incrementality_2026-08-07.md), `agent_tasks/static_when_tldr_build_pruning.md`, `incremental_build_metadata_20261008.md` (closed) | partial — planner + object cache wired in the file-worker pool (P-E #4594, keyed by producer); changed-src + TLDR iface + AOP pointcut plan #4511; Stage 2 cache content-keyed #4559 |
 | C | Cache storage, roots, identity | [`per_lane_private_caches.md`](../../../05_design/compiler/incremental_build/per_lane_private_caches.md), [`compiler_semantic_cache_manager.md`](../../../04_architecture/compiler_semantic_cache_manager.md) (+ 03/05 twins), [`shared_cache_directory_roots_v1.md`](../../../04_architecture/shared_cache_directory_roots_v1.md), [`centralized_temp_cache_roots.md`](../../../04_architecture/centralized_temp_cache_roots.md), [`native_module_cache_invalidation.md`](../../../04_architecture/native_module_cache_invalidation.md), [`hir_cache_envelope_reader.md`](../../../05_design/hir_cache_envelope_reader.md), [`shared_parse_cache_crosshost_acceptance.md`](../../agent_tasks/shared_parse_cache_crosshost_acceptance.md), [`parse_phase_process_sharding_blocked_2026-08-21.md`](../../../05_design/compiler/incremental_build/parse_phase_process_sharding_blocked_2026-08-21.md), [`mir_shard_export_summaries.md`](../../../05_design/compiler/incremental_build/mir_shard_export_summaries.md), [`packed_binary_ast_v1.md`](../../../05_design/compiler/incremental_build/packed_binary_ast_v1.md) | [`cache_build_review_and_portability_2026-10-24.md`](../../../05_design/compiler/incremental_build/cache_build_review_and_portability_2026-10-24.md) | landed for identity: HIR/frontend cache scope published before shard spawn #4565; `.spab` default store + hit #4582 #4589 #4503; roots unchanged (`$SIMPLE_CACHE`, per-lane bootstrap-only) |
-| D | Per-file pipeline / compile optimization | [`true_per_file_pipeline_v1.md`](../../../05_design/compiler/incremental_build/true_per_file_pipeline_v1.md), [`build_runner_fiber_scheduler_v1.md`](../../../05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md), guide [`bootstrap_options.md`](../../../07_guide/tooling/bootstrap_options.md), `.claude/rules/bootstrap.md` | `doc/08_tracking/bug/stage3_hir_phase_cost_breakdown_2026-10-25.md` (#4567), `agent_tasks/startup_perf_parallel_plan_2026-08-17_tldr.md` | partial — see §2 rows 2, 5, 7; P-A..P-G3 and P-G2 (#4600) landed, default flip not done (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`, P-F #4592) |
+| D | Per-file pipeline / compile optimization | [`true_per_file_pipeline_v1.md`](../../../05_design/compiler/incremental_build/true_per_file_pipeline_v1.md), [`build_runner_fiber_scheduler_v1.md`](../../../05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md), guide [`bootstrap_options.md`](../../../07_guide/tooling/bootstrap_options.md), `.claude/rules/bootstrap.md` | `doc/08_tracking/bug/stage3_hir_phase_cost_breakdown_2026-10-25.md` (#4567), `agent_tasks/startup_perf_parallel_plan_2026-08-17_tldr.md` | partial — evening: P-G4..P-H merged (#4625 #4628 #4653 #4672 #4683), P-G7 #4696 open; see §Progress 2026-10-25 (evening) — see §2 rows 2, 5, 7; P-A..P-G3 and P-G2 (#4600) landed, default flip not done (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`, P-F #4592) |
 | E | Generic / AOP / macro semantic cache | [`generic_aop_macro_semantic_cache_plan_2026-10-24.md`](generic_aop_macro_semantic_cache_plan_2026-10-24.md) | `source_calls_canonical_monomorphization_v1.md`, `generics/native_monomorphization_plan_2026-07-17.md`, `04_architecture/phase3_mono_*` | partial — reader-driven concrete instances P-G1 #4591; module-scoped mono + COMDAT #4575 #4580 #4597 #4603; per-file lane mono from reader instances P-G3 #4598; TLDR specialization list + `.rr` producers P-G2 #4600 (merged `73c4aef632a`); AOP match-shard driver wiring #4401 open |
 | F | Test runner / daemon | [`test_daemon_default_execution_design_2026-03-25.md`](../../../05_design/app/testing/test_daemon_default_execution_design_2026-03-25.md), [`test_runner_daemon_resource_governor.md`](../../../05_design/app/testing/test_runner_daemon_resource_governor.md) (+ [architecture](../../../04_architecture/test/test_runner_daemon_resource_governor.md)), [`fork_mode_is_not_fresh_process_per_unit.md`](../../../05_design/lib/test_runner/fork_mode_is_not_fresh_process_per_unit.md); route policy in `src_based_tldr_build_v1.md` §10 | — | open — route policy partial (`TEST_DAEMON_REROUTE_ENVIRONMENT` only); no PR in #4498-#4604 |
 | G | Parse / frontend state | [`parse_context_per_context_state.md`](../../../05_design/compiler/frontend/parse_context_per_context_state.md), [`parse_context_var_inventory.md`](../../../05_design/compiler/frontend/parse_context_var_inventory.md), [`parser_framework.md`](../../../04_architecture/parser_framework.md), [`frontend_parser_gaps_and_lazy_closure_design.md`](../../../05_design/compiler/parsing/frontend_parser_gaps_and_lazy_closure_design.md) | [`startup_perf_parallel_plan_2026-08-17_tldr.md`](../../agent_tasks/startup_perf_parallel_plan_2026-08-17_tldr.md) | partial — stage 1 snapshots landed (#4505 #4512-#4516 #4518 #4519 #4521 #4522 #4523 #4526 #4527 #4529 #4530 #4532-#4535 #4538-#4541 #4548 #4604); stage 2 accessor indirection for parser/stmt/expr/decl (#4544 #4550 #4553 #4555 #4558 #4560 #4561 #4568); `--parse-fibers=i/n` child lane #4508; stages 3-4 open |
@@ -61,3 +61,58 @@ Items 3 (DataFrame collections), 4 (mold linker; #4507 and the COMDAT dedup
 #4603 are the only linker-adjacent landings today) and 7 (profile-switchable
 containers; `CollectionFeedbackState` #4535 only moved its parse-side state)
 have no cache-plan conflict; their status lives in the umbrella.
+
+### Progress 2026-10-25 (evening)
+
+PR states verified with `gh pr view` against base `release/1.0.0`.
+
+**Per-file packages merged:** P-A #4588 `e0efb59638f`, P-B #4597 `7ec523277de`,
+P-C #4589 `d1ee8738d60`, P-D #4603 `cbe361c2497`, P-E #4594 `9314979e6e6`,
+P-F #4592 `1c6ccfb61c4`, P-G1 #4591 `3383735e8cb`, P-G2 #4600 `73c4aef632a`,
+P-G3 #4598 `220b35b4b35`, P-G4 #4625 `7ec28192eb0`, P-G5 #4628 `963f32429a3`,
+P-G5b #4653 `5de3687be0b`, P-G6 #4672 `03e6d90af24`, P-H #4683 `bf4c14a31e1`
+(stage3 and plain native-build go through the file-worker pool, fail-closed).
+E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
+
+**Open:** P-G7 #4696 (instance object producer + link wiring) is OPEN; approved by lead
+reviewer (comment), pending merge. Merge release_phase3 into
+release/1.0.0: #4704 OPEN.
+
+**Default stays off:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`
+(`SIMPLE_FILE_WORKERS` default "0"). Flip waits on a proof run: stage3 -> stage3'
+built with P-H, then a per-file self-rebuild that yields an overlap receipt
+(`scripts/check/check-per-file-overlap-receipt.shs`). No such receipt exists yet.
+
+**Stage evidence (in progress, not a retained measurement):** stage2 built cold
+from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The
+stage3 whole-program run is in progress with 0 MIR errors (was 3211); it is
+single-threaded and CPU-bound.
+
+**Other landings:** #4610 stale lock reclaim / orphan reaping `52ecd8b7725`;
+#4622 Mach-O as conditional build tag `a269ecaecba`; #4623 pre-push gate clear
+error for missing gate script `fc894af98af`; #4633 host-scaled tree RSS cap
+`ae3c1307476`; #4682 llvm-mingw drive-letter admission `784ac5aa304`; seed
+externs #4608 `57a129fb2b9` and #4688 `5bd6f027abb`; spec fixes #4636
+`1cfdf5876ca`, #4635 `33bfd461fbb`, #4638 `4f5e0d91b88`. Also merged since the
+morning: memory #4698 `574b8bb6e70` and #4705 `31bafe03f9e` (HIR / per-module MIR
+eviction), perf #4693 `35fe920618d` (sha256 accelerator), MIR #4706
+`a853ac75861`, stage2 #4684 `dd7cede08a3` and #4697 `7c1e83a584b`.
+
+**Still failing / under investigation:** HIR cache selfcheck (239/1495 hits);
+seed JIT fallback on `native_build_main`.
+
+**Evening update (16:06).**
+
+- Landing: the second lander force-landed after local gates (CI queued over 50
+  minutes): #4693 `35fe920618d`, #4684 `dd7cede08a3`, #4697 `7c1e83a584b`,
+  #4686 `14c1428c6c9`, #4698 `574b8bb6e70`, #4705 `31bafe03f9e`, #4706
+  `a853ac75861`, #4685 `73929c8bdc1`; P-H #4683 `bf4c14a31e1`.
+- Open: P-G7 #4696 (approved by lead reviewer comment), #4704 release_phase3
+  merge, #4708 batch MIR eviction.
+- Phase 3 at 16:06: the stage3 whole-program run is in staged codegen (batch
+  about 121 of about 187), 0 MIR errors, 28.8 GB RSS, single thread. Next: lld
+  link, sanity, MCP / caret / devhub, stage3 self-rebuild from the latest
+  release with P-H, then the per-file proof run (80 jobs) and the default flip.
+- Investigating: closure walk not following `use os.*` imports (selected 1 vs
+  5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
+  despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).
