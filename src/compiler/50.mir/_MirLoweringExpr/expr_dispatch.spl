@@ -2435,6 +2435,15 @@ impl MirLowering:
             if val hir_value_type = dict_value_hir_type:
                 dict_result_type = self.lower_type(hir_value_type)
                 resolved_from_local = true
+        # A builder-tracked `Dict(K, i64)` is often the ERASED default (field
+        # projection / codec temp), not the declared V. When the HIR V is
+        # Bool, the i64 `>>3` arm would turn a stored true/false into int 1/0
+        # (bug native_dict_bool_index_int_2026-10-25), so prefer the HIR V.
+        if not value_type_from_hir and _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
+            if val hir_v = dict_value_hir_type:
+                val hir_v_mir = self.lower_type(hir_v)
+                if _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool):
+                    dict_result_type = hir_v_mir
         # Store-side refinement: an empty `{}` literal fixes the declared
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
