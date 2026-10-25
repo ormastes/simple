@@ -120,9 +120,10 @@ no socket reads, writes, fragmentation, deadlines or listener behavior.
    and `screen` contains two rows of four spaces. Return to the original
    window; its independent 12 by 6 geometry survives.
 5. Change work's layout. Monitoring retains its manual layout and original
-   80 by 24 pane dimensions; its rectangle list stays empty.
-6. Capture a manual window before selecting named geometry. Screen capture
-   refuses, rectangles stay empty and no pane capture occurs.
+   80 by 24 pane dimensions; its rectangle uses the real pane ID and full canvas.
+6. Capture a manual window before selecting named geometry. Persisted geometry
+   permits screen capture, rectangles show the real full-canvas pane, and the
+   capture count advances once without changing the layout.
 7. Select a valid layout, then request an invalid name. The request refuses;
    the selected layout and exact prior rectangles survive.
 8. Request two column bands in a one-column canvas. It refuses without

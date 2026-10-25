@@ -1,7 +1,7 @@
 # Window layout projections and backend resize transaction. The API remains
 # the sole writer of authoritative service state; helpers consume snapshots.
 use os.apps.smux.service.{ServiceState}
-use os.apps.smux.mux_rects.{MuxRect, mux_layout_known, mux_layout_rects}
+use os.apps.smux.mux_rects.{MuxRect, mux_full_rect, mux_layout_known, mux_layout_rects}
 use std.nogc_sync_mut.sosix.pty.{sosix_pty_can_resize as pty_can_resize,
     sosix_pty_resize as pty_resize}
 
@@ -13,13 +13,6 @@ fn window_index(st: ServiceState, session_id: text, window_id: text) -> int:
         return -1
     return idx
 
-pub fn invalidate_window_layout(st: ServiceState, session_id: text, window_id: text) -> ServiceState:
-    val idx = window_index(st, session_id, window_id)
-    if idx < 0:
-        return st
-    val window = st.get_window(idx)
-    return st.replace_window(idx, window.with_layout("manual", window.canvas_cols, window.canvas_rows))
-
 pub fn window_layout_name(st: ServiceState, session_id: text, window_id: text) -> Result<text, text>:
     val idx = window_index(st, session_id, window_id)
     if idx < 0:
@@ -27,13 +20,25 @@ pub fn window_layout_name(st: ServiceState, session_id: text, window_id: text) -
     return Ok(st.get_window(idx).layout)
 
 pub fn window_layout_rects(st: ServiceState, session_id: text, window_id: text) -> [MuxRect]:
+    val idx = window_index(st, session_id, window_id)
+    if idx < 0:
+        return []
+    val window = st.get_window(idx)
+    return window_plan_rects(st, session_id, window_id, window.canvas_cols, window.canvas_rows)
+
+# Project from the stored reference canvas, never the previous rounded result.
+# Empty output for a nonempty window means refusal; callers must not substitute
+# a named layout. Holes (split separators or closed panes) are retained.
+pub fn window_plan_rects(st: ServiceState, session_id: text, window_id: text, cols: int, rows: int) -> [MuxRect]:
     var empty: [MuxRect] = []
+    if cols <= 0 or rows <= 0 or cols > 32767 or rows > 32767:
+        return empty
+    if cols * rows > 262144:
+        return empty
     val idx = window_index(st, session_id, window_id)
     if idx < 0:
         return empty
     val window = st.get_window(idx)
-    if not mux_layout_known(window.layout):
-        return empty
     var ids: [text] = []
     var i = 0
     while i < st.pane_count:
@@ -41,7 +46,54 @@ pub fn window_layout_rects(st: ServiceState, session_id: text, window_id: text) 
         if pane.session_id == session_id and pane.window_id == window_id:
             ids.push(pane.id)
         i = i + 1
-    return mux_layout_rects(ids, window.canvas_cols as i64, window.canvas_rows as i64, window.layout)
+    if mux_layout_known(window.layout):
+        return mux_layout_rects(ids, cols as i64, rows as i64, window.layout)
+    if window.layout != "manual" or cols < 1 or rows < 1:
+        return empty
+    if window.manual_rects.len() == 0 and ids.len() == 1:
+        return [mux_full_rect(ids[0], cols as i64, rows as i64)]
+    if window.manual_cols < 1 or window.manual_rows < 1 or window.manual_rects.len() != ids.len():
+        return empty
+    var projected: [MuxRect] = []
+    # Order by service pane order so child resize indices always match IDs.
+    for id in ids:
+        var found = false
+        for rect in window.manual_rects:
+            if rect.pane_id == id:
+                val left = rect.col * (cols as i64) / (window.manual_cols as i64)
+                val top = rect.row * (rows as i64) / (window.manual_rows as i64)
+                val right = (rect.col + rect.cols) * (cols as i64) / (window.manual_cols as i64)
+                val bottom = (rect.row + rect.rows) * (rows as i64) / (window.manual_rows as i64)
+                projected.push(MuxRect(pane_id: id, col: left, row: top, cols: right - left, rows: bottom - top))
+                found = true
+        if not found:
+            return empty
+    if not window_rects_valid(projected, cols, rows):
+        return empty
+    return projected
+
+pub fn window_rects_valid(rects: [MuxRect], cols: int, rows: int) -> bool:
+    if cols <= 0 or rows <= 0 or cols > 32767 or rows > 32767:
+        return false
+    if cols * rows > 262144:
+        return false
+    var i = 0
+    while i < rects.len():
+        val r = rects[i]
+        if r.col < 0 or r.row < 0 or r.cols <= 0 or r.rows <= 0:
+            return false
+        if r.col + r.cols > cols or r.row + r.rows > rows:
+            return false
+        var j = 0
+        while j < i:
+            val other = rects[j]
+            if r.pane_id == other.pane_id:
+                return false
+            if r.col < other.col + other.cols and other.col < r.col + r.cols and r.row < other.row + other.rows and other.row < r.row + r.rows:
+                return false
+            j = j + 1
+        i = i + 1
+    return true
 
 pub fn resize_layout_children(st: ServiceState, indices: [int], rects: [MuxRect]) -> Result<bool, text>:
     if indices.len() != rects.len():
@@ -51,6 +103,8 @@ pub fn resize_layout_children(st: ServiceState, indices: [int], rects: [MuxRect]
         val rect = rects[checked]
         if indices[checked] < 0 or indices[checked] >= st.pane_count:
             return Err("invalid layout pane index")
+        if st.get_pane(indices[checked]).pane.id != rect.pane_id:
+            return Err("layout pane mapping mismatch")
         if rect.cols <= 0 or rect.rows <= 0 or rect.cols > 32767 or rect.rows > 32767:
             return Err("invalid layout pane dimensions")
         if rect.cols * rect.rows > 262144:

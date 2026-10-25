@@ -25,9 +25,11 @@ No children are allocated by this suite and no runtime PASS is claimed.
 1. Apply a layout to an inactive window. Its session's active window and an
    unrelated session remain unchanged. Focus away and back; the selected name
    and canvas survive.
-2. Successfully split, close or arbitrarily resize a pane. Each operation
-   explicitly changes that window's layout to `manual` and named rectangle
-   queries return an empty list until a named layout is selected again.
+2. Successfully split, close or explicitly resize a pane. Each operation
+   changes that window's layout to `manual` and rectangle queries retain real
+   coordinates. A vertical 80 by 24 split has widths 39 and 40, separated by
+   column 39. Closing one pane preserves the survivor without auto-grow.
+   Resizing the only pane updates its canvas and published rectangle.
 3. Refuse an invalid split, missing-pane close and invalid resize. Refusal
    preserves the existing named plan.
 4. Remove the final pane. The empty window refuses layout selection and
@@ -35,6 +37,20 @@ No children are allocated by this suite and no runtime PASS is claimed.
 
 5. Refuse dimensions which would wrap a 32-bit native ABI slot and canvases
    exceeding the service area limit. Retain the prior 80x24 pane and plan.
+
+6. Shrink a nested manual split to 40 by 12, then restore 80 by 24. Original
+   pane IDs and all boundaries return exactly. Refuse a 1 by 1 canvas and a
+   pane resize that overlaps siblings; pane dimensions, canvas, coordinates
+   and resize/capture metrics remain unchanged. These assertions are authored,
+   not an execution receipt.
+
+7. At an 80-column reference with a 39-column left pane, shrink to 40, split
+   again, and invoke the same rollback API used after child-spawn refusal.
+   The added pane disappears and all current boundaries return. Growing back
+   to 80 must restore width 39, not 38. A consumed checkpoint refuses reuse.
+   A separate case selects a newer named layout and checks that old or
+   cross-session rollback requests cannot replace it. These tests allocate no
+   child; live provider failure and PTY rollback remain unexecuted obligations.
 
 There are eight authored scenarios. Named selection updates pane VT
 grid sizes and complete window metadata while preserving child/focus owners.

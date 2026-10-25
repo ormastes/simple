@@ -22,13 +22,21 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state}
+use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
+use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new,
+    smux_lease_admit, smux_lease_heartbeat, smux_lease_check, smux_lease_expiry_candidates,
+    smux_lease_expire, smux_lease_remove, smux_lease_token_matches,
+    smux_lease_forget_client, smux_lease_forget_session}
+use std.nogc_sync_mut.sosix.entropy.{sosix_random_hex}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
+use os.apps.smux.client_notifications.{smux_notifications_clear_recipient, smux_notifications_clear_all}
 use os.apps.smux.frame_snapshot.{smux_frame_validate, smux_frame_from_state}
 use os.apps.smux.vt_screen.{vt_new, vt_feed}
 use os.apps.smux.layout.{smux_plan_split}
 use os.apps.smux.mux_rects.{MuxRect, mux_layout_known, mux_layout_rects}
 use os.apps.smux.window_layout_service.{
-    invalidate_window_layout as _invalidate_window_layout,
-    window_layout_name, window_layout_rects,
+    window_layout_name, window_layout_rects, window_plan_rects, window_rects_valid,
     resize_layout_children as _resize_layout_children
 }
 use std.nogc_sync_mut.sosix.pty.{
@@ -59,12 +67,21 @@ use os.apps.smux.input_queue.{pane_input_enqueue, pane_input_remaining,
 const SMUX_CAPACITY: int = 8
 
 var _svc: ServiceState = ServiceState.empty()
+var _client_leases: ClientLeaseState = ClientLeaseState(owner_nonce: "",
+    next_generation: 1, last_now_ms: 0, leases: [])
+var _split_checkpoints: [SplitCheckpoint] = []
+var _closing_sessions: [text] = []
 
 # =========================================================================
 # Test support
 # =========================================================================
 
 pub fn smux_reset_for_test():
+    smux_notifications_clear_all()
+    # Empty incarnation triggers fresh secure entropy on the next admission.
+    _client_leases = ClientLeaseState(owner_nonce: "", next_generation: 1, last_now_ms: 0, leases: [])
+    _split_checkpoints = []
+    _closing_sessions = []
     # Reap every attached child first: a reset must not leak processes.
     var i = 0
     while i < _svc.pane_count:
@@ -183,6 +200,8 @@ fn _clean_output(raw: text) -> text:
 # queries share the bounded input queue; one provider write follows each drain.
 # A child waiting on that answer can resume after the provider delivers it.
 fn _flush_input(pr0: PaneRecord) -> PaneRecord:
+    if smux_session_closing(pr0.pane.session_id):
+        return pr0
     if pr0.input.error != "" or not _has_child(pr0):
         return pr0
     if _is_pty(pr0):
@@ -209,6 +228,10 @@ fn _drain_bounded(pr0: PaneRecord, limit: int) -> PaneRecord:
     return _flush_input(_drain_bounded_no_flush(pr0, limit))
 
 fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int) -> PaneRecord:
+    # Pending close owns the native token. Captures may inspect the retained
+    # snapshot but must not query, write to, or resurrect that closing owner.
+    if smux_session_closing(pr0.pane.session_id):
+        return pr0
     var pr = pr0
     var raw = ""
     var reads = 0
@@ -300,18 +323,190 @@ pub fn smux_list_sessions() -> [MuxSession]:
         i = i + 1
     return result
 
+pub fn smux_session_closing(session_id: text) -> bool:
+    for pending in _closing_sessions:
+        if pending == session_id:
+            return true
+    return false
+
+pub fn smux_rename_session(session_id: text, name: text) -> Result<MuxSession, text>:
+    if smux_session_closing(session_id):
+        return Err("session is closing: " + session_id)
+    val renamed = rename_session_state(_svc, session_id, name)
+    if renamed.is_err():
+        return Err(renamed.unwrap_err())
+    val st = renamed.unwrap()
+    val session = st.get_session(st.find_session_idx(session_id))
+    _svc = st
+    return Ok(session)
+
+# A false native close is retained for retry, including quarantine completion.
+# Failure can follow successful closes of sibling panes: this is deliberately
+# partial teardown, not an atomic rollback. At most eight owners are visited.
+# The piped Windows backend may block 100ms + 5s per close; this is not async.
+pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
+    if _svc.find_session_idx(session_id) < 0:
+        return Err("unknown session: " + session_id)
+    if not smux_session_closing(session_id):
+        _closing_sessions.push(session_id)
+    var st = _svc
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if pane.pane.session_id == session_id:
+            var closed = true
+            if _is_pty(pane):
+                closed = pty_close(pane.pty_fd as i32)
+            elif _has_child(pane):
+                closed = process_close_piped(pane.child_pid)
+            if closed:
+                st = st.replace_pane(i, pane.with_pty(-1, -1))
+        i = i + 1
+    val removed = remove_session_state(st, session_id)
+    if removed.is_err():
+        _svc = st
+        return Err("partial session cleanup pending or failed; retry kill: " + session_id)
+    i = 0
+    while i < st.client_count:
+        val client = st.get_client(i)
+        if client.session_id == session_id:
+            smux_notifications_clear_recipient(session_id, client.client_id)
+        i = i + 1
+    var checkpoints: [SplitCheckpoint] = []
+    for saved in _split_checkpoints:
+        if saved.before.session_id != session_id:
+            checkpoints.push(saved)
+    var pending: [text] = []
+    for closing in _closing_sessions:
+        if closing != session_id:
+            pending.push(closing)
+    _split_checkpoints = checkpoints
+    _closing_sessions = pending
+    _client_leases = smux_lease_forget_session(_client_leases, session_id)
+    _svc = removed.unwrap()
+    return Ok(true)
+
+fn _leased_canvas_valid(cols: int, rows: int) -> bool:
+    return cols > 0 and cols <= 512 and rows > 0 and rows <= 256 and cols * rows <= 60000
+
+fn _lease_owner_ready(state: ClientLeaseState) -> Result<ClientLeaseState, text>:
+    if state.owner_nonce != "": return Ok(state)
+    # Match the crypto owner's explicit nil guard: a nullable-pattern bind is
+    # not a reliable fail-closed boundary on the affected native compilers.
+    val raw = sosix_random_hex(16)
+    if raw == nil: return Err("client lease secure entropy unavailable")
+    val nonce: text = raw ?? ""
+    return smux_leases_new(nonce)
+
+pub fn smux_attach_leased(session_id: text, client_id: text, cols: int, rows: int) -> Result<text, text>:
+    if smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0:
+        return Err("client lease session unavailable")
+    if client_id == "" or not _leased_canvas_valid(cols, rows):
+        return Err("client lease target or dimensions invalid")
+    val existing = _svc.find_client_idx(client_id)
+    if existing < 0 and _svc.client_count >= 4:
+        return Err("client attachment capacity reached")
+    val owner = _lease_owner_ready(_client_leases)
+    if owner.is_err(): return Err(owner.unwrap_err())
+    val admission = smux_lease_admit(owner.unwrap(), session_id, client_id, sosix_time_now_monotonic_ms())
+    if admission.is_err(): return Err(admission.unwrap_err())
+    val admitted = admission.unwrap()
+    var st = _svc
+    if existing >= 0:
+        val previous = st.get_client(existing)
+        # Re-admission changes identity even when the visible client ID is reused.
+        smux_notifications_clear_recipient(previous.session_id, client_id)
+        st = st.remove_client(existing)
+    val attachment = MuxClientAttachment.create(client_id, session_id, cols, rows)
+    _client_leases = admitted.state
+    _svc = st.add_client(attachment)
+    return Ok(admitted.lease.token)
+
+fn _leased_attachment_index(st: ServiceState, session_id: text, client_id: text) -> int:
+    val idx = st.find_client_idx(client_id)
+    if idx < 0: return -1
+    if st.get_client(idx).session_id != session_id: return -1
+    return idx
+
+pub fn smux_client_heartbeat(session_id: text, client_id: text, token: text) -> Result<bool, text>:
+    if smux_session_closing(session_id) or _leased_attachment_index(_svc, session_id, client_id) < 0:
+        return Err("client lease attachment unavailable")
+    val renewed = smux_lease_heartbeat(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
+    if renewed.is_err(): return Err(renewed.unwrap_err())
+    _client_leases = renewed.unwrap()
+    return Ok(true)
+
+pub fn smux_client_check_lease(session_id: text, client_id: text, token: text) -> Result<bool, text>:
+    if smux_session_closing(session_id) or _leased_attachment_index(_svc, session_id, client_id) < 0:
+        return Err("client lease attachment unavailable")
+    return smux_lease_check(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
+
+pub fn smux_client_resize_leased(session_id: text, client_id: text, token: text, cols: int, rows: int) -> Result<bool, text>:
+    if smux_session_closing(session_id) or not _leased_canvas_valid(cols, rows):
+        return Err("client lease session or dimensions invalid")
+    val idx = _leased_attachment_index(_svc, session_id, client_id)
+    if idx < 0: return Err("client lease attachment unavailable")
+    val renewed = smux_lease_heartbeat(_client_leases, session_id, client_id, token, sosix_time_now_monotonic_ms())
+    if renewed.is_err(): return Err(renewed.unwrap_err())
+    val st = _svc.remove_client(idx).add_client(MuxClientAttachment.create(client_id, session_id, cols, rows))
+    _client_leases = renewed.unwrap()
+    _svc = st
+    return Ok(true)
+
+pub fn smux_detach_leased(session_id: text, client_id: text, token: text) -> Result<bool, text>:
+    val idx = _leased_attachment_index(_svc, session_id, client_id)
+    if idx < 0 or not smux_lease_token_matches(_client_leases, session_id, client_id, token):
+        return Err("client lease identity mismatch")
+    val leases = smux_lease_remove(_client_leases, session_id, client_id, token)
+    val st = _svc.remove_client(idx)
+    smux_notifications_clear_recipient(session_id, client_id)
+    _client_leases = leases
+    _svc = st
+    return Ok(true)
+
+# Periodic server housekeeping, also usable before admission. Expiry removes
+# only the exact leased attachment and its notices; pane/process owners survive.
+# A clock failure refuses expiry without dropping any attachment or child.
+pub fn smux_reap_expired_clients() -> Result<int, text>:
+    val now_ms = sosix_time_now_monotonic_ms()
+    val candidates = smux_lease_expiry_candidates(_client_leases, now_ms)
+    if candidates.is_err(): return Err(candidates.unwrap_err())
+    var st = _svc
+    var leases = _client_leases
+    var removed_count = 0
+    for candidate in candidates.unwrap():
+        val expired = smux_lease_expire(leases, candidate.session_id, candidate.client_id, candidate.token, now_ms)
+        if expired.is_ok():
+            val idx = _leased_attachment_index(st, candidate.session_id, candidate.client_id)
+            if idx >= 0:
+                st = st.remove_client(idx)
+                smux_notifications_clear_recipient(candidate.session_id, candidate.client_id)
+                removed_count = removed_count + 1
+            leases = expired.unwrap()
+    _client_leases = leases
+    _svc = st
+    return Ok(removed_count)
+
 pub fn smux_attach(session_id: text, client_id: text, cols: int, rows: int) -> MuxClientAttachment:
+    # Compatibility API: persistent unmanaged attachment. A tokenless request
+    # cannot downgrade or resize a leased interactive attachment.
     # Refused attachments must not look successful or consume a client slot.
     val refused = MuxClientAttachment(client_id: client_id, session_id: session_id,
         attached: false, cols: cols, rows: rows)
-    if _svc.find_session_idx(session_id) < 0 or client_id == "" or cols <= 0 or rows <= 0:
+    if smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0 or client_id == "" or cols <= 0 or rows <= 0:
         return refused
+    for lease in _client_leases.leases:
+        if lease.client_id == client_id:
+            return refused
     val existing = _svc.find_client_idx(client_id)
     if existing < 0 and _svc.client_count >= 4:
         return refused
     val att = MuxClientAttachment.create(client_id, session_id, cols, rows)
     var st = _svc
     if existing >= 0:
+        val prior = st.get_client(existing)
+        if prior.session_id != session_id:
+            smux_notifications_clear_recipient(prior.session_id, client_id)
         st = st.remove_client(existing)
     _svc = st.add_client(att)
     return att
@@ -320,6 +515,8 @@ pub fn smux_detach(client_id: text) -> bool:
     val idx = _svc.find_client_idx(client_id)
     if idx < 0:
         return false
+    smux_notifications_clear_recipient(_svc.get_client(idx).session_id, client_id)
+    _client_leases = smux_lease_forget_client(_client_leases, client_id)
     _svc = _svc.remove_client(idx)
     return true
 
@@ -333,6 +530,8 @@ pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
         return false
     if _svc.get_client(idx).session_id != session_id:
         return false
+    smux_notifications_clear_recipient(session_id, client_id)
+    _client_leases = smux_lease_forget_client(_client_leases, client_id)
     _svc = _svc.remove_client(idx)
     return true
 
@@ -341,7 +540,7 @@ pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
 # =========================================================================
 
 pub fn smux_new_window(session_id: text, name: text) -> MuxWindow:
-    if (_svc.find_session_idx(session_id) < 0 or
+    if (smux_session_closing(session_id) or _svc.find_session_idx(session_id) < 0 or
             _svc.window_count >= SMUX_CAPACITY or _svc.pane_count >= SMUX_CAPACITY):
         return MuxWindow.create("", session_id, name)
     val n = _svc.next_id
@@ -363,6 +562,7 @@ pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
     return result
 
 pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
+    if smux_session_closing(session_id): return false
     if _window_idx(_svc, session_id, window_id) < 0:
         return false
     var st = _svc
@@ -397,6 +597,7 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
     return result
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -407,28 +608,99 @@ pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, directi
     if planned.is_err():
         return Err(planned.unwrap_err())
     val plan = planned.unwrap()
+    val wi = _window_idx(_svc, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    val window = _svc.get_window(wi)
+    val previous = window_layout_rects(_svc, session_id, window_id)
+    if previous.len() == 0:
+        return Err("window has no valid pane geometry")
+    val n = _svc.next_id
+    var rects: [MuxRect] = []
+    var sibling: [MuxRect] = []
+    for rect in previous:
+        if rect.pane_id == pane_id:
+            rects.push(MuxRect(pane_id: pane_id, col: rect.col, row: rect.row,
+                cols: plan.old_cols as i64, rows: plan.old_rows as i64))
+            val horizontal = direction == "horizontal" or direction == "h"
+            sibling.push(MuxRect(pane_id: id_text(n),
+                col: if horizontal: rect.col else: rect.col + (plan.old_cols as i64) + 1,
+                row: if horizontal: rect.row + (plan.old_rows as i64) + 1 else: rect.row,
+                cols: plan.new_cols as i64, rows: plan.new_rows as i64))
+        else:
+            rects.push(rect)
+    if sibling.len() != 1:
+        return Err("split pane geometry missing")
+    rects.push(sibling[0])
+    if not window_rects_valid(rects, window.canvas_cols, window.canvas_rows):
+        return Err("split cannot fit panes in canvas")
     if _is_pty(original) and pty_can_resize():
         if not pty_resize(original.pty_fd as i32, plan.old_rows, plan.old_cols):
             return Err("terminal resize failed: " + pane_id)
-    val n = _svc.next_id
     val added = PaneRecord.create(MuxPane.create(id_text(n), window_id, session_id)).resize(plan.new_cols as int, plan.new_rows as int)
     val resized = original.resize(plan.old_cols as int, plan.old_rows as int)
     val changed = _svc.replace_pane(idx, resized).add_pane(added).with_next_id(n + 1)
-    _svc = _invalidate_window_layout(changed, session_id, window_id)
+    val committed = changed.replace_window(wi, window.with_geometry(rects, window.canvas_cols, window.canvas_rows))
+    val checkpoint = split_checkpoint_capture(_svc, committed, session_id, window_id, added.pane.id)
+    var checkpoints: [SplitCheckpoint] = []
+    for saved in _split_checkpoints:
+        if saved.before.id != window_id and _svc.find_window_idx(saved.before.id) >= 0:
+            checkpoints.push(saved)
+    checkpoints.push(checkpoint)
+    _split_checkpoints = checkpoints
+    _svc = committed
     val new_pane = added.pane
     return Ok(new_pane)
+
+# Only the most recent split in this window can be rolled back. The opaque
+# service-owned checkpoint compares IDs, child handles and complete geometry;
+# callers cannot supply replacement state or resurrect a removed child.
+pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: text) -> Result<bool, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    var match_index = -1
+    var i = 0
+    while i < _split_checkpoints.len():
+        val checkpoint = _split_checkpoints[i]
+        if checkpoint.before.session_id == session_id and checkpoint.before.id == window_id and checkpoint.added_pane == added_pane_id:
+            match_index = i
+        i = i + 1
+    if match_index < 0:
+        return Err("split rollback checkpoint missing")
+    val restored = split_checkpoint_restore(_svc, _split_checkpoints[match_index])
+    if restored.is_err():
+        return Err(restored.unwrap_err())
+    var remaining: [SplitCheckpoint] = []
+    i = 0
+    while i < _split_checkpoints.len():
+        if i != match_index:
+            remaining.push(_split_checkpoints[i])
+        i = i + 1
+    _split_checkpoints = remaining
+    _svc = restored.unwrap()
+    return Ok(true)
 
 # Remove the pane and request child teardown. The native provider retains any
 # cancellation/tree cleanup until its cleanup_pending sweep proves completion.
 pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool:
+    if smux_session_closing(session_id): return false
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return false
+    val wi = _window_idx(_svc, session_id, window_id)
+    if wi < 0:
+        return false
+    val window = _svc.get_window(wi)
+    var remaining: [MuxRect] = []
+    for rect in window_layout_rects(_svc, session_id, window_id):
+        if rect.pane_id != pane_id:
+            remaining.push(rect)
     _release_child(_svc.get_pane(idx))
-    _svc = _invalidate_window_layout(_svc.remove_pane(idx), session_id, window_id)
+    # Closing leaves surviving rectangles in place; no implicit auto-grow.
+    _svc = _svc.remove_pane(idx).replace_window(wi, window.with_geometry(remaining, window.canvas_cols, window.canvas_rows))
     return true
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
+    if smux_session_closing(session_id): return false
     if _pane_idx(_svc, session_id, window_id, pane_id) < 0:
         return false
     var st = _svc
@@ -453,6 +725,7 @@ pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, t
 # Native provider resizing precedes the corresponding VT/service commit.
 # Providers without a resize capability retain their documented grid-only path.
 pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -462,6 +735,26 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
         return Err("pane dimensions exceed service limit")
     if cols * rows > 262144:
         return Err("pane dimensions exceed service limit")
+    val wi = _window_idx(_svc, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    val window = _svc.get_window(wi)
+    val previous = window_layout_rects(_svc, session_id, window_id)
+    if previous.len() == 0:
+        return Err("window has no valid pane geometry")
+    val canvas_cols = if previous.len() == 1: cols else: window.canvas_cols
+    val canvas_rows = if previous.len() == 1: rows else: window.canvas_rows
+    var rects: [MuxRect] = []
+    for rect in previous:
+        if rect.pane_id == pane_id:
+            rects.push(MuxRect(pane_id: pane_id,
+                col: if previous.len() == 1: 0 else: rect.col,
+                row: if previous.len() == 1: 0 else: rect.row,
+                cols: cols as i64, rows: rows as i64))
+        else:
+            rects.push(rect)
+    if not window_rects_valid(rects, canvas_cols, canvas_rows):
+        return Err("pane resize would overlap or exceed window canvas")
     val original = _svc.get_pane(idx)
     if _is_pty(original) and pty_can_resize():
         if not pty_resize(original.pty_fd as i32, rows as i32, cols as i32):
@@ -474,7 +767,7 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
         resize_count: m.resize_count + 1,
         capture_count: m.capture_count
     ))
-    _svc = _invalidate_window_layout(changed, session_id, window_id)
+    _svc = changed.replace_window(wi, window.with_geometry(rects, canvas_cols, canvas_rows))
     return Ok(updated.pane)
 
 # =========================================================================
@@ -483,6 +776,7 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
 
 # Attaches a piped child (no controlling terminal). Returns its pid.
 pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> Result<i64, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -501,6 +795,7 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
 # `command_line` is handed to the platform launcher as one line (a shell path
 # on POSIX, a CreateProcess command line on Windows). Returns its pid.
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -554,6 +849,7 @@ pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> 
 # prefix to its provider. A pane without a child refuses input. Delivery may
 # remain pending after acceptance; smux_input_status reports progress/errors.
 pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> Result<text, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -571,6 +867,7 @@ pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_inp
     return Ok("accepted")
 
 pub fn smux_input_status(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -642,6 +939,7 @@ pub fn smux_pane_bracketed_paste(session_id: text, window_id: text, pane_id: tex
 # enabled bracketed paste, so it is taken as one paste (newlines included)
 # rather than typed keys; sent as-is otherwise. Does not submit.
 pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: text) -> Result<text, text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     val idx = _pane_idx(_svc, session_id, window_id, pane_id)
     if idx < 0:
         return Err("unknown pane: " + pane_id)
@@ -709,14 +1007,13 @@ pub fn smux_capture_cells(session_id: text, window_id: text, pane_id: text) -> R
         resize_count: m.resize_count, capture_count: m.capture_count + 1))
     return Ok(shown)
 
-# A directional split, pane removal or arbitrary pane resize invalidates the
-# named plan for this window. Manual mode deliberately exposes no fabricated
-# coordinates; select a named layout again to establish a complete canvas.
+# A directional split, pane removal or explicit pane resize replaces the named
+# plan with persisted manual coordinates. Named selection remains explicit.
 pub fn smux_window_layout(session_id: text, window_id: text) -> Result<text, text>:
     return window_layout_name(_svc, session_id, window_id)
 
-# Rectangles use production pane IDs and the persisted window canvas. Unknown
-# or manual windows have no named geometry. This never captures child output.
+# Rectangles use production pane IDs and persisted named or manual geometry.
+# This never captures child output.
 pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
     return window_layout_rects(_svc, session_id, window_id)
 
@@ -726,11 +1023,33 @@ pub fn smux_window_rects(session_id: text, window_id: text) -> [MuxRect]:
 # rollback before any service metadata is committed. Legacy providers remain
 # explicitly grid-only. Actual child geometry still requires runtime evidence.
 pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<[MuxRect], text>:
-    val wi = _window_idx(_svc, session_id, window_id)
-    if wi < 0:
-        return Err("unknown window: " + window_id)
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
     if not mux_layout_known(name):
         return Err("invalid layout: " + name)
+    val planned = _arrange_window(_svc, session_id, window_id, name, cols, rows)
+    if planned.is_err():
+        return Err(planned.unwrap_err())
+    val changed = planned.unwrap()
+    val rects = window_layout_rects(changed, session_id, window_id)
+    _svc = changed
+    return Ok(rects)
+
+# Reflow the existing plan, including manual nested splits. Never select an
+# unrelated named layout because a window has manual geometry.
+pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: int) -> Result<[MuxRect], text>:
+    if smux_session_closing(session_id): return Err("session is closing: " + session_id)
+    val planned = _arrange_window(_svc, session_id, window_id, "", cols, rows)
+    if planned.is_err():
+        return Err(planned.unwrap_err())
+    val changed = planned.unwrap()
+    val rects = window_layout_rects(changed, session_id, window_id)
+    _svc = changed
+    return Ok(rects)
+
+fn _arrange_window(before: ServiceState, session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<ServiceState, text>:
+    val wi = _window_idx(before, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
     if cols <= 0 or rows <= 0:
         return Err("layout canvas dimensions must be positive")
     if cols > 32767 or rows > 32767:
@@ -740,21 +1059,21 @@ pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: i
     var ids: [text] = []
     var indices: [int] = []
     var i = 0
-    while i < _svc.pane_count:
-        val pane = _svc.get_pane(i).pane
+    while i < before.pane_count:
+        val pane = before.get_pane(i).pane
         if pane.session_id == session_id and pane.window_id == window_id:
             ids.push(pane.id)
             indices.push(i)
         i = i + 1
     if ids.len() == 0:
         return Err("no panes in window: " + window_id)
-    val rects = mux_layout_rects(ids, cols as i64, rows as i64, name)
-    if rects.len() != ids.len():
+    val rects = if name == "": window_plan_rects(before, session_id, window_id, cols, rows) else: mux_layout_rects(ids, cols as i64, rows as i64, name)
+    if rects.len() != ids.len() or not window_rects_valid(rects, cols, rows):
         return Err("layout cannot fit panes in canvas")
-    val backend = _resize_layout_children(_svc, indices, rects)
+    val backend = _resize_layout_children(before, indices, rects)
     if backend.is_err():
         return Err(backend.unwrap_err())
-    var st = _svc
+    var st = before
     i = 0
     while i < rects.len():
         val rect = rects[i]
@@ -762,8 +1081,8 @@ pub fn smux_select_layout(session_id: text, window_id: text, name: text, cols: i
         st = st.replace_pane(indices[i], pane.resize(rect.cols as int, rect.rows as int))
         i = i + 1
     val window = st.get_window(wi)
-    _svc = st.replace_window(wi, window.with_layout(name, cols, rows))
-    return Ok(rects)
+    val resized = if name == "": window.with_canvas(cols, rows) else: window.with_layout(name, cols, rows)
+    return Ok(st.replace_window(wi, resized))
 
 # Capture retained terminal history plus the visible frame in one snapshot.
 # Limit validation and full pane ownership precede any drain or state change.

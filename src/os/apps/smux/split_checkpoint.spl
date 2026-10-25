@@ -1,0 +1,83 @@
+# Private, bounded split rollback values. No child output or service registry is
+# saved: rollback preserves fresh pane owners and restores only window geometry.
+use os.apps.smux.contract.{MuxWindow}
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.window_layout_service.{window_layout_rects, resize_layout_children}
+
+class SplitCheckpoint:
+    before: MuxWindow
+    after: MuxWindow
+    added_pane: text
+    previous: [MuxRect]
+    expected: [MuxRect]
+    child_pids: [i64]
+    pty_fds: [i64]
+
+fn same_rects(left: [MuxRect], right: [MuxRect]) -> bool:
+    if left.len() != right.len(): return false
+    var i = 0
+    while i < left.len():
+        val a = left[i]
+        val b = right[i]
+        if a.pane_id != b.pane_id or a.col != b.col or a.row != b.row or a.cols != b.cols or a.rows != b.rows:
+            return false
+        i = i + 1
+    return true
+
+pub fn split_checkpoint_capture(before: ServiceState, after: ServiceState, session: text, window: text, added: text) -> SplitCheckpoint:
+    val expected = window_layout_rects(after, session, window)
+    var pids: [i64] = []
+    var handles: [i64] = []
+    for rect in expected:
+        val pane = after.get_pane(after.find_pane_idx(rect.pane_id))
+        pids.push(pane.child_pid)
+        handles.push(pane.pty_fd)
+    return SplitCheckpoint(before: before.get_window(before.find_window_idx(window)),
+        after: after.get_window(after.find_window_idx(window)), added_pane: added,
+        previous: window_layout_rects(before, session, window), expected: expected,
+        child_pids: pids, pty_fds: handles)
+
+pub fn split_checkpoint_restore(st: ServiceState, checkpoint: SplitCheckpoint) -> Result<ServiceState, text>:
+    val prior = checkpoint.before
+    val wi = st.find_window_idx(prior.id)
+    if wi < 0: return Err("split rollback window missing")
+    val window = st.get_window(wi)
+    val expected_window = checkpoint.after
+    if window.session_id != prior.session_id or window.name != expected_window.name or window.layout != expected_window.layout or window.canvas_cols != expected_window.canvas_cols or window.canvas_rows != expected_window.canvas_rows:
+        return Err("split rollback geometry changed")
+    if window.manual_cols != expected_window.manual_cols or window.manual_rows != expected_window.manual_rows or not same_rects(window.manual_rects, expected_window.manual_rects):
+        return Err("split rollback reference changed")
+    if not same_rects(window_layout_rects(st, prior.session_id, prior.id), checkpoint.expected):
+        return Err("split rollback panes changed")
+    var i = 0
+    while i < checkpoint.expected.len():
+        val rect = checkpoint.expected[i]
+        val pi = st.find_pane_idx(rect.pane_id)
+        if pi < 0: return Err("split rollback pane missing")
+        val pane = st.get_pane(pi)
+        if pane.child_pid != checkpoint.child_pids[i] or pane.pty_fd != checkpoint.pty_fds[i]:
+            return Err("split rollback child changed")
+        if pane.pane.cols != rect.cols or pane.pane.rows != rect.rows:
+            return Err("split rollback pane dimensions changed")
+        i = i + 1
+    val added_idx = st.find_pane_idx(checkpoint.added_pane)
+    if added_idx < 0: return Err("split rollback new pane missing")
+    val added = st.get_pane(added_idx)
+    if added.child_pid > 0 or added.pty_fd >= 0:
+        return Err("split rollback new pane has a child")
+    var indices: [int] = []
+    for rect in checkpoint.previous:
+        indices.push(st.find_pane_idx(rect.pane_id))
+    val backend = resize_layout_children(st, indices, checkpoint.previous)
+    if backend.is_err(): return Err(backend.unwrap_err())
+    var changed = st
+    i = 0
+    while i < checkpoint.previous.len():
+        val rect = checkpoint.previous[i]
+        val pane = changed.get_pane(indices[i])
+        changed = changed.replace_pane(indices[i], pane.resize(rect.cols as int, rect.rows as int))
+        i = i + 1
+    # Focus and fresh output/input stay on current pane owners. Window focus is
+    # independent of this geometry transaction and may have changed meanwhile.
+    return Ok(changed.remove_pane(added_idx).replace_window(wi, prior.with_active(window.is_active)))
