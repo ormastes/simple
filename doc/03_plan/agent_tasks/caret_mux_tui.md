@@ -150,7 +150,7 @@ consumers discovered later must join that manifest before qualification.
 | Shared applications source owner (root assignment required) | A06 web dashboard, A07 LLM dashboard, A08 configured library consumers | Mounted real routes, preserved HTTP/WS protocol, backend failure propagation and safe targets, observable child state, no hardcoded empty success or fallback |
 | SMUX/host composition owners | A04 hosted product, A05 shell/OS registrations | Verified Phase 3-built product; actual owner/client/loader and terminal execution. Guest claims require real guest evidence |
 | System-test owner | Shared contract and complete A01–A10 traceability | Modern `step(...)` SYSTEM scenarios against actual apps/fixtures; helpers `caret_mux_setup`, `caret_mux_check_state`; no new test wrappers or fake backend |
-| Root execution/merge owner | Producer admission, resource schedule, attempts and final integration | Phase 3-only compiler/runtime/Hello lineage; actual native runs, case counts, artifacts, six-cycle ledger, material repair then affected rerun |
+| Root execution/merge owner | Producer admission, resource schedule, attempts and final integration | Existing Phase2 checks without a Phase2 rebuild, then actual Phase3 compiler/runtime/Hello lineage for Phase3 qualification; actual native runs, case counts, artifacts, six-cycle ledger, material repair then affected rerun |
 
 Prerequisite failures remain explicit: missing real backend, Phase 3 CLI,
 runtime/provider, application route or native fixture means BLOCKED/NOT_RUN.
