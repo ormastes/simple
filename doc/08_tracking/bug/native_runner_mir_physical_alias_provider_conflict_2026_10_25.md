@@ -1,7 +1,11 @@
 # Native runner treats one physical extern provider as competing aliases
 
-Status: source repair authored; production-helper native verification pending;
+Status: production-helper native probe passed all 10 policy groups;
 full rebuilt-compiler integration and SSpec execution pending.
+
+Retained probe receipt: `C:/dev/simple-mir-projection-policy-probe-20261025/evidence/terminal.sdn`.
+The exact production-helper diagnostic compiled in 30.813 seconds and ran in
+0.625 seconds; this does not qualify the full compiler integration.
 
 The provisional pure-Simple producer `13d73267e690b2cdd46438315e2bfe6d4d6c0c37bcfc15591a921fc9728b270b`
 compiled the frozen `b66b7b1f78562719ea803d7558300c3d2f054eb0` test-runner source
