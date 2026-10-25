@@ -1,0 +1,59 @@
+# Actual request lifetime wrapper. Its producer must be compiler-specialized;
+# a source-level function value alone is not admission evidence.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.source_region_context_v1.*
+
+pub class SourceRegionRequestV1:
+    context: SourceRegionContextV1
+    first_error: SourceRegionErrorV1? = nil
+    cleanup_error: SourceRegionErrorV1? = nil
+    ended: bool = false
+    released: bool = false
+
+    pub static fn create(account: MirLoopResourceAccountV1) -> Result<SourceRegionRequestV1, SourceRegionErrorV1>:
+        # Retain the owner even when producer execution later fails, so a
+        # cleanup failure never loses the live control's only reference.
+        if account == nil: return Err(SourceRegionErrorV1.Incomplete)
+        if account.is_closed(): return Err(SourceRegionErrorV1.Closed)
+        match account.reserve(45, state_fields: 5, output_bytes: 40):
+            case Err(_): return Err(SourceRegionErrorV1.Capacity)
+            case Ok(_): ()
+        val context = source_region_create_v1(account)?
+        Ok(SourceRegionRequestV1(context: context))
+
+    pub me run_scalar(producer: fn(SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>) -> Result<i64, SourceRegionErrorV1>:
+        if self.ended: return Err(SourceRegionErrorV1.Closed)
+        if val error = self.first_error: return Err(error)
+        match producer(self.context):
+            case Ok(value): Ok(value)
+            case Err(error):
+                self.first_error = Some(error)
+                # End the failed producer's read lifetime once. The cleanup
+                # error is retained independently and cannot replace E.
+                match self.end_consumers():
+                    case Ok(_): ()
+                    case Err(_): ()
+                Err(error)
+
+    pub me end_consumers() -> Result<(), SourceRegionErrorV1>:
+        if self.ended: return Ok(())
+        match source_region_close_v1(self.context):
+            case Err(error):
+                self.cleanup_error = Some(error)
+                return Err(error)
+            case Ok(_): ()
+        self.ended = true
+        Ok(())
+
+    pub me release_retired_storage() -> Result<(), SourceRegionErrorV1>:
+        if self.released: return Ok(())
+        if not self.ended: return Err(SourceRegionErrorV1.Conflict)
+        # The existing allocation owner must retire every region member first.
+        # Never pretend that closing a view frees its still-retained graph.
+        match source_region_release_v1(self.context):
+            case Err(error):
+                self.cleanup_error = Some(error)
+                Err(error)
+            case Ok(_):
+                self.released = true
+                Ok(())
