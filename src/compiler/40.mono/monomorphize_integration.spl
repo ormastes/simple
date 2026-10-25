@@ -248,6 +248,9 @@ class MonomorphizationPass:
     # receiver's arguments alone. A call on a concrete instantiation is then
     # a loud E-MONO-034, never a silent bind to the unspecialized template.
     generic_method_rejected: Dict<text, text>
+    # Positive local inherent ownership only; an empty value is poisoned.
+    # Archive-restored workers without this retained proof stay fail-closed.
+    inherent_method_owners: Dict<text, text> = {}
     # Module name -> its SymbolTable, to read a receiver type's identity.
     module_symbols: Dict<text, SymbolTable>
     # Generic struct/class tables, keyed by ownership identity
@@ -355,6 +358,7 @@ impl MonomorphizationPass:
             unresolved_templates: {},
             generic_methods: {},
             generic_method_rejected: {},
+            inherent_method_owners: {},
             module_symbols: {},
             generic_type_params: {},
             generic_type_modules: {},
@@ -994,6 +998,7 @@ impl MonomorphizationPass:
                     mono_type_identity(module.symbols, symbol.id, module_name)
         else:
             self.module_symbols[module_name] = module.symbols
+        self.collect_local_inherent_method_owners_v1(module, module_name)
         self.collect_generic_impl_methods(module, module_name)
         self.collect_class_static_templates_v1(module, module_name)
 
@@ -1101,6 +1106,35 @@ impl MonomorphizationPass:
                     val pp: HirParam = p
                     ptys = ptys.push(pp.type_)
                 self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
+
+    me collect_local_inherent_method_owners_v1(module: HirModule, module_name: text):
+        # Every association participates: a trait or unsupported association
+        # poisons the same symbol even if a later inherent impl names it too.
+        for raw_impl in module.impls:
+            val impl_: HirImpl = raw_impl
+            var identity = ""
+            if not impl_.has_trait_ and impl_.type_params.len() == 0:
+                match impl_.type_.kind:
+                    case HirTypeKind.Named(owner, arguments):
+                        if arguments.len() == 0:
+                            identity = mono_type_identity(module.symbols, owner, module_name)
+                    case _: ()
+            for method_name in impl_.methods.keys():
+                val target: SymbolId = impl_.methods[method_name]
+                val key = mono_sym_key(module_name, target.id)
+                var admitted = false
+                if identity != "" and module.functions[target] != nil:
+                    val declaration: HirFunction = module.functions[target]
+                    admitted = declaration.symbol.id == target.id and declaration.is_method and
+                        not declaration.is_static and declaration.type_params.len() == 0 and
+                        not declaration.is_generic_template and hir_type_is_concrete(declaration.return_type)
+                if not admitted:
+                    self.inherent_method_owners[key] = ""
+                elif self.inherent_method_owners.has(key):
+                    if self.inherent_method_owners[key] != identity:
+                        self.inherent_method_owners[key] = ""
+                else:
+                    self.inherent_method_owners[key] = identity
 
     me collect_generic_impl_methods(module: HirModule, module_name: text):
         """Register each instance method of a generic inherent impl
@@ -2206,11 +2240,94 @@ impl MonomorphizationPass:
         if inferred.is_err(): return Err(inferred.unwrap_err())
         self.complete_template_type_args_v1(template, inferred.unwrap())
 
+    me builtin_result_call_type_v1(expr: HirExpr) -> HirType?:
+        # The explicit HIR tag, not the printed callee spelling, owns this
+        # closed constructor. Unknown calls never gain result-context authority.
+        if not self.module_symbols.has(self.current_module): return nil
+        match expr.kind:
+            case HirExprKind.Call(callee, arguments, type_args):
+                if arguments.len() != 1 or (type_args != nil and type_args.len() != 0): return nil
+                val argument: HirCallArg = arguments[0]
+                if argument.has_name: return nil
+                val callable: HirExpr = callee
+                var target = SymbolId(id: -1)
+                match callable.kind:
+                    case HirExprKind.NamedVar(symbol, _): target = symbol
+                    case _: return nil
+                val table: SymbolTable = self.module_symbols[self.current_module]
+                val row_opt: HirSymbol? = table.get_symbol_raw(target.id)
+                if not row_opt.?: return nil
+                val row: HirSymbol = row_opt.unwrap()
+                match row.kind:
+                    case SymbolKind.Function: ()
+                    case _: return nil
+                val tag = row.builtin_method_tag
+                if tag != BUILTIN_METHOD_RESULT_OK and tag != BUILTIN_METHOD_RESULT_ERR: return nil
+                val payload = self.infer_expr_type(mono_arg_value(argument))
+                if payload == nil or not hir_type_is_concrete(payload): return nil
+                val active: HirType = payload
+                val absent = HirType(kind: HirTypeKind.Infer(-1, 0), span: expr.span)
+                val kind = if tag == BUILTIN_METHOD_RESULT_OK: HirTypeKind.Result(active, absent) else: HirTypeKind.Result(absent, active)
+                HirType(kind: kind, span: expr.span)
+            case _: nil
+
+    me declared_local_method_return_v1(receiver: HirExpr, method: text, resolution: MethodResolution) -> HirType?:
+        val (receiver_type, module_name) = self.receiver_instance_type(receiver)
+        # Imported and dynamic dispatch require separate nominal transport.
+        if receiver_type == nil or module_name != self.current_module: return nil
+        if not self.module_symbols.has(module_name): return nil
+        val type_: HirType = receiver_type
+        var owner = SymbolId(id: -1)
+        match type_.kind:
+            case HirTypeKind.Named(symbol, arguments):
+                if arguments.len() != 0: return nil
+                owner = symbol
+            case _: return nil
+        val table: SymbolTable = self.module_symbols[module_name]
+        val target_opt: SymbolId? = table.lookup_method_in_type(owner, method)
+        if not target_opt.?: return nil
+        val target: SymbolId = target_opt.unwrap()
+        match resolution:
+            case MethodResolution.InstanceMethod(resolved_owner, resolved_target):
+                if resolved_owner.id != owner.id or resolved_target.id != target.id: return nil
+            case MethodResolution.Unresolved: ()
+            case _: return nil
+        val row_opt: HirSymbol? = table.get_symbol_raw(target.id)
+        if not row_opt.?: return nil
+        val row: HirSymbol = row_opt.unwrap()
+        match row.kind:
+            case SymbolKind.Method: ()
+            case _: return nil
+        val key = mono_sym_key(module_name, target.id)
+        if not self.inherent_method_owners.has(key): return nil
+        val identity = mono_type_identity(table, owner, module_name)
+        if identity == "" or self.inherent_method_owners[key] != identity: return nil
+        if not self.fn_returns.has(key): return nil
+        val result: HirType = self.fn_returns[key]
+        if not hir_type_is_concrete(result): return nil
+        result
+
     me call_evidence_is_valid_v1(expr: HirExpr, actual: HirType) -> bool:
         if hir_type_is_concrete(actual): return true
         # Only an actual Ok/Err value has a genuinely absent Result arm.
         # Raw cast targets and untrusted type stamps cannot create this hole.
         match expr.kind:
+            case HirExprKind.Call(_, _, _):
+                if val inferred = self.builtin_result_call_type_v1(expr):
+                    match actual.kind:
+                        case HirTypeKind.Result(actual_ok, actual_err):
+                            match inferred.kind:
+                                case HirTypeKind.Result(inferred_ok, inferred_err):
+                                    if hir_type_is_concrete(inferred_ok):
+                                        match actual_err.kind:
+                                            case HirTypeKind.Infer(_, _): return self.same_type_key(actual_ok, inferred_ok)
+                                            case _: return false
+                                    match actual_ok.kind:
+                                        case HirTypeKind.Infer(_, _): return self.same_type_key(actual_err, inferred_err)
+                                        case _: return false
+                                case _: return false
+                        case _: return false
+                return false
             case HirExprKind.EnumLit(_, variant, payload):
                 var active: HirType = nil
                 var absent: HirType = nil
@@ -2352,6 +2469,8 @@ impl MonomorphizationPass:
                     parts = parts.push(ptt)
                 HirType(kind: HirTypeKind.Tuple(parts), span: sp)
             case HirExprKind.Call(callee, call_args, type_args):
+                if val result_constructor = self.builtin_result_call_type_v1(expr):
+                    return result_constructor
                 val ce: HirExpr = callee
                 # A generic callee returns its declared return type under the
                 # instantiation this very call resolves to (`val a = keep("x")`
@@ -2370,7 +2489,7 @@ impl MonomorphizationPass:
                 if ctor != nil:
                     return ctor
                 self.callee_return_type(ce)
-            case HirExprKind.MethodCall(receiver, method, margs, _):
+            case HirExprKind.MethodCall(receiver, method, margs, resolution):
                 # A method of a generic impl on a known instance returns its
                 # declared type under the receiver's arguments. Every other
                 # method (builtins, traits) stays unanswered, except the
@@ -2380,7 +2499,7 @@ impl MonomorphizationPass:
                 if mname == "":
                     if method == "unwrap" and margs.len() == 0:
                         return self.optional_payload_type(self.infer_expr_type(mrecv))
-                    return nil
+                    return self.declared_local_method_return_v1(mrecv, method, resolution)
                 val mtemplate = self.template_signature_v1(mname)
                 val (mrt, _mmod) = self.receiver_instance_type(mrecv)
                 if mrt == nil:
