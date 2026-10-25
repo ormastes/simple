@@ -24,6 +24,19 @@ struct NativeBuildParseClosurePublicationV1:
     count: i64
     error: text
 
+# @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25: element-wise
+# compare instead of `!=` on [text]. Delete once array Eq/NotEq lowers through
+# rt_native_eq in the compiler that builds this module.
+fn _parse_closure_text_list_eq_v1(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
         frontend_cache_dir: text) -> NativeBuildParseClosurePublicationV1:
@@ -46,7 +59,10 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure snapshot roots mismatch")
     val selected_roots = mapped.unwrap()
-    if selected_roots != canonical.unwrap():
+    # @workaround bug=array_eq_lowered_as_identity_compare_2026-10-25:
+    # Stage-2 codegen lowers `[text] != [text]` as a raw word compare, so the
+    # Stage 3 compiler reported a mismatch for equal selector lists.
+    if not _parse_closure_text_list_eq_v1(selected_roots, canonical.unwrap()):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure selector mapping mismatch")
     val binding = NativeEntryClosureBindingV1(authority.snapshot.revision_id,
