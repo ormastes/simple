@@ -191,6 +191,11 @@ _mail_curl() {
   local max="${MAIL_CURL_MAX_RETRIES:-3}" delay="${MAIL_CURL_RETRY_DELAY:-1}"
   local attempt=1 rc tmp auth="" escaped recovered=0
   local -a args=()
+  # Schannel ignores CURL_CA_BUNDLE; use curl's explicit CA option so the
+  # caller's trust bundle has the same meaning across TLS backends.
+  if [ -n "${CURL_CA_BUNDLE:-}" ]; then
+    args+=(--cacert "$CURL_CA_BUNDLE")
+  fi
   # Use curl's config pipe for credentials; --user must never reach exec argv.
   while [ $# -gt 0 ]; do
     if [ "$1" = --user ]; then
@@ -354,13 +359,29 @@ _mail_config_valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9_.@+-]+$ ]]
 }
 
+# MSYS may leave shell-looking filenames unconverted when starting a native
+# executable. Translate the filename explicitly; it remains one literal argv.
+_mail_config_parse_document() {
+  local helper="$1" path="$2" resolved
+  resolved=$(command -v "$helper") || return 127
+  case "$resolved" in
+    *.[Ee][Xx][Ee])
+      if command -v cygpath >/dev/null 2>&1; then
+        path=$(cygpath -w -- "$path") || return $?
+        MSYS2_ARG_CONV_EXCL='*' "$helper" config-json "$path"
+        return $?
+      fi ;;
+  esac
+  "$helper" config-json "$path"
+}
+
 # Canonical Simple SDN parser; the installed helper never compiles at startup.
 _mail_config_query() {
   local mode="$1" name="${2:-}" key="${3:-}" helper document
   [ -f "$MAIL_CONFIG_FILE" ] || { echo "MAIL_CONFIG_MISSING" >&3; return 2; }
   helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
   command -v "$helper" >/dev/null 2>&1 || { echo "error: compiled shared SDN helper unavailable" >&3; return 2; }
-  document=$("$helper" config-json "$MAIL_CONFIG_FILE") || return $?
+  document=$(_mail_config_parse_document "$helper" "$MAIL_CONFIG_FILE") || return $?
   case "$mode" in
     list) printf '%s' "$document" | jq -r '.accounts | keys[]' ;;
     default) printf '%s' "$document" | jq -r '.default_account // empty' ;;
@@ -486,7 +507,7 @@ mail_config_set_account() (
   done
   local helper
   helper=$(mail_expand_path "${MAIL_CONFIG_BIN:-${MAIL_CREDENTIAL_BIN:-simple-mail-credentials}}") || return $?
-  "$helper" config-json "$tmp" >/dev/null || return $?
+  _mail_config_parse_document "$helper" "$tmp" >/dev/null || return $?
   chmod 600 "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
 )
 
