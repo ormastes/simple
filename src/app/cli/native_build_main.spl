@@ -73,6 +73,9 @@ use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     file_worker_inc_receipt_line_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
+use compiler.driver.driver_build.native_file_worker_instances_v1.{file_worker_instances_plan_of_tldr_v1,
+    file_worker_instances_run_v1, file_worker_instances_receipt_line_v1}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -1361,12 +1364,13 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
+        val instances_relink = run_file_worker_instances_v1(args, mir_queue, inc_producer)
         if inc_dir != "":
             val fin = file_worker_inc_finish_v1(inc_dir, inc_producer, mir_queue, hir_queue, inc_output, reused)
             print file_worker_inc_receipt_line_v1(fin.reused, fin.rebuilt, fin.relink)
             env_set(FILE_WORKER_INC_DIR_ENV_V1, inc_dir)
             env_set(FILE_WORKER_INC_PRODUCER_ENV_V1, inc_producer)
-            if not fin.relink:
+            if not fin.relink and not instances_relink:
                 env_set(FILE_WORKER_LINK_PLACED_ENV_V1, "1")
         return mir_queue
     if outcome == "fail":
@@ -1374,6 +1378,37 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         return "fail"
     eprint "[file-worker] no MIR module verdict; falling back to in-process build"
     ""
+
+# No instance-object producer exists yet: the template-body -> object codegen
+# step is the open half of
+# doc/08_tracking/bug/generic_instance_plan_has_no_consumer_pg6_2026-10-25.md.
+# Every claimed key therefore fails closed (receipt FAILED, no COMDAT
+# retirement, no instance object linked) and using objects keep their COMDAT
+# copies.
+fn file_worker_instance_object_unavailable_v1(spec: RequiredSpecializationV1) -> text:
+    ""
+
+# P-G6: after every module object exists (no barrier before the first one),
+# plan the needed generic instances from the fresh TLDR lists and run them as
+# single-flight jobs. Returns true when an instance was built or dropped, which
+# forces a relink (P-E removed-module rule).
+fn run_file_worker_instances_v1(args: [text], mir_queue: text, producer: text) -> bool:
+    val frontend_env = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    val frontend = if frontend_env != "": frontend_env else: native_build_frontend_cache_dir_arg(args)
+    if frontend == "" or producer == "" or not file_exists("{mir_queue}/inventory"):
+        return false
+    var modules: [text] = []
+    val inventory = file_read("{mir_queue}/inventory").split("\n")
+    var i = 1
+    while i < inventory.len():
+        if inventory[i] != "":
+            modules.push(inventory[i])
+        i = i + 1
+    val plan = file_worker_instances_plan_of_tldr_v1(modules, frontend + "/tldr", machine_cache_root(), producer)
+    val run = file_worker_instances_run_v1(plan, machine_cache_root(), producer, "{mir_queue}.instances",
+        "coordinator-{getpid()}", false, file_worker_instance_object_unavailable_v1)
+    print file_worker_instances_receipt_line_v1(run)
+    run.relink
 
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR

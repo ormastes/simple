@@ -37,3 +37,29 @@ What closing it needs: project generic function templates into the TLDR `generic
 
 - `test/01_unit/compiler/cache/generic_specialization_mono_v1_spec.spl`: case "an imported generic function instance with no type use keeps the list incomplete".
 - `test/01_unit/compiler/mono/mono_module_scoped_spec.spl`: case "records an imported generic function instance with primitive arguments (P-G5)".
+
+## P-G6 progress (2026-10-25)
+
+Closed by `src/compiler/80.driver/driver_build/native_file_worker_instances_v1.spl`
+and its call in `run_file_worker_pool_v1` (`src/app/cli/native_build_main.spl`):
+
+- Step 1: the coordinator plans from every module's fresh TLDR list after the
+  module objects exist (no barrier before the first object).
+- Step 2 (scheduling half): each key in `build` is a single-flight job
+  (exclusive mkdir claim in `<mir ledger>.instances`) with a PASS/FAILED
+  receipt; a built object is published with `generic_instance_cache_publish_v1`;
+  the previous needed set is persisted per producer.
+- Step 5: keys under `drop` have their object deleted, and a build or drop
+  forces a relink (P-E removed-module rule).
+- Fail closed: an incomplete plan runs no job. COMDAT retirement and instance
+  linking need a complete plan, every key verified, and COMDAT-linkage
+  instance objects, so no instance gets two strong definitions.
+
+Still open:
+
+- Step 2 (object half): no instance-object producer exists (template body ->
+  object codegen). The pool passes a producer that returns no object, so
+  every claimed key fails closed with a FAILED receipt.
+- Steps 3-4: the linker does not consume `link_objects`, and using objects
+  still emit their COMDAT copies. Both are blocked on the producer above.
+- Gap 2 (function templates) is unchanged.
