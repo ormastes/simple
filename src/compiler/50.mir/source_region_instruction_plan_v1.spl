@@ -188,9 +188,12 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
                     result_type: alias_result, destination: Some(epoch), success: success))
                 field_index = field_index + 1
             return Ok(Some(SourceRegionInstructionPlanV1(steps: steps, locals: locals, next_local: first_local + 2 + fields.len() * 2)))
-        case Const(_, _, type_):
+        case Const(_, value, type_):
             if not source_region_plan_scalar_v1(type_):
                 return Err("SOURCE-STORE: rich constant provenance is unavailable")
+            match value:
+                case Int(_) | Bool(_) | Zero: ()
+                case _: return Err("SOURCE-STORE: non-scalar constant bits are unclassified")
             return Ok(nil)
         case Cast(_, operand, target) | Bitcast(_, operand, target):
             if not source_region_plan_scalar_v1(target):
@@ -217,6 +220,36 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
                             return Err("SOURCE-STORE: unary storage provenance is unavailable")
                     case Err(error): return Err(error)
             return Ok(nil)
-        case Copy(_, _) | Move(_, _) | GetField(_, _, _): return Ok(nil)
+        case Copy(destination, source) | Move(destination, source):
+            match source_region_plan_operand_type_v1(func, mir_operand_copy(destination)):
+                case Ok(destination_type):
+                    match source_region_plan_operand_type_v1(func, mir_operand_copy(source)):
+                        case Ok(source_type):
+                            if destination_type != source_type:
+                                return Err("SOURCE-STORE: alias copy changes storage type")
+                        case Err(error): return Err(error)
+                case Err(error): return Err(error)
+            return Ok(nil)
+        case GetField(destination, base, field):
+            var fields: [MirFieldDef] = []
+            match source_region_plan_operand_type_v1(func, base):
+                case Ok(type_):
+                    match type_.kind:
+                        case Struct(symbol):
+                            for key in module.types.keys():
+                                if key.id == symbol.id:
+                                    match module.types[key].kind:
+                                        case Struct(actual): fields = actual
+                                        case _: return Err("SOURCE-STORE: field read lacks struct layout")
+                        case _: return Err("SOURCE-STORE: field read storage is unclassified")
+                case Err(error): return Err(error)
+            if field < 0 or field >= fields.len(): return Err("SOURCE-STORE: field read slot is undeclared")
+            if fields[field].has_bits_attr or fields[field].offset != field * 8:
+                return Err("SOURCE-STORE: field read layout is unclassified")
+            match source_region_plan_operand_type_v1(func, mir_operand_copy(destination)):
+                case Ok(type_):
+                    if type_ != fields[field].type_: return Err("SOURCE-STORE: field read changes storage type")
+                case Err(error): return Err(error)
+            return Ok(nil)
         case _:
             return Err("SOURCE-STORE: unclassified allocation/store/call effect")
