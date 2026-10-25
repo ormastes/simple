@@ -228,4 +228,3 @@ These are the 84 source hits classified above; membership does not imply a live 
 
 - `src/os/tools/shell/less/less_tool.spl`
 - `src/os/tools/shell/register_tools.spl`
-
