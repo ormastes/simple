@@ -61,6 +61,13 @@ after #4367 #4370 #4372 #4373 #4378 #4379 #4382 landed.
 
 ## 2. Per-file src→obj jobs (no stage barrier)
 
+**Superseded 2026-10-25:** the shard-based "Job unit" status below is history.
+The execution contract is now `true_per_file_pipeline_v1.md`; its opt-in
+`--file-worker` lane (`SIMPLE_FILE_WORKERS=1`, #4576 and follow-ups through
+#4603) runs HIR→mono→MIR→obj per claimed module. The default lane is still
+phase-barriered (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`, #4592). Status:
+PARTIAL; no native first-object-overlap receipt yet.
+
 | Aspect | Design | Status |
 |---|---|---|
 | Job unit | one source file; stages are chained async tasks; the job's output is one object plus the module's refreshed TLDR | **partial** — #4348 (`1743475452d`) runs HIR/MIR *shard workers* inside the Stage3/4 capsule (`src/app/cli/native_build_main.spl` `native_build_focused_capsule_shards_v1`, ownership `src/compiler/80.driver/driver_hir_cache.spl` `hir_shard_owns`); #4368 (`fad47aafb67`) adds parse shards (`run_parse_shards_with_base`, cap `CAPSULE_PARSE_SHARD_DEFAULT_MAX = 8`, measured knee 8 workers → 103 s vs 1 → 459 s). Shards are still **phase-batched** (parse workers exit before surfaces; HIR then MIR), so the barrier remains. |
