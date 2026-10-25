@@ -1,0 +1,45 @@
+"""
+# Lambda-lift symbols are owner-qualified
+
+A lambda used as a value is lifted to a synthesized top-level MIR function.
+Its counter restarts in every compiler process (per-module native workers,
+MIR shard forks), so the bare name `__lambda_lift_<n>` was defined by several
+objects of one link (6 modules in the Stage 3 build); with
+`--allow-multiple-definition` every module silently called the first
+module's lambda. The lifted name must carry the owning module exactly like an
+ordinary module function (`<module>.<name>`).
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val LAMBDA_SOURCE: text = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    apply(\\v: v + 1, 10)\n"
+
+fn lifted_names(file: text) -> [text]:
+    val ast = parse_full_frontend(LAMBDA_SOURCE, file, file, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var names: [text] = []
+    for function in mir.functions.values():
+        if function.name.contains("__lambda_lift_"):
+            names = names.push(function.name)
+    names
+
+describe "lambda-lift symbol ownership", tag: ["only-compiled"]:
+    # @manual scenario evidence
+    it "qualifies each lifted lambda with its owning module":
+        val a = lifted_names("lam_owner_a.spl")
+        val b = lifted_names("lam_owner_b.spl")
+        expect(a.len()).to_equal(1)
+        expect(b.len()).to_equal(1)
+        expect(a[0].starts_with("__lambda_lift_")).to_equal(false)
+        expect(a[0].contains("lam_owner_a.__lambda_lift_")).to_equal(true)
+        expect(b[0].contains("lam_owner_b.__lambda_lift_")).to_equal(true)
+        expect(a[0] == b[0]).to_equal(false)
