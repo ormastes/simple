@@ -1,11 +1,10 @@
 # C4 typed dictionary owner integration v1
 
-Status: interface frozen with architecture/planner owners; implementation
-candidate present. Baseline dictionary fixture was RED (missing native APIs);
-its first implemented revision passed ASan/UBSan. Exact candidate review and
-post-review evidence remain pending. This first i64/Struct milestone is
-partial. It does not admit HIR roots, text keys, arrays/enums/bytes, pure/hosted
-providers, caller/pin/link closure, or whole SOURCE.
+Status: exact private native revision94e061c78bd received independent scoped
+SOURCE_GO and passed the one authorized post-review ASan/UBSan fixture. This
+first i64/Struct milestone remains partial: it does not admit full HIR roots,
+text keys, arrays/enums/bytes, pure/hosted providers, actual shared-account/caller/
+pin/link execution, reverse Struct-to-Dictionary edges or whole SOURCE.
 
 ## Compiler-facing freeze
 
@@ -170,3 +169,49 @@ rehash; the other is retired after the original source owner. It also exercises
 ordinary clear refusal with unchanged contents/epoch and a second real native
 scope for tagged-record erase/reinsert and old-owner rejection. Actual address
 reuse is reported if observed, not assumed from a new generation alone.
+
+## Retained new dictionary execution (2026-10-25)
+
+Baseline attempt1 was RED because the new APIs did not exist; its linker evidence
+is `/tmp/c4-dictionary-red.log`. An early implementation passed attempt2, retained
+in `/tmp/c4-dictionary-attempt2.log`. Source review then found/fixed ordinary clear
+and copied-header lifetime defects. Exact repaired revision94e061c78bd received
+independent scoped SOURCE_GO, and the single authorized final attempt3 passed:
+
+```sh
+cc -std=gnu11 -O0 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -pthread test/01_unit/runtime/runtime_source_region_dictionary_v1_test.c src/runtime/runtime_native.c -Wl,--gc-sections -ldl -lm -o /tmp/simple-c4-dictionary-reviewed-test
+/tmp/simple-c4-dictionary-reviewed-test
+```
+
+That command ran as one process tree under the existing watchdog, with enforced
+sampled RSS threshold2097152KiB,100ms observations,120s timeout and term/kill/drain.
+This was explicitly authorized sampled enforcement, not a kernel hard limit.
+The receipt says `status=complete`, `observation_complete=1`,
+`peak_rss_kib=234732`, `hard_memory_limit=0`; child/guard exited0 with no sanitizer
+findings. Immediate physical/commit admission facts were:
+
+- MemAvailable116030664KiB.
+- CommitLimit minus Committed_AS63645848KiB.
+- Effective minimum63645848KiB, above the required17825792KiB combined reserve.
+
+Retained artifacts are `/tmp/c4-dictionary-final.log`,
+`/tmp/c4-dictionary-final-admission.txt` and
+`/tmp/c4-dictionary-final-rss.receipt`. Output:
+
+```text
+dictionary_address_reuse=not-observed
+C4 typed i64/Struct dictionary dependency: PASS (full HIR/SOURCE UNRUN)
+```
+
+Executed controls include actual dictionary Child retrieval followed by alias
+mutation/Stale, both exact Struct representations, all i64 key bits/extrema,
+same-value put, remove/reinsert/absence, actual backing rehash, foreign/preexisting/
+null refusal, insufficient operation/observation fuel without mutation, ordinary
+set/clear refusal, stale copied backing after rehash and original retirement,
+and genuine owner-record erase/reinsert across scopes with old-owner rejection.
+Allocator same-address reuse was not observed and is not claimed. Canonical
+registry rehash and optional reader decoding received source review; this fixture
+does not claim a separate forced global-registry-rehash/reader-transport matrix.
+No old primitive or cleanup runner was rerun, and no further dictionary check
+was performed after this pass. Actual Simple account/HIR/pin/link/performance,
+reverse17, text-key ownership and all remaining full-SOURCE gates stay OPEN.
