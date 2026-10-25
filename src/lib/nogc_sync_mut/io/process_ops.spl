@@ -808,7 +808,11 @@ fn _process_observation_result_error_v1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
-use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed}
+use std.common.string_core.{str_len}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_decode}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -1627,6 +1631,63 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
 
+# Private post-exit process spools retain the full-output API contract. The
+# snapshot bounds this operation; each strict UTF-8 decode stays within the
+# shared text-session budget. Size stability is not an immutability guarantee.
+fn _process_capture_owned_spool_checked(path: text) -> Result<text, text>:
+    val expected = file_size_signed(path)
+    if expected < 0:
+        return Err("capture size unavailable: {path}")
+    val codec = match file_default_text_codec():
+        case Ok(item): item
+        case Err(error): return Err(io_text_error_message(error))
+    if expected == 0:
+        val probe = match external_file_read_bytes_at(path, 0, 1):
+            case Ok(item): item
+            case Err(error): return Err(io_text_error_message(error))
+        if probe.len() != 0 or file_size_signed(path) != 0:
+            return Err("capture changed during empty read: {path}")
+        return Ok("")
+    var chunks: [text] = []
+    var offset: i64 = 0
+    while offset < expected:
+        val remaining = expected - offset
+        var count = if remaining > 1048576: 1048576 else: remaining
+        var decoded = false
+        var attempt = 0
+        while attempt < 4 and count > 0:
+            # offset + count <= expected, so positional arithmetic cannot wrap.
+            val bytes = match external_file_read_bytes_at(path, offset, count):
+                case Ok(item): item
+                case Err(error): return Err(io_text_error_message(error))
+            if bytes.len() != count:
+                return Err("capture returned a short byte extent: {path}")
+            match file_session_decode(bytes, codec, offset):
+                case Ok(chunk):
+                    if str_len(chunk) != count:
+                        return Err("capture decoded byte extent changed: {path}")
+                    chunks.push(chunk)
+                    offset = offset + count
+                    decoded = true
+                    break
+                case Err(error):
+                    match error:
+                        case TextIoError.Codec(_):
+                            # At most three trailing bytes can belong to the
+                            # next UTF-8 scalar. Every trimmed byte is revisited.
+                            if attempt == 3 or count == 1:
+                                return Err(io_text_error_message(error))
+                            count = count - 1
+                            attempt = attempt + 1
+                        case _:
+                            return Err(io_text_error_message(error))
+        if not decoded:
+            return Err("capture made no decoding progress: {path}")
+    val content = chunks.join("")
+    if offset != expected or str_len(content) != expected or file_size_signed(path) != expected:
+        return Err("capture byte extent changed during read: {path}")
+    Ok(content)
+
 fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """
     Same contract and same timeout/kill semantics as process_run_timeout_unix,
@@ -1784,12 +1845,27 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     var stdout = ""
     var stderr = ""
-    if file_exists(stdout_file):
-        stdout = file_read_text(stdout_file)
-        file_delete(stdout_file)
-    if file_exists(stderr_file):
-        stderr = file_read_text(stderr_file)
-        file_delete(stderr_file)
+    var capture_error = ""
+    match _process_capture_owned_spool_checked(stdout_file):
+        case Ok(content):
+            stdout = content
+            file_delete(stdout_file)
+        case Err(message):
+            capture_error = "stdout capture failed: {message}; retained spool: {stdout_file}"
+    match _process_capture_owned_spool_checked(stderr_file):
+        case Ok(content):
+            stderr = content
+            file_delete(stderr_file)
+        case Err(message):
+            capture_error = capture_error + "\nstderr capture failed: {message}; retained spool: {stderr_file}"
+
+    if capture_error != "":
+        if relay_error != "":
+            stderr = stderr + "\n[ERROR: {relay_error}]"
+        if timed_out:
+            val timeout_secs = (effective_timeout + 999) / 1000
+            stderr = stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]"
+        return (stdout, stderr + "\n[ERROR: {capture_error}]", -1)
 
     if relay_error != "":
         (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
