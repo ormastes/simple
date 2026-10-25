@@ -18,9 +18,13 @@
 #
 # Body identity: ConcreteTldrKey folds the template's interface, not its body.
 # The coordinator therefore caches under a BODY key: ConcreteTldrKey + the
-# sha256 of the template owner's current source. A body-only edit changes the
-# body key, so the old object is not reused, not retired against, and the
-# instance is rebuilt (the old body key is dropped).
+# owner identity P-E uses for the owner's own object (source digest + the
+# interface digest of each direct import). A body-only edit, or a layout
+# change in a type the owner imports, changes the body key, so the old object
+# is not reused, not retired against, and the instance is rebuilt (the old
+# body key is dropped). An unknown import makes the list incomplete. The
+# transitive gap (a type reached through a non-importing intermediary) is
+# shared with P-E/P-G2, not new here.
 #
 # Extractable instances only: a function that reads or writes a module global
 # (LoadGlobal/StoreGlobal/GlobalAddr), or names a constant, a static or a
@@ -30,15 +34,15 @@
 # symbol -> key mapping yet; their keys fail closed the same way.
 #
 # Retirement (P-G6 rule): only after a run in which EVERY needed key PASSED is
-# the needed set recorded as retirable (body key + owner source path). Before
-# the next build the coordinator snapshots the rows whose owner source still
-# hashes to the recorded body digest AND whose cached object verifies. MIR
+# the needed set recorded as retirable (body key, owner path, owner imports).
+# Before the next build the coordinator snapshots the rows whose owner identity
+# still matches the recorded body digest AND whose cached object verifies. MIR
 # children drop exactly those COMDAT copies (by ConcreteTldrKey) and the link
 # links exactly those objects (byte copies, re-verified). Linking an instance
 # object next to a surviving COMDAT copy is safe: both are COMDAT/weak.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, file_copy,
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, file_copy, file_hash_sha256_or_empty,
     dir_create_all, getpid}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirInstKind, MirOperandKind, MirConstValue}
@@ -89,11 +93,25 @@ pub fn generic_instance_body_digest_of_v1(body_key: text) -> text:
     val at = body_key.index_of(_BODY_SEP_V1)
     if at < 0: "" else: body_key.substring(at + _BODY_SEP_V1.len())
 
-# Current body digest of a template owner: sha256 of its source ("" unknown).
-pub fn generic_instance_owner_digest_v1(owner_path: text) -> text:
+# Body identity of a template owner -- the identity P-E uses to reuse the
+# owner's own object: its source digest (native hash) + the interface digest
+# of every direct import (`iface_of`, file_worker_inc_iface_digest_v1 in the
+# coordinator). "" (unknown) when the source or any import digest is unknown.
+# Shared transitive gap (same as P-E/P-G2): a type reached only through a
+# non-importing intermediary is not folded.
+pub fn generic_instance_owner_digest_v1(owner_path: text, deps: [text], iface_of: fn(text) -> text) -> text:
     if owner_path == "" or not file_exists(owner_path):
         return ""
-    sha256_text(file_read(owner_path))
+    val src = file_hash_sha256_or_empty(owner_path)
+    if src == "":
+        return ""
+    var acc = "owner-body/v2|" + src
+    for d in deps.sorted():
+        val iface = iface_of(d)
+        if iface == "":
+            return ""
+        acc = acc + "|" + d + "=" + iface
+    sha256_text(acc)
 
 # Module id -> source path for the build's modules.
 pub fn generic_instance_module_ids_v1(module_paths: [text]) -> Dict<text, text>:
@@ -113,9 +131,11 @@ pub fn generic_instance_owner_path_of_v1(template_symbol: text, ids: Dict<text, 
 
 # Rewrite every spec's key to its body key. A spec whose owner source is
 # unknown makes its list incomplete (fail closed: no job, nothing retired).
-# Returns the rewritten lists and body key -> owner path.
+# `deps_of`: owner path -> its direct imports (paths); an owner with no
+# entry is unknown. Returns the rewritten lists and body key -> retire row
+# suffix ("<owner path>	<deps joined by 001e>").
 pub fn generic_instance_lists_with_body_v1(lists: [GenericSpecializationListV1?],
-        ids: Dict<text, text>) -> ([GenericSpecializationListV1?], Dict<text, text>):
+        ids: Dict<text, text>, deps_of: Dict<text, [text]>, iface_of: fn(text) -> text) -> ([GenericSpecializationListV1?], Dict<text, text>):
     var out: [GenericSpecializationListV1?] = []
     var owners: Dict<text, text> = {}
     var digests: Dict<text, text> = {}
@@ -127,14 +147,17 @@ pub fn generic_instance_lists_with_body_v1(lists: [GenericSpecializationListV1?]
                 for s in list.specs:
                     val owner = generic_instance_owner_path_of_v1(s.template_symbol, ids)
                     if owner != "" and not digests.contains_key(owner):
-                        digests[owner] = generic_instance_owner_digest_v1(owner)
+                        digests[owner] = if deps_of.contains_key(owner):
+                            generic_instance_owner_digest_v1(owner, deps_of[owner], iface_of)
+                        else:
+                            ""
                     val digest = if owner == "": "" else: digests[owner]
                     if digest == "":
                         complete = false
                         continue
                     var b = s
                     b.concrete_key = generic_instance_body_key_v1(s.concrete_key, digest)
-                    owners[b.concrete_key] = owner
+                    owners[b.concrete_key] = owner + "	" + deps_of[owner].join("001e")
                     specs.push(b)
                 out.push(Some(GenericSpecializationListV1(complete: complete, specs: specs)))
             case nil:
@@ -253,7 +276,8 @@ pub fn generic_instance_verified_v1(cache_root: text, producer: text, body_key: 
     val path = generic_instance_object_path_v1(cache_root, producer, body_key)
     generic_instance_object_file_verified_v1(path, generic_instance_header_path_v1(path), producer, body_key)
 
-# Record (ok) or clear the retirable rows after a run: body key + owner path.
+# Record (ok) or clear the retirable rows after a run: body key, owner path,
+# owner direct imports.
 pub fn generic_instance_retire_record_v1(cache_root: text, producer: text, body_keys: [text],
         owners: Dict<text, text>, ok: bool) -> bool:
     val path = generic_instance_retire_path_v1(cache_root, producer)
@@ -274,20 +298,26 @@ pub fn generic_instance_retire_record_v1(cache_root: text, producer: text, body_
     _publish_text_v1(path, rows.join("\n") + "\n")
 
 # Coordinator, before the workers start: the retirable body keys whose owner
-# source still hashes to the recorded body digest and whose cached object
-# verifies right now. Children retire only these; the link links them.
-pub fn generic_instance_retire_snapshot_v1(cache_root: text, producer: text) -> [text]:
+# identity (source + recorded direct imports' interface digests) still
+# matches the recorded body digest and whose cached object verifies right
+# now. Children retire only these; the link links them.
+pub fn generic_instance_retire_snapshot_v1(cache_root: text, producer: text,
+        iface_of: fn(text) -> text) -> [text]:
     var out: [text] = []
     val path = generic_instance_retire_path_v1(cache_root, producer)
     if path == "" or not file_exists(path):
         return out
     for line in file_read(path).split("\n"):
         val cols = line.split("\t")
-        if cols.len() != 2:
+        if cols.len() != 3:
             continue
         val body_key = cols[0]
+        var deps: [text] = []
+        for d in cols[2].split("\u001e"):
+            if d != "":
+                deps.push(d)
         val digest = generic_instance_body_digest_of_v1(body_key)
-        if digest == "" or generic_instance_owner_digest_v1(cols[1]) != digest:
+        if digest == "" or generic_instance_owner_digest_v1(cols[1], deps, iface_of) != digest:
             continue
         if generic_instance_verified_v1(cache_root, producer, body_key):
             out.push(body_key)

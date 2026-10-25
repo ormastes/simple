@@ -71,7 +71,7 @@ use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1,
     file_worker_inc_receipt_line_v1}
-use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1, file_worker_inc_iface_digest_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
 use compiler.driver.driver_build.native_file_worker_instances_v1.{file_worker_instances_plan_v1,
     file_worker_instances_run_v1, file_worker_instances_receipt_line_v1}
@@ -1360,7 +1360,8 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     # P-G7: children stage instance objects and retire only the COMDAT copies
     # whose verified instance object this build will link.
     val instance_stage = "{mir_queue}.instances/stage"
-    val retire_snapshot = generic_instance_retire_snapshot_v1(machine_cache_root(), inc_producer)
+    val retire_snapshot = generic_instance_retire_snapshot_v1(machine_cache_root(), inc_producer,
+        file_worker_inc_iface_digest_v1)
     val retire_path = "{mir_queue}.instances/retire"
     var retire_concrete: [text] = []
     for body_key in retire_snapshot:
@@ -1386,7 +1387,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
     if outcome == "link":
-        val (instances_relink, instances_ok) = run_file_worker_instances_v1(args, mir_queue, inc_producer,
+        val (instances_relink, instances_ok) = run_file_worker_instances_v1(args, mir_queue, hir_queue, inc_producer,
             if retire_written: retire_snapshot else: [])
         if not instances_ok:
             eprint "[file-worker] retired COMDAT copies have no verified instance object; link blocked"
@@ -1412,7 +1413,7 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
 # (relink, ok): relink when an instance was built or dropped (P-E
 # removed-module rule); ok is false only when a COMDAT copy the children
 # retired (`retired`) has no verified instance object to link.
-fn run_file_worker_instances_v1(args: [text], mir_queue: text, producer: text,
+fn run_file_worker_instances_v1(args: [text], mir_queue: text, hir_queue: text, producer: text,
         retired: [text]) -> (bool, bool):
     val frontend_env = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
     val frontend = if frontend_env != "": frontend_env else: native_build_frontend_cache_dir_arg(args)
@@ -1430,7 +1431,15 @@ fn run_file_worker_instances_v1(args: [text], mir_queue: text, producer: text,
     var lists: [GenericSpecializationListV1?] = []
     for m in modules:
         lists.push(generic_spec_list_of_module_v1(m, frontend + "/tldr"))
-    val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules))
+    # Owner identity = source + direct imports' interface digests (P-E rule);
+    # an owner with no deps record keeps its specs' lists incomplete.
+    var deps_of: Dict<text, [text]> = {}
+    for m in modules:
+        val deps = native_file_worker_deps_read_v1(hir_queue, m)
+        if deps.is_ok():
+            deps_of[m] = deps.unwrap()
+    val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules),
+        deps_of, file_worker_inc_iface_digest_v1)
     val plan = file_worker_instances_plan_v1(body_lists, machine_cache_root(), producer)
     val stage = "{mir_queue}.instances/stage"
     val run = file_worker_instances_run_v1(plan, machine_cache_root(), producer, "{mir_queue}.instances/jobs",

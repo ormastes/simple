@@ -105,3 +105,12 @@ Still open (keys fail closed, nothing retired for them):
   `file_hash_sha256_or_empty` digest; link copies are re-verified.
 - Extraction also rejects instances that name a constant, static or
   non-instance function of the using module.
+
+### P-G7 review r2 fix
+
+- Owner identity (the body digest in the body key and in each retire row) is
+  now the P-E object-reuse identity: the owner's source digest (native hash)
+  plus `file_worker_inc_iface_digest_v1` of each direct import (HIR ledger
+  deps record). If an import's digest is unknown, the list is marked
+  incomplete. The transitive gap through a non-importing intermediary is the
+  one P-E/P-G2 already have.

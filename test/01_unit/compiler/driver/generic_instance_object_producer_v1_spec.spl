@@ -60,10 +60,18 @@ fn body_lists(root: text, keys: [text]) -> ([GenericSpecializationListV1?], Dict
     var specs: [RequiredSpecializationV1] = []
     for k in keys:
         specs.push(spec_of(id + ".id", k))
+    var deps: Dict<text, [text]> = {}
+    deps[path] = ["pkg/shapes.spl"]
     generic_instance_lists_with_body_v1([Some(GenericSpecializationListV1(complete: true, specs: specs))],
-        generic_instance_module_ids_v1([path]))
+        generic_instance_module_ids_v1([path]), deps, fake_iface)
 
 var owner_body_v1: text = "fn id<T>(x: T) -> T: x\n"
+# Interface digest of the owner's one direct import (stands in for
+# file_worker_inc_iface_digest_v1).
+var import_iface_v1: text = "iface-1"
+
+fn fake_iface(path: text) -> text:
+    if path == "pkg/shapes.spl": import_iface_v1 else: ""
 
 fn file_read_owner(root: text) -> text:
     owner_body_v1
@@ -169,11 +177,11 @@ describe "generic instance-object producer (P-G7)":
         val (_l, owners) = body_lists(root, ["k:id_i64"])
         expect(generic_instance_retire_record_v1(cache, PRODUCER, first.built, owners,
             first.retire_comdat)).to_equal(true)
-        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER).len()).to_equal(1)
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER, fake_iface).len()).to_equal(1)
         # Body-only edit: same signature, so the same ConcreteTldrKey.
         owner_body_v1 = "fn id<T>(x: T) -> T:\n    val y = x\n    y\n"
         val _w = owner(root, owner_body_v1)
-        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER).len()).to_equal(0)
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER, fake_iface).len()).to_equal(0)
         val _s2 = generic_instance_stage_publish_v1(root + "/stage-1", "k:id_i64",
             object_file(root, "v2", "ID-V2"))
         val r = run_round(root, "1", ["k:id_i64"])
@@ -185,7 +193,7 @@ describe "generic instance-object producer (P-G7)":
     it "an unknown template owner keeps the plan incomplete":
         val lists: [GenericSpecializationListV1?] = [Some(GenericSpecializationListV1(complete: true,
             specs: [spec_of("nowhere.id", "k:x")]))]
-        val (out, _owners) = generic_instance_lists_with_body_v1(lists, {})
+        val (out, _owners) = generic_instance_lists_with_body_v1(lists, {}, {}, fake_iface)
         match out[0]:
             case Some(l): expect(l.complete).to_equal(false)
             case nil: expect(false).to_equal(true)
@@ -216,3 +224,35 @@ describe "generic instance-object producer (P-G7)":
         generic_instance_key_record_v1("id$i64", "k:id_i64")
         expect(generic_instance_key_of_v1("id$i64")).to_equal("k:id_i64")
         expect(generic_instance_key_of_v1("other$i64")).to_equal("")
+
+    it "an imported type's layout change with the template source unchanged rebuilds the instance":
+        val root = fresh_root("iface")
+        val cache = root + "/cache"
+        owner_body_v1 = "fn id<T>(x: T) -> T: x\n"
+        import_iface_v1 = "iface-1"
+        val _s = generic_instance_stage_publish_v1(root + "/stage-0", "k:id_shape",
+            object_file(root, "v1", "ID-SHAPE-V1"))
+        val first = run_round(root, "0", ["k:id_shape"])
+        val (_l, owners) = body_lists(root, ["k:id_shape"])
+        expect(generic_instance_retire_record_v1(cache, PRODUCER, first.built, owners,
+            first.retire_comdat)).to_equal(true)
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER, fake_iface).len()).to_equal(1)
+        # A field of a type in the imported module changes: its interface digest moves.
+        import_iface_v1 = "iface-2"
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER, fake_iface).len()).to_equal(0)
+        val _s2 = generic_instance_stage_publish_v1(root + "/stage-1", "k:id_shape",
+            object_file(root, "v2", "ID-SHAPE-V2"))
+        val r = run_round(root, "1", ["k:id_shape"])
+        expect(r.built.len()).to_equal(1)
+        expect(r.reused.len()).to_equal(0)
+        expect(r.dropped).to_equal(first.built)
+        import_iface_v1 = "iface-1"
+
+    it "an owner import with no interface digest keeps the plan incomplete":
+        val root = fresh_root("noiface")
+        import_iface_v1 = ""
+        val (lists, _owners) = body_lists(root, ["k:id_x"])
+        match lists[0]:
+            case Some(l): expect(l.complete).to_equal(false)
+            case nil: expect(false).to_equal(true)
+        import_iface_v1 = "iface-1"
