@@ -1,5 +1,22 @@
 # Agent task ownership: profile-switchable containers
 
+## Status reconciliation (2026-10-25)
+
+Verified against `origin/release/1.0.0` and its git log on 2026-10-25. Docs-only; no tests were run for this note.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Adaptive text/generic set/map runtimes (`src/lib/nogc_sync_mut/src/collections/adaptive_*.spl`) | PARTIAL — source present; no admitted pure-Simple execution receipt | source tree |
+| `@collection_algorithm` parser rewrite and site identity (`src/compiler/10.frontend/core/collection_feedback.spl`) | PARTIAL — source present; parser feedback state gained take/install in PR #4535 (`6578c2c1037`, merge `de2297fcc5d`) | git log |
+| `.sprof` v2 collection profile, capture channel (`runtime_collection_capture.c`, `sffi/collection_capture.spl`), `simple run --collection-profile-out` | PARTIAL — source present; four-metric capture and append path not executed on a qualified runner | source tree |
+| Guarded MIR consumer, literal membership only (`50.mir/_MirLoweringExpr/collection_literal_membership.spl`) | PARTIAL — landed `97b13f9eb09`, explicit target admission `bb7d5313b2f` (2026-10-11) | git log |
+| Typed CLI policy/budget/explanation (`88ca1e4dfde`, `93bc526ff95`, `e1c2cce4157`) | PARTIAL — source only | git log |
+| General typed CollectionPlan lowering (generic set/map, nested/hash/merge joins) | OPEN | no consumer beyond literal membership |
+| Two-run A/B profile selection on native Windows and Linux/WSL (umbrella done gate) | OPEN — no execution evidence; Item 7 remains TEST_BLOCKED per the 2026-10-16 continuation (PR #3504, `bcb8876fbe3`) | no receipts |
+| PSC-AC-001..008 | OPEN — none has an execution receipt | — |
+
+Item 7 is **not DONE** on any host.
+
 | Lane | Owner | Scope |
 |---|---|---|
 | Source attribute and typed CollectionPlan | Codex | Parser, HIR, semantic guards, MIR lowering, explanation. |

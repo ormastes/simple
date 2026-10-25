@@ -1,5 +1,7 @@
 # Profile-switchable collections (implementation in progress)
 
+> Status 2026-10-25: implementation in progress, not production verified. Source exists on `release/1.0.0`, but no qualified pure-Simple runner has executed the two-run feedback flow on Windows or Linux/WSL. See the [architecture status](../../04_architecture/compiler/profile_switchable_container_algorithms.md#status-reconciliation-2026-10-25).
+
 An initialized local or class/struct field constructed directly as
 `AdaptiveTextSet`, `AdaptiveTextMap`, `AdaptiveSet<K>`, or `AdaptiveMap<K,V>` can use
 `@collection_algorithm("auto")`, `"linear"`, `"hash"`, or `"ordered"`.
