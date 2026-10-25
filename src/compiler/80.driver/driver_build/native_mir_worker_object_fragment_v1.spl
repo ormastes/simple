@@ -38,16 +38,21 @@ pub struct NativeMirWorkerObjectFragmentV1:
     object_bytes: i64
     capsule_identity: text
 
-pub fn native_mir_worker_expected_valid_v1(e: NativeMirWorkerObjectExpectedV1) -> bool:
+pub fn native_mir_worker_expected_provenance_valid_v1(e: NativeMirWorkerObjectExpectedV1) -> bool:
     if not sha256_lower_hex_valid(e.invocation) or not sha256_lower_hex_valid(e.source) or
             not sha256_lower_hex_valid(e.context) or not sha256_lower_hex_valid(e.manifest) or
             not sha256_lower_hex_valid(e.module_source) or
             not sha256_lower_hex_valid(e.producer) or not sha256_lower_hex_valid(e.job) or
-            e.child_pid <= 0 or (e.child_birth.to_i64() ?? -1) <= 0 or
             (e.provider != "" and not sha256_lower_hex_valid(e.provider)):
         return false
-    if e.owner == "" or e.module == "" or e.target == "" or
+    if e.module == "" or e.target == "" or
             (e.backend != "cranelift" and e.backend != "llvm" and e.backend != "llvm-lib"):
+        return false
+    true
+
+pub fn native_mir_worker_expected_valid_v1(e: NativeMirWorkerObjectExpectedV1) -> bool:
+    if not native_mir_worker_expected_provenance_valid_v1(e) or e.owner == "" or
+            e.child_pid <= 0 or (e.child_birth.to_i64() ?? -1) <= 0:
         return false
     e.private_root != "" and not e.private_root.contains("\0") and
         not e.private_root.contains("\n") and not e.private_root.contains("/../") and
@@ -145,8 +150,10 @@ pub fn native_mir_worker_objects_adopt_ordered_v1(cache_root: text,
         return Err("MIR partial object inventory refused")
     if not all_stopped: return Err("MIR partial object workers not reaped")
     var seen: Dict<text, bool> = {}
-    for row in rows:
-        if not native_mir_worker_expected_valid_v1(row) or seen.has(row.module):
+    for index in 0..rows.len():
+        val row = rows[index]
+        if not native_mir_worker_expected_provenance_valid_v1(row) or seen.has(row.module) or
+                (ready[index] and not native_mir_worker_expected_valid_v1(row)):
             return Err("MIR partial object inventory duplicate or invalid")
         if row.invocation != rows[0].invocation or row.source != rows[0].source or
                 row.context != rows[0].context or row.manifest != rows[0].manifest or
