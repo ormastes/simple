@@ -2,6 +2,8 @@ use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave
 # Declaration parsing: fn, extern fn, struct/class, type params, domain blocks.
 use compiler.frontend.core.parser_decls.*
 use compiler.frontend.core._ParserDecls.enum_module_body.{parse_top_level_visibility}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_pending_take, lock_level_record}
+use compiler.frontend.core.lock_level_parser.{lock_level_reject_non_function}
 use compiler.frontend.core.representation_declarations_v1.{representation_declaration_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1, representation_reject_pending_v1}
 # Parser — Declaration Module
 #
@@ -646,6 +648,10 @@ fn parser_skip_where_clause(type_params: [text]) -> [[text]]:
     bounds
 
 fn parse_fn_decl(is_async: i64) -> i64:
+    # Consume before the body: nested functions must not inherit this rank.
+    val lock_rank = lock_level_pending_take()
+    if lock_rank >= 0 and is_async != 0:
+        parser_error("[E-LOCK-LEVEL-003] ranked function scopes must be synchronous")
     val representation_owner = representation_declaration_begin_v1("fn")
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -757,6 +763,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
     decl_set_param_defaults(fn_decl_idx, param_defaults)
     decl_set_param_muts(fn_decl_idx, param_muts)
     representation_declaration_end_v1(representation_owner, fn_decl_idx, fn_name)
+    lock_level_record(fn_decl_idx, lock_rank)
     fn_decl_idx
 
 fn parse_extern_fn_decl() -> i64:
@@ -1019,9 +1026,11 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     while true:
         parser_skip_newlines()
         if par_kind_get() == 182:
+            lock_level_reject_non_function(182)
             parser_advance()
             break
         if par_kind_get() == 190:
+            lock_level_reject_non_function(190)
             break
 
         # Skip docstrings in class/struct body
@@ -1098,6 +1107,9 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             if parser_parse_member_attribute():
                 continue
 
+        if par_kind_get() != TOK_KW_PUB and not (par_kind_get() == TOK_IDENT and par_text_get() == "pri"):
+            if par_kind_get() == TOK_KW_VAL: lock_level_reject_non_function(-1)
+            else: lock_level_reject_non_function(par_kind_get())
         # Associated types: type Item = T (skip for now, just parse and ignore).
         # `type: T` is instead a keyword-named field, as in the canonical Rust
         # parser's parse_field/expect_identifier path.
@@ -1141,6 +1153,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             class_member_visibility = parse_top_level_visibility()
         elif par_kind_get() == TOK_IDENT and par_text_get() == "pri" and not parser_class_member_followed_by_colon():
             class_member_visibility = parse_top_level_visibility()
+        if par_kind_get() == TOK_KW_VAL: lock_level_reject_non_function(-1)
+        else: lock_level_reject_non_function(par_kind_get())
 
         # Handle methods in class/struct body
         if par_kind_get() == 30:
