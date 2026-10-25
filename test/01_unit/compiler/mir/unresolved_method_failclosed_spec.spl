@@ -1,0 +1,100 @@
+"""
+An unresolved method call in MIR lowering is a FATAL error (Task #145), and
+the phase-3 generic-receiver shapes resolve without hitting that path.
+
+Before: reject_unresolved_method_call_v1 used self.error (non-fatal), so the
+driver downgraded it to a warning and the const-0 + rt_panic placeholder
+shipped in native code (e.g. `[text].insert(i, v)` silently dropped).
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+struct Outcome:
+    unresolved: [text]
+    fatal_unresolved: i64
+
+fn lower_src(source: text, name: text) -> Outcome:
+    val filename = "unresolved_method_" + name + ".spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var hits: [text] = []
+    var fatal = 0
+    for err in mir_lowering.errors:
+        if err.message.contains("unresolved method call"):
+            hits = hits.push(err.message)
+            if err.fatal:
+                fatal = fatal + 1
+    Outcome(unresolved: hits, fatal_unresolved: fatal)
+
+val BOGUS_METHOD_SOURCE = """
+class Box:
+    v: i64
+
+fn main():
+    val b = Box(v: 1)
+    val r = b.no_such_method_xyz(2)
+    print r
+"""
+
+val TEXT_ARRAY_INSERT_SOURCE = """
+fn main():
+    var names: [text] = ["a", "c"]
+    names.insert(1, "b")
+    print names.len()
+"""
+
+val U8_ARRAY_LEN_SOURCE = """
+fn count(data: [u8]) -> i64:
+    data.len()
+
+fn main():
+    print count([1u8, 2u8])
+"""
+
+val RESULT_FROM_METHOD_SOURCE = """
+class Loader:
+    n: i64
+    fn load(name: text) -> Result<i64, text>:
+        if name == "":
+            return Err("empty")
+        Ok(self.n)
+
+fn main():
+    val l = Loader(n: 3)
+    val r = l.load("x")
+    if r.is_err():
+        print "err"
+    else:
+        print r.unwrap()
+"""
+
+describe "unresolved method call fail-closed":
+    it "marks an unresolved method call as a fatal MIR error":
+        val o = lower_src(BOGUS_METHOD_SOURCE, "bogus")
+        expect(o.unresolved.len() > 0).to_equal(true)
+        expect(o.fatal_unresolved).to_equal(o.unresolved.len())
+
+    it "fails closed on [text].insert (no native array-insert lowering yet)":
+        val o = lower_src(TEXT_ARRAY_INSERT_SOURCE, "insert")
+        expect(o.unresolved.len() > 0).to_equal(true)
+        expect(o.fatal_unresolved).to_equal(o.unresolved.len())
+
+    it "resolves [u8].len on a parameter":
+        val o = lower_src(U8_ARRAY_LEN_SOURCE, "u8len")
+        expect(o.unresolved.len()).to_equal(0)
+
+    it "resolves is_err/unwrap on a method-returned Result":
+        val o = lower_src(RESULT_FROM_METHOD_SOURCE, "result")
+        expect(o.unresolved.len()).to_equal(0)
