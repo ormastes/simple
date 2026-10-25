@@ -77,6 +77,37 @@ enum TypeKind:
     Unique(Type)                # &T  unique owner (move-only)
     Shared(Type)                # *T  shared (Rc) owner
 
+# Inspect declaration syntax without resolving named aliases. Kept with the
+# TypeKind owner so HIR's similarly named variants cannot capture these arms.
+pub fn parser_type_written_any_spans_v1(type_: Type) -> [Span]:
+    var spans: [Span] = []
+    match type_.kind:
+        case TypeKind.Named(name, arguments):
+            if name == "Any" or name == "any":
+                spans = spans.push(type_.span)
+            for argument in arguments:
+                for nested_span in parser_type_written_any_spans_v1(argument):
+                    spans = spans.push(nested_span)
+        case TypeKind.Tuple(elements) | TypeKind.Union(elements):
+            for element in elements:
+                for nested_span in parser_type_written_any_spans_v1(element):
+                    spans = spans.push(nested_span)
+        case TypeKind.Function(parameters, result):
+            for parameter in parameters:
+                for nested_span in parser_type_written_any_spans_v1(parameter):
+                    spans = spans.push(nested_span)
+            for nested_span in parser_type_written_any_spans_v1(result):
+                spans = spans.push(nested_span)
+        case TypeKind.Array(inner, _) | TypeKind.Optional(inner) |
+                TypeKind.Reference(inner, _) | TypeKind.Pointer(inner, _) |
+                TypeKind.Atomic(inner) | TypeKind.Isolated(inner) |
+                TypeKind.Projection(inner, _) | TypeKind.Weak(inner) |
+                TypeKind.Unique(inner) | TypeKind.Shared(inner):
+            for nested_span in parser_type_written_any_spans_v1(inner):
+                spans = spans.push(nested_span)
+        case TypeKind.Infer | TypeKind.Error: pass
+    spans
+
 # Keep multi-field TypeKind extraction beside its owner.  Consumers that also
 # import HirTypeKind have a colliding Named variant on stage4.
 fn parser_type_kind_named_name(kind: TypeKind) -> text:
