@@ -2876,6 +2876,17 @@ impl MirLowering:
                 self.lower_static(bs_static_const)
                 bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
+            # `lower_static` deliberately defers every dict-literal global
+            # (`var D: Dict<K, V> = {}`) to the runtime initializer, which is
+            # the only producer of its static + `global_statics_by_id` mirror.
+            # This branch never ran that initializer, so each `D = x` in a
+            # function body missed `find_global_static` and aborted with
+            # "assignment target has no local binding" (~113 sites in the
+            # stage3 whole-program MIR run, all dict globals). Run it here,
+            # after the accumulator reset so its init function is kept, and
+            # before any body is lowered -- same order as the non-bootstrap
+            # path. Bug mir_bootstrap_dict_global_no_binding_2026-10-25.
+            self.lower_runtime_module_initializers(module, bs_const_vals, 0)
             val bootstrap_function_values: [HirFunction] = module.functions.values()
             val bootstrap_function_indices = hir_function_symbol_order(bootstrap_function_values)
             val bootstrap_function_count = bootstrap_function_indices.len()
