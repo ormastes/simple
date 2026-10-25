@@ -1,0 +1,71 @@
+# Native entry exercising the actual macro producers with typed array shifts.
+use compiler.frontend.core._Ast.decl_nodes.{macro_facts_reset, macro_fact_use_push}
+use compiler.frontend.parser.macro_registry.{MacroDef, MacroIntroDecl, macro_def_generated_public_names}
+use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_guarded_v1}
+use compiler.frontend.cache_artifact.macro_reference_projector.{MacroSourceDefV1,
+    MacroModuleSourceV1, MacroSourceInvocationV1, project_macro_module_v1}
+
+fn macro_insert_boundary_check() -> bool:
+    macro_facts_reset()
+    # Equal-line active facts precede inactive facts; middle and tail insertions
+    # must move names, arguments, line guards and activity in lockstep.
+    macro_fact_use_push("item", "same", 2, 1)
+    macro_fact_use_push("item", "active4", 4, 1)
+    macro_fact_use_push("item", "active8", 8, 1)
+    val source = "@when(false)\nitem!(first)\n@end\nitem!(active4)\n@when(false)\nitem!(middle)\n@end\nitem!(active8)\n@when(false)\nitem!(last)\n@end\n"
+    val (src, evals) = macro_module_source_from_parse_guarded_v1("pkg", "fixture", "fixture.spl", source)
+    val uses = src.invocations
+    if uses.len() != 6: return false
+    val expected_args: [text] = ["same", "first", "active4", "middle", "active8", "last"]
+    val expected_active: [bool] = [true, false, true, false, true, false]
+    var i = 0
+    while i < uses.len():
+        if uses[i].requested_name != "item": return false
+        if uses[i].args_text != expected_args[i]: return false
+        if uses[i].active != expected_active[i]: return false
+        if uses[i].region_id != "item#{i}": return false
+        if uses[i].invocation_text != "item!(" + expected_args[i] + ")": return false
+        if i == 2 or i == 4:
+            if uses[i].active_guard_id != "": return false
+        else:
+            if uses[i].active_guard_id == "": return false
+        i = i + 1
+    macro_facts_reset()
+    val (empty_src, empty_evals) = macro_module_source_from_parse_guarded_v1("pkg", "empty", "empty.spl", "")
+    if empty_src.invocations.len() != 0: return false
+    val (inactive_src, inactive_evals) = macro_module_source_from_parse_guarded_v1("pkg", "inactive", "inactive.spl", "@when(false)\nitem!(only)\n@end\n")
+    if inactive_src.invocations.len() != 1: return false
+    if inactive_src.invocations[0].args_text != "only": return false
+    if inactive_src.invocations[0].active: return false
+    true
+
+fn macro_sorted_names_check() -> bool:
+    val names: [text] = ["zeta", "alpha", "middle", "alpha", "zeta", "beta"]
+    var intros: [MacroIntroDecl] = []
+    for name in names:
+        intros.push(MacroIntroDecl(kind: "fn", name_pattern: name, type_pattern: nil))
+    val def = MacroDef(name: "maker", params: [], contract_intros: intros, contract_injects: [])
+    val expected: [text] = ["alpha", "beta", "middle", "zeta"]
+    if macro_def_generated_public_names(def) != expected: return false
+    # Projector has its own sorted-unique owner, reached through the public API.
+    val source_def = MacroSourceDefV1(def: def, namespace: "macro", body_text: "0",
+        nested_macro_names: [], declared_effects: ["zeta", "alpha", "middle", "alpha", "beta"],
+        guard_ids: [], is_public: true)
+    val invocation = MacroSourceInvocationV1(region_id: "r0", stable_invocation_id: "maker#0",
+        requested_name: "maker", invocation_text: "maker!()", args_text: "",
+        hygiene_scope_id: "r0", active_guard_id: "", active: true)
+    val source = MacroModuleSourceV1(package: "pkg", module: "fixture", source_id: "fixture.spl",
+        defs: [source_def], invocations: [invocation])
+    val projected = project_macro_module_v1(source, [])
+    if projected.generated_public_names != expected: return false
+    if projected.def_table.entries[0].declared_effects != expected: return false
+    if names != ["zeta", "alpha", "middle", "alpha", "zeta", "beta"]: return false
+    val empty_def = MacroDef(name: "empty", params: [], contract_intros: [], contract_injects: [])
+    if macro_def_generated_public_names(empty_def).len() != 0: return false
+    true
+
+fn main() -> i64:
+    if not macro_insert_boundary_check(): return 1
+    if not macro_sorted_names_check(): return 2
+    print "macro array insertion: PASS"
+    0
