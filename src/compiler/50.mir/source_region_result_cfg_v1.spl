@@ -1,0 +1,122 @@
+# Scalar Result continuation using the same runtime ABI as lower_try_expr and
+# result_predicates. No byte offsets or guessed enum payload layouts are used.
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirInst, MirBlock}
+
+struct SourceRegionResultCfgV1:
+    locals: [MirLocal]
+    check_instructions: [MirInst]
+    check_terminator: MirTerminator
+    ok_instructions: [MirInst]
+    failure_blocks: [MirBlock]
+    payload: LocalId
+    next_local: i64
+    original_result: LocalId
+
+# Caller owns typed Err propagation and resolved Incomplete construction.
+# Cleanup belongs only to the top-level retained-consumer request wrapper.
+struct SourceRegionResultFailureRoutesV1:
+    err: BlockId
+    malformed: BlockId
+
+# This intentionally admits only the scalar/nominal facade surface. Unknown
+# shapes fail closed rather than comparing display names or coarse type classes.
+fn source_region_cfg_type_same_v1(left: MirType, right: MirType, depth: i64 = 0) -> bool:
+    if depth > 16:
+        return false
+    match left.kind:
+        case MirTypeKind.I64:
+            match right.kind:
+                case MirTypeKind.I64: true
+                case _: false
+        case MirTypeKind.Unit:
+            match right.kind:
+                case MirTypeKind.Unit: true
+                case _: false
+        case MirTypeKind.Bool:
+            match right.kind:
+                case MirTypeKind.Bool: true
+                case _: false
+        case MirTypeKind.Ptr(a, mutable_a):
+            match right.kind:
+                case MirTypeKind.Ptr(b, mutable_b): mutable_a == mutable_b and source_region_cfg_type_same_v1(a, b, depth + 1)
+                case _: false
+        case MirTypeKind.Result(ok_a, err_a):
+            match right.kind:
+                case MirTypeKind.Result(ok_b, err_b): source_region_cfg_type_same_v1(ok_a, ok_b, depth + 1) and source_region_cfg_type_same_v1(err_a, err_b, depth + 1)
+                case _: false
+        case _: source_region_error_type_same_v1(left, right)
+
+fn source_region_cfg_params_same_v1(expected: [MirType], supplied: [MirType]) -> bool:
+    if expected.len() != supplied.len():
+        return false
+    for index in 0..expected.len():
+        if not source_region_cfg_type_same_v1(expected[index], supplied[index]):
+            return false
+    true
+
+fn source_region_error_type_same_v1(left: MirType, right: MirType) -> bool:
+    # Fail closed: the facade error is a resolved nominal declaration.
+    match left.kind:
+        case MirTypeKind.Enum(a):
+            match right.kind:
+                case MirTypeKind.Enum(b): a.id >= 0 and a.id == b.id
+                case _: false
+        case MirTypeKind.Struct(a):
+            match right.kind:
+                case MirTypeKind.Struct(b): a.id >= 0 and a.id == b.id
+                case _: false
+        case _: false
+
+fn source_region_scalar_result_same_v1(left: MirType, error_type: MirType) -> bool:
+    match left.kind:
+        case MirTypeKind.Result(ok, err):
+            match ok.kind:
+                case MirTypeKind.I64: source_region_error_type_same_v1(err, error_type)
+                case _: false
+        case _: false
+
+fn source_region_result_runtime_v1(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()],
+            return_type: MirType.i64(), is_variadic: false, params_known: true)))))
+
+fn source_region_result_cfg_v1(result_type: MirType, error_type: MirType,
+        facade: MirOperand, args: [MirOperand], arg_types: [MirType],
+        routes: SourceRegionResultFailureRoutesV1, first_local: i64,
+        ok_block: BlockId, span: Span?) -> Result<SourceRegionResultCfgV1, text>:
+    if not source_region_scalar_result_same_v1(result_type, error_type):
+        return Err("SOURCE-RESULT-CFG: expected resolved Result<i64,E>")
+    if first_local < 0 or first_local > 9223372036854775803:
+        return Err("SOURCE-RESULT-CFG: invalid fresh local range")
+    val block_ids = [ok_block.id, routes.err.id, routes.malformed.id]
+    for index in 0..block_ids.len():
+        if block_ids[index] < 0:
+            return Err("SOURCE-RESULT-CFG: invalid continuation identity")
+        for prior in 0..index:
+            if block_ids[index] == block_ids[prior]:
+                return Err("SOURCE-RESULT-CFG: aliased continuation identities")
+    match facade.kind:
+        case MirOperandKind.Const(_, type_):
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    if not signature.params_known or signature.is_variadic or signature.params.len() != args.len() or not source_region_cfg_params_same_v1(signature.params, arg_types) or not source_region_scalar_result_same_v1(signature.return_type, error_type):
+                        return Err("SOURCE-RESULT-CFG: facade signature mismatch")
+                case _: return Err("SOURCE-RESULT-CFG: facade is not typed callable")
+        case _: return Err("SOURCE-RESULT-CFG: unresolved facade")
+    val result = LocalId(id: first_local)
+    val tag = LocalId(id: first_local + 1)
+    val payload = LocalId(id: first_local + 2)
+    val locals = [
+        MirLocal(id: result, name: nil, type_: result_type, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: tag, name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: payload, name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)]
+    val checks = [MirInst(kind: MirInstKind.Call(Some(result), facade, args), span: span),
+        MirInst(kind: MirInstKind.Call(Some(tag), source_region_result_runtime_v1("rt_enum_discriminant"), [mir_operand_copy(result)]), span: span)]
+    val success = [MirInst(kind: MirInstKind.Call(Some(payload), source_region_result_runtime_v1("rt_enum_payload"), [mir_operand_copy(result)]), span: span)]
+    Ok(SourceRegionResultCfgV1(locals: locals, check_instructions: checks,
+        check_terminator: MirTerminator.Switch(mir_operand_copy(tag), [SwitchCase(value: 0, target: ok_block), SwitchCase(value: 1, target: routes.err)], routes.malformed),
+        ok_instructions: success, failure_blocks: [], payload: payload, next_local: first_local + 3, original_result: result))
