@@ -59,11 +59,11 @@ use compiler.common.cache_contract.hash_algorithm_compute_v1.{hash_algorithm_nam
 use std.nogc_async_mut.sosix.packed_blob_view.{PackedBlobView, packed_blob_map, packed_blob_unmap,
     packed_blob_view_ok, packed_blob_u8, packed_blob_u16, packed_blob_u32, packed_blob_u64}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_size}
+use std.nogc_sync_mut.io.{file_modified_time}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
 extern fn rt_string_new(bytes: i64, len: i64) -> text
 extern fn rt_is_interpreter_runtime() -> bool
-extern fn rt_file_stat(path: text) -> i64
 
 pub val SPAB_MAGIC_V1: text = "SPLARTF1"
 pub val SPAB_FORMAT_VERSION_V1: i64 = 1
@@ -71,6 +71,8 @@ pub val SPAB_MIN_READER_VERSION_V1: i64 = 1
 # Miss reason when a hit-path digest has no native implementation here: the
 # reader never falls back to pure-Simple SHA-256 (packed_binary_ast_v1.md §8).
 pub val SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1: text = "native digest unavailable"
+# Sealed verification only: the seal names a different body digest (never a final miss).
+pub val SPAB_MISS_SEAL_MISMATCH_V1: text = "seal does not match body digest"
 val SPAB_HEADER_BYTES: i64 = 64
 val SPAB_ENTRY_BYTES: i64 = 32
 val SPAB_ALIGN: i64 = 64
@@ -968,7 +970,7 @@ fn _view_src(src: SpabSourceV1, sealed_body_hex: text) -> SpabViewV1:
     var body_checked = 0
     if sealed:
         if view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1) != sealed_body_hex:
-            return _miss(src, "seal does not match body digest")
+            return _miss(src, SPAB_MISS_SEAL_MISMATCH_V1)
         body_checked = 1
     var body: [u8] = []
     if not sealed:
@@ -1025,14 +1027,24 @@ pub fn flat_packed_open_v1(path: text) -> SpabViewV1:
     # hit skip every byte-copying hash pass; otherwise full verification runs
     # and, on success, (re)writes the seal so the next hit is zero-copy.
     val seal = _seal_body_for(path)
-    var view = _miss(_bytes_src([]), "unread")
+    var src = _bytes_src([])
+    var have_src = false
     if not rt_is_interpreter_runtime():
         val mapped = packed_blob_map(path)
         if packed_blob_view_ok(mapped):
-            view = _view_src(SpabSourceV1(mapped: true, view: mapped, bytes: [], size: mapped.size), seal)
-    if view.reason == "unread":
-        view = _view_src(_bytes_src(file_read_bytes(path)), seal)
-    if seal == "" and view.valid:
+            src = SpabSourceV1(mapped: true, view: mapped, bytes: [], size: mapped.size)
+            have_src = true
+    if not have_src:
+        src = _bytes_src(file_read_bytes(path))
+    var view = _view_src(src, seal)
+    var reseal = seal == ""
+    # A seal whose digest disagrees with the blob does not describe this file
+    # (e.g. a concurrent rewrite raced a re-seal): ignore it, verify fully and
+    # repair it -- never let a stale seal poison the entry into a permanent miss.
+    if seal != "" and view.reason == SPAB_MISS_SEAL_MISMATCH_V1:
+        view = _view_src(src, "")
+        reseal = true
+    if reseal and view.valid:
         val _sealed = flat_packed_seal_v1(path, view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1))
     view
 
@@ -1056,9 +1068,11 @@ fn _seal_line(path: text, body_hex: text) -> text:
         return ""
     "spab-seal-v1 {size} {mtime} {body_hex}"
 
+# Unit relied on: whole seconds since the Unix epoch (rt_file_stat in both the
+# C runtime and the Rust seed). A unit change only invalidates every seal,
+# which costs one full verification and a re-seal per entry.
 fn _mtime(path: text) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_file_stat(path)
+    file_modified_time(path)
 
 pub fn flat_packed_seal_v1(path: text, body_hex: text) -> bool:
     val line = _seal_line(path, body_hex)
