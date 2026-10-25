@@ -3,6 +3,7 @@ use compiler.hir.hir_types.{SymbolId, HirType, SymbolKind}
 use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.function_lowering.*
@@ -12,6 +13,7 @@ use compiler.mir.source_region_specialize_module_v1.{SourceRegionSpecializationV
 use compiler.mir.source_region_current_function_v1.*
 use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
 use compiler.mir.mir_types.{MirTypeKind}
+use compiler.mir.mir_types.{MirTypeDefKind}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -29,6 +31,93 @@ pub class SourceRegionFunctionPlanV1:
     closure_digest: text
 
 impl MirLowering:
+    me validate_source_region_context_v1(module: MirModule, context_type: MirType,
+            error_type: HirType, facades: SourceRegionFacadeSymbolsV1) -> Result<(), text>:
+        val lowered_error = self.lower_type(error_type)
+        val context_symbol = match context_type.kind:
+            case MirTypeKind.Struct(symbol): symbol
+            case _: return Err("SOURCE-REQUEST: nominal context declaration required")
+        if not module.types.has(context_symbol) or not module.functions.has(facades.create) or not module.functions.has(facades.incomplete):
+            return Err("SOURCE-REQUEST: actual context/facade declarations are absent")
+        match lowered_error.kind:
+            case MirTypeKind.Enum(symbol):
+                if symbol.id < 0: return Err("SOURCE-REQUEST: resolved error declaration required")
+            case _: return Err("SOURCE-REQUEST: nominal error enum required")
+        val create = module.functions[facades.create]
+        val incomplete = module.functions[facades.incomplete]
+        if create.signature.params.len() != 1 or create.signature.is_variadic:
+            return Err("SOURCE-REQUEST: exact context factory account signature required")
+        match create.signature.return_type.kind:
+            case MirTypeKind.Result(ok, error):
+                if serialize_mir_type(ok) != serialize_mir_type(context_type) or serialize_mir_type(error) != serialize_mir_type(lowered_error):
+                    return Err("SOURCE-REQUEST: actual context factory Result differs")
+            case _: return Err("SOURCE-REQUEST: actual context factory Result required")
+        if (incomplete.signature.params.len() != 0 or incomplete.signature.is_variadic or
+                serialize_mir_type(incomplete.signature.return_type) != serialize_mir_type(MirType.result(MirType.i64(), lowered_error))):
+            return Err("SOURCE-REQUEST: actual Incomplete factory Result differs")
+        match module.types[context_symbol].kind:
+            case MirTypeDefKind.Struct(fields):
+                if (fields.len() < 3 or fields[0].name != "account" or fields[1].name != "native_control" or fields[2].name != "generation"):
+                    return Err("SOURCE-REQUEST: context public prefix differs")
+                if (serialize_mir_type(fields[0].type_) != serialize_mir_type(create.signature.params[0]) or
+                        serialize_mir_type(fields[1].type_) != serialize_mir_type(MirType.i64()) or
+                        serialize_mir_type(fields[2].type_) != serialize_mir_type(MirType.i64())):
+                    return Err("SOURCE-REQUEST: actual context field types differ")
+            case _: return Err("SOURCE-REQUEST: context storage is not a struct")
+        Ok(())
+
+    pub me prepare_source_region_request_v1(module: MirModule, entry: SymbolId,
+            originals: Dict<SymbolId, HirFunction>, context_type: MirType,
+            error_type: HirType, facades: SourceRegionFacadeSymbolsV1,
+            result_construction: SourceRegionResultConstructionV1
+    ) -> Result<SourceRegionFunctionPlanV1, text>:
+        val closure = source_region_resolved_call_closure_v1(module, entry)?
+        self.validate_source_region_context_v1(module, context_type, error_type, facades)?
+        val lowered_error = self.lower_type(error_type)
+        var names: Dict<text, bool> = {}
+        for symbol in module.functions.keys(): names[module.functions[symbol].name] = true
+        # Validate every source/signature before allocating any new identity.
+        for symbol in closure.functions:
+            if not originals.has(symbol) or originals[symbol].symbol.id != symbol.id:
+                return Err("SOURCE-REQUEST: original HIR closure declaration absent")
+            val function = module.functions[symbol]
+            val declaration = originals[symbol]
+            if function.signature.is_variadic or function.signature.params.len() != declaration.params.len():
+                return Err("SOURCE-REQUEST: exact original signature required")
+            # Ordinary lowering does not set params_known. Authenticate its
+            # signature from the actual HIR declaration, not that default bit.
+            for index in 0..declaration.params.len():
+                val parameter_type = self.lower_type(declaration.params[index].type_)
+                if serialize_mir_type(parameter_type) != serialize_mir_type(function.signature.params[index]):
+                    return Err("SOURCE-REQUEST: actual HIR parameter type differs")
+            if serialize_mir_type(self.lower_type(declaration.return_type)) != serialize_mir_type(function.signature.return_type):
+                return Err("SOURCE-REQUEST: actual HIR return type differs")
+        var symbols: Dict<SymbolId, SymbolId> = {}
+        var signatures: Dict<SymbolId, MirSignature> = {}
+        var specialized_names: Dict<SymbolId, text> = {}
+        for symbol in closure.functions:
+            val function = module.functions[symbol]
+            val name = function.name + "__source_region_v1_{self.symbols.next_symbol_id}"
+            if names.has(name): return Err("SOURCE-REQUEST: specialized linker name collision")
+            val fresh = self.symbols.define_with_binding(name, SymbolKind.Function, nil,
+                function.span, Visibility.Private, false, Some(module.name), false)
+            if module.functions.has(fresh):
+                return Err("SOURCE-REQUEST: actual allocator collided with original identity")
+            var params: [MirType] = []
+            for parameter in function.signature.params: params.push(parameter)
+            params.push(context_type)
+            symbols[symbol] = fresh
+            signatures[symbol] = MirSignature(params: params,
+                return_type: MirType.result(function.signature.return_type, lowered_error),
+                is_variadic: false, params_known: true)
+            specialized_names[symbol] = name
+            names[name] = true
+        Ok(SourceRegionFunctionPlanV1(module: module, originals: originals,
+            specialized_symbols: symbols, specialized_signatures: signatures,
+            specialized_names: specialized_names, call_targets: closure.targets_by_name,
+            context_type: context_type, error_type: error_type, facades: facades,
+            result_construction: result_construction, closure_digest: closure.input_digest))
+
     pub me lower_source_region_function_v1(original: HirFunction,
             plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
         if plan.closure_digest == "" or not plan.specialized_symbols.has(original.symbol):
@@ -48,6 +137,7 @@ impl MirLowering:
 
     pub me lower_source_region_request_v1(entry: SymbolId, order: [SymbolId],
             plan: SourceRegionFunctionPlanV1) -> Result<SourceRegionSpecializationV1, text>:
+        self.validate_source_region_context_v1(plan.module, plan.context_type, plan.error_type, plan.facades)?
         if order.len() != plan.specialized_symbols.len():
             return Err("SOURCE-REQUEST: incomplete closure replay order")
         if not plan.specialized_symbols.has(entry):
