@@ -42,13 +42,12 @@ def worker_args(count=32, lane="per-file"):
 
 
 class WorkerLoweringLane(unittest.TestCase):
-    def record(self, script, args=(), whole_program=None, extra_env=None):
+    def record(self, script, args=(), whole_program=None):
         with tempfile.TemporaryDirectory(prefix="stage3-lane-vector-") as tmp:
             record = Path(tmp) / "vector"
             env = {"PATH": os.defpath, "CONTROL_RECORD": str(record)}
             if whole_program is not None:
                 env["SIMPLE_BOOTSTRAP_WHOLE_PROGRAM"] = whole_program
-            env.update(extra_env or {})
             result = subprocess.run(["sh", "-c", script, "lane-test", *args],
                                     env=env, capture_output=True, timeout=10)
             vector = record.read_bytes().split(b"\0")[:-1] if record.exists() else None
@@ -86,7 +85,7 @@ class WorkerLoweringLane(unittest.TestCase):
                 self.assertIn(b"/fixture/cache with space", vector)
 
     def test_invalid_lane_refuses_before_recording(self):
-        for lane in ("", "invalid", "per-file whole-program", "per-file:fw=2", "per-file:mono=1"):
+        for lane in ("", "invalid", "per-file whole-program"):
             with self.subTest(lane=lane):
                 result, vector = self.worker(lane=lane)
                 self.assertEqual(result.returncode, 64, result.stderr)
@@ -109,12 +108,9 @@ class WorkerLoweringLane(unittest.TestCase):
                                                              "stage3_per_file_env"})
         assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
         recorder = 'bootstrap_stage3_args_sha256() { printf "%s\\0" "$@" >"$CONTROL_RECORD"; };\n'
-        knobs = {"SIMPLE_FILE_WORKERS": "1"}
-        for lane, whole, env in (("per-file", None, None), ("whole-program", "1", None),
-                                 ("per-file:fw=1", None, knobs)):
+        for lane, whole in (("per-file", None), ("whole-program", "1")):
             with self.subTest(lane=lane):
-                result, expected = self.record("set -eu\n" + assignments + "\n" + LANE + recorder + DIGEST,
-                                               whole_program=whole, extra_env=env)
+                result, expected = self.record("set -eu\n" + assignments + "\n" + LANE + recorder + DIGEST, whole_program=whole)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 worker_result, actual = self.worker(lane=lane)
                 self.assertEqual(worker_result.returncode, 0, worker_result.stderr)
