@@ -179,3 +179,30 @@ and the spec result line. No PR lands with a regression in any of the three.
 - A caller that still promotes an outer container pays O(N) once; it is a
   review finding, not a crash. `SIMPLE_TRANSIENT_PROMOTE_DEBUG=1` reports it.
 - The registry meta row adds 8 bytes per heap object in the side table.
+
+## 10. Landing status (2026-10-25)
+
+All packages landed on `release/1.0.0` the same day: design #4783, P0 #4802,
+P1 #4811, P2 #4837, P3 #4841, P4 #4799, P5 #4804, P6 #4842 (plus bug record
+#4806). Measured so far (micro-level; the Stage-3 figure is still pending):
+
+| What | Before | After |
+|---|---|---|
+| Outer-array adopt, N=2000 rows (Rust / C) | 40,335 ms / 24,777 ms (promote) | 92 ms / 52 ms (adopt visits 1 node) |
+| Rust promote, address-collision fallback, N=2000 | 2,717 ms | 33 ms |
+| MIR store publish bench, 1000 modules x 50 fns (fake port) | 577.2 s, outer arrays walked 1000x | 163.5 s, walked 0x |
+| rc share+release, 100k-object graph (C) | 146.6 MB peak (leak) | 21.8 MB peak |
+
+Still on the legacy `promote` alias (full walk, retags to the session):
+HIR `hir_module`, diagnostics, phase memos, symbol tables, frontend registries,
+module surfaces; MIR owner roots (drafts #4761/#4762) and `_bootstrap_fn_*`
+(already delta-only). Moving the growing HIR containers (phase memos, symbol
+tables) under the session allocator is the next perf step.
+
+`BuildSession.end()` is OPT-IN (`SIMPLE_BUILD_SESSION_END=1`) until one green
+native Stage-3 run; under the interpreter `rt_rc_share` refuses, so `end()` is
+always skipped there. Globals still dangling after an `end()`:
+`resource_registry` (reset not exported) and `mir_data` `_bootstrap_fn_*`.
+Kill-switches: `SIMPLE_BUILD_SESSION=0` (no session), `SIMPLE_BUILD_SESSION_END=0`.
+Next s3 run should record HIR/MIR per-module time and `PeakWorkingSet64`
+with and without `SIMPLE_BUILD_SESSION_END=1` (method: HIR perf lane, #4764 body).
