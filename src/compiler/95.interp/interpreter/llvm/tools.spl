@@ -78,6 +78,17 @@ fn _env_tool_dirs() -> [text]:
             dirs.push(prefix + "/bin")
     dirs
 
+# Per-process resolution cache for _find_tool, keyed by the joined candidate
+# list. find_llc/find_clang run once per AOT unit; re-spawning `where` and
+# `--version` for every unit failed transiently in a long stage3 build
+# ("llc not found" for 51 units across 7 batches with llc on PATH).
+# Hits are cached for the process lifetime. A miss is retried on later calls
+# up to _FIND_TOOL_MAX_MISSES times, then cached as "" (bounded retry).
+val _FIND_TOOL_MAX_MISSES = 3
+var _find_tool_cache_keys: [text] = []
+var _find_tool_cache_paths: [text] = []
+var _find_tool_cache_misses: [i64] = []
+
 fn _find_tool(candidates: [text]) -> text:
     """Find a WORKING tool using platform-appropriate detection.
 
@@ -98,7 +109,32 @@ fn _find_tool(candidates: [text]) -> text:
         return match native_tool_strict_resolve_v1(role):
             Ok(path): path
             Err(_): ""
-    # Env-provided dirs first (see _env_tool_dirs docstring).
+    val key = candidates.join(",")
+    var idx = -1
+    var i = 0
+    while i < _find_tool_cache_keys.len():
+        if _find_tool_cache_keys[i] == key:
+            idx = i
+        i = i + 1
+    if idx >= 0:
+        if _find_tool_cache_paths[idx] != "" or _find_tool_cache_misses[idx] >= _FIND_TOOL_MAX_MISSES:
+            return _find_tool_cache_paths[idx]
+    val found = _find_tool_discover(candidates)
+    if idx < 0:
+        _find_tool_cache_keys.push(key)
+        _find_tool_cache_paths.push(found)
+        _find_tool_cache_misses.push(if found == "": 1 else: 0)
+    else:
+        _find_tool_cache_paths[idx] = found
+        if found == "":
+            _find_tool_cache_misses[idx] = _find_tool_cache_misses[idx] + 1
+    found
+
+fn _find_tool_discover(candidates: [text]) -> text:
+    """Uncached discovery body of _find_tool (non-strict path only)."""
+    # Env-provided dirs first (see _env_tool_dirs docstring). With
+    # SIMPLE_LLVM_BIN set and the tool present there, no `where`/`command -v`
+    # process is ever spawned.
     for dir in _env_tool_dirs():
         for candidate in candidates:
             for path in [dir + "/" + candidate, dir + "/" + candidate + ".exe"]:
