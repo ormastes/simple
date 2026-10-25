@@ -4254,12 +4254,28 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
     *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
   esac
+  # Lowering lane (2026-10-25). Per-file src->obj is the default: Stage 3
+  # lowers each module to its own object (per-module object cache under
+  # SIMPLE_NATIVE_BUILD_CACHE_DIR, SIMPLE_NATIVE_BUILD_THREADS = selfhost_jobs,
+  # i.e. host.sdn max_build_jobs) and links them. SIMPLE_BOOTSTRAP is passed
+  # EMPTY to the Stage 3 child on that lane: under SIMPLE_BOOTSTRAP=1 the HIR
+  # shard workers fail ("HIR cache identity unavailable for shard") and
+  # single-process HIR leaves cross-module imports unresolved, so scripts must
+  # not force the bootstrap_fixed shortcut. SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+  # opts back into the single-instance whole-program lane (SIMPLE_BOOTSTRAP=1).
+  # Same knob in resume-stage3-from-admitted.sh; both values are hashed.
+  stage3_bootstrap_flag= stage3_whole_program_env=
+  case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
+    '') ;;
+    1) stage3_bootstrap_flag=1 stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+    *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
-      "SIMPLE_BOOTSTRAP=1" \
+      "SIMPLE_BOOTSTRAP=${stage3_bootstrap_flag}" ${stage3_whole_program_env} \
       "SIMPLE_BOOTSTRAP_STAGE3=1" \
       "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
       "SIMPLE_ABI_ADMISSION_RECEIPT=${stage2_admission_receipt_absolute}" \
@@ -5357,7 +5373,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     RUST_LOG="${stage_build_rust_log}" \
     LIBRARY_PATH="${bootstrap_link_library_path}" \
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_BOOTSTRAP="${stage3_bootstrap_flag}" ${stage3_whole_program_env} \
     SIMPLE_BOOTSTRAP_STAGE3=1 \
     SIMPLE_ABI_POLICY="${simple_abi_policy}" \
     SIMPLE_ABI_ADMISSION_RECEIPT="${stage2_admission_receipt_absolute}" \

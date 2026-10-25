@@ -5,7 +5,7 @@ set -eu
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
 worker_arg_count=$#
-[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || [ "$#" -eq 32 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -22,7 +22,7 @@ compiler_cap=${12:-}
 # The new positional value is the controller authority, including across a
 # systemd manager that drops or supplies stale ambient environment. Legacy
 # 28/30-argument callers retain only the historical host-platform default.
-if [ "$worker_arg_count" -eq 31 ]; then
+if [ "$worker_arg_count" -ge 31 ]; then
   observation_budget_ms=${13}
 else
   observation_host=$(uname -s) || { echo 'stage3 worker: cannot identify observation host' >&2; exit 64; }
@@ -30,6 +30,21 @@ else
   [ "${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$observation_budget_ms}" = "$observation_budget_ms" ] || {
     echo 'stage3 worker: unrecorded observation budget' >&2; exit 64;
   }
+fi
+# Lowering lane (32-argument form, 2026-10-25). Per-file src->obj is the
+# default: SIMPLE_BOOTSTRAP is passed EMPTY so the compiler never takes the
+# SIMPLE_BOOTSTRAP=1 whole-program bootstrap_fixed shortcut, whose HIR shard
+# identity and cross-module import resolution do not serve the per-module
+# lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1. Legacy 28/30/31-argument callers keep the
+# historical SIMPLE_BOOTSTRAP=1 vector byte-for-byte.
+bootstrap_flag=1 whole_program_env=
+if [ "$worker_arg_count" -eq 32 ]; then
+  case "${14}" in
+    per-file) bootstrap_flag= ;;
+    whole-program) whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
+    *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+  esac
 fi
 case "$observation_budget_ms" in
   ''|0*|*[!0-9]*) echo 'stage3 worker: invalid observation budget' >&2; exit 64 ;;

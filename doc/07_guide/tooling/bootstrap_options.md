@@ -72,6 +72,29 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
   blocks with "HIR cache identity unavailable for shard", and the unsharded
   ambient-bootstrap HIR leaves cross-module imports unresolved. Use the unset
   lane above until those are fixed.
+- Scripts (2026-10-25): `bootstrap-from-scratch.sh` Stage 3 and
+  `resume-stage3-from-admitted.sh` (via `lib/stage3-native-build-worker.sh`,
+  32-argument form, last positional `per-file`|`whole-program`) no longer
+  force the shortcut. Default: the Stage 3 child gets `SIMPLE_BOOTSTRAP=`
+  (empty) so the compiler takes the per-module lane. With
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` exported it gets `SIMPLE_BOOTSTRAP=1
+  SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (the old single-object lane). Both values
+  are in the Stage 3 args hash, so the receipt records which lane ran; any
+  other value of the knob is refused. The outer `export SIMPLE_BOOTSTRAP=1`
+  is unchanged (Stage 3 runs under `env -i`). Stage 2 args and their resume
+  reconstruction are untouched.
+- Objects, cache, link: each module's object is `aot-<hash>.o`, keyed by the
+  module witness in the per-module object cache under
+  `SIMPLE_NATIVE_BUILD_CACHE_DIR/<producer scope>/` (index `build_cache.sdn`;
+  Stage 3 points it at `stage3/<triple>/stage3-native-cache`); an
+  unchanged module is a cache hit and is not re-emitted. Codegen fans out over
+  `SIMPLE_NATIVE_BUILD_THREADS`, which the scripts set to `selfhost_jobs`
+  (`bootstrap-build-jobs-policy.shs`: `--jobs` > `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS`
+  > `~/.config/simple/host.sdn` `max_build_jobs` > 16). All objects plus the
+  runtime bundle are then linked into one binary.
+- Not yet proven: a full Stage 3 run of the per-file lane under
+  `SIMPLE_BOOTSTRAP_STAGE3=1` with `SIMPLE_BOOTSTRAP` empty. If it fails, use
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` and record the failure.
 - Known WA: `WA-PERFILE-TRIPLE-QUOTE`
   (`doc/08_tracking/bug/perfile_lane_triple_quote_interpolation_parse_2026-10-25.md`).
 
