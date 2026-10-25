@@ -74,3 +74,29 @@ it); the checked-in `hir_codec.spl` now matches generator output byte for
 byte. Self-check not loosened. Unconfirmed until a stage-3 rerun shows
 `selfcheck_failed` near 0 (whether these two Dict<_, bool> fields are the
 ONLY N source is not proven -- no failing entry is stored to decode).
+
+## Fix 3 — the real dominant source: omitted desugared `has_X` flags (2026-10-25)
+
+Fix 2 (`6e3dd22dc90`) is NOT in stage2 `d72188e68ec`, so the s3-perfile2/
+s3-perfile3/s3-wa logs never exercised it. But it is also not sufficient:
+`src/compiler/80.driver/perf/compiler_work_counters.spl` (a lone struct, no
+`impl`) fails the same way. Reproduced with that stage2 on 3-line fixtures:
+`fn main` only -> stored; `struct P: x: i64` (no impl) -> `refused reason=decode`.
+
+Root cause: HIR lowering constructs nodes with named args but omits the
+DESUGARED presence flag that pairs with an optional field. The flag is nil at
+runtime, `put_bool` writes `N`, and the decoder guard rejects. A scan of every
+`Hir*(` named construction against its non-optional bool/i64 fields found 13
+omissions, all `has_*`:
+
+- HirStruct.has_doc_comment, has_specialization_of (declaration_lowering) — every module with a struct
+- HirTrait.has_doc_comment, has_specialization_of; HirConst.has_fixed_address;
+  HirAssocTypeDecl.has_default; HirBitfieldField.has_type_; HirStaticAssert.has_message (trait_impl_lowering)
+- HirField.has_fixed_address; HirBitfield.has_doc_comment (declaration_lowering)
+- HirInterpolation.has_format (expression_components); lambda HirParam.has_default (expression_core);
+  HirWithItem.has_target (statements)
+
+All now set from the parser's own `has_*` (or `false`/`true` where fixed),
+matching class/function lowering. Spec:
+`test/01_unit/compiler/20.hir/hir_lowering_desugared_has_flags_spec.spl`.
+Needs a stage2 rebuilt at or after this commit to take effect.
