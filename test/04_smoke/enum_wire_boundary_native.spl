@@ -1,4 +1,5 @@
-use std.nogc_sync_mut.io_runtime.{exit}
+# Keep this ABI smoke independent of the broad IO/crypto closure.
+use std.nogc_sync_mut.sffi.process.{process_exit_i32}
 use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
 
 @unsafe(reason: "borrow a live typed enum without ownership transfer or mutation; returns its uint32 runtime identity or minus one for an invalid enum", capabilities: [ffi])
@@ -13,7 +14,7 @@ extern fn rt_tuple_len(tuple: i64) -> i64
 fn require(condition: bool):
     if not condition:
         print "ENUM_WIRE_BOUNDARY_FAIL"
-        exit(1)
+        process_exit_i32(1)
 
 enum WireCase:
     Empty
@@ -63,7 +64,7 @@ fn main():
     require_slot(int_fields, 2, 1, false)
     match enum_wire_restore_nil(int_fields, 2, [1]):
         case Ok(restored):
-            require(rt_tuple_len(rt_enum_payload(restored)) == 2)
+            require(rt_tuple_len(rt_enum_payload(restored)) == rt_tuple_len(rt_enum_payload(int_fields)))
             require_slot(restored, 2, 1, true)
             require_slot(int_fields, 2, 1, false)
             require(rt_enum_id(restored) == rt_enum_id(int_fields))
@@ -79,13 +80,25 @@ fn main():
         case Err(_): require(false)
     match enum_wire_restore_nil(original, 3, [1]):
         case Ok(restored):
-            require(rt_tuple_len(rt_enum_payload(restored)) == 3)
+            require(rt_tuple_len(rt_enum_payload(restored)) == rt_tuple_len(rt_enum_payload(original)))
             require_slot(restored, 3, 1, true)
             require_slot(original, 3, 1, false)
             match restored:
                 case WireCase.Row(label, _, count):
                     require(label == "keep")
                     require(count == 37)
+                case _: require(false)
+        case Err(_): require(false)
+    # HIR Break(nil, nil) restores the first slot, then the cache selfcheck
+    # pattern-matches the result. Keep the prototype carrier as well as the
+    # fields; an Array-to-Tuple change crashes native pattern extraction.
+    match enum_wire_restore_nil(pair_true, 2, [0]):
+        case Ok(restored):
+            require(rt_tuple_len(rt_enum_payload(restored)) == rt_tuple_len(rt_enum_payload(pair_true)))
+            require_slot(restored, 2, 0, true)
+            require_slot(pair_true, 2, 0, false)
+            match restored:
+                case WireCase.Pair(_, enabled): require(enabled == true)
                 case _: require(false)
         case Err(_): require(false)
     match enum_wire_restore_nil(WireCase.Flag(false), 1, [0]):
