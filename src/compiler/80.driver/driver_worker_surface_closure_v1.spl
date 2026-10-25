@@ -24,7 +24,7 @@
 #      in (2) is a heuristic; (5) is what makes it safe.
 #
 # Default ON for HIR shard children; SIMPLE_HIR_WORKER_SKELETON=0 opts out.
-# MIR children under module-scoped mono (SIMPLE_MONO_MODULE_SCOPED=1 +
+# MIR children under module-scoped mono (per-file lane, not whole-program, +
 # SIMPLE_MIR_SHARD_ONLY_PATHS, the file-worker P4 lane, which a file worker's
 # MIR child always is) seed the closure from their admitted target paths and
 # additionally load HIR only for the targets plus their FROZEN import closure
@@ -40,7 +40,7 @@ use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
     module_tldr_companion_sections_v1}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
-use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1, mono_module_scoped_selected_v1}
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v1"
 
@@ -182,11 +182,16 @@ pub fn worker_surface_claim_allowed_v1(path: text) -> bool:
 # ===== MIR-child scoping (P-A) =====
 
 # Admitted targets of a module-scoped MIR child, or [] when this child must
-# keep the whole-closure behaviour (global mono, opt-out, or no targets).
-pub fn worker_mir_scoped_targets_v1(mono_scoped: text, only_paths: text, flag: text) -> [text]:
-    if mono_scoped != "1" or flag == "0":
+# keep the whole-closure behaviour (whole-program lane, skeleton opt-out, or no
+# targets). Mono scoping is decided by the ONE predicate
+# mono_module_scoped_selected_v1 (also used by the mono pass and the HIR deps
+# record) so the three cannot drift. `whole_program` is
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM, `flag` is SIMPLE_HIR_WORKER_SKELETON.
+pub fn worker_mir_scoped_targets_v1(whole_program: text, only_paths: text, flag: text) -> [text]:
+    val targets = native_file_worker_only_paths_parse_v1(only_paths)
+    if flag == "0" or not mono_module_scoped_selected_v1(whole_program, targets.len() > 0):
         return []
-    native_file_worker_only_paths_parse_v1(only_paths)
+    targets
 
 # AOP advice is collected from EVERY loaded HIR module at weave time, and an
 # aspect module is normally not imported by its join points, so it is not in

@@ -14,16 +14,14 @@
 # The HIR ledger, the MIR ledger, claim/terminal/seal records and the
 # link-only final worker (SIMPLE_MIR_SHARD_LINK) are reused unchanged.
 #
-# Monomorphization gate (fail-closed). Mono is still a GLOBAL pass over every
-# HIR module (40.mono/monomorphize_integration.spl process_modules); P4 makes
-# it module-scoped. A MIR child therefore needs every module's HIR in the
-# cache, so a module whose HIR is done while some other module's HIR is not
-# yet PASS is recorded MONO-PENDING and its MIR is deferred until the HIR
-# ledger is complete (native_file_worker_hir_ledger_state_v1). It is never
-# lowered against a partial program, so no wrong object can be emitted.
-# Consequence, stated plainly: until P4, file_worker_overlap_proven_v1 cannot
-# hold on a real build -- the claim loop removes the coordinator-level pass
-# barrier but the mono barrier remains, now inside the pool.
+# Monomorphization (P-G3). In the per-file lane mono is module-scoped ONLY:
+# MIR(F) instantiates the generic call sites of F into F's own object (COMDAT,
+# deduped at link) from the HIR of F's imports plus concrete instances served
+# by the template-body seam below. There is no global monomorphize pass and no
+# whole-HIR-ledger wait; MONO-PENDING is recorded only when a specific instance
+# is unavailable after body lookup and one transitive widening. The legacy
+# global-mono loop (MIR waits for the whole HIR ledger) runs only under
+# SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
 #
 # Receipts (temp file + rename, "<key>=<value>" lines):
 #   HIR receipt  <hir_queue>/<sha256(path)>.receipt     status MONO-PENDING|FAILED
@@ -229,7 +227,7 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
 
 # ===== P4 wiring: module-scoped mono in the file-worker lane =====
 #
-# Under SIMPLE_MONO_MODULE_SCOPED=1 a worker no longer waits for the whole HIR
+# In the per-file lane (P-G3: always, no opt-in) a worker no longer waits for the whole HIR
 # ledger. MIR(F) is admitted as soon as HIR(F) and the HIR of F's DIRECT
 # imports are PASS (native_file_worker_deps_ready_v1). Direct, not transitive:
 # module-scoped mono collects templates from the modules F imports; a template
@@ -243,13 +241,22 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
 # child through SIMPLE_MIR_SHARD_ONLY_PATHS; that child claims only those
 # modules and runs module-scoped mono only for them.
 pub const NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1: text = "SIMPLE_MIR_SHARD_ONLY_PATHS"
-pub const NATIVE_MONO_MODULE_SCOPED_ENV_V1: text = "SIMPLE_MONO_MODULE_SCOPED"
+pub const NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1: text = "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM"
 
-# Pure gate: module-scoped mono replaces the global pass only when the opt-in
-# flag is "1" AND a file worker named the claimed modules (otherwise the
-# targets are unknown and global mono stays the only correct choice).
-pub fn mono_module_scoped_selected_v1(env_value: text, file_worker_active: bool) -> bool:
-    env_value == "1" and file_worker_active
+# Pure gate (P-G3): in the per-file lane (an active file worker) mono is ALWAYS
+# module-scoped -- no global monomorphize pass, no cross-shard mono
+# dependency, no opt-in flag. The only way back to the global pass is the
+# whole-program bootstrap opt-out SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+# (`whole_program_env`). Outside a file worker the targets are unknown and the
+# global pass stays the only correct choice.
+pub fn mono_module_scoped_selected_v1(whole_program_env: text, file_worker_active: bool) -> bool:
+    file_worker_active and whole_program_env != "1"
+
+# Fail-closed guard: a child inside the per-file lane that reaches the global
+# mono pass (no admitted target paths) would reintroduce the whole-program mono
+# barrier. That is an error, never a silent global pass.
+pub fn native_file_worker_global_mono_forbidden_v1(whole_program_env: text, in_file_worker_lane: bool) -> bool:
+    in_file_worker_lane and whole_program_env != "1"
 
 pub fn native_file_worker_only_paths_parse_v1(raw: text) -> [text]:
     var out: [text] = []
@@ -340,13 +347,59 @@ pub fn native_file_worker_mono_template_missing_v1(diagnostics: [text]) -> bool:
             return true
     false
 
-# Module-scoped mono fallback decision: "ok" (no missing template), "widen"
-# (first E-MONO-040 -> retry with transitive imports), "MONO-PENDING" (still
-# missing after widening -> fail closed, no object).
+# Template names named by "E-MONO-040: template <name> not visible to module
+# <m>" diagnostics, deduplicated, in first-seen order. These are exactly the
+# instances F needs that its visible HIR could not provide.
+pub fn native_file_worker_missing_templates_v1(diagnostics: [text]) -> [text]:
+    val marker = "E-MONO-040: template "
+    var out: [text] = []
+    for d in diagnostics:
+        val at = d.index_of(marker) ?? -1
+        if at < 0:
+            continue
+        val rest = d.substring(at + marker.len(), d.len())
+        val end = rest.index_of(" not visible") ?? -1
+        val name = if end < 0: rest else: rest.substring(0, end)
+        if name != "" and not out.contains(name):
+            out = out.push(name)
+    out
+
+# Module-scoped mono fallback decision (P-G3): "ok" (no missing template),
+# "reader" (some missing template is served as a concrete instance by the
+# reader -- retry with those instances; never waits on other HIR),
+# "widen" (first E-MONO-040 without reader coverage -> retry with transitive
+# imports), "MONO-PENDING" (a SPECIFIC instance is still unavailable after
+# widening -> fail closed, no object). `reader_served` counts the missing
+# templates the reader supplied on this attempt.
 pub fn native_file_worker_mono_fallback_v1(diagnostics: [text], widened: bool) -> text:
+    native_file_worker_mono_fallback_reader_v1(diagnostics, widened, 0)
+
+pub fn native_file_worker_mono_fallback_reader_v1(diagnostics: [text], widened: bool, reader_served: i64) -> text:
     if not native_file_worker_mono_template_missing_v1(diagnostics):
         return "ok"
+    if reader_served > 0:
+        return "reader"
     if widened: "MONO-PENDING" else: "widen"
+
+# ===== Template-body-on-demand seam (reader instances) =====
+#
+# When F needs an instance whose template is not in its visible HIR, the body
+# is loaded on demand from the OWNER module's published artifact (HIR cache /
+# TLDR AST), so F instantiates it into F's own object (COMDAT, deduped at
+# link) without waiting on the owner's HIR shard. P-G2's specialization list
+# names which instances F needs; P-G1's reader_concrete_instance_v1 (a
+# ConcreteTldrAstViewV1 keyed by generic decl id + type args) is used for TYPE
+# inference only and does not supply bodies. Until the on-demand body loader
+# exists the feature check below is false and every request reports
+# unavailable; the worker then uses its deps-HIR templates exactly as before.
+# Swap point: driver_reader_concrete_instance_v1 in driver_hir_pipeline_passes.
+pub const NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1: text = "SIMPLE_READER_CONCRETE_INSTANCES"
+
+pub fn native_file_worker_reader_instances_available_v1() -> bool:
+    false
+
+pub fn native_file_worker_reader_instances_enabled_v1(env_value: text, available: bool) -> bool:
+    available and env_value != "0"
 
 pub fn native_file_worker_mono_pending_path_v1(queue: text, path: text) -> text:
     "{queue}/{sha256_text(path)}.mono-pending"

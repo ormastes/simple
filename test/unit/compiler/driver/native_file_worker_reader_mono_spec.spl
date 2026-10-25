@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# Per-file lane: no global mono pass; instances from the reader (P-G3)
+
+**Category:** Compiler / driver
+**Design:** doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md section 4
+
+## Purpose and Audience
+
+In the per-file lane (SIMPLE_FILE_WORKERS=1) MIR(F) instantiates the generic
+call sites of F into F's own object from the HIR of its imports plus concrete
+template bodies loaded on demand from the owner module (P-G1 views serve type
+inference only). The
+global monomorphize pass is forbidden there and kept only for
+SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1. MONO-PENDING is reserved for a specific
+instance that is still unavailable. Instance emission once per using object
+with COMDAT linkage (deduped at link) is pinned by
+test/01_unit/compiler/mono/mono_module_scoped_spec.spl.
+
+## Expected Outcome
+
+The per-file lane never selects or reaches the global pass; missing template
+names are extracted from E-MONO-040 diagnostics; a reader-served instance is
+retried before any widening; MONO-PENDING only after widening with no reader
+coverage; the body seam is off until its loader is available; a template is
+asked for at most once, so the retry loop terminates.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    mono_module_scoped_selected_v1, native_file_worker_global_mono_forbidden_v1,
+    native_file_worker_missing_templates_v1, native_file_worker_mono_fallback_reader_v1,
+    native_file_worker_mono_fallback_v1, native_file_worker_reader_instances_enabled_v1}
+
+describe "per-file lane runs no global mono":
+    it "selects module-scoped mono for every file worker":
+        assert_true(mono_module_scoped_selected_v1("", true))
+        assert_false(mono_module_scoped_selected_v1("1", true))
+
+    it "forbids the global pass inside the per-file lane":
+        assert_true(native_file_worker_global_mono_forbidden_v1("", true))
+        assert_true(native_file_worker_global_mono_forbidden_v1("0", true))
+
+    it "keeps the global pass for the whole-program lane and outside workers":
+        assert_false(native_file_worker_global_mono_forbidden_v1("1", true))
+        assert_false(native_file_worker_global_mono_forbidden_v1("", false))
+
+describe "missing instance extraction":
+    it "names each missing template once":
+        val diags = [
+            "E-MONO-040: template std.list.List not visible to module app.main",
+            "E-MONO-034: unrelated",
+            "E-MONO-040: template std.list.List not visible to module app.main",
+            "E-MONO-040: template app.util.pair not visible to module app.main"]
+        val names = native_file_worker_missing_templates_v1(diags)
+        assert_equal(names.len(), 2)
+        assert_equal(names[0], "std.list.List")
+        assert_equal(names[1], "app.util.pair")
+
+    it "ignores diagnostics without a missing template":
+        assert_equal(native_file_worker_missing_templates_v1(["E-MONO-034: x"]).len(), 0)
+
+fn missing() -> [text]:
+    ["E-MONO-040: template a.T not visible to module m"]
+
+describe "reader-first fallback":
+    it "is ok with no missing template":
+        assert_equal(native_file_worker_mono_fallback_reader_v1([], false, 0), "ok")
+
+    it "retries with reader instances before widening":
+        assert_equal(native_file_worker_mono_fallback_reader_v1(missing(), false, 1), "reader")
+        assert_equal(native_file_worker_mono_fallback_reader_v1(missing(), true, 2), "reader")
+
+    it "widens once, then MONO-PENDING only for an unavailable instance":
+        assert_equal(native_file_worker_mono_fallback_reader_v1(missing(), false, 0), "widen")
+        assert_equal(native_file_worker_mono_fallback_reader_v1(missing(), true, 0), "MONO-PENDING")
+        assert_equal(native_file_worker_mono_fallback_v1(missing(), true), "MONO-PENDING")
+
+describe "template-body seam":
+    it "is off until the on-demand body loader is available":
+        assert_false(native_file_worker_reader_instances_enabled_v1("", false))
+        assert_false(native_file_worker_reader_instances_enabled_v1("1", false))
+
+    it "is on by default once available and can be disabled":
+        assert_true(native_file_worker_reader_instances_enabled_v1("", true))
+        assert_false(native_file_worker_reader_instances_enabled_v1("0", true))
+
+describe "reader retry terminates":
+    it "never asks twice for the same template":
+        # Mirrors monomorphize_file_worker_scoped_v1: each missing template is
+        # asked once; a repeat E-MONO-040 serves 0 and falls through.
+        var asked: [text] = []
+        var served_rounds: [i64] = []
+        var round = 0
+        while round < 3:
+            var served: i64 = 0
+            for t in native_file_worker_missing_templates_v1(missing()):
+                if asked.contains(t):
+                    continue
+                asked = asked.push(t)
+                served = served + 1
+            served_rounds = served_rounds.push(served)
+            round = round + 1
+        assert_equal(asked.len(), 1)
+        assert_equal(served_rounds[1], 0)
+        assert_equal(native_file_worker_mono_fallback_reader_v1(missing(), true, served_rounds[1]), "MONO-PENDING")
