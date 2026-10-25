@@ -1,0 +1,76 @@
+# @cover src/compiler/70.backend/backend/native/elf_writer.spl
+# @cover src/compiler/70.backend/backend/native/macho_writer.spl
+# ============================================================================
+# Module-scoped mono instance dedup for non-LLVM backends (per-file P-D)
+#
+# #4575 places a generic instance in every object that instantiates it
+# (`MirFunction.is_comdat`). MirToLlvm emits `linkonce_odr` + `comdat any`;
+# the native, cranelift and C backends must give the same "many copies, one
+# kept" guarantee or the link fails with a duplicate-symbol error.
+# ============================================================================
+
+use std.spec.step
+use compiler.backend.native.elf_writer.{
+    elf_writer_x86_64, elf_add_section, elf_add_symbol, new_text_section,
+    new_func_symbol, new_weak_func_symbol, write_elf64
+}
+use compiler.backend.native.macho_writer.{new_macho_weak_func_symbol, new_macho_func_symbol}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn instance_object(weak: bool) -> [i64]:
+    var writer = elf_writer_x86_64()
+    # mov eax, 42 ; ret
+    writer = elf_add_section(writer, new_text_section([0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3]))
+    val sym = if weak: new_weak_func_symbol("Box__get__i64", 1, 0, 6) else: new_func_symbol("Box__get__i64", 1, 0, 6)
+    writer = elf_add_symbol(writer, sym)
+    write_elf64(writer)
+
+fn has_symbol_entry(bytes: [i64], st_info: i64) -> bool:
+    # Elf64_Sym tail of the instance symbol: st_info, st_other = 0, st_shndx = 1 (LE).
+    var i = 0
+    while i + 3 < bytes.len():
+        if bytes[i] == st_info and bytes[i + 1] == 0 and bytes[i + 2] == 1 and bytes[i + 3] == 0:
+            return true
+        i = i + 1
+    false
+
+describe "COMDAT instance dedup - native ELF writer":
+    it "binds a COMDAT instance STB_WEAK (st_info 0x22) and a plain function STB_GLOBAL (0x12)":
+        val weak = instance_object(true)
+        expect(has_symbol_entry(weak, 0x22)).to_equal(true)
+        expect(has_symbol_entry(weak, 0x12)).to_equal(false)
+        val strong = instance_object(false)
+        expect(has_symbol_entry(strong, 0x12)).to_equal(true)
+        expect(has_symbol_entry(strong, 0x22)).to_equal(false)
+
+describe "COMDAT instance dedup - native Mach-O writer":
+    it "marks a COMDAT instance N_WEAK_DEF (0x80) and leaves plain functions strong":
+        expect(new_macho_weak_func_symbol("inst", 1, 0).desc).to_equal(0x80)
+        expect(new_macho_func_symbol("inst", 1, 0).desc).to_equal(0)
+
+describe "COMDAT instance dedup - backend wiring":
+    it "native ELF and Mach-O emitters select weak symbols from MirFunction.is_comdat":
+        val layout = read_src("src/compiler/70.backend/backend/native/native_layout.spl")
+        expect(layout.contains("if func.is_comdat:")).to_equal(true)
+        val elf = read_src("src/compiler/70.backend/backend/native/native_elf.spl")
+        expect(elf.contains("new_weak_func_symbol(func.name")).to_equal(true)
+        val macho = read_src("src/compiler/70.backend/backend/native/native_macho.spl")
+        expect(macho.contains("new_macho_weak_func_symbol(func.name")).to_equal(true)
+
+    it "cranelift declares COMDAT instances with the COMDAT linkage code the SFFI groups":
+        val adapter = read_src("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect(adapter.contains("if func.is_comdat: CL_LINKAGE_COMDAT else: CL_LINKAGE_EXPORT")).to_equal(true)
+        val sffi = read_src("src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs")
+        expect(sffi.contains("const CRANELIFT_LINKAGE_COMDAT: i64 = 4;")).to_equal(true)
+        expect(sffi.contains("product.object.add_comdat(")).to_equal(true)
+
+    it "C backend defines COMDAT instances `inline` (COMDAT on ELF and COFF) and keeps them out of the header":
+        val builder = read_src("src/plugins/backend_c/c_ir_builder.spl")
+        expect(builder.contains("#define SPL_COMDAT_INSTANCE inline __attribute__((used))")).to_equal(true)
+        val core = read_src("src/plugins/backend_c/_CBackendTranslate/class_core.spl")
+        expect(core.contains("self.translate_function(fn_name, body, func.is_comdat)")).to_equal(true)
+        expect(core.contains("r\"SPL_COMDAT_INSTANCE \" + ret_ty")).to_equal(true)

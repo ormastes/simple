@@ -70,6 +70,10 @@ struct ObjectModuleContext {
     // The same ISA Arc passed to ObjectBuilder. V1 modules have no acceptance
     // evidence; only the configured V2 constructor may expose readback.
     configured_isa_v2: Option<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>>,
+    // Module-scoped mono instances (declared with CRANELIFT_LINKAGE_COMDAT).
+    // Each gets its own COMDAT(any) group at emit time so every object that
+    // instantiated it may carry a copy and the linker keeps one.
+    comdat_funcs: Vec<FuncId>,
 }
 
 /// Backing storage for a function being built.
@@ -218,6 +222,71 @@ fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {
         5 => FloatCC::GreaterThanOrEqual,
         _ => FloatCC::Equal,
     }
+}
+
+/// Function linkage code for a module-scoped mono instance (MIR `is_comdat`):
+/// the cranelift analogue of LLVM `linkonce_odr` + `comdat any`.
+const CRANELIFT_LINKAGE_COMDAT: i64 = 4;
+
+/// Linkage a COMDAT instance is declared with for `format`. ELF: weak inside
+/// a COMDAT group (what clang emits for C++ inline). COFF: external inside an
+/// IMAGE_COMDAT_SELECT_ANY section -- object 0.36 writes a *defined* weak COFF
+/// symbol as a bare WEAK_EXTERNAL without its aux record, so weak is not
+/// usable there. Mach-O: object has no COMDAT support, so N_WEAK_DEF alone,
+/// which ld64 coalesces. Returns (linkage, needs_comdat_group).
+fn comdat_instance_linkage(format: target_lexicon::BinaryFormat) -> (Linkage, bool) {
+    match format {
+        target_lexicon::BinaryFormat::Coff => (Linkage::Export, true),
+        target_lexicon::BinaryFormat::Macho => (Linkage::Preemptible, false),
+        _ => (Linkage::Preemptible, true),
+    }
+}
+
+/// Put a defined COMDAT instance in its own COMDAT(any) group. Relies on
+/// `per_function_section(true)`, so the function owns its section.
+///
+/// COFF: lld (and link.exe) take the COMDAT leader to be the first external
+/// symbol *after* the section-definition symbol. cranelift-object creates the
+/// function symbol at declare time, long before the section exists, so the
+/// leader would precede its section symbol and lld discards every copy
+/// ("relocation against symbol in discarded section"). Instead the original
+/// symbol -- which this object's relocations already target -- is turned into
+/// an undefined reference, and a fresh defined leader of the same name is
+/// added after the section symbol. Every caller then binds to whichever copy
+/// the linker keeps.
+fn add_function_comdat(product: &mut cranelift_object::ObjectProduct, id: FuncId) -> bool {
+    let Some((symbol, true)) = product.functions[id] else { return false };
+    let object::write::SymbolSection::Section(section) = product.object.symbol(symbol).section else {
+        return false;
+    };
+    let mut leader = symbol;
+    if product.object.format() == object::BinaryFormat::Coff {
+        let def = product.object.symbol(symbol);
+        let defined = object::write::Symbol {
+            name: def.name.clone(),
+            value: def.value,
+            size: def.size,
+            kind: def.kind,
+            scope: def.scope,
+            weak: false,
+            section: def.section,
+            flags: object::SymbolFlags::None,
+        };
+        let reference = product.object.symbol_mut(symbol);
+        reference.section = object::write::SymbolSection::Undefined;
+        reference.value = 0;
+        reference.size = 0;
+        product.object.section_symbol(section);
+        leader = product.object.add_symbol(defined);
+    } else {
+        product.object.section_symbol(section);
+    }
+    product.object.add_comdat(object::write::Comdat {
+        kind: object::ComdatKind::Any,
+        symbol: leader,
+        sections: vec![section],
+    });
+    true
 }
 
 fn linkage_from_code(code: i64) -> Linkage {
@@ -481,7 +550,7 @@ pub unsafe extern "C" fn rt_cranelift_sig_set_return(sig: i64, type_: i64) {
 // ============================================================================
 
 /// Declare a function in a module (for forward references and imports).
-/// linkage: 0=Export, 1=Import, 2=Local
+/// linkage: 0=Export, 1=Import, 2=Local, 4=COMDAT instance (see comdat_instance_linkage)
 /// Returns a function handle, or 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_function(
@@ -504,7 +573,11 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
         }
     };
 
-    let link = linkage_from_code(linkage);
+    let mut link = linkage_from_code(linkage);
+    if linkage == CRANELIFT_LINKAGE_COMDAT {
+        // JIT: one module, nothing to dedupe -- plain export.
+        link = Linkage::Export;
+    }
 
     // Try JIT module first, then AOT
     let func_id = {
@@ -519,9 +592,19 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
             drop(jit);
             let mut aot = AOT_MODULES.lock().unwrap();
             if let Some(mod_ctx) = aot.get_mut(&module) {
+                let mut needs_group = false;
+                if linkage == CRANELIFT_LINKAGE_COMDAT {
+                    let (comdat_link, group) =
+                        comdat_instance_linkage(mod_ctx.module.isa().triple().binary_format);
+                    link = comdat_link;
+                    needs_group = group;
+                }
                 let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
                 if let Some(id) = id {
                     mod_ctx.func_ids.insert(name.clone(), id);
+                    if needs_group {
+                        mod_ctx.comdat_funcs.push(id);
+                    }
                 }
                 id
             } else {
@@ -1803,6 +1886,7 @@ fn rt_cranelift_new_aot_module_impl(
             module,
             func_ids: HashMap::new(),
             configured_isa_v2,
+            comdat_funcs: Vec::new(),
         },
     );
     handle
@@ -1834,7 +1918,13 @@ pub unsafe extern "C" fn rt_cranelift_emit_object_raw(module: i64, path_ptr: i64
 fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
     let mut aot_modules = AOT_MODULES.lock().unwrap();
     if let Some(ctx) = aot_modules.remove(&module) {
-        let product = ctx.module.finish();
+        let comdat_funcs = ctx.comdat_funcs;
+        let mut product = ctx.module.finish();
+        for id in comdat_funcs {
+            if !add_function_comdat(&mut product, id) {
+                return false;
+            }
+        }
         let bytes = product.emit().unwrap_or_default();
         if bytes.is_empty() {
             return false;
@@ -2559,6 +2649,92 @@ mod tests {
             assert_eq!(func(), 27);
             rt_cranelift_free_module(module);
         }
+    }
+
+    /// Emit an object defining COMDAT instance `Box__get__i64` (and, with
+    /// `entry`, an exported caller of it) exactly as the AOT path does.
+    fn emit_comdat_instance_object(triple: &str, entry: Option<&str>) -> Vec<u8> {
+        let isa = cranelift_codegen::isa::lookup(triple.parse::<Triple>().unwrap())
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let format = isa.triple().binary_format;
+        let mut builder =
+            ObjectBuilder::new(isa, "comdat_probe", cranelift_module::default_libcall_names()).unwrap();
+        builder.per_function_section(true).per_data_object_section(true);
+        let mut module = ObjectModule::new(builder);
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        let (link, group) = comdat_instance_linkage(format);
+        let inst = module.declare_function("Box__get__i64", link, &sig).unwrap();
+        let mut fbc = FunctionBuilderContext::new();
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig.clone();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            let blk = b.create_block();
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let v = b.ins().iconst(types::I64, 42);
+            b.ins().return_(&[v]);
+            b.finalize();
+        }
+        module.define_function(inst, &mut ctx).unwrap();
+        if let Some(entry) = entry {
+            let e = module.declare_function(entry, Linkage::Export, &sig).unwrap();
+            let mut ctx = module.make_context();
+            ctx.func.signature = sig.clone();
+            let callee = module.declare_func_in_func(inst, &mut ctx.func);
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            let blk = b.create_block();
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let call = b.ins().call(callee, &[]);
+            let r = b.inst_results(call)[0];
+            b.ins().return_(&[r]);
+            b.finalize();
+            module.define_function(e, &mut ctx).unwrap();
+        }
+        let mut product = module.finish();
+        if group {
+            assert!(add_function_comdat(&mut product, inst));
+        }
+        product.emit().unwrap()
+    }
+
+    #[test]
+    fn test_comdat_instance_is_grouped_on_elf_and_coff_and_weak_on_macho() {
+        use object::{Object, ObjectComdat, ObjectSymbol};
+
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"] {
+            let bytes = emit_comdat_instance_object(triple, Some("entry_main"));
+            let file = object::File::parse(bytes.as_slice()).unwrap();
+            let comdats: Vec<_> = file.comdats().collect();
+            assert_eq!(comdats.len(), 1, "{triple}: one COMDAT group");
+            assert_eq!(comdats[0].kind(), object::ComdatKind::Any, "{triple}");
+            let leader = file.symbol_by_index(comdats[0].symbol()).unwrap();
+            assert_eq!(leader.name().unwrap(), "Box__get__i64", "{triple}");
+            assert!(leader.is_definition(), "{triple}: leader is the definition");
+        }
+        // COFF: the leader must FOLLOW its section-definition symbol, or lld
+        // discards every copy of the section.
+        let bytes = emit_comdat_instance_object("x86_64-pc-windows-msvc", None);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let comdat = file.comdats().next().unwrap();
+        let leader_index = comdat.symbol().0;
+        let section_symbol_index = file
+            .symbols()
+            .find(|s| s.kind() == object::SymbolKind::Section && s.section_index() == file.symbol_by_index(comdat.symbol()).unwrap().section_index())
+            .unwrap()
+            .index()
+            .0;
+        assert!(section_symbol_index < leader_index);
+
+        let bytes = emit_comdat_instance_object("x86_64-apple-darwin", None);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        assert_eq!(file.comdats().count(), 0);
+        let inst = file.symbols().find(|s| s.name() == Ok("_Box__get__i64")).unwrap();
+        assert!(inst.is_weak(), "Mach-O: N_WEAK_DEF");
     }
 
     #[test]
