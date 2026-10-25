@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/native_struct_field_default_dropped_on_reexport_2026-10-25.md
+
+# An omitted constructor field must take its declared `= default` under
+# native-build even when the type reaches the constructing module only through
+# a glob re-export (`use reexp.*` where `reexp` does `pub use defs.*`). The Rust
+# seed's native-build filled such slots with the nil tag 3 (i64 read back as 3,
+# text as empty), which is how `HirSymbol.generic_param_count: i64 = 0` became
+# `N` in the stage2 HIR cache (hir_cache_selfcheck_nil_in_non_optional_scalar).
+#
+# WHY A SUBPROCESS. The spec body runs on the interpreter, which is correct
+# for named imports; only a native-built probe can go red (the seed
+# interpreter cannot yet resolve a glob-re-exported constructor, so there is
+# no interpreter control arm). Assertions name absolute values
+# the probe did not compute itself.
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+
+val PROBE_DIR: text = "test/01_unit/compiler/codegen/reexport_field_default_probe"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn run_probe_native() -> text:
+    val out_exe = PROBE_DIR + "/probe_native.exe"
+    val cmd = "SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_BOOTSTRAP=1 " + simple_bin() + " native-build " +
+        PROBE_DIR + "/main.spl -o " + out_exe + " >/dev/null 2>&1 && " + out_exe + "; rm -f " + out_exe
+    process_run("sh", ["-c", cmd]).0
+
+describe "omitted field defaults survive a glob re-export":
+    it "holds under seed native-build":
+        # @req REQ-SSPEC-COMPILER
+        step("Native-build the probe with the Rust seed and run it")
+        val out = run_probe_native()
+        step("i64 / text / bool / class defaults are real values, not the nil tag 3")
+        expect(out).to_contain("n=12345 z=0 s=dflt f=true count=7 label=box")
+        step("Each construction gets its own `= []` array")
+        expect(out).to_contain("xs1=1 xs2=0")
+        expect(out).to_contain("REEXPORT_FIELD_DEFAULT PROBE: ALL PASS")

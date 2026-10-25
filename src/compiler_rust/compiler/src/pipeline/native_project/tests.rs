@@ -1006,6 +1006,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -6892,6 +6893,7 @@ int main(void) { app_call(); return 0; }
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7008,6 +7010,7 @@ void __module_init_security_registry(void) {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7286,6 +7289,7 @@ int main(int argc, char** argv) {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7425,6 +7429,7 @@ int main(void) {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7499,6 +7504,7 @@ int main(void) {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7567,6 +7573,7 @@ int main(void) { return (int)run_check(); }
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8352,6 +8359,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -9232,6 +9240,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         unique_struct_owners: std::collections::HashMap::new(),
         struct_module_owners: std::collections::HashMap::new(),
         duplicate_struct_defs: std::collections::HashMap::new(),
+        struct_field_defaults: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
         enum_runtime_names: std::collections::HashMap::new(),
         enum_runtime_collision: None,
@@ -9503,6 +9512,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
