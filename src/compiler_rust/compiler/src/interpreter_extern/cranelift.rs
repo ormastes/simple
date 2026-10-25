@@ -974,3 +974,21 @@ mod tests {
         assert!(result.is_ok(), "zero-length text may use a null data pointer");
     }
 }
+
+/// Raw ABI 1 adapter; no interpreter or Rust-seed fallback is selected here.
+pub fn rt_cranelift_declare_readonly_words_v1(args: &[Value]) -> Result<Value, CompileError> {
+    const NAME: &str = "rt_cranelift_declare_readonly_words_v1";
+    if args.len() != 9 {
+        return Err(CompileError::runtime(format!("{NAME}: expected 9 arguments")));
+    }
+    let mut values = [0_i64; 9];
+    for (index, value) in values.iter_mut().enumerate() {
+        *value = expect_i64(args, index, NAME)?;
+    }
+    validate_raw_span(values[1], values[2], NAME)?;
+    let Some(byte_count) = values[4].checked_mul(8) else { return Ok(Value::Int(0)) };
+    validate_raw_span(values[3], byte_count, NAME)?;
+    Ok(Value::Int(unsafe { cranelift_sffi::rt_cranelift_declare_readonly_words_v1(
+        values[0], values[1], values[2], values[3], values[4], values[5],
+        values[6], values[7], values[8]) }))
+}

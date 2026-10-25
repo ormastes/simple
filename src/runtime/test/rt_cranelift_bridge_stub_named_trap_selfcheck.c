@@ -51,6 +51,8 @@ extern int64_t rt_cranelift_bconst(int64_t ctx, bool value);
 extern int64_t rt_cranelift_call_indirect(int64_t ctx, int64_t sig, int64_t addr, int64_t args_ptr, int64_t args_len);
 extern int64_t rt_cranelift_declare_global_data_v2(int64_t module, int64_t name_ptr, int64_t name_len, int64_t type_, int64_t initial_bits, int64_t linkage, int64_t alignment);
 
+extern int64_t rt_cranelift_declare_readonly_words_v1(int64_t module, int64_t name_ptr, int64_t name_len, int64_t words_ptr, int64_t word_count, int64_t alignment, int64_t reloc_word_index, int64_t reloc_target_data_id, int64_t reloc_addend);
+
 static int failures = 0;
 
 static void check(int condition, const char* message) {
@@ -83,6 +85,8 @@ static void call_fconst(void)                  { (void)rt_cranelift_fconst(0, 0,
 static void call_bconst(void)                  { (void)rt_cranelift_bconst(0, true); }
 static void call_call_indirect(void)           { (void)rt_cranelift_call_indirect(0, 0, 0, 0, 0); }
 static void call_declare_global_data_v2(void)  { (void)rt_cranelift_declare_global_data_v2(0, 0, 0, 0, 0, 0, 0); }
+
+static void call_readonly_words_v1(void) { (void)rt_cranelift_declare_readonly_words_v1(0, 0, 0, 0, 0, 0, 0, 0, 0); }
 
 static int child_traps_named(rt_stub_call_fn fn, const char* expect_name) {
     int pipefd[2];
@@ -156,6 +160,9 @@ int main(void) {
           "rt_cranelift_call_indirect (5x i64 -> i64) traps naming itself");
     check(child_traps_named(call_declare_global_data_v2, "rt_cranelift_declare_global_data_v2") == 1,
           "rt_cranelift_declare_global_data_v2 (7x i64 -> i64) traps naming itself");
+
+    check(child_traps_named(call_readonly_words_v1, "rt_cranelift_declare_readonly_words_v1") == 1,
+          "rt_cranelift_declare_readonly_words_v1 (9x i64 -> i64) traps naming itself");
 
     /* --- 2. Distinguishability: two DIFFERENT stubs must not report the
      *        same name -- proves this is a per-symbol NAMED trap, not one

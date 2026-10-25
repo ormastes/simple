@@ -101,6 +101,30 @@ fn cranelift_data_addr_in_func(ctx: i64, data_id: i64) -> i64:
 fn cranelift_function_addr_in_func(ctx: i64, name: text) -> i64:
     rt_cranelift_function_addr_in_func(ctx, rt_string_data(name), rt_string_len(name))
 
+# ABI 1 copies unboxed words; the temporary never becomes artifact data.
+@unsafe(reason: "temporary Cranelift word buffer allocation", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(size: i64) -> i64
+@unsafe(reason: "release temporary Cranelift word buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_free(ptr: i64)
+@unsafe(reason: "write unboxed word into owned temporary buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+@unsafe(reason: "borrowed word span and module-local readonly relocation ABI 1", capabilities: [ffi, raw_ptr])
+extern fn rt_cranelift_declare_readonly_words_v1(module: i64, name_ptr: i64, name_len: i64, words_ptr: i64, word_count: i64, alignment: i64, reloc_word_index: i64, reloc_target_data_id: i64, reloc_addend: i64) -> i64
+
+@unsafe(reason: "copy exact unboxed words into borrowed Cranelift ABI 1 span", capabilities: [ffi, raw_ptr])
+fn cranelift_declare_readonly_words_v1(module: i64, name: text, words: [i64], alignment: i64, reloc_word_index: i64, reloc_target_data_id: i64, reloc_addend: i64) -> i64:
+    val count = words.len()
+    if count <= 0 or count > 1152921504606846975 or name.len() <= 0:
+        return 0
+    val buffer = rt_alloc(count * 8)
+    if buffer == 0:
+        return 0
+    for index in 0..count:
+        rt_ptr_write_i64(buffer, index * 8, words[index])
+    val result = rt_cranelift_declare_readonly_words_v1(module, rt_string_data(name), rt_string_len(name), buffer, count, alignment, reloc_word_index, reloc_target_data_id, reloc_addend)
+    rt_free(buffer)
+    result
+
 # ============================================================================
 # Function Building
 # ============================================================================

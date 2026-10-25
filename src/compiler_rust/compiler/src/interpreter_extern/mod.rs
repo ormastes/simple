@@ -1011,6 +1011,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         cranelift::rt_cranelift_declare_global_data
     );
     insert_simple!(
+        "rt_cranelift_declare_readonly_words_v1",
+        cranelift::rt_cranelift_declare_readonly_words_v1
+    );
+    insert_simple!(
         "rt_cranelift_declare_global_data_v2",
         cranelift::rt_cranelift_declare_global_data_v2
     );
