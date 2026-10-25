@@ -1956,6 +1956,14 @@ ${cache_environment_payload}"
     cache_runtime_snapshot=${cache_context_base}/runtime-admitted.txt
     cache_tool_snapshot=${cache_context_base}/tool-authority-before.txt
   fi
+  # Stage 2 under the Rust seed: the lane is NOT keyed by the whole-tree
+  # source digest (it changed at every new tip and forced cold rebuilds).
+  # The seed's per-module keys decide reuse; a parent override (non-seed
+  # producer) keeps the fail-closed whole-source identity.
+  if [ "$1" = stage2 ] && [ -z "${bootstrap_stage2_parent_override}" ]; then
+    cache_source_snapshot="${log_dir}/stage2-content-keyed-source.txt"
+    bootstrap_cache_content_keyed_source "${cache_source_snapshot}" stage2 || return 1
+  fi
   cache_input_payload=$(bootstrap_cache_phase_inputs "${repo_root}" "${PLATFORM}" "${backend}" \
     "${cache_build_mode:-${bootstrap_mode}}" "${cache_source_snapshot}" \
     "${cache_runtime_snapshot}" "${cache_tool_snapshot}" "${cache_options_payload}") || return 1

@@ -1,0 +1,70 @@
+#!/bin/sh
+# Selftest: two tips differing in ONE source file must reuse the Stage 2 lane.
+# (1) lineage: the whole-tree source digest used to key the stage2 binding, so
+#     any new tip refused the cache; the content-keyed lane must now admit it,
+#     while a changed producer sha still refuses (fail closed).
+# (2) objects: with SIMPLE_SEED_BIN set, the real seed native-builds both tips
+#     into one cache dir and must print "[native-incremental] N reused / 1 rebuilt".
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/s2-content-key.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
+
+mods="a b c d e"
+mk_tip() { # DIR CHANGED-VALUE
+  mkdir -p "$1/src"
+  for m in $mods; do printf 'fn %s_val() -> i64:\n    return 1\n' "$m" > "$1/src/$m.spl"; done
+  printf 'fn c_val() -> i64:\n    return %s\n' "$2" > "$1/src/c.spl"
+  printf 'use a\nuse b\nuse c\nuse d\nuse e\nfn main() -> i64:\n    return a_val() + c_val()\n' > "$1/src/main.spl"
+}
+mk_tip "$tmp/tip1" 1
+mk_tip "$tmp/tip2" 2
+for t in tip1 tip2; do (cd "$tmp/$t" && for f in src/*.spl; do printf '%s %s\n' "$(h < "$f")" "$f"; done) > "$tmp/$t.whole"; done
+cmp -s "$tmp/tip1.whole" "$tmp/tip2.whole" && fail 'fixture tips must differ'
+printf 'rt\n' > "$tmp/rt.txt"; printf 'tool\n' > "$tmp/tool.txt"
+inputs() { bootstrap_cache_phase_inputs /repo x86_64 llvm bootstrap "$1" "$tmp/rt.txt" "$tmp/tool.txt" opts | h; }
+prod=$(printf seed | h); prod2=$(printf seed2 | h)
+cache_root="$tmp/cache"; lane="$cache_root/stage2/$prod/bootstrap-main"
+
+# Old behaviour (whole-tree source in the lane identity) refuses tip2.
+old1=$(inputs "$tmp/tip1.whole"); old2=$(inputs "$tmp/tip2.whole")
+[ "$old1" != "$old2" ] || fail 'whole-tree digest unexpectedly stable'
+
+# New behaviour: content-keyed lane identity is tip-independent.
+bootstrap_cache_content_keyed_source "$tmp/ck1.txt" stage2 || fail 'helper rejected stage2'
+bootstrap_cache_content_keyed_source "$tmp/ck3.txt" stage3 && fail 'helper must refuse non-stage2 phases'
+new=$(inputs "$tmp/ck1.txt")
+bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod" "$new" bootstrap-main reuse || fail 'tip1 prepare'
+for m in $mods main; do printf 'obj-%s\n' "$m" > "$lane/$m.o"; done
+bootstrap_cache_release_all
+bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod" "$new" bootstrap-main reuse || fail 'tip2 refused content-keyed lane'
+bootstrap_cache_release_all
+[ "$(ls "$lane"/*.o | wc -l | tr -d ' ')" = 6 ] || fail 'lane objects not preserved'
+out=$(bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod2" "$new" bootstrap-main reuse 2>&1) &&
+  fail 'changed producer must refuse the lane'
+case "$out" in *incompatible*) ;; *) fail "wrong producer refusal: $out" ;; esac
+bootstrap_cache_release_all
+out=$(bootstrap_cache_prepare "$cache_root" "$lane" stage2 "$prod" "$old2" bootstrap-main reuse 2>&1) &&
+  fail 'changed non-source inputs must refuse the lane'
+bootstrap_cache_release_all
+
+# Per-object reuse via the real seed when available.
+if [ -n "${SIMPLE_SEED_BIN:-}" ]; then
+  oc="$tmp/objcache"
+  for t in tip1 tip2; do
+    (cd "$tmp/$t" && { [ -d .git ] || { git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm tip; }; } && SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_INCREMENTAL=1 "$SIMPLE_SEED_BIN" native-build --source src \
+      --cache-dir "$oc" --entry src/main.spl -o "$tmp/$t.bin") > "$tmp/$t.log" 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || { cat "$tmp/$t.log" >&2; fail "seed native-build $t rc=$rc"; }
+  done
+  receipt=$(grep '\[native-incremental\]' "$tmp/tip2.log" | tail -1)
+  case "$receipt" in *" reused / 1 rebuilt"*) ;; *) fail "tip2 receipt not N reused / 1 rebuilt: $receipt" ;; esac
+  echo "seed receipt: $receipt"
+else
+  echo 'note: SIMPLE_SEED_BIN unset; per-object receipt half skipped (lineage half ran)'
+fi
+echo 'PASS: stage2 lane reused across tips differing in 1 file; producer/input change still refuses'
