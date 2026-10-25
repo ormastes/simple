@@ -2,6 +2,12 @@
 
 ## Current landing and qualification status — 2026-10-25
 
+### Superseding terminal snapshot — 13:17 UTC
+
+The [terminal/evidence update](../09_report/releasephase3_progress_2026_10_25.md#superseding-terminal-and-evidence-update--2026-10-25-1317-utc) supersedes the RUNNING wording below. Attempt4 completed all 1,453 HIR modules and typechecking, then stopped during monomorphization at the inner sampled RSS cap (exit88, quiescent); all 1,453 HIR/frontend entries remain preserved. Attempt5 refused before compilation because admitted source/git/tool identities changed. A real fresh canonical Stage2 producer/checkpoint is required; fresh preflight alone cannot replace those bindings. The v3 remint never launched, and its finite peer wait ended124 without extension. Final Stage3 attempt6 remains unspent.
+
+Merged cap transport [#4828](https://github.com/ormastes/simple/pull/4828), enum budget [#4832](https://github.com/ormastes/simple/pull/4832), and text-contract proposal [#4834](https://github.com/ormastes/simple/pull/4834) have distinct source/evidence boundaries in the report. Native operation17 is now landed through [#4823](https://github.com/ormastes/simple/pull/4823), with one retained focused ASan/UBSan fixture PASS at source `9d4dcb77aeba`; sampled RSS is not a hard-memory guarantee or feature acceptance. All **82 acceptance scopes remain UNRUN**; no Stage3 binary/own Hello or qualified full CLI/general runner exists. The full goal remains new producer/sanity/admission → Stage3 compiler/own Hello → next generation → full CLI/runner and every selected acceptance scope, including remaining actual C4 invocation/full-graph behavior. No new feature census is made.
+
 ### Superseding snapshot — 11:42 UTC
 
 The [current source/acceptance ledger](../09_report/releasephase3_progress_2026_10_25.md#superseding-source-and-acceptance-ledger--2026-10-25-1142-utc) is pinned to `release_phase3` at `a87d4fa2e3d5` / merged [PR #4815](https://github.com/ormastes/simple/pull/4815). Private function-owner transport is coded and landed, with actual registration/caller/worker provenance still open. Retained Optional CFG and generated caller work, the wrong-variant verifier repair and stable-origin repair have local committed candidates but are not landed at that pin. Native operation17, the complete HIR graph, text keys, arrays/rich children and complete source admission remain implementation/integration gaps; existing scalar/Struct/enum/dictionary foundations are not full-scope completion.

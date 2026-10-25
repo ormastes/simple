@@ -2,7 +2,7 @@
 
 This is an evidence update, not a fresh compiler build or acceptance run. Historical [82-scope inventory](releasephase3_coding_inventory_2026_10_25.md) and [selector reconciliation](robust_acceptance_selector_reconciliation_2026_10_25.md) are unchanged. Local `/tmp` evidence links name retained host artifacts; they are not portable repository artifacts.
 
-Latest status: [the 11:42 UTC source/acceptance ledger below](#superseding-source-and-acceptance-ledger--2026-10-25-1142-utc). Earlier build observations are preserved as dated history.
+Latest status: [the 13:17 UTC terminal/evidence update below](#superseding-terminal-and-evidence-update--2026-10-25-1317-utc). Earlier build observations and the 11:42 source ledger are preserved as dated history.
 
 ## Current update — 2026-10-25, after PR #4657
 
@@ -191,3 +191,78 @@ passing scenario count, full compiler/Phase3 PASS, invariant/termination proof,
 formal proof, source-admission PASS, native lifetime/RSS qualification or release
 readiness is added. The older 15/54/4/9 inventory is preserved as a dated census;
 this scoped update does not recalculate it or certify every current row.
+
+## Superseding terminal and evidence update — 2026-10-25 13:17 UTC
+
+This source/docs-only update supersedes the earlier RUNNING/HIR snapshot. The
+checked release target is `86e9b881c28322beb7491e66b89537892c346f87`.
+Retained terminal receipts and focused native evidence were read without
+rerunning their green checks, launching builds, polling peers or changing live
+source/caches/locks. No fresh feature census or new acceptance count is claimed.
+
+### Frozen compiler campaign: terminal, caches retained
+
+| Boundary | Actual outcome and retained limitation |
+|---|---|
+| Attempt4 HIR/typechecking | All **1,453 modules** completed: 1,332 new plus121 cached. Typechecking completion is recorded at **4,013,907ms** (about66m54s), followed by monomorphization start. HIR completion is not object generation or a final compiler. |
+| Attempt4 terminal | [Terminal receipt](/tmp/phase3-next-measured-20261025/stage3-attempt4-terminal.sdn): inner sampled cap **23,146,496KiB** (22.075GiB), peak **23,147,384KiB**, exit88. [Inner RSS receipt](/tmp/phase3-next-measured-20261025/stage3-attempt4-resource-cap-stop-evidence/stage3-native-build.log.rss.env) records `rss-cap-exceeded`, `quiescent=1`; this is a measured cap stop, not an inferred OOM. All **1,453 HIR and1,453 frontend entries** remain preserved. |
+| Attempt5 | [Retained exit status](/tmp/phase3-next-measured-20261025/stage3-resume-attempt5-exit.code) is64; refusal occurred in Stage2 verification **before compilation**. The changed source/git/tool state no longer matches the admitted interval. Fresh preflight does not replace those exact comparisons or authenticate new inputs. |
+| Producer v3 remint | **Never launched.** The finite900-second wait for an external heavy process ended124, with no extension; [wait exit status](/tmp/phase3-next-measured-20261025/producer-remint-v3-peer-wait-exit.code). No new producer/compiler admission exists from this attempt. No peer paths or private command lines are included here. |
+| Remaining attempt budget | Final Stage3 attempt6 is **unspent**. Resource/admission design remains pending; no proposed future cap is a qualified fit. It is not an already-running, scheduled-success or admitted result. Root retains launch/resource ownership. |
+
+The existing canonical resume verifier compares admitted source, Git and tool
+snapshots independently (the attempt5 owner retains the checks at
+`resume-stage3-from-admitted.sh:666–678`). The supported recovery is a **real fresh
+canonical Stage2 producer/checkpoint** over the intended immutable inputs, with
+its actual sanity, receiver, runtime, tool, planner and admission evidence.
+Do not rewrite old snapshots, forge stamps, substitute a preflight receipt or
+reinterpret the producer-only checkpoint as full tool qualification. Compatible
+cache entries remain subject to the existing lineage checks.
+
+### Newly landed source and focused evidence
+
+| Landed change | Evidence boundary |
+|---|---|
+| [#4828](https://github.com/ormastes/simple/pull/4828), `13c94b195634` | Explicit Stage3 RSS-cap transport is pinned across controller, worker, transcript, invocation hash and child budget/watchdog. Its actual shell fixture passed and Astra reviewed the source; this does not turn attempt5's changed admission inputs into valid ones or establish a new compiler PASS. |
+| [#4832](https://github.com/ormastes/simple/pull/4832), `d9dc34a62246` | Canonical enum duplicate-map work/capacity is prepaid before growth. Scoped SOURCE_GO; executable compiler scenarios remain **UNRUN**. No runtime or full enum/caller acceptance follows from source review. |
+| [#4834](https://github.com/ormastes/simple/pull/4834), `86e9b881c283` | **Proposal/documentation only:** authentic immutable text birth/lifetime contract. Not implemented text-key/full-HIR admission or a runtime-qualified text provider. |
+| [#4823](https://github.com/ormastes/simple/pull/4823), `79f07910a691` | Native Struct-to-Dictionary operation17 is coded and landed. This supersedes its absence in the older11:42 target. Actual C4 invocation, compiler emission/planning, whole-graph behavior and all selected acceptance remain separate. |
+
+The **one retained operation17 native fixture** used source
+`9d4dcb77aebac52f88fb8638d701c3bb47241545`, after operation17 landed.
+[Source pin](/tmp/op17-native-evidence-20261025/source-revision.txt),
+[recorded run](/tmp/op17-native-evidence-20261025/run.sh),
+[stdout](/tmp/op17-native-evidence-20261025/stdout.log) and
+[exit code](/tmp/op17-native-evidence-20261025/exit.code) record ASan/UBSan,
+`op17 native fixture PASS`, and exit0. The binary's independently read SHA256 is
+`466a6d034c71e1174c4a956832907b169cca015dcf90d6b6253616448659e70f`.
+The [RSS receipt](/tmp/op17-native-evidence-20261025/rss.receipt) records
+peak **233,764KiB**, `quiescent=1`, and **hard_memory_limit=0**: sampled accounting,
+not a hard-memory enforcement guarantee. This focused provider PASS was not
+rerun and is **not** a compiler/HIR/SOURCE admission, general runner qualification,
+whole-graph proof or PASS for any of the82 selected acceptance scopes.
+
+### Full goal and required end conditions remain unchanged
+
+1. Produce the real fresh canonical Stage2 compiler for the intended frozen
+   source/tool/runtime lineage; require its actual sanity/Hello, receiver,
+   planner and producer-admission/checkpoint evidence without weakening gates.
+2. Use it to finish the Phase3 compiler, then have that exact compiler compile
+   Hello and execute its output correctly. No Phase3 compiler binary or its own
+   Hello PASS exists yet.
+3. Complete the required next compiler generation with genuine lineage and
+   executable qualification; a focused provider fixture cannot replace it.
+4. Build and qualify the full CLI and existing general SSpec runner, then run
+   every selected acceptance scope with actual registered/executed assertions.
+   All **82 feature acceptance scopes remain UNRUN**; no loading-only result,
+   missing runner or zero-case run counts as PASS.
+5. Complete remaining actual C4 caller/invocation and lifecycle integration,
+   full reachable graph/constructor/write closure, text keys/immutable text,
+   arrays/rich children and exact enum/Optional replay, source admission and
+   required backend/runtime/native evidence. Preserve ordinary behavior and
+   independent review; logical budgets and isolated provider results do not
+   establish complete heap/RSS, proof, source authority or release readiness.
+
+Older source-candidate and implementation classifications above retain their
+own pins and dates; this update neither recertifies every row nor narrows the
+selected robust goal. There is still no full Phase3 PASS or qualified CLI/runner.
