@@ -57,6 +57,26 @@ each stage behavior-preserving and separately landable.
    threading `ctx` through the parser entry points. Decide after stage 3,
    when the only global left is the one slot.
 
+### Stage 1 status (2026-10-25)
+
+Landed per-owner snapshots: `FlatPoolState` (#4505), `LexerState` (#4512),
+`ParserState` (#4513), `AstLexerSlotState` (#4514), `StmtStoreState`
+(#4515), `PendingDeclAttrState` (#4516), `ExprStoreState` (#4518),
+`DeclStoreState` (#4519), `FabCaptureState` (#4521), combined by
+`src/compiler/10.frontend/parse_context.spl`. Still outside the snapshot:
+
+- per-index env node mirrors (`SIMPLE_BOOTSTRAP_MODULE_DECL_<i>` and the
+  per-expr/stmt/decl field keys), written only in env-mirror bootstrap
+  mode. Context swapping requires those mirror modes off. The fixed scalar
+  env channels (`SIMPLE_PARSER_HAD_ERROR`, `SIMPLE_PARSER_FIRST_ERROR`,
+  `SIMPLE_BOOTSTRAP_PAR_*`, lexer cursor and node-count keys) are in
+  `ParseEnvState` (`parse_env_state.spl`); the env-mirror high-water slots
+  and `module_decl_slots` are in their owners' snapshots.
+- the ~600 remaining module vars in other frontend files; audit each as
+  per-parse (add an owner snapshot) or process-wide (leave).
+- arena generation/hardening (`ast_gen_*`, `ast_reset_seq`,
+  `ast_harden_*`) stays process-wide by design.
+
 Process-wide caches/counters (`frontend_parse_cache.spl`) stay global but
 must become atomic or per-worker before stage 4.
 

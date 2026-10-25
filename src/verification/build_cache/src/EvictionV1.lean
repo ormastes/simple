@@ -18,6 +18,10 @@
   references"), i.e. it now aims at RootClosed, the premise of
   root_closed_no_dangling; the bounded twin checks pins and byte accounting
   but not yet reference closure.
+  Reviewed 2026-10-25 (per-source entry-count caps + admit-before-plan):
+  the new caps only add entries to an evict/unload plan under the same
+  live_views <= 0 guard, and admission only rejects; plans stay admissible,
+  so pinned_survive and read_after_evict_same_or_miss still cover them.
   No sorry, no axioms.
 -/
 namespace EvictionV1

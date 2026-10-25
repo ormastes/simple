@@ -459,7 +459,11 @@ fails the run leaving no receipt. Pinned by
 Stage 3 runs from a frozen admitted Stage 2; source fixes need a Stage 2
 rebuild. #4498 prescans all closure structs in the bootstrap-fixed MIR lane;
 #4499 fixes inner `/src/` module naming; Windows links `ws2_32` + `mswsock`
-(#4430). Per-file src to obj is the direction and is IN PROGRESS, not default.
+(#4430).
+
+Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. A full
+Stage 3 run of the per-file lane is not yet proven.
+
 Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
 miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
 Never `git stash`; never GCC on Windows.

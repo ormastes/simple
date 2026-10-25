@@ -51,13 +51,52 @@ nil_in_non_optional_scalar` lines; the encoder writes a nil token the generated
 decoder refuses, so entries are not stored and HIR shard work is recomputed.
 See `doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md`.
 
-## Direction: per-file src to obj (IN PROGRESS, not the default)
+## Per-file src to obj is the default (#4525)
 
-The target design is per-file source-to-object jobs
-(`doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`). Landed
-pieces: FileFiber v1 per-file async read with one parse and TLDR publish
-(#4453), single-flight leaders (#4441). The whole-program lane above is still
-what bootstrap uses.
+Target design: `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`.
+Landed pieces: FileFiber v1 per-file read + TLDR publish (#4453), single-flight
+leaders (#4441), and #4525, which makes per-module lowering the default.
+
+- `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` is the only way into the whole-program
+  bootstrap-fixed lane (one MirLowering over the closure, flat MIR passes
+  skipped, single-object context dispatch). Unset: each module's MIR feeds the
+  per-module witness-keyed object cache in `driver_aot_native_output.spl`, so
+  `aot-<hash>.o` objects appear in the build dir one per module during codegen.
+- #4525 is in compiler source, so it only applies once Stage 2 is rebuilt. With
+  the frozen Stage 2 today, the per-file lane is reached by running the Stage 3
+  native-build with `SIMPLE_BOOTSTRAP` and `SIMPLE_BOOTSTRAP_STAGE3` unset
+  (entry `src/app/cli/bootstrap_main.spl`, `--entry-closure`, `--threads 80`).
+- Measured 2026-10-25 (frozen Stage 2, 9-module closure, 8 threads): 9 objects,
+  first at 160 s, last at 174 s, binary runs correctly.
+- Under `SIMPLE_BOOTSTRAP=1` without `SIMPLE_BOOTSTRAP_STAGE3`, HIR sharding
+  blocks with "HIR cache identity unavailable for shard", and the unsharded
+  ambient-bootstrap HIR leaves cross-module imports unresolved. Use the unset
+  lane above until those are fixed.
+- Scripts (2026-10-25): `bootstrap-from-scratch.sh` Stage 3 and
+  `resume-stage3-from-admitted.sh` (via `lib/stage3-native-build-worker.sh`,
+  32-argument form, last positional `per-file`|`whole-program`) no longer
+  force the shortcut. Default: the Stage 3 child gets `SIMPLE_BOOTSTRAP=`
+  (empty) so the compiler takes the per-module lane. With
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` exported it gets `SIMPLE_BOOTSTRAP=1
+  SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (the old single-object lane). Both values
+  are in the Stage 3 args hash, so the receipt records which lane ran; any
+  other value of the knob is refused. The outer `export SIMPLE_BOOTSTRAP=1`
+  is unchanged (Stage 3 runs under `env -i`). Stage 2 args and their resume
+  reconstruction are untouched.
+- Objects, cache, link: each module's object is `aot-<hash>.o`, keyed by the
+  module witness in the per-module object cache under
+  `SIMPLE_NATIVE_BUILD_CACHE_DIR/<producer scope>/` (index `build_cache.sdn`;
+  Stage 3 points it at `stage3/<triple>/stage3-native-cache`); an
+  unchanged module is a cache hit and is not re-emitted. Codegen fans out over
+  `SIMPLE_NATIVE_BUILD_THREADS`, which the scripts set to `selfhost_jobs`
+  (`bootstrap-build-jobs-policy.shs`: `--jobs` > `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS`
+  > `~/.config/simple/host.sdn` `max_build_jobs` > 16). All objects plus the
+  runtime bundle are then linked into one binary.
+- Not yet proven: a full Stage 3 run of the per-file lane under
+  `SIMPLE_BOOTSTRAP_STAGE3=1` with `SIMPLE_BOOTSTRAP` empty. If it fails, use
+  `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` and record the failure.
+- Known WA: `WA-PERFILE-TRIPLE-QUOTE`
+  (`doc/08_tracking/bug/perfile_lane_triple_quote_interpolation_parse_2026-10-25.md`).
 
 ## Cache protocol (all landed 2026-10-24)
 
