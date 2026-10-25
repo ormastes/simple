@@ -1,0 +1,73 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.common.source_region_descriptor_v1.*
+use compiler.common.source_region_descriptor_schema_v1.*
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, mir_operand_const_int}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, LocalId}
+use compiler.hir.hir_types.{SymbolId}
+
+describe "C4 physical dictionary descriptor schema":
+    it "resolves compiler token to actual raw and tagged Struct storage":
+        for physical in [1, 2]:
+            match source_region_dictionary_descriptor_slots_v1([mir_operand_const_int(3)], physical):
+                case Ok(slots):
+                    expect(slots.len()).to_equal(2)
+                    expect(slots[0].kind).to_equal(1)
+                    expect(slots[0].representation).to_equal(0)
+                    expect(slots[1].kind).to_equal(2)
+                    expect(slots[1].representation).to_equal(physical)
+                case Err(_): assert(false)
+
+    it "emits a 64-byte shape4 control header and entry template relocation":
+        val slots = [SourceRegionSlotV1(kind: 1, representation: 0), SourceRegionSlotV1(kind: 2, representation: 1)]
+        match source_region_llvm_dictionary_descriptor_v1(".c4.dictionary", slots):
+            case Ok(ir):
+                expect(ir).to_contain("i64 1, i64 4, i64 64, i64 2")
+                expect(ir).to_contain("[i64 0, i64 8, i64 1, i64 0]")
+                expect(ir).to_contain("[i64 8, i64 8, i64 2, i64 1]")
+                expect(ir).to_contain("ptrtoint (ptr @.c4.dictionary.slots to i64)")
+            case Err(_): assert(false)
+
+    it "does not reuse the Struct extent rule for dictionary control storage":
+        expect(source_region_descriptor_schema_header_v1(4, 64u64, 2)).to_equal(true)
+        expect(source_region_descriptor_schema_header_v1(1, 64u64, 2)).to_equal(false)
+        expect(source_region_descriptor_schema_header_v1(4, 16u64, 2)).to_equal(false)
+
+    it "accepts only the two fixed typed entry rows for shape4":
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 0, 0u64, 8u64, 1u64, 0u64)).to_equal(true)
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 8u64, 8u64, 2u64, 2u64)).to_equal(true)
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 0, 0u64, 8u64, 2u64, 1u64)).to_equal(false)
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 8u64, 8u64, 3u64, 1u64)).to_equal(false)
+
+    it "refuses header offsets masquerading as entry offsets":
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 40u64, 8u64, 2u64, 1u64)).to_equal(false)
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 8u64, 4u64, 2u64, 1u64)).to_equal(false)
+
+    it "rejects physical representations passed as private compiler tokens":
+        for token in [0, 1, 2, 4]:
+            match source_region_dictionary_descriptor_slots_v1([mir_operand_const_int(token)], 1):
+                case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.InvalidRepresentation)
+                case Ok(_): assert(false)
+
+    it "rejects a token with a nominal non-i64 type":
+        val fake = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(3), MirType(kind: MirTypeKind.Struct(SymbolId(id: 7)))))
+        match source_region_dictionary_descriptor_slots_v1([fake], 1):
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.MalformedOperand)
+            case Ok(_): assert(false)
+
+    it "rejects runtime descriptor provenance and extra arguments":
+        val dynamic = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+        match source_region_dictionary_descriptor_slots_v1([dynamic], 1):
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.MalformedOperand)
+            case Ok(_): assert(false)
+        match source_region_dictionary_descriptor_slots_v1([mir_operand_const_int(3), mir_operand_const_int(3)], 1):
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.MalformedOperand)
+            case Ok(_): assert(false)
+
+    it "does not permit compiler tokens or repr4 in physical shape4 rows":
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 8u64, 8u64, 2u64, 3u64)).to_equal(false)
+        expect(source_region_descriptor_schema_row_v1(4, 64u64, 2, 1, 8u64, 8u64, 2u64, 4u64)).to_equal(false)
+
+    it "retains the shape1 physical Struct grammar":
+        expect(source_region_descriptor_schema_header_v1(1, 16u64, 2)).to_equal(true)
+        expect(source_region_descriptor_schema_row_v1(1, 16u64, 2, 1, 8u64, 8u64, 3u64, 1u64)).to_equal(true)
+        expect(source_region_descriptor_schema_row_v1(1, 16u64, 2, 1, 8u64, 8u64, 2u64, 4u64)).to_equal(false)

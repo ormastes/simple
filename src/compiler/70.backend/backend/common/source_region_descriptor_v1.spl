@@ -3,8 +3,9 @@
 # A missing classification is an error, not a scalar slot.
 
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
-use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
 use compiler.mir.source_region_descriptor_input_v1.{source_region_ordinary_struct_representation_v1}
+use compiler.common.source_region_descriptor_schema_v1.{source_region_descriptor_schema_header_v1, source_region_descriptor_schema_row_v1}
 
 enum SourceRegionDescriptorErrorV1:
     UnsupportedWordWidth
@@ -103,4 +104,29 @@ fn source_region_llvm_descriptor_v1(name: text, word_width: i64,
     # Private linkage permits temporary assembler labels with no retained map.
     val table = "@{name}.slots = internal constant [{slots.len()} x [4 x i64]] [{rows}], align 8"
     val header = "@{name} = internal constant [6 x i64] [i64 1, i64 1, i64 {byte_extent}, i64 {slots.len()}, i64 ptrtoint (ptr @{name}.slots to i64), i64 1], align 8"
+    Ok(table + "\n" + header)
+
+fn source_region_dictionary_descriptor_slots_v1(args: [MirOperand], physical_struct_representation: i64) -> Result<[SourceRegionSlotV1], SourceRegionDescriptorErrorV1>:
+    if args.len() != 1: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+    match args[0].kind:
+        case Const(Int(token), type_):
+            if type_.kind != MirTypeKind.I64: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+            if token != source_region_ordinary_struct_representation_v1():
+                return Err(SourceRegionDescriptorErrorV1.InvalidRepresentation)
+        case _: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+    if physical_struct_representation != 1 and physical_struct_representation != 2:
+        return Err(SourceRegionDescriptorErrorV1.InvalidRepresentation)
+    Ok([SourceRegionSlotV1(kind: 1, representation: 0),
+        SourceRegionSlotV1(kind: 2, representation: physical_struct_representation)])
+
+fn source_region_llvm_dictionary_descriptor_v1(name: text, slots: [SourceRegionSlotV1]) -> Result<text, SourceRegionDescriptorErrorV1>:
+    if not source_region_descriptor_schema_header_v1(4, 64u64, slots.len()):
+        return Err(SourceRegionDescriptorErrorV1.InvalidExtent)
+    for index in 0..slots.len():
+        val slot = slots[index]
+        if not source_region_descriptor_schema_row_v1(4, 64u64, 2, index, index as u64 * 8u64, 8u64, slot.kind as u64, slot.representation as u64):
+            return Err(SourceRegionDescriptorErrorV1.UnclassifiedSlot)
+    val value_representation = slots[1].representation
+    val table = "@{name}.slots = internal constant [2 x [4 x i64]] [[4 x i64] [i64 0, i64 8, i64 1, i64 0], [4 x i64] [i64 8, i64 8, i64 2, i64 {value_representation}]], align 8"
+    val header = "@{name} = internal constant [6 x i64] [i64 1, i64 4, i64 64, i64 2, i64 ptrtoint (ptr @{name}.slots to i64), i64 1], align 8"
     Ok(table + "\n" + header)

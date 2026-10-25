@@ -8,6 +8,7 @@ use compiler.backend.linker.source_region_link_types_v1.*
 use compiler.backend.linker.source_region_elf_protection_v1.{source_region_elf_field_v1}
 use compiler.backend.linker.elf_parser.{ElfObject, ElfSymbol, elf_parse_object}
 use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use compiler.common.source_region_descriptor_schema_v1.{source_region_descriptor_schema_header_v1, source_region_descriptor_schema_row_v1}
 
 fn source_region_descriptor_binding_v1(digest: text, function_symbol: i64, destination: i64) -> text:
     ".c4.{digest}.{function_symbol}.{destination}"
@@ -53,21 +54,35 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
         for block in function.blocks:
             for instruction in block.instructions:
                 match instruction.kind:
-                    case Intrinsic(destination, "source_region_struct_descriptor_v1", args):
+                    case Intrinsic(destination, descriptor_kind, args):
+                        if descriptor_kind != "source_region_struct_descriptor_v1" and descriptor_kind != "source_region_dictionary_descriptor_v1":
+                            if descriptor_kind.starts_with("source_region_") and descriptor_kind.ends_with("_descriptor_v1"):
+                                return Err("SOURCE-EMIT-UNSUPPORTED-DESCRIPTOR-SHAPE")
+                            continue
                         val context = source_region_module_function_context_local_v1(module, function)?
                         if not context.?: return Err("SOURCE-EMIT-DESCRIPTOR-OUTSIDE-ADMITTED-CLOSURE")
                         if val local = destination:
                             var slots: [SourceRegionSlotV1] = []
-                            match source_region_descriptor_slots_v1(args):
-                                case Ok(value):
-                                    match source_region_resolve_struct_slots_v1(value, ordinary_struct_representation):
-                                        case Ok(actual): slots = actual
-                                        case Err(_): return Err("SOURCE-EMIT-STRUCT-REPRESENTATION")
-                                case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-INPUT")
                             var extent = 0
-                            match source_region_descriptor_extent_v1(slots.len()):
-                                case Ok(value): extent = value
-                                case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-EXTENT")
+                            var shape = 1
+                            if descriptor_kind == "source_region_dictionary_descriptor_v1":
+                                shape = 4
+                                extent = 64
+                                match source_region_dictionary_descriptor_slots_v1(args, ordinary_struct_representation):
+                                    case Ok(actual): slots = actual
+                                    case Err(_): return Err("SOURCE-EMIT-DICTIONARY-ENTRY-TEMPLATE")
+                            else:
+                                match source_region_descriptor_slots_v1(args):
+                                    case Ok(value):
+                                        match source_region_resolve_struct_slots_v1(value, ordinary_struct_representation):
+                                            case Ok(actual): slots = actual
+                                            case Err(_): return Err("SOURCE-EMIT-STRUCT-REPRESENTATION")
+                                    case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-INPUT")
+                                match source_region_descriptor_extent_v1(slots.len()):
+                                    case Ok(value): extent = value
+                                    case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-EXTENT")
+                            if not source_region_descriptor_schema_header_v1(shape, extent as u64, slots.len()):
+                                return Err("SOURCE-EMIT-DESCRIPTOR-SHAPE")
                             match source_region_descriptor_slot_words_v1(slots):
                                 case Err(_): return Err("SOURCE-EMIT-SLOT-CLASSIFICATION")
                                 case Ok(_): ()
@@ -80,11 +95,15 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
                                 return Err("SOURCE-EMIT-SYMBOL-EXTENT")
                             val header = _source_region_object_span_v1(object, header_symbol.st_shndx, header_symbol.st_value, 48)?
                             val table = _source_region_object_span_v1(object, table_symbol.st_shndx, table_symbol.st_value, table_extent)?
-                            if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != 1u64 or
+                            if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != shape as u64 or
                                 source_region_elf_field_v1(header, 16, 8) != extent as u64 or source_region_elf_field_v1(header, 24, 8) != slots.len() as u64 or
                                 source_region_elf_field_v1(header, 32, 8) != 0u64 or source_region_elf_field_v1(header, 40, 8) != 1u64):
                                 return Err("SOURCE-EMIT-HEADER-CONTENT")
                             for index in 0..slots.len():
+                                if not source_region_descriptor_schema_row_v1(shape, extent as u64, slots.len(), index,
+                                    source_region_elf_field_v1(table, index * 32, 8), source_region_elf_field_v1(table, index * 32 + 8, 8),
+                                    source_region_elf_field_v1(table, index * 32 + 16, 8), source_region_elf_field_v1(table, index * 32 + 24, 8)):
+                                    return Err("SOURCE-EMIT-DESCRIPTOR-ROW-SCHEMA")
                                 if (source_region_elf_field_v1(table, index * 32, 8) != index as u64 * 8u64 or
                                     source_region_elf_field_v1(table, index * 32 + 8, 8) != 8u64 or
                                     source_region_elf_field_v1(table, index * 32 + 16, 8) != slots[index].kind as u64 or
@@ -95,7 +114,7 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
                                 header_section: header_symbol.st_shndx, header_offset: header_symbol.st_value as u64,
                                 table_section: table_symbol.st_shndx, table_offset: table_symbol.st_value as u64,
                                 allocation_bytes: extent as u64, slot_count: slots.len(), table_bytes: table_extent as u64,
-                                table_digest: sha256_u8_fast_hex(table)))
+                                table_digest: sha256_u8_fast_hex(table), shape: shape))
                             for offset in 0..6:
                                 val key = "{header_symbol.st_shndx}:{header_symbol.st_value + offset * 8}"
                                 if protected_words.has(key): return Err("SOURCE-EMIT-OVERLAPPING-DESCRIPTORS")

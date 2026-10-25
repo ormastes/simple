@@ -7,6 +7,7 @@ use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_read_at, ret
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
 use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
 use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_u8_fast_hex}
+use compiler.common.source_region_descriptor_schema_v1.{source_region_descriptor_schema_header_v1, source_region_descriptor_schema_row_v1}
 
 struct SourceRegionElfLoadV1:
     type_: u64
@@ -298,6 +299,8 @@ fn source_region_elf_descriptor_spans_v1(view: ElfFileObjectV1,
     page_size: u64, account: MirLoopResourceAccountV1) -> Result<[SourceRegionElfSpanV1], text>:
     if record.slot_count <= 0 or record.slot_count > 288230376151711743 or record.table_bytes != record.slot_count as u64 * 32u64:
         return Err("SOURCE-LINK-EXPECTED-SLOT-BOUNDS")
+    if not source_region_descriptor_schema_header_v1(record.shape, record.allocation_bytes, record.slot_count):
+        return Err("SOURCE-LINK-EXPECTED-DESCRIPTOR-SHAPE")
     val header_symbol = source_region_elf_index_find_v1(symbols, record.binding, account)?
     val table_symbol = source_region_elf_index_find_v1(symbols, record.table_binding, account)?
     if header_symbol.size != 48u64 or table_symbol.size != record.table_bytes:
@@ -305,7 +308,7 @@ fn source_region_elf_descriptor_spans_v1(view: ElfFileObjectV1,
     val header_offset = source_region_elf_protected_offset_v1(loads, header_symbol.value, 48u64, page_size)?
     val table_offset = source_region_elf_protected_offset_v1(loads, table_symbol.value, record.table_bytes, page_size)?
     val header = source_region_elf_exact_v1(view.file, header_offset, 48, account)?
-    if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != 1u64 or
+    if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != record.shape as u64 or
             source_region_elf_field_v1(header, 16, 8) != record.allocation_bytes or
             source_region_elf_field_v1(header, 24, 8) != record.slot_count as u64 or
             source_region_elf_field_v1(header, 32, 8) != table_symbol.value or
@@ -320,13 +323,8 @@ fn source_region_elf_descriptor_spans_v1(view: ElfFileObjectV1,
         val width = source_region_elf_field_v1(row, 8, 8)
         val kind = source_region_elf_field_v1(row, 16, 8)
         val representation = source_region_elf_field_v1(row, 24, 8)
-        if offset != index as u64 * 8u64 or width != 8u64 or record.allocation_bytes / 8u64 != record.slot_count as u64 or record.allocation_bytes % 8u64 != 0u64:
-            return Err("SOURCE-LINK-SLOT-LAYOUT")
-        if kind == 1u64:
-            if representation != 0u64: return Err("SOURCE-LINK-SCALAR-REPRESENTATION")
-        elif kind == 2u64 or kind == 3u64:
-            if representation != 1u64 and representation != 2u64: return Err("SOURCE-LINK-POINTER-REPRESENTATION")
-        else: return Err("SOURCE-LINK-SLOT-CLASSIFICATION")
+        if not source_region_descriptor_schema_row_v1(record.shape, record.allocation_bytes, record.slot_count, index, offset, width, kind, representation):
+            return Err("SOURCE-LINK-SLOT-LAYOUT-OR-CLASSIFICATION")
         if not hash.update(row): return Err("SOURCE-LINK-SLOT-HASH")
         index = index + 1
     val observed = hash.finish_hex() ?? ""
