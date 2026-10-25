@@ -28,7 +28,10 @@ use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_b
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
 use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1,
-    native_build_focused_capsule_shards_v1}
+    native_build_focused_capsule_shards_v1, run_native_file_worker_v1}
+use compiler.driver.driver_build.native_file_worker_incremental_v1.{FILE_WORKER_INC_DIR_ENV_V1,
+    FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1}
+use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_commit_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -163,6 +166,12 @@ pub fn bootstrap_capsule_shard_child_env(args: [text]):
         elif arg.starts_with("--parse-shard="):
             env_set("SIMPLE_PARSE_SHARD", arg.substring(14))
 
+fn bootstrap_file_worker_requested(args: [text]) -> bool:
+    for arg in args:
+        if arg.starts_with("--file-worker="):
+            return true
+    false
+
 # Runs the capsule's shard workers before the in-process build. On a sealed
 # MIR ledger it installs SIMPLE_MIR_SHARD_LINK, so the in-process build links
 # the workers' objects and lowers nothing. False only when the MIR aggregate
@@ -178,6 +187,21 @@ fn bootstrap_capsule_shard_prepass(args: [text], allow_mir: bool) -> bool:
     if ledger != "":
         env_set("SIMPLE_MIR_SHARD_LINK", ledger)
     true
+
+# File-worker P-E: when every object hash is unchanged the coordinator already
+# placed the cached output at -o, so the link is skipped; otherwise link and
+# record the new output for the next incremental run.
+fn bootstrap_stage4_link_or_place_v1(args: [text]) -> i64:
+    val inc_dir = env_get(FILE_WORKER_INC_DIR_ENV_V1) ?? ""
+    val inc_producer = env_get(FILE_WORKER_INC_PRODUCER_ENV_V1) ?? ""
+    val output = bootstrap_output_from_args(args, 0)
+    if inc_dir != "" and (env_get(FILE_WORKER_LINK_PLACED_ENV_V1) ?? "") == "1":
+        val _kept = file_worker_inc_commit_v1(inc_dir, inc_producer, output, false)
+        return 0
+    val code = run_exact_stage4_focused_capsule(args)
+    if code == 0 and inc_dir != "":
+        val _recorded = file_worker_inc_commit_v1(inc_dir, inc_producer, output, true)
+    code
 
 fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     val worker_args = bootstrap_native_build_worker_args(args)
@@ -348,6 +372,10 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val explicit_entry = native_build_entry_from_args(args, 0)
     if explicit_entry != "":
         if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1" or env_get("SIMPLE_BOOTSTRAP_STAGE4") == "1":
+            # --file-worker=i/n (opt-in SIMPLE_FILE_WORKERS=1): a claim-loop worker
+            # that drives HIR and MIR children; it never runs the capsule itself.
+            if bootstrap_file_worker_requested(args):
+                return run_native_file_worker_v1(args)
             bootstrap_capsule_shard_child_env(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":
             # MIR sharding stays off: Stage3 (SIMPLE_BOOTSTRAP=1, entry
@@ -375,7 +403,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         # in-process capsule below links their objects (SIMPLE_MIR_SHARD_LINK).
         if not bootstrap_capsule_shard_prepass(args, true):
             return 1
-        return run_exact_stage4_focused_capsule(args)
+        return bootstrap_stage4_link_or_place_v1(args)
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
         return run_bootstrap_native_build_coordinator(args)

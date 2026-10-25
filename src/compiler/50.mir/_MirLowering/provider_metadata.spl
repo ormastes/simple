@@ -126,6 +126,8 @@ fn mir_provider_default_children_valid(expr: HirExpr) -> bool:
         case Error: return false
         case Binary(_, left, right) | Index(left, right):
             return not mir_provider_default_is_error(left) and not mir_provider_default_is_error(right)
+        case ArrayRepeat(value, count, _):
+            return not mir_provider_default_is_error(value) and not mir_provider_default_is_error(count)
         case Unary(_, value) | Field(value, _, _) | TupleIndex(value, _) | Cast(value, _):
             return not mir_provider_default_is_error(value)
         case Call(callee, args, _) | MethodCall(callee, _, args, _):
@@ -147,6 +149,17 @@ fn mir_provider_default_children_valid(expr: HirExpr) -> bool:
         case StructLit(_, fields):
             for field in fields:
                 if mir_provider_default_is_error(field.1): return false
+        case EnumLit(_, _, payload):
+            val payload_opt: HirEnumPayload? = payload
+            if val present_payload = payload_opt:
+                val concrete_payload: HirEnumPayload = present_payload
+                match concrete_payload:
+                    case Tuple(values):
+                        for value in values:
+                            if mir_provider_default_is_error(value): return false
+                    case Struct(payload_fields):
+                        for payload_field in payload_fields:
+                            if mir_provider_default_is_error(payload_field.1): return false
         case _: ()
     true
 
@@ -495,6 +508,26 @@ impl MirLowering:
             case Unresolved: MethodResolution.Unresolved
             case BuiltinCollection(operation): MethodResolution.BuiltinCollection(operation)
 
+    me relocate_provider_enum_payload_v1(payload: HirEnumPayload?, provider: SymbolTable, links: Dict<i64, text>) -> HirEnumPayload?:
+        # Presence does not unwrap HirEnumPayload?: bind the concrete payload
+        # before matching (4710b22a991 class).
+        val optional_payload: HirEnumPayload? = payload
+        if val present_payload = optional_payload:
+            val concrete_payload: HirEnumPayload = present_payload
+            match concrete_payload:
+                case Tuple(values):
+                    var relocated_values: [HirExpr] = []
+                    for value in values:
+                        relocated_values = relocated_values.push(self.relocate_provider_default(value, provider, links))
+                    return Some(HirEnumPayload.Tuple(relocated_values))
+                case Struct(fields):
+                    var relocated_fields: [(text, HirExpr)] = []
+                    for field in fields:
+                        val cur_field: (text, HirExpr) = field
+                        relocated_fields = relocated_fields.push((cur_field.0, self.relocate_provider_default(cur_field.1, provider, links)))
+                    return Some(HirEnumPayload.Struct(relocated_fields))
+        nil
+
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
         # Same nested-access annotation as relocate_provider_type.
         val expr_kind: HirExprKind = expr.kind
@@ -538,15 +571,25 @@ impl MirLowering:
                     var source_name = ""
                     var class_identity = ""
                     var source_is_class = false
+                    var source_is_struct = false
                     if val present_source = optional_source:
                         val source: HirSymbol = present_source
                         source_name = source.name
                         if source.kind == SymbolKind.Class:
                             source_is_class = true
                             class_identity = mir_class_identity(source)
+                        elif source.kind == SymbolKind.Struct:
+                            source_is_struct = true
                     if source_is_class:
                         val target = self.relocate_provider_type_symbol(id, provider)
                         HirExprKind.NamedVar(target, class_identity)
+                    elif source_is_struct:
+                        # `field: BlockId = BlockId(id: -1)`: a struct
+                        # constructor callee is a type, not a callable; the
+                        # paren-constructor path keys its layout by bare name.
+                        val target = self.relocate_provider_type_symbol(id, provider)
+                        if target.id < 0: HirExprKind.Error
+                        else: HirExprKind.NamedVar(target, source_name)
                     else:
                         val target = self.relocate_provider_callable(id, provider, links)
                         if target.id < 0: HirExprKind.Error
@@ -623,6 +666,23 @@ impl MirLowering:
                 HirExprKind.Cast(self.relocate_provider_default(value, provider, links), self.relocate_provider_type(target, provider))
             case ConvertCall(value, target):
                 HirExprKind.ConvertCall(self.relocate_provider_default(value, provider, links), self.relocate_provider_type(target, provider))
+            case ArrayRepeat(value, count, elem):
+                # `fp_state: ExtendedCtxRv = ExtendedCtxRv(bytes: [0; 264])`.
+                val optional_repeat_elem: HirType? = elem
+                var relocated_repeat_elem: HirType? = nil
+                if val present_repeat_elem = optional_repeat_elem:
+                    val repeat_elem_type: HirType = present_repeat_elem
+                    relocated_repeat_elem = Some(self.relocate_provider_type(repeat_elem_type, provider))
+                HirExprKind.ArrayRepeat(self.relocate_provider_default(value, provider, links), self.relocate_provider_default(count, provider, links), relocated_repeat_elem)
+            case EnumLit(enum_type, variant, payload):
+                # `field: Vis = Vis.Private`: the enum's Named id belongs to the
+                # provider table; read raw in the consumer it names an
+                # unrelated symbol (bug llvmglobals_2026-10-25).
+                val relocated_enum_type = self.relocate_provider_type(enum_type, provider)
+                val relocated_enum_kind: HirTypeKind = relocated_enum_type.kind
+                match relocated_enum_kind:
+                    case Error: HirExprKind.Error
+                    case _: HirExprKind.EnumLit(relocated_enum_type, variant, self.relocate_provider_enum_payload_v1(payload, provider, links))
             # Captures, globals and blocks need
             # their own binding scope. Do not borrow a consumer local with the
             # same numeric ID. Error is diagnosed only if the default is used.
@@ -691,7 +751,8 @@ impl MirLowering:
                 if method.id >= 0:
                     self.struct_method_syms["{canonical}::{method_name}"] = method
 
-    me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool):
+    me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool,
+            links: Dict<i64, text> = {}):
         # prescan_module_struct_names registers every module's struct field
         # metadata before any module is lowered, so an imported struct's
         # struct_field_hir_type holds Named ids from the PROVIDER table. Read
@@ -711,17 +772,32 @@ impl MirLowering:
             val source: HirSymbol = present_source
             var fields: [HirField] = []
             var field_names: [text] = []
+            # Default expressions carry PROVIDER SymbolIds too. The composite
+            # inventory and the provider's own lower_module store them raw
+            # under the bare name; an omitted-field fill in this consumer then
+            # resolved `Visibility.Private`'s enum id to an unrelated consumer
+            # symbol (bug llvmglobals_2026-10-25). Relocate them alongside the
+            # field types, as register_provider_class does for classes.
+            var flags: [bool] = []
+            var defaults: [HirExpr] = []
             for field in struct_def.fields:
                 # Annotated copies: nested struct transports lose their declared
                 # value type on the stage-native lane (module_build.spl pattern).
                 var relocated: HirField = field
                 val field_type: HirType = field.type_
                 relocated.type_ = self.relocate_provider_type(field_type, provider)
+                if field.has_default:
+                    val field_default: HirExpr = field.default
+                    relocated.default = self.relocate_provider_default(field_default, provider, links)
                 fields = fields.push(relocated)
                 field_names = field_names.push(field.name)
+                flags = flags.push(field.has_default)
+                defaults = defaults.push(relocated.default)
             val key = self.composite_layout_key(source)
             if key != struct_def.name:
                 self.register_composite_field_metadata(key, fields, self.symbols, true)
+                self.struct_field_has_default[key] = flags
+                self.struct_field_default_expr[key] = defaults
             # The bare-name entry is shared by every same-named struct: replace it
             # only when the consumer does not declare that name itself and the
             # recorded bare-layout owner is this provider's declaration -- a
@@ -741,6 +817,10 @@ impl MirLowering:
                     return
                 i = i + 1
             self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
+            # Overwrite, not keep-first: the inventory row is the raw provider
+            # expression this relocation replaces.
+            self.struct_field_has_default[struct_def.name] = flags
+            self.struct_field_default_expr[struct_def.name] = defaults
 
 # Trait-typed receiver dispatch (bug
 # stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's
@@ -1376,8 +1456,11 @@ impl MirLowering:
                 if mir_provider_layout_leaf_v1(struct_def.name) != leaf:
                     self.error_fatal("provider layout index is stale for {provider_module.name}: {leaf}", Some(struct_def.span))
                     continue
+                var struct_links: Dict<i64, text> = {}
+                if provider_index < self.provider_session_links_ready.len() and self.provider_session_links_ready[provider_index]:
+                    struct_links = self.provider_session_links[provider_index]
                 self.register_provider_struct(struct_def, provider_module.symbols,
-                    self.provider_layout_consumer_names.has(struct_def.name))
+                    self.provider_layout_consumer_names.has(struct_def.name), struct_links)
 
     me provider_layout_demand_end_v1():
         """Close this module's layout demand state (no promotion roots)."""

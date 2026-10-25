@@ -19,16 +19,16 @@
 #   - x = x + [item] creates a NEW array each time (O(n) per call → O(n²) in loop)
 #   - The patterns only match when LHS target == LHS of + (same variable)
 
+use compiler.frontend.core._AstExpr.nodes.{expr_owner_args, expr_owner_args_set, expr_owner_int, expr_owner_left, expr_owner_left_set, expr_owner_right, expr_owner_right_set, expr_owner_str, expr_owner_str_set, expr_owner_tag, expr_owner_tag_set}
 use compiler.frontend.core._AstExpr.nodes.{
     EXPR_ASSIGN, EXPR_BINARY, EXPR_ARRAY_LIT, EXPR_IDENT,
     EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_INDEX,
     EXPR_FIELD_ACCESS, EXPR_FOR, EXPR_LIST_COMP,
     EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT,
     EXPR_UNARY, EXPR_INTERPOLATED_STRING, EXPR_SUFFIXED_LIT,
-    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
-    expr_args, expr_count
+    expr_count
 }
-use compiler.core.ast_stmt.{STMT_FOR, stmt_tag, stmt_expr, stmt_count}
+use compiler.core.ast_stmt.{STMT_FOR, stmt_get_tag, stmt_get_expr, stmt_set_expr, stmt_count}
 use compiler.core.tokens.{TOK_PLUS}
 use compiler.blocks.sugar_registry.{
     apply_sugar_rules_ast, has_ast_rewrite_rules, ast_rewrite_rule_generation
@@ -58,7 +58,7 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
     var dynamic_ast_rules = has_ast_rewrite_rules()
 
     while i < count:
-        val tag = expr_tag[i]
+        val tag = expr_owner_tag(i)
 
         if tag == EXPR_ASSIGN:
             try_rewrite_assign(i)
@@ -71,7 +71,7 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
 
         # [FR-PLUG-0003] After built-in rewrites, consult the sugar rule registry
         # for plugin-registered AST rewrites.  apply_sugar_rules_ast re-reads
-        # expr_tag[i] to pick up any tag changes made by the built-in arms above.
+        # expr_owner_tag(i) to pick up any tag changes made by the built-in arms above.
         # [STATIC-NEXT] replace dynamic registry call with inlined specialised
         # lowering when static rule baking (FR-PLUG-0004) lands.
         val current_ast_rule_generation = ast_rewrite_rule_generation()
@@ -80,7 +80,7 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
             dynamic_ast_rules = has_ast_rewrite_rules()
 
         if dynamic_ast_rules:
-            val _new_tag = expr_tag[i]
+            val _new_tag = expr_owner_tag(i)
             val _rewritten = apply_sugar_rules_ast(_new_tag, i)
             if _rewritten != i:
                 # A plugin rule replaced the node with a newly-allocated node.
@@ -98,7 +98,7 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
     var j = stmt_start
     val s_count = stmt_count()
     while j < s_count:
-        if stmt_tag[j] == STMT_FOR:
+        if stmt_get_tag(j) == STMT_FOR:
             try_rewrite_chars_iter_stmt(j)
         j = j + 1
 
@@ -108,7 +108,7 @@ fn desugar_collections_static(start_from: i64, stmt_start: i64):
     var i = start_from
     val count = expr_count()
     while i < count:
-        val tag = expr_tag[i]
+        val tag = expr_owner_tag(i)
         if tag == EXPR_ASSIGN:
             try_rewrite_assign(i)
         elif tag == EXPR_COMPOUND_ASSIGN:
@@ -119,7 +119,7 @@ fn desugar_collections_static(start_from: i64, stmt_start: i64):
     var j = stmt_start
     val s_count = stmt_count()
     while j < s_count:
-        if stmt_tag[j] == STMT_FOR:
+        if stmt_get_tag(j) == STMT_FOR:
             try_rewrite_chars_iter_stmt(j)
         j = j + 1
 
@@ -152,7 +152,7 @@ fn is_definite_scalar_addend(e: i64) -> bool:
     """True when `e`'s AST shape can only ever be a scalar/text value, never
     a collection -- so rewriting `target = target + e` into a `.merge(e)`
     MethodCall would be wrong regardless of `target`'s (unknown) type."""
-    val tag = expr_tag[e]
+    val tag = expr_owner_tag(e)
     # EXPR_SUFFIXED_LIT (`1i64`, `2u8`, `1.5f32`) is a DISTINCT arena tag from
     # EXPR_INT_LIT/EXPR_FLOAT_LIT -- a suffixed literal is NOT tagged as a
     # plain int/float literal. Omitting it let `c.n = c.n + 1i64` fall through
@@ -175,35 +175,35 @@ fn is_definite_scalar_addend(e: i64) -> bool:
 # ============================================================================
 
 fn try_rewrite_assign(e: i64):
-    val target = expr_left[e]
-    val value = expr_right[e]
+    val target = expr_owner_left(e)
+    val value = expr_owner_right(e)
     if target < 0 or value < 0:
         return
 
     # Pattern E: x = x.push(item) → x.push(item)
     # Drop redundant assignment wrapping an in-place mutation
-    if expr_tag[value] == EXPR_METHOD_CALL:
-        val method = expr_s_val[value]
-        val receiver = expr_left[value]
+    if expr_owner_tag(value) == EXPR_METHOD_CALL:
+        val method = expr_owner_str(value)
+        val receiver = expr_owner_left(value)
         if method == "push" or method == "merge":
             if exprs_refer_same(target, receiver):
                 # Rewrite: promote the method call, discard the assign
-                expr_tag[e] = EXPR_METHOD_CALL
-                expr_left[e] = receiver
-                expr_s_val[e] = method
-                expr_args[e] = expr_args[value]
-                expr_right[e] = -1
+                expr_owner_tag_set(e, EXPR_METHOD_CALL)
+                expr_owner_left_set(e, receiver)
+                expr_owner_str_set(e, method)
+                expr_owner_args_set(e, expr_owner_args(value))
+                expr_owner_right_set(e, -1)
                 _collection_desugar_rewrites = _collection_desugar_rewrites + 1
                 return
 
     # value must be BINARY(+, lhs, rhs)
-    if expr_tag[value] != EXPR_BINARY:
+    if expr_owner_tag(value) != EXPR_BINARY:
         return
-    if expr_i_val[value] != TOK_PLUS:
+    if expr_owner_int(value) != TOK_PLUS:
         return
 
-    val rhs_left = expr_left[value]
-    val rhs_right = expr_right[value]
+    val rhs_left = expr_owner_left(value)
+    val rhs_right = expr_owner_right(value)
     if rhs_left < 0 or rhs_right < 0:
         return
 
@@ -212,15 +212,15 @@ fn try_rewrite_assign(e: i64):
         return
 
     # Pattern A: x = x + [single_item] → x.push(single_item)
-    if expr_tag[rhs_right] == EXPR_ARRAY_LIT:
-        val elements = expr_args[rhs_right]
+    if expr_owner_tag(rhs_right) == EXPR_ARRAY_LIT:
+        val elements = expr_owner_args(rhs_right)
         if elements.len() == 1:
             # Single element — rewrite to .push(element)
-            expr_tag[e] = EXPR_METHOD_CALL
-            expr_left[e] = target
-            expr_s_val[e] = "push"
-            expr_args[e] = elements
-            expr_right[e] = -1
+            expr_owner_tag_set(e, EXPR_METHOD_CALL)
+            expr_owner_left_set(e, target)
+            expr_owner_str_set(e, "push")
+            expr_owner_args_set(e, elements)
+            expr_owner_right_set(e, -1)
             _collection_desugar_rewrites = _collection_desugar_rewrites + 1
             return
         # Multi-element array literal [a, b, c] — don't rewrite
@@ -234,11 +234,11 @@ fn try_rewrite_assign(e: i64):
         return
 
     # Pattern B: x = x + other_arr → x.merge(other_arr)
-    expr_tag[e] = EXPR_METHOD_CALL
-    expr_left[e] = target
-    expr_s_val[e] = "merge"
-    expr_args[e] = [rhs_right]
-    expr_right[e] = -1
+    expr_owner_tag_set(e, EXPR_METHOD_CALL)
+    expr_owner_left_set(e, target)
+    expr_owner_str_set(e, "merge")
+    expr_owner_args_set(e, [rhs_right])
+    expr_owner_right_set(e, -1)
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
 # ============================================================================
@@ -248,22 +248,22 @@ fn try_rewrite_assign(e: i64):
 fn try_rewrite_compound_assign(e: i64):
     # Compound assign stores: i_val=operator, left=target, right=value
     # We only handle += (TOK_PLUS)
-    if expr_i_val[e] != TOK_PLUS:
+    if expr_owner_int(e) != TOK_PLUS:
         return
 
-    val target = expr_left[e]
-    val value = expr_right[e]
+    val target = expr_owner_left(e)
+    val value = expr_owner_right(e)
     if target < 0 or value < 0:
         return
 
-    if expr_tag[value] == EXPR_ARRAY_LIT:
-        val elements = expr_args[value]
+    if expr_owner_tag(value) == EXPR_ARRAY_LIT:
+        val elements = expr_owner_args(value)
         if elements.len() == 1:
-            expr_tag[e] = EXPR_METHOD_CALL
-            expr_left[e] = target
-            expr_s_val[e] = "push"
-            expr_args[e] = elements
-            expr_right[e] = -1
+            expr_owner_tag_set(e, EXPR_METHOD_CALL)
+            expr_owner_left_set(e, target)
+            expr_owner_str_set(e, "push")
+            expr_owner_args_set(e, elements)
+            expr_owner_right_set(e, -1)
             _collection_desugar_rewrites = _collection_desugar_rewrites + 1
             return
         return
@@ -274,11 +274,11 @@ fn try_rewrite_compound_assign(e: i64):
         return
 
     # x += other_arr → x.merge(other_arr)
-    expr_tag[e] = EXPR_METHOD_CALL
-    expr_left[e] = target
-    expr_s_val[e] = "merge"
-    expr_args[e] = [value]
-    expr_right[e] = -1
+    expr_owner_tag_set(e, EXPR_METHOD_CALL)
+    expr_owner_left_set(e, target)
+    expr_owner_str_set(e, "merge")
+    expr_owner_args_set(e, [value])
+    expr_owner_right_set(e, -1)
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
 # ============================================================================
@@ -286,29 +286,29 @@ fn try_rewrite_compound_assign(e: i64):
 # ============================================================================
 
 fn try_rewrite_chars_iter_expr(e: i64):
-    val iterable = expr_left[e]
+    val iterable = expr_owner_left(e)
     if iterable < 0:
         return
-    if expr_tag[iterable] != EXPR_METHOD_CALL:
+    if expr_owner_tag(iterable) != EXPR_METHOD_CALL:
         return
-    if expr_s_val[iterable] != "chars":
+    if expr_owner_str(iterable) != "chars":
         return
-    if expr_args[iterable].len() != 0:
+    if expr_owner_args(iterable).len() != 0:
         return
-    expr_left[e] = expr_left[iterable]
+    expr_owner_left_set(e, expr_owner_left(iterable))
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
 fn try_rewrite_chars_iter_stmt(s: i64):
-    val iterable = stmt_expr[s]
+    val iterable = stmt_get_expr(s)
     if iterable < 0:
         return
-    if expr_tag[iterable] != EXPR_METHOD_CALL:
+    if expr_owner_tag(iterable) != EXPR_METHOD_CALL:
         return
-    if expr_s_val[iterable] != "chars":
+    if expr_owner_str(iterable) != "chars":
         return
-    if expr_args[iterable].len() != 0:
+    if expr_owner_args(iterable).len() != 0:
         return
-    stmt_expr[s] = expr_left[iterable]
+    stmt_set_expr(s, expr_owner_left(iterable))
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
 # [FR-PLUG-0003 DONE] apply_sugar_rules_ast(tag, node_index) is now called inline in the
@@ -326,21 +326,21 @@ fn exprs_refer_same(a: i64, b: i64) -> bool:
     if a < 0 or b < 0:
         return false
 
-    val tag_a = expr_tag[a]
-    val tag_b = expr_tag[b]
+    val tag_a = expr_owner_tag(a)
+    val tag_b = expr_owner_tag(b)
 
     # Both identifiers with same name: x == x
     if tag_a == EXPR_IDENT and tag_b == EXPR_IDENT:
-        return expr_s_val[a] == expr_s_val[b]
+        return expr_owner_str(a) == expr_owner_str(b)
 
     # Both index expressions: dict[k] == dict[k]
     if tag_a == EXPR_INDEX and tag_b == EXPR_INDEX:
-        return exprs_refer_same(expr_left[a], expr_left[b]) and exprs_refer_same(expr_right[a], expr_right[b])
+        return exprs_refer_same(expr_owner_left(a), expr_owner_left(b)) and exprs_refer_same(expr_owner_right(a), expr_owner_right(b))
 
     # Both field access: obj.field == obj.field
     if tag_a == EXPR_FIELD_ACCESS and tag_b == EXPR_FIELD_ACCESS:
-        if expr_s_val[a] != expr_s_val[b]:
+        if expr_owner_str(a) != expr_owner_str(b):
             return false
-        return exprs_refer_same(expr_left[a], expr_left[b])
+        return exprs_refer_same(expr_owner_left(a), expr_owner_left(b))
 
     false

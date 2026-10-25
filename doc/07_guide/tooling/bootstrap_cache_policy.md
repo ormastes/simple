@@ -6,6 +6,17 @@ Compiler rebuilds, one-binary mode, successful Phase 2 completion and cache age
 never authorize deletion. Failed attempts retain completed native objects,
 frontend records, runtime objects and logs.
 
+## Retaining immutable generations during a refresh
+
+`SIMPLE_BOOTSTRAP_RETAIN_GENERATIONS` accepts a comma-separated keep-set of
+existing direct-child generation names. It preserves those directories during
+canonical pruning; it does not admit a compiler or change cache compatibility.
+The default pruning behavior is unchanged when the variable is unset or empty.
+Invalid, duplicate, missing, symlinked or excessive entries reject the entire
+keep-set before deletion. The caller reports pruning failures as warnings, so a
+refresh that requires preservation must validate the nonempty set before launch
+and verify each retained producer/runtime identity after publication.
+
 Full bootstrap combines this cache default with go-to-end collection on hosts
 and CI. A retry or later bootstrap phase does not imply a clean build. Use an
 explicit clean/invalidation option only for the requested scope, and preserve
@@ -209,3 +220,9 @@ describes a scoped Linux/WSL producer whose object directory follows the lexical
 cache parent, not TMPDIR alone. A reviewed RAM-parent alias may retain the same
 physical cache; it must preserve all normal fingerprints and single-writer
 authority. Storage indirection is not forced cache admission.
+
+## State as of 2026-10-25
+
+Shard knobs, the `.spab`/DigestV1/GuardIdV1/single-flight/ledger/eviction cache
+protocol and the Lean formal gates are summarised in
+[bootstrap options](bootstrap_options.md).

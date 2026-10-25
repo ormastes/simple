@@ -70,9 +70,17 @@ class PureDatabaseBitmapQueryOwnedV1:
     capability_bits: u64
     reason: text
 
+# @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 2):
+# native MIR lowers `Some(<trait value>)` into an Option<trait> slot by coercing the
+# Option handle itself to the trait, so the concrete owner is empty and lowering fails
+# with "missing native trait implementation ... for ". Box the reducer in a class so
+# the Option payload is a record, not a trait object.
+class _PureDatabaseReducerSlotV1:
+    reducer: PureDatabaseBitmapReducerV1
+
 class _PureDatabaseSelectOwnedV1:
     query: Result<[DbRow], DbError>
-    reducer: PureDatabaseBitmapReducerV1?
+    reducer: _PureDatabaseReducerSlotV1?
     provider_used: bool
     provider_and_calls: i64
     provider_identity: text
@@ -83,11 +91,12 @@ class _PureDatabaseSelectOwnedV1:
     reason: text
 
 fn _pure_database_select_owned_v1(query: Result<[DbRow], DbError>,
-        reducer: PureDatabaseBitmapReducerV1?, provider_used: bool,
+        reducer: _PureDatabaseReducerSlotV1?, provider_used: bool,
         provider_and_calls: i64, reason: text) -> _PureDatabaseSelectOwnedV1:
-    if val Some(strategy) = reducer:
+    if val Some(slot) = reducer:
+        val strategy = slot.reducer
         return _PureDatabaseSelectOwnedV1(
-            query: query, reducer: Some(strategy), provider_used: provider_used,
+            query: query, reducer: Some(slot), provider_used: provider_used,
             provider_and_calls: provider_and_calls,
             provider_identity: strategy.provider_identity(),
             implementation_identity: strategy.implementation_identity(),
@@ -1869,10 +1878,10 @@ class PureDatabase:
                 provider_and_calls: 0, provider_identity: identity,
                 implementation_identity: implementation, interface_identity: interface_id,
                 abi_digest: digest, capability_bits: caps, reason: "select-result-cache-hit")
-        val selected = self._do_select_bitmap_owned_v1(stmt.select, params, Some(reducer))
+        val selected = self._do_select_bitmap_owned_v1(stmt.select, params, Some(_PureDatabaseReducerSlotV1(reducer: reducer)))
         self._select_cache_store_v1(table_idx, sql, selected.query)
         val next_reducer = match selected.reducer:
-            Some(value): value
+            Some(value): value.reducer
             nil: reducer
         PureDatabaseBitmapQueryOwnedV1(
             query: selected.query, reducer: next_reducer,
@@ -3020,7 +3029,8 @@ class PureDatabase:
             # `last_insert_rowid` advanced, so every autoincrement consumer
             # (enterprise_store ordered reads, UiAccessStore) read NULL ids.
             val auto_pk_ci = self._tbl_pk_col[ti]
-            if auto_pk_ci >= 0 and auto_pk_ci < row_vals.len() as i32 and row_vals[auto_pk_ci].is_null():
+            # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1): read via _dbvalue_at
+            if auto_pk_ci >= 0 and auto_pk_ci < row_vals.len() as i32 and _dbvalue_at(row_vals, auto_pk_ci).is_null():
                 if self._pk_col_is_integer(ti, auto_pk_ci):
                     val auto_id = self._next_free_rowid(ti)
                     row_vals[auto_pk_ci] = DbValue.Integer(value: auto_id)
@@ -3044,7 +3054,8 @@ class PureDatabase:
             if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
                 self._ensure_pk_map(ti)
                 var pkm = self._tbl_pk_map[ti]
-                val pk_txt_ins = row_vals[pk_ci].to_text()
+                # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1): read via _dbvalue_at
+                val pk_txt_ins = _dbvalue_at(row_vals, pk_ci).to_text()
                 pkm[pk_txt_ins] = tuple_pos
                 self._tbl_pk_map[ti] = pkm
                 self._pk_flat["{ti}:" + pk_txt_ins] = tuple_pos
@@ -3124,7 +3135,8 @@ class PureDatabase:
                 else:
                     row_vals.push(DbValue.Null)
                 rci = rci + 1
-            val pk_val = row_vals[pk_col_idx]
+            # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 1): read via _dbvalue_at
+            val pk_val = _dbvalue_at(row_vals, pk_col_idx)
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
             val cur_typed = self._tbl_typed[ti]
@@ -3190,7 +3202,7 @@ class PureDatabase:
         self._do_select_bitmap_owned_v1(sel, params, nil).query
 
     me _do_select_bitmap_owned_v1(sel: SqlSelect, params: [DbValue],
-            reducer: PureDatabaseBitmapReducerV1?) -> _PureDatabaseSelectOwnedV1:
+            reducer: _PureDatabaseReducerSlotV1?) -> _PureDatabaseSelectOwnedV1:
         var active_reducer = reducer
         var provider_used = false
         var provider_and_calls: i64 = 0
@@ -3350,7 +3362,8 @@ class PureDatabase:
         if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix and not used_like_typed:
             if use_typed:
                 var used_bitmap_reduction = false
-                if val Some(strategy) = active_reducer:
+                if val Some(active_slot) = active_reducer:
+                    val strategy = active_slot.reducer
                     val terms = _pure_database_bitmap_terms_v1(
                         sel, params, col_map, typed, n_tuples)
                     if terms.len() == 2 and not has_join:
@@ -3371,7 +3384,15 @@ class PureDatabase:
                         val calls_before = strategy.and_call_count()
                         val reduced = strategy.reduce_and_owned_v1(
                             left_words, right_words, n_tuples as i64)
-                        active_reducer = Some(reduced.reducer)
+                        # @workaround doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md (cause 2):
+                        # a trait-typed field read (even through a typed `val`) passed to a
+                        # constructor has no concrete owner; a match result carries one.
+                        # `nil: strategy` is unreachable and exists for exhaustiveness only;
+                        # do not fold this back into a direct `reduced.reducer` read.
+                        val next_reducer = match Some(reduced):
+                            Some(owned): owned.reducer
+                            nil: strategy
+                        active_reducer = Some(_PureDatabaseReducerSlotV1(reducer: next_reducer))
                         reason = reduced.reason
                         val calls_after = reduced.reducer.and_call_count()
                         val call_delta = if calls_after >= calls_before:

@@ -554,3 +554,15 @@ Applied: header pointer; lease → pin/view/future wording (items 1-2);
 owners: name `GuardId` as proposed; thread the four cache limits into P6; implement
 the P3 pointer fill through single-flight; extend `module_public_summary_facts_v1.spl`
 rather than adding a parallel producer.
+
+## Follow-up: P-G2 specialization list source (2026-10-25)
+
+P-G2 (PR #4600) writes each file's `generic-spec` TLDR section from a textual
+`Name<args>` pre-pass. It is exact only when every generic use is textual; any
+inferred or non-textual use (bare imported template, a name imported from a
+generic-bearing module, wildcard/aliased import, unresolved import) marks the
+list incomplete and the planner falls back to the interface rule. **Follow-up
+(P-G2/P-G3):** write the list from the instance set module-scoped mono actually
+instantiated for the file (`run_monomorphization_module_scoped_v1`); the text
+scan then becomes a pre-pass hint only. Rows are keyed with the shared
+`concrete_tldr_key_for_v1` (same derivation as `acquire_concrete_tldr`).

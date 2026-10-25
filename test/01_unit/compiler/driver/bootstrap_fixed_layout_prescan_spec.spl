@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bootstrap-fixed lane prescans every closure layout before lowering
+
+Stage 3 (2026-10-25, frozen admitted Stage 2, 1453-module closure): MIR
+emitted 479 "array return record element has no unique provider layout"
+errors (e.g. `compiler.common.driver_source_file::SourceFile`). The
+bootstrap-fixed lane built a fresh `MirLowering` and lowered closure modules
+one by one without `prescan_module_struct_names`, so
+`composite_layout_digests` only knew modules lowered so far: any consumer
+lowered before its provider could not prove the provider's layout. The
+`--entry-closure` lane always prescans the whole closure first.
+
+The lane only runs for the Stage 3 entry under SIMPLE_BOOTSTRAP=1, so this
+pins the wiring in source (the neighboring driver-spec idiom).
+"""
+
+# @tag: unit, compiler, driver, bootstrap, stage3
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.driver_pipeline_lowering.*
+
+describe "bootstrap-fixed layout prescan":
+    it "prescans closure layouts before enum and composite inventory and body lowering":
+        val driver = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        val enum_pos = driver.index_of("bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)")
+        val prescan_pos = driver.index_of("bootstrap_lowering.prescan_module_struct_names(")
+        val composite_pos = driver.index_of("bootstrap_lowering.register_module_composite_inventory_v1(bootstrap_enum_modules)")
+        val closure_pos = driver.index_of("bootstrap_lowering.lower_bootstrap_closure_module(")
+        expect(enum_pos >= 0).to_equal(true)
+        expect(prescan_pos >= 0).to_equal(true)
+        expect(enum_pos > prescan_pos).to_equal(true)
+        expect(composite_pos > enum_pos).to_equal(true)
+        expect(closure_pos > composite_pos).to_equal(true)
+        expect(driver.split("var bootstrap_prescan_idx = 0").len()).to_equal(2)

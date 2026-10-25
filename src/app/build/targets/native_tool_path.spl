@@ -1,0 +1,45 @@
+# Native action tool locations have a different authority from declared source
+# paths: an immutable compiler may live outside the checkout being compiled.
+# Relative receipts retain their existing vocabulary. External POSIX tools must
+# name an existing canonical regular executable, never a symlink spelling.
+use app.build.targets.artifact_receipt.{declared_path_valid}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use app.io.process_ops.{process_run_bounded_direct}
+
+pub fn native_tool_path_valid_v1(path: text) -> bool:
+    if not path.starts_with("/"):
+        return declared_path_valid(path)
+    if path == "/" or path.contains("|") or path.contains("\\") or
+            path.contains("\n") or path.contains("\r") or path.contains("\0"):
+        return false
+    for segment in path[1:].split("/"):
+        if segment == "" or segment == "." or segment == "..": return false
+    true
+
+pub fn native_tool_absolute_path_v1(repo_root: text, path: text) -> text:
+    if not native_tool_path_valid_v1(path): return ""
+    if not path.starts_with("/"): return repo_root + "/" + path
+    match path_final_existing(path):
+        case Err(_): return ""
+        case Ok(final_path):
+            if final_path.path != path: return ""
+    if not file_is_regular_no_follow(path): return ""
+    # Permission probe only: no shell and no execution of the candidate tool.
+    # The existing executable-pin provider is Linux/static-ELF-only, so it
+    # cannot validate a Darwin compiler. Keep this probe bounded and fail closed.
+    val (_, _, status) = process_run_bounded_direct("/bin/test", ["-x", path], 1000, 1024)
+    if status != 0: return ""
+    path
+
+pub fn native_tool_receipt_path_v1(repo_root: text, executable: text) -> text:
+    if not native_tool_path_valid_v1(executable): return ""
+    var resolved = executable
+    if executable.starts_with("/"):
+        match path_final_existing(executable):
+            case Err(_): return ""
+            case Ok(final_path): resolved = final_path.path
+    val prefix = repo_root + "/"
+    val receipt_path = if resolved.starts_with(prefix): resolved[prefix.len():] else: resolved
+    if native_tool_absolute_path_v1(repo_root, receipt_path) == "": return ""
+    receipt_path

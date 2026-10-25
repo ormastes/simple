@@ -1,0 +1,189 @@
+#!/bin/sh
+# Exercise real main-script lock/env functions with Cargo and workspace
+# mutation stubbed. Portable locks and the env -i construction are real.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+MAIN=$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/shared-cache-main-test.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'portable_lock_release_all >/dev/null 2>&1 || :; rm -rf -- "$tmp"' EXIT HUP INT TERM
+extracted=$tmp/actual-main-functions.sh
+
+python3 - "$MAIN" "$extracted" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read().splitlines(True)
+names = ("bootstrap_acquire_shared_rust_cargo_cache",
+         "run_rust_authority_command", "run_rust_authority_env",
+         "bootstrap_cleanup")
+out = []
+for name in names:
+    start = next((i for i, line in enumerate(source)
+                  if line.startswith(name + "() {")), None)
+    if start is None:
+        raise SystemExit("missing main function: " + name)
+    depth = 0
+    end = None
+    for i in range(start, len(source)):
+        # Shell parameter-expansion braces are balanced, as are the function's
+        # block braces; this bounded extractor keeps nested blocks intact.
+        depth += source[i].count("{") - source[i].count("}")
+        if i > start and depth == 0:
+            end = i + 1
+            break
+    if end is None:
+        raise SystemExit("unterminated main function: " + name)
+    out.extend(source[start:end])
+
+text = "".join(source)
+command = text.index("run_rust_authority_command() {")
+prepare = text.index("  prepare_rust_authority_workspace", command)
+cache = text.index("  bootstrap_acquire_shared_rust_cargo_cache || return 1", command)
+if not cache < prepare:
+    raise SystemExit("cache lock is not acquired before workspace preparation")
+admission = text.index("Rust runtime authority private-admission origin")
+local_release = text.index("  bootstrap_release_rust_authority || {", admission)
+cache_release = text.index("portable_lock_release \"${rust_shared_cache_lock_handle}\"", local_release)
+pin = text.index("bootstrap_authority_pin_stage4", cache_release)
+if not local_release < cache_release < pin:
+    raise SystemExit("shared cache lock is not released after private admission")
+cleanup_start = next(i for i, line in enumerate(source)
+                     if line.startswith("bootstrap_cleanup() {"))
+if "portable_lock_release \"${rust_shared_cache_lock_handle}\"" not in "".join(out[-len(out):]):
+    cleanup_source = "".join(source[cleanup_start:])
+    cleanup_end = cleanup_source.index("\n}")
+    if "portable_lock_release \"${rust_shared_cache_lock_handle}\"" not in cleanup_source[:cleanup_end]:
+        raise SystemExit("normal cleanup does not release the shared cache lock")
+open(sys.argv[2], "w", encoding="utf-8").writelines(out)
+PY
+
+. "$ROOT/scripts/bootstrap/bootstrap-authority-wiring.shs"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=$ROOT/scripts/check/lib/portable-hardlink-lock.pl
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$ROOT/scripts/check/lib/portable-process-lock.shs"
+. "$extracted"
+
+repo=$tmp/repo
+linked=$tmp/linked
+mkdir -p "$repo" "$tmp/cache-root"
+git init -q "$repo"
+git -C "$repo" -c user.name=cache-test -c user.email=cache-test@example.invalid commit --allow-empty -qm initial
+git -C "$repo" worktree add -q -b sibling "$linked" HEAD
+mkdir -p "$linked/cache"
+repo=$(CDPATH= cd -- "$repo" && pwd -P)
+linked=$(CDPATH= cd -- "$linked" && pwd -P)
+cache_root=$linked/cache
+common=$(bootstrap_authority_git_common_dir "$repo")
+[ "$common" = "$(bootstrap_authority_git_common_dir "$linked")" ]
+
+rust_shared_cache_root=
+rust_shared_cache_common_dir=$common
+rust_shared_cache_lock_handle=
+rust_target_lock_handle=
+repo_root=$repo
+os=linux
+SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS=0
+bootstrap_acquire_shared_rust_cargo_cache
+held_default=$rust_shared_cache_lock_handle
+[ -n "$held_default" ]
+if ( portable_lock_acquire "$common/simple-rust-cargo-cache-locks" authority 0 ); then
+  echo 'FAIL: default Cargo authority did not serialize on the shared lock' >&2
+  exit 1
+fi
+
+# The sibling override resolves to the same common lock; repeat acquisition
+# validates and keeps the owned handle instead of taking a second lock.
+repo_root=$linked
+rust_shared_cache_root=$cache_root
+[ "$(bootstrap_authority_rust_cargo_cache_common_dir "$repo_root" "$cache_root")" = "$common" ]
+bootstrap_acquire_shared_rust_cargo_cache
+[ "$rust_shared_cache_lock_handle" = "$held_default" ]
+
+events=$tmp/events
+: >"$events"
+bootstrap_acquire_rust_authority() {
+  printf 'authority-lock\n' >>"$events"
+  rust_target_lock_handle=stub-authority-handle
+}
+prepare_rust_authority_workspace() { printf 'prepare\n' >>"$events"; }
+absolute_path() { printf '%s\n' "$1"; }
+bootstrap_progress_mark() { :; }
+progress_log=
+log_dir=$tmp
+rust_authority_home=$tmp/home
+rust_authority_cargo_home=$tmp/cargo-home
+rust_authority_tmp=$tmp/rust-tmp
+rust_authority_target=$cache_root/rust-cargo-target-test
+rust_authority_lto=on
+rust_llvm_status=disabled
+rustc_abs=/fixture/rustc
+cc_abs=/fixture/cc
+simple_abi_cflags=
+jobs=10
+mingw_linker= mingw_cc= mingw_ar= mingw_cflags= mingw_rustflags=
+windows_include= windows_lib= windows_libpath= windows_system_root=
+windows_system_drive= windows_program_data= windows_temp=
+rust_llvm_prefix= rust_llvm_homebrew_prefix= rust_llvm_library_path=
+rust_llvm_sdkroot=
+PATH=/usr/bin:/bin
+export PATH
+rust_authority_env_log=$tmp/preflight-env.txt
+run_logged() {
+  captured_log=$1
+  shift
+  if [ "$captured_log" = bootstrap-preflight ]; then
+    "$@" >"$rust_authority_env_log" 2>&1
+    return $?
+  fi
+  for captured_arg do
+    case "$captured_arg" in
+      CARGO_TARGET_DIR=*) printf 'cargo-target=%s\n' "${captured_arg#*=}" >>"$events" ;;
+    esac
+  done
+  printf 'cargo-call\n' >>"$events"
+  return 0
+}
+run_rust_authority_command test-log on /fixture/cargo build
+cat >"$tmp/expected-events" <<EOF
+authority-lock
+prepare
+cargo-target=$rust_authority_target
+cargo-call
+EOF
+cmp -s "$events" "$tmp/expected-events"
+
+# Execute the extracted production env constructor through env -i. This proves
+# preflight sees the same validated cache root and target selection.
+os=linux
+rust_shared_cache_root=$cache_root
+run_rust_authority_env bootstrap-preflight \
+  "CARGO_TARGET_DIR=$rust_authority_target" /bin/sh -c 'env'
+grep -Fx "CARGO_TARGET_DIR=$rust_authority_target" "$rust_authority_env_log" >/dev/null
+grep -Fx "SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT=$cache_root" "$rust_authority_env_log" >/dev/null
+
+# Invoke the extracted real cleanup in its own process; then prove the same
+# portable lock can be acquired again by this process.
+cleanup_probe=$tmp/cleanup-probe.sh
+cat >"$cleanup_probe" <<'SH'
+set -eu
+. "$ROOT/scripts/bootstrap/bootstrap-authority-wiring.shs"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=$ROOT/scripts/check/lib/portable-hardlink-lock.pl
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$ROOT/scripts/check/lib/portable-process-lock.shs"
+. "$EXTRACTED"
+portable_lock_acquire "$LOCK_ROOT" authority 0
+rust_shared_cache_lock_handle=$PORTABLE_LOCK_HANDLE
+bootstrap_verdict_written=1 bootstrap_abnormal_signal= bootstrap_deploy_tx_active=0
+progress_log= bootstrap_progress_state= bootstrap_progress_pid=
+attempt_archive= log_dir= stage3_provenance_dir=
+deploy_lock_handle= rust_target_lock_handle= bootstrap_lock_handle=
+resume_stage4_release_continuation_lock() { :; }
+bootstrap_cache_release_all() { :; }
+bootstrap_cleanup 0
+SH
+portable_lock_release "$held_default"
+ROOT=$ROOT EXTRACTED=$extracted LOCK_ROOT=$common/simple-rust-cargo-cache-locks \
+  sh "$cleanup_probe"
+portable_lock_acquire "$common/simple-rust-cargo-cache-locks" authority 0
+portable_lock_release "$PORTABLE_LOCK_HANDLE"
+echo 'PASS: main cache lock, Cargo ordering, preflight env, cleanup and release contracts'

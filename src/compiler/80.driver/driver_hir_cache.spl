@@ -56,14 +56,17 @@ use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envel
 use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_complete, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_deps_publish_v1, mono_module_scoped_selected_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -103,7 +106,15 @@ fn hir_cache_enabled() -> bool:
         return false
     # Requires the front-end cache scope: that is the compiler identity the
     # header is checked against. No scope, no identity, no cache.
-    frontend_parse_cache_scope() != ""
+    _hir_cache_identity_scope() != ""
+
+# Identity the HIR header folds. Equals frontend_parse_cache_scope() whenever
+# the frontend cache is on; with SIMPLE_FRONTEND_CACHE=0 it falls back to the
+# published SIMPLE_FRONTEND_CACHE_SCOPE so the HIR cache keeps working.
+fn _hir_cache_identity_scope() -> text:
+    hir_cache_identity_scope_v1(frontend_parse_cache_scope(),
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "",
+        sosix_env_get_nullable("SIMPLE_FRONTEND_CACHE") ?? "")
 
 fn hir_cache_dir() -> text:
     val root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? ""
@@ -158,7 +169,7 @@ fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
     hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
 fn hir_cache_header() -> text:
-    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
+    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
 
 # `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
 # source + closure digests, but the HEADER additionally folds
@@ -788,10 +799,18 @@ fn hir_shard_owner() -> text:
     sosix_env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? hir_shard_spec()
 
 fn hir_shard_begin(path: text, key: text) -> i64:
+    # P5: a worker whose surfaces cover only its seeds' import closure never
+    # claims a module outside it (driver_worker_surface_closure_v1.spl).
+    if not worker_surface_claim_allowed_v1(path): return 0
     val queue = _hir_shard_queue_dir()
     if queue == "":
         return if hir_shard_owns(path): 1 else: 0
     if hir_shard_recovery_blocked(queue): return -1
+    # File-worker HIR child (driver_build/native_file_worker_v1.spl): stop
+    # claiming after SIMPLE_HIR_SHARD_CLAIM_LIMIT modules; the rest stay
+    # unclaimed for the next round or another worker. Unset/<=0 = no limit.
+    val claim_limit = (sosix_env_get_nullable("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "").to_i64() ?? 0
+    if claim_limit > 0 and _hir_shard_claimed >= claim_limit: return 0
     val claimed = hir_shard_recovery_claim(queue, hir_shard_owner(), path, key)
     if claimed > 0:
         _hir_shard_claimed = _hir_shard_claimed + 1
@@ -800,6 +819,16 @@ fn hir_shard_begin(path: text, key: text) -> i64:
 fn hir_shard_finish(path: text, state: text, cache_stored: bool) -> bool:
     if not hir_shard_active() or _hir_shard_queue_dir() == "": return true
     hir_shard_recovery_terminal(_hir_shard_queue_dir(), hir_shard_owner(), path, state, cache_stored)
+
+# File-worker P4: deps records are written only when a file worker drives
+# this HIR child (its hir ledger env is set), unless SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
+fn hir_shard_deps_wanted_v1() -> bool:
+    hir_shard_active() and _hir_shard_queue_dir() != "" and
+        mono_module_scoped_selected_v1(sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? "") != "")
+
+fn hir_shard_publish_deps_v1(path: text, deps: [text]) -> bool:
+    native_file_worker_deps_publish_v1(_hir_shard_queue_dir(), path, deps)
 
 fn hir_shard_complete() -> bool:
     if _hir_shard_queue_dir() == "": return true
@@ -959,7 +988,7 @@ fn hir_shard_level_count(levels: [i64]) -> i64:
     top + 1
 
 fn hir_shard_summary(levels: i64, lowered: i64) -> text:
-    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels}"
+    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels} {worker_surface_counters_v1()}"
 
 export HIR_CACHE_ENTRY_VERSION, HIR_CACHE_CHECKSUM_PREFIX, HIR_CACHE_REJECT_REASONS
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
@@ -978,6 +1007,7 @@ export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SA
 export hir_cache_load_reencodes_v1, hir_cache_adoption_receipt_v1
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
+export hir_shard_deps_wanted_v1, hir_shard_publish_deps_v1
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block
 export hir_shard_inventory
 

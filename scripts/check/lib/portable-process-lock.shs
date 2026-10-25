@@ -301,6 +301,42 @@ portable_lock_recover_stale() {
   [ "${portable_lock_recover_admitted}" -eq 1 ]
 }
 
+# Owner PID liveness for orphan reaping. POSIX: kill -0. MSYS/Cygwin: also ask
+# the native process table, because kill -0 only sees MSYS pids.
+portable_lock_pid_alive() {
+  kill -0 "$1" 2>/dev/null && return 0
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      portable_lock_winpid=$(cat "/proc/$1/winpid" 2>/dev/null || printf '%s' "$1")
+      tasklist //FI "PID eq ${portable_lock_winpid}" //NH 2>/dev/null |
+        grep -q "[[:space:]]${portable_lock_winpid}[[:space:]]" && return 0
+      ;;
+  esac
+  return 1
+}
+
+# A killed bootstrap can leave orphans (launcher, rustc, helpers, watcher) in
+# its process group, which keeps the claim "live" so the next run times out
+# waiting for ownership. When the recorded owner itself is provably gone (pid
+# not alive) and it led its own group (pid == pgid, as the session wrapper
+# guarantees), nothing legitimate can remain in that group: terminate it so
+# claim-state can go dead. Disabled with SIMPLE_LOCK_REAP_ORPHANS=0.
+portable_lock_reap_orphans() {
+  [ "${SIMPLE_LOCK_REAP_ORPHANS:-1}" != 0 ] || return 1
+  [ "$1" = "$2" ] || return 1
+  [ "$2" != "${PORTABLE_LOCK_OWNER_PGID}" ] || return 1
+  portable_lock_pid_alive "$1" && return 1
+  kill -0 -- "-$2" 2>/dev/null || return 1
+  echo "portable-lock: stale lock owner pid $1 is gone; reaping orphaned process group $2" >&2
+  kill -TERM -- "-$2" 2>/dev/null || :
+  portable_lock_reap_i=0
+  while [ "${portable_lock_reap_i}" -lt 5 ] && kill -0 -- "-$2" 2>/dev/null; do
+    sleep 1; portable_lock_reap_i=$((portable_lock_reap_i + 1))
+  done
+  kill -0 -- "-$2" 2>/dev/null && kill -KILL -- "-$2" 2>/dev/null
+  return 0
+}
+
 portable_lock_acquire() {
   portable_lock_canonical_output "$1" || return $?
   portable_lock_root=${PORTABLE_LOCK_CANONICAL_OUTPUT}
@@ -332,13 +368,23 @@ portable_lock_acquire() {
       portable_lock_stale_pid=${PORTABLE_LOCK_LOADED_PID}
       portable_lock_stale_start=${PORTABLE_LOCK_LOADED_START}
       portable_lock_stale_pgid=${PORTABLE_LOCK_LOADED_PGID}
-      if [ "$(portable_lock_claim_state "${portable_lock_stale_pid}" \
-        "${portable_lock_stale_start}" "${portable_lock_stale_pgid}")" = dead ] &&
+      portable_lock_state=$(portable_lock_claim_state \
+        "${portable_lock_stale_pid}" "${portable_lock_stale_start}" \
+        "${portable_lock_stale_pgid}")
+      if [ "${portable_lock_state}" = live ] &&
+        portable_lock_reap_orphans "${portable_lock_stale_pid}" \
+          "${portable_lock_stale_pgid}"; then
+        portable_lock_state=$(portable_lock_claim_state \
+          "${portable_lock_stale_pid}" "${portable_lock_stale_start}" \
+          "${portable_lock_stale_pgid}")
+      fi
+      if [ "${portable_lock_state}" = dead ] &&
         portable_lock_recover_stale "${portable_lock_root}" \
           "${portable_lock_name}" "${portable_lock_stable}" \
           "${portable_lock_owner_claim}" "${portable_lock_stale_identity}" \
           "${portable_lock_stale_nonce}" "${portable_lock_stale_pid}" \
           "${portable_lock_stale_start}" "${portable_lock_stale_pgid}"; then
+        echo "portable-lock: stale lock reclaimed: ${portable_lock_stable} (owner pid ${portable_lock_stale_pid} dead)" >&2
         portable_lock_record_handle "${portable_lock_owner_claim}"
         return 0
       fi
