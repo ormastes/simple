@@ -20,6 +20,18 @@ use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_path, rt_cri
 use compiler.frontend.rt_criticality_registry.{rt_criticality_profile, rt_criticality_reason}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_bounds_for}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_is_hal}
+use std.io_runtime.{time_now_monotonic_ms}
+
+fn rt_validation_trace_enabled_v1() -> bool:
+    (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1"
+
+fn rt_validation_trace_v1(enabled: bool, started_ms: i64, phase: text,
+        done: i64, total: i64):
+    if not enabled: return
+    val elapsed = time_now_monotonic_ms() - started_ms
+    val line = "[enum-reg] rt-criticality phase={phase} done={done} total={total} elapsed_ms={elapsed}"
+    eprint(line)
+    print line
 
 fn rt_name_effects(name: text) -> i64:
     var mask: i64 = 0
@@ -568,10 +580,15 @@ pub fn rt_critical_contract_claims_v1() -> [RtCriticalContractClaimV1]:
 # Shared exact stable graph for both the actual validator and reviewed bound
 # capability inputs. This projection grants no admission by itself.
 pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> [RtCriticalFact]:
+    val trace = rt_validation_trace_enabled_v1()
+    val started_ms = if trace: time_now_monotonic_ms() else: -1
     # Bare names are translated only when unique. Duplicate unqualified names
     # never alias silently: their edges become unknown and fail closed.
     var unique_ids: Dict<text, text> = {}
     var ambiguous: Dict<text, bool> = {}
+    var indexed_functions = 0
+    var index_trace_events = 0
+    var next_trace = 128
     for raw_fn in functions:
         # ANY-transport: annotated rebind (cycle-71).
         val fn_: RtCriticalFunctionFactsV1 = raw_fn
@@ -581,7 +598,16 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
             ambiguous[declaration.name] = true
         else:
             unique_ids[declaration.name] = stable
+        indexed_functions = indexed_functions + 1
+        if trace and index_trace_events < 64 and indexed_functions >= next_trace:
+            rt_validation_trace_v1(trace, started_ms,
+                "graph:index", indexed_functions, functions.len())
+            next_trace = next_trace + 128
+            index_trace_events = index_trace_events + 1
     var facts: [RtCriticalFact] = []
+    var built_functions = 0
+    var edge_trace_events = 0
+    next_trace = 128
     for raw_fn in functions:
         # ANY-transport: annotated rebind (cycle-71).
         val fn_: RtCriticalFunctionFactsV1 = raw_fn
@@ -595,6 +621,14 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
         facts.push(RtCriticalFact(name: rt_stable_fn_id(declaration.module_key, declaration.symbol_id),
             own_effects: fn_.own_effects, bounded_effects: 0, callees: stable_callees,
             line: declaration.line, effect_units: fn_.effect_units))
+        built_functions = built_functions + 1
+        if trace and edge_trace_events < 64 and built_functions >= next_trace:
+            rt_validation_trace_v1(trace, started_ms,
+                "graph:edges", built_functions, functions.len())
+            next_trace = next_trace + 128
+            edge_trace_events = edge_trace_events + 1
+    rt_validation_trace_v1(trace, started_ms,
+        "graph:facts-done", facts.len(), functions.len())
     facts
 
 # Replay reads no ambient claim/capability registry or severity switch. The
@@ -602,6 +636,11 @@ pub fn rt_criticality_graph_facts_v1(functions: [RtCriticalFunctionFactsV1]) -> 
 pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         functions: [RtCriticalFunctionFactsV1], capabilities: [RtBoundCapability],
         claims: [RtCriticalContractClaimV1], implicit_profile_error: bool) -> [RtCriticalDiagnostic]:
+    val trace = rt_validation_trace_enabled_v1()
+    val trace_started_ms = if trace: time_now_monotonic_ms() else: -1
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "policy:start modules={module_ids.len()} functions={functions.len()} claims={claims.len()}",
+        0, functions.len())
     var diagnostics: [RtCriticalDiagnostic] = []
     var has_rt_hal = false
     for raw_fn in functions:
@@ -609,8 +648,10 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
         val fn_: RtCriticalFunctionFactsV1 = raw_fn
         if fn_.declaration.is_rt_hal: has_rt_hal = true
     if claims.len() == 0 and not has_rt_hal:
+        rt_validation_trace_v1(trace, trace_started_ms, "policy:done-no-claims-no-hal", 0, 0)
         return diagnostics
     val facts = rt_criticality_graph_facts_v1(functions)
+    rt_validation_trace_v1(trace, trace_started_ms, "graph-facts:done", facts.len(), functions.len())
     # Resolve each claim once. Rank propagation then shares one scalar graph
     # closure across all roots, including explicit lower-tier callers of a
     # critical or verified dependency.
@@ -644,7 +685,11 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
             val root_id = rt_stable_fn_id(declaration.module_key, declaration.symbol_id)
             if (declared_ranks[root_id] ?? 0) < 3:
                 declared_ranks[root_id] = 3
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "rank-closure:start roots={declared_ranks.len()}", 0, facts.len())
     val effective_ranks = rt_effective_assurance_closure(facts, declared_ranks)
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "rank-closure:done", effective_ranks.len(), facts.len())
     var fact_positions: Dict<text, i64> = {}
     var fact_position = 0
     while fact_position < facts.len():
@@ -726,6 +771,7 @@ pub fn validate_rt_criticality_claim_facts_v1(module_ids: [text],
                 severity: RtCriticalDiagnosticSeverity.Error, message: d))
         admitted_roots[root_id] = true
     val ordered = rt_sort_criticality_diagnostics(diagnostics)
+    rt_validation_trace_v1(trace, trace_started_ms, "policy:done", ordered.len(), functions.len())
     ordered
 
 fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule],
@@ -745,6 +791,9 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
     """
     if blobs.len() == 0:
         return validate_rt_criticality_diagnostics_array(fallback)
+    val trace = rt_validation_trace_enabled_v1()
+    val trace_started_ms = if trace: time_now_monotonic_ms() else: -1
+    rt_validation_trace_v1(trace, trace_started_ms, "census:start", 0, blobs.len())
     # Streamed (bug stage3_rt_criticality_validation_memory_spike_2026_10_19):
     # the old loop decoded every blob, re-encoded it and RETAINED every decoded
     # HirModule (~30 MB each) plus the unscoped encoder working set, so the
@@ -763,6 +812,8 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
     var declarations: [RtCriticalFunctionDeclarationV1] = []
     var declaration_owners: [i64] = []
     var blob_index: i64 = 0
+    var next_census_trace = 64
+    var census_trace_events = 0
     for raw_blob in blobs:
         # [text] element: scalar transport; the census owns the decode scope.
         val blob: text = raw_blob
@@ -788,6 +839,13 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
                 declaration_owners.push(owner)
             verified = verified + 1
         blob_index = blob_index + 1
+        if trace and census_trace_events < 64 and blob_index >= next_census_trace:
+            rt_validation_trace_v1(trace, trace_started_ms,
+                "census verified={verified}", blob_index, blobs.len())
+            next_census_trace = next_census_trace + 64
+            census_trace_events = census_trace_events + 1
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "census:done verified={verified}", blob_index, blobs.len())
     if codec_refusals.len() > 0:
         for refusal in codec_refusals:
             eprint("[hir-blob-refused] {refusal}; validating the in-memory module instead (codec-class refusal is non-fatal; the build proceeds UNCACHED)")
@@ -832,6 +890,8 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
         kept_owners[kept_owner] = true
         if verified_has_rt_hal[kept_owner]: has_rt_hal = true
     if rt_criticality_claim_keys().len() == 0 and not has_rt_hal:
+        rt_validation_trace_v1(trace, trace_started_ms,
+            "validation:done-no-claims-no-hal", verified, blobs.len())
         rt_bound_manifest_clear()
         return []
     var kept_declarations: [RtCriticalFunctionDeclarationV1] = []
@@ -849,6 +909,10 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
         val id_path = verified_paths[owner_by_name[id_name]]
         if id_path != "" and not module_ids.contains(id_path): module_ids.push(id_path)
     var functions: [RtCriticalFunctionFactsV1] = []
+    rt_validation_trace_v1(trace, trace_started_ms, "facts:start", 0, name_order.len())
+    var facts_modules_done = 0
+    var next_facts_trace = 64
+    var facts_trace_events = 0
     for facts_name in name_order:
         val facts_blob_index = verified_blob_indices[owner_by_name[facts_name]]
         val facts_blob: text = blobs[facts_blob_index]
@@ -862,7 +926,21 @@ fn validate_rt_criticality_diagnostics_blobs(blobs: [text], fallback: [HirModule
         for raw_facts in facts.functions:
             val function_facts: RtCriticalFunctionFactsV1 = raw_facts
             functions.push(function_facts)
-    validate_rt_criticality_facts_v1(module_ids, functions)
+        facts_modules_done = facts_modules_done + 1
+        if trace and facts_trace_events < 64 and facts_modules_done >= next_facts_trace:
+            rt_validation_trace_v1(trace, trace_started_ms,
+                "facts", facts_modules_done, name_order.len())
+            next_facts_trace = next_facts_trace + 64
+            facts_trace_events = facts_trace_events + 1
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "facts:done", facts_modules_done, name_order.len())
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "graph:start modules={module_ids.len()} functions={functions.len()} claims={rt_criticality_claim_keys().len()}",
+        0, functions.len())
+    val result = validate_rt_criticality_facts_v1(module_ids, functions)
+    rt_validation_trace_v1(trace, trace_started_ms,
+        "graph:done diagnostics={result.len()}", functions.len(), functions.len())
+    result
 
 # Pass-1 census of one encoded module: codec verdict, module identity, HAL
 # flag and the function declarations (RtCriticalFunctionDeclarationV1 is a
