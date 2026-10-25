@@ -2568,7 +2568,9 @@ fn transient_heap_promotion_walks_unowned_root_with_owned_children() {
     assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
     assert_eq!(super::rt_array_len(owned_child), 1);
     super::rt_array_free(owned_child);
+    super::free_transient_heap(unowned_root);
 }
+
 
 // BSM P0 (build_session_memory_model_v1.md §6): scope compaction is deferred
 // to scope end. Each case runs on both the indexed path and the forced
@@ -2622,7 +2624,9 @@ fn bsm_p0_ambiguous_unowned_root_keeps_owned_children() {
     assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
     assert_eq!(super::rt_array_len(owned_child), 1);
     super::rt_array_free(owned_child);
+    super::free_transient_heap(unowned_root);
 }
+
 
 /// The `bootstrap_hir_modules_promote_last` pattern
 /// (src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl): per module,
@@ -2668,6 +2672,7 @@ fn bsm_p0_check_outers(outers: &[RuntimeValue], n: usize) {
         assert_eq!(super::rt_array_len(*outer), n as i64);
         let last = super::rt_array_get(*outer, n as i64 - 1);
         assert_eq!(super::rt_array_len(last), 50);
+        assert!(super::rt_array_free_deep(*outer) > 0);
     }
 }
 
@@ -2715,6 +2720,9 @@ fn bsm_p0_ambiguous_many_promotes_benchmark() {
     eprintln!("bsm-bench: pattern=ambiguous_many_promotes n={} wall_ms={}", n, elapsed.as_millis());
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(super::rt_array_len(*row), if i % 2 == 0 { 50 } else { -1 });
+        if i % 2 == 0 {
+            assert!(super::rt_array_free_deep(*row) > 0);
+        }
     }
 }
 
