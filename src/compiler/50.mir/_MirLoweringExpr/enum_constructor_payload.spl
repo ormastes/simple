@@ -47,6 +47,11 @@ fn enum_payload_types_alias_compatible(expected: HirType, actual: HirType, symbo
 # existing MIR-evidence arms.
 fn enum_payload_hir_mir_alias_compatible(expected: HirType, actual: MirType, symbols: SymbolTable, canonical_owners: Dict<text, i64>) -> bool:
     match expected.kind:
+        case HirTypeKind.Unit:
+            match actual.kind:
+                case MirTypeKind.Unit: return true
+                case MirTypeKind.Tuple(elements): return elements.len() == 0
+                case _: return false
         case HirTypeKind.Dict(ek, ev):
             match actual.kind:
                 case MirTypeKind.Dict(ak, av):
@@ -275,6 +280,12 @@ impl MirLowering:
         # parser metadata). Both take their optional type from the declared
         # slot. Their lowered I64 carrier alone is not evidence: 3 is not nil.
         match expected.kind:
+            case HirTypeKind.Unit:
+                # Nil is not the unit value. Reject before remembered or
+                # source-HIR evidence can turn it into a positive match.
+                match expression.kind:
+                    case HirExprKind.NilLit: return false
+                    case _: ()
             case HirTypeKind.Optional(_):
                 match expression.kind:
                     case HirExprKind.NilLit: return self.unsafe_depth > 0
@@ -349,7 +360,7 @@ impl MirLowering:
                                 return actual_owner == mir_class_identity(declaration)
                             case _: ()
                 return false
-            case HirTypeKind.Dict(_, _) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_):
+            case HirTypeKind.Dict(_, _) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_) | HirTypeKind.Unit:
                 # Container payloads (the SdnValue.Dict/Array shape): the MIR
                 # word is a handle, so KIND-shape evidence plus alias-aware
                 # element comparison is sufficient — same rule as the
