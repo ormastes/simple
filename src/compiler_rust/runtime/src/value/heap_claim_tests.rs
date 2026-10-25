@@ -116,7 +116,7 @@ fn stale_closure_key_cannot_orphan_new_pinned_lifetime() {
 #[test]
 fn scoped_bookkeeping_layout_reports_real_payload_cost() {
     assert_eq!(std::mem::size_of::<ScopedAllocationKey>(), 24);
-    eprintln!("scoped-claim-cost: pointer_bytes={} key_bytes={} canonical_map_entry_bytes={} session_map_entry_bytes={} module_index_entry_bytes={}; HashMap load/control/allocator overhead and Vec spare capacity are additional", 
+    eprintln!("scoped-claim-cost: pointer_bytes={} key_bytes={} canonical_map_entry_bytes={} session_map_entry_bytes={} module_index_entry_bytes={}; HashMap load/control/allocator overhead and Vec spare capacity are additional",
         std::mem::size_of::<usize>(), std::mem::size_of::<ScopedAllocationKey>(),
         std::mem::size_of::<(usize, ScopedAllocationKey)>(),
         std::mem::size_of::<(usize, ScopedAllocationKey)>(),
