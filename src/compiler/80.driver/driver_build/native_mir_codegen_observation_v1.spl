@@ -1,7 +1,8 @@
 # Actual native object compilation observation. Raw receipts are evidence only;
 # D must bind them to its immutable launch/job ledger before counting overlap.
 use compiler.driver.driver_build.native_mir_codegen_interval_admission_v1.{
-    NativeMirCodegenIntervalV1, native_mir_codegen_interval_encode_v1}
+    NativeMirCodegenIntervalV1, native_mir_codegen_interval_encode_v1,
+    native_mir_codegen_job_identity_v1}
 use compiler.driver.driver_types.{FrozenNativeModuleCapsuleV1}
 use compiler.driver.driver_build.native_mir_worker_object_fragment_v1.{NativeMirWorkerObjectExpectedV1}
 use compiler.driver.driver_build.native_mir_worker_object_publish_v1.{native_mir_worker_object_publish_v1}
@@ -30,7 +31,11 @@ pub fn native_mir_codegen_observation_begin_v1(module: text
     val context = env_get_nullable("SIMPLE_MIR_WORKER_CONTEXT") ?? ""
     val manifest = env_get_nullable("SIMPLE_MIR_WORKER_MANIFEST") ?? ""
     val producer = env_get_nullable("SIMPLE_MIR_WORKER_PRODUCER") ?? ""
-    val job = env_get_nullable("SIMPLE_MIR_WORKER_JOB") ?? ""
+    # Dynamic claims choose the actual physical module inside this process.
+    # Parent admission independently derives this identity from its sealed
+    # manifest and matching invocation-owned claim; no launch-wide job env is
+    # accepted as evidence of which physical row actually compiled.
+    val job = native_mir_codegen_job_identity_v1(manifest, module)
     val worker = env_get_nullable("SIMPLE_MIR_SHARD_OWNER") ?? ""
     for digest in [invocation, source, context, manifest, producer, job]:
         if not sha256_lower_hex_valid(digest): return Err("object codegen observation lacks admitted job identities")
@@ -67,7 +72,7 @@ pub fn native_mir_codegen_observation_end_v1(
     if not file_write(staged, blob): return Err("object codegen interval staging failed")
     val readback = file_read_regular_no_follow_bounded(staged, 16384)?
     if readback != blob: return Err("object codegen interval readback differs")
-    if not file_publish_noreplace_raw(staged, observed.path):
+    if file_publish_noreplace_raw(staged, observed.path) != 1:
         return Err("object codegen interval publication failed or already exists")
     Ok(true)
 
