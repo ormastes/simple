@@ -43,6 +43,7 @@ foundation: CowEnv dirty-tracking, byte-level heap counters — see
 | `src/app/memstat/main.spl` | L5 out-of-process RSS sampler feeding the stage-4 gate |
 | `scripts/check/check-stage4-memory-gate.shs` | CI RSS gate over `memstat` output; PASS/FAIL verdict line |
 | `scripts/perf/measure-peak-rss.shs` | BSM P0: wall + peak RSS of one command (`--label X -- cmd`), last line `peak-rss: ... method=gnu-time\|proc-sample\|ps-sample`, fail-closed exit 2, `--selftest`; Rust `TransientHeapScope.promoted` defers ambiguous-index compaction to ONE filter at `rt_transient_array_scope_end` (`collections.rs`) |
+| `src/runtime/runtime_native.c` + `src/compiler_rust/runtime/src/value/collections.rs` | BSM P1 session heap (T1), dual-implemented: `rt_session_heap_begin() -> u32` / `rt_session_heap_end(u32)` (one sweep, I4), `rt_session_alloc_begin/end` (depth-counted, I3), `rt_transient_heap_adopt(v)` (module→session retag, prunes at non-module nodes, I2), `rt_session_heap_id()`; promote retags to the session (full walk) while one is live. C state `rt_core_session_heap_*` + `RT_CORE_STRING_FLAG_SESSION`; Rust `SESSION_HEAP` thread-local. Selfcheck `src/runtime/test/rt_session_heap_selfcheck.c`; Simple externs in `src/lib/nogc_sync_mut/sffi/transient.spl` |
 
 ## Env gates
 | Env | Layer | Default | Status |

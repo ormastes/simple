@@ -429,6 +429,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
     insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
+    insert_simple!("rt_session_heap_begin", memory::rt_session_heap_begin);
+    insert_simple!("rt_session_heap_end", memory::rt_session_heap_end);
+    insert_simple!("rt_session_alloc_begin", memory::rt_session_alloc_begin);
+    insert_simple!("rt_session_alloc_end", memory::rt_session_alloc_end);
+    insert_simple!("rt_transient_heap_adopt", memory::rt_transient_heap_adopt);
+    insert_simple!("rt_session_heap_id", memory::rt_session_heap_id);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -3777,6 +3783,12 @@ mod tests {
             "rt_transient_heap_promote",
             "rt_transient_heap_promote_share_begin",
             "rt_transient_heap_promote_share_end",
+            "rt_session_heap_begin",
+            "rt_session_heap_end",
+            "rt_session_alloc_begin",
+            "rt_session_alloc_end",
+            "rt_transient_heap_adopt",
+            "rt_session_heap_id",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }
