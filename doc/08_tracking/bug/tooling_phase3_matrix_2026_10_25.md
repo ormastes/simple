@@ -222,3 +222,21 @@ Conservative T32 campaign accounting is six diagnostic rows: CLI, actual MCP,
 CMM server, current-resolver probe, CMM lexer object and T32 helper object.
 No further repair/compile retry in this lane without an explicit budget
 extension. These results do not narrow the still-incomplete full phase matrix.
+
+## Compiler cycle-five terminal and final cycle
+
+Cycle five completed its 1515-entry HIR work but terminated before object/link
+completion at the enforced 20971520 KiB cap: exit 88, peak20976348 KiB. Receipt
+reports quiescent=1; the previously live parent/worker processes were confirmed
+absent before continuation. No usable compiler candidate or Hello result exists.
+Evidence: producer worktree `build/tooling-producer/compile4/`.
+
+Cycle six, the final allowed compiler repair cycle, uses the exact supported
+`--low-memory` option with the same enforced 20 GiB cap, preserved compatible
+caches and unchanged source c0bbd9e91e7500848081e57b8e3befa70f300d51. Release fetch
+confirmed base3fafd89481d remained current. No guard is disabled. New evidence:
+`build/tooling-producer/compile5-low-memory/`, exec session16908; planned output
+`simple_resolver_fix_low_memory.exe`. Source remains frozen while live. This is
+RUNNING, not PASS. If it fails, stop the compiler repair lane at six cycles;
+continuation requires the explicit budget extension. A successful link still
+requires real Hello compile and output execution before dependent producer use.
