@@ -53,4 +53,31 @@ int64_t rt_source_region_read_end_live_v1(int64_t pinned_control,
     int64_t generation, int64_t lease, int64_t prepaid_work);
 int64_t rt_source_region_release_live_v1(int64_t pinned_control,
     int64_t generation, int64_t prepaid_work);
+
+/* Native typed dictionary milestone: raw i64 keys, non-null exact Struct
+ * values. These signatures do not admit safe SOURCE without compiler capture,
+ * shared-account reservation, caller/pin and final-link qualification. */
+int64_t rt_source_region_dict_observation_bound_v1(void);
+int64_t rt_source_region_dict_bound_v1(int64_t operation,int64_t descriptor,
+    int64_t capacity_or_observation,int64_t metric);
+int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t descriptor,int64_t capacity_hint,int64_t work);
+int64_t rt_source_region_dict_put_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t dictionary,int64_t key,int64_t value,int64_t work);
+int64_t rt_source_region_dict_remove_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t dictionary,int64_t key,int64_t work);
+int64_t rt_source_region_dict_get_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t dictionary,int64_t key,int64_t work);
+
+/* C RUNTIME OWNER ONLY. Never SOURCE intrinsics or raw admitted FFI calls.
+ * Enter requires the native owner lock and actual qualified destination
+ * membership/prefix; success retains the existing region lock until exit.
+ * The caller performs no user callback, rt_alloc or non-lock-aware registry
+ * operation in that critical section. Exit cannot fail after the exact store.
+ * Retirement has the same native-owner -> region-owner lock order. */
+int64_t rt_source_region_native_owner_enter_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t operation,int64_t child,int64_t representation,int64_t work);
+void rt_source_region_native_owner_exit_v1(int64_t control,int64_t operation,
+    int64_t changed,int64_t born);
+void rt_source_region_native_owner_retire_v1(int64_t control,int64_t generation);
 #endif

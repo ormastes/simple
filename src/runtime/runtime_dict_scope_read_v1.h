@@ -27,7 +27,7 @@ static void* rt_core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64
         size_t index = rt_core_immortal_hash_ptr(ptr) & (cap - 1);
         for (size_t probes = 0; probes < cap && probes < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 && *fuel > 0; probes++) {
             --*fuel;
-            uintptr_t entry = rt_core_immortal_registry[index];
+            uintptr_t entry = rt_core_immortal_entry_pointer_v1(rt_core_immortal_registry[index]);
             if (!entry) break;
             if (entry == ptr) { found = 1; break; }
             index = (index + 1) & (cap - 1);

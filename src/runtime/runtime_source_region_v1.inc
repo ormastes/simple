@@ -188,6 +188,13 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
 
 int64_t rt_source_region_bound_v1(int64_t operation, int64_t descriptor,
     int64_t capacity, int64_t metric) {
+    if (operation>=13 && operation<=16) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+        return rt_source_region_dict_bound_v1(operation,descriptor,capacity,metric);
+#else
+        return SR_INCOMPLETE;
+#endif
+    }
     if (!sr_try_lock()) return SR_INCOMPLETE;
     int64_t result = sr_bound_locked(operation, descriptor, capacity, metric);
     rt_struct_alloc_lock_release();
@@ -527,4 +534,51 @@ int64_t rt_source_region_release_live_v1(int64_t control,int64_t generation,
     }
     rt_struct_alloc_lock_release();
     return error;
+}
+
+int64_t rt_source_region_native_owner_enter_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t operation,int64_t child,int64_t representation,int64_t work) {
+    if (operation<13 || operation>16) return SR_INCOMPLETE;
+    if (!sr_allow(9,0,0,work)) return sr_allow_failure_v1;
+    RtSourceRegionV1* r=sr_control(control);
+    int64_t error=sr_validate(r,generation);
+    if (!error && r->epoch!=(uint64_t)epoch) error=SR_STALE;
+    if (!error && (r->ticket || (operation!=16 && r->lease))) error=SR_CONFLICT;
+    if (!error && operation==13 && r->members>=INT64_MAX) error=sr_fail(r,SR_CAPACITY);
+    if (!error && (operation==14 || operation==15) && r->epoch>=INT64_MAX)
+        error=sr_fail(r,SR_CAPACITY);
+    if (!error && operation==14) {
+        uintptr_t identity=(uintptr_t)child;
+        if (child<=0 || (representation!=1 && representation!=2) ||
+            (representation==1 && (identity&7)) ||
+            (representation==2 && (identity&7)!=1)) error=SR_FOREIGN;
+        if (representation==2) identity &= ~(uintptr_t)7;
+        RtStructAllocation* entry=!error ? sr_find(identity) : NULL;
+        RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
+        if (!error && (!metadata || metadata->control ||
+            metadata->region!=(uintptr_t)r || metadata->generation!=r->generation ||
+            !metadata->descriptor || metadata->descriptor[1]!=1)) error=SR_FOREIGN;
+    }
+    if (error) { rt_struct_alloc_lock_release(); return error; }
+    return control; /* Both existing owners remain locked until native exit. */
+}
+
+void rt_source_region_native_owner_exit_v1(int64_t control,int64_t operation,
+    int64_t changed,int64_t born) {
+    RtSourceRegionV1* r=(RtSourceRegionV1*)(uintptr_t)control;
+    if (operation==13 && born) ++r->members;
+    if ((operation==14 || operation==15) && changed) ++r->epoch;
+    rt_struct_alloc_lock_release();
+}
+
+void rt_source_region_native_owner_retire_v1(int64_t control,int64_t generation) {
+    /* Actual native retirement already holds its owner lock. No reverse
+     * blocking acquisition or new synchronization owner is introduced. */
+    rt_struct_alloc_lock_acquire();
+    RtSourceRegionV1* r=sr_control_any_owner(control);
+    if (r && r->generation==(uint64_t)generation) {
+        atomic_store_explicit(&r->closed,1,memory_order_release);
+        if (r->members) --r->members;
+    }
+    rt_struct_alloc_lock_release();
 }

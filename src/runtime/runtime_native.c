@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "runtime_alloc_observer.h"
+#include "runtime_source_region_v1.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #endif
@@ -1511,6 +1512,31 @@ typedef struct RtCoreDict {
     int64_t read_backing;
 } RtCoreDict;
 
+#define RT_CORE_DICT_SOURCE_REGION_V1 UINT8_C(0x80)
+typedef struct RtCoreSourceDictBackingV1 {
+    int64_t control, generation;
+    const uint64_t* descriptor;
+    uintptr_t dictionary;
+    uint64_t abi;
+    RtCoreDictEntry entries[];
+} RtCoreSourceDictBackingV1;
+typedef struct RtCoreSourceDictRegistrationV1 {
+    RtCoreDict* dictionary;
+    RtCoreSourceDictBackingV1* backing;
+} RtCoreSourceDictRegistrationV1;
+#define RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1 ((uintptr_t)2)
+static RtCoreSourceDictRegistrationV1* rt_core_source_dict_registration_v1(uintptr_t entry) {
+    return (entry & (uintptr_t)7)==RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1
+        ? (RtCoreSourceDictRegistrationV1*)(entry & ~(uintptr_t)7) : NULL;
+}
+static uintptr_t rt_core_immortal_entry_pointer_v1(uintptr_t entry) {
+    RtCoreSourceDictRegistrationV1* owner=rt_core_source_dict_registration_v1(entry);
+    return owner ? (uintptr_t)owner->dictionary : entry;
+}
+static void rt_core_source_dict_retire_locked_v1(RtCoreDict* dictionary,
+    RtCoreSourceDictRegistrationV1* owner);
+
+
 static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
 
 /* Heap-boxed f64 (see RT_VALUE_HEAP_FLOAT). A leaf object: the full double is
@@ -1957,6 +1983,7 @@ static uintptr_t* rt_core_immortal_registry = NULL; /* open-addressing table, 0 
 static size_t rt_core_immortal_registry_cap = 0;    /* power of two, or 0 */
 static size_t rt_core_immortal_registry_len = 0;
 static size_t rt_core_immortal_registry_tombs = 0;
+static size_t rt_core_immortal_max_success_probe_v1 = 0;
 static atomic_flag rt_core_immortal_registry_lock = ATOMIC_FLAG_INIT;
 
 static void rt_core_immortal_registry_acquire(void) {
@@ -2198,9 +2225,10 @@ static void rt_core_reclaim_transient_raw(void) {
 /* caller holds the lock; table has a free slot */
 static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     size_t mask = rt_core_immortal_registry_cap - 1;
-    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    uintptr_t actual=rt_core_immortal_entry_pointer_v1(p);
+    size_t i = rt_core_immortal_hash_ptr(actual) & mask;
     size_t first_tomb = SIZE_MAX;
-    for (;;) {
+    for (size_t probes=1;probes<=rt_core_immortal_registry_cap;++probes) {
         uintptr_t e = rt_core_immortal_registry[i];
         if (e == 0) {
             /* Reuse the earliest tombstone seen, but only after proving p is
@@ -2212,15 +2240,20 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
                 rt_core_immortal_registry[i] = p;
             }
             rt_core_immortal_registry_len++;
+            if (probes>rt_core_immortal_max_success_probe_v1)
+                rt_core_immortal_max_success_probe_v1=probes;
             return 1;
         }
         if (e == RT_CORE_IMMORTAL_TOMBSTONE) {
             if (first_tomb == SIZE_MAX) first_tomb = i;
-        } else if (e == p) {
+        } else if (rt_core_immortal_entry_pointer_v1(e) == actual) {
+            if (probes>rt_core_immortal_max_success_probe_v1)
+                rt_core_immortal_max_success_probe_v1=probes;
             return 0;
         }
         i = (i + 1) & mask;
     }
+    return 0;
 }
 
 /* caller holds the lock; returns 1 if an entry was erased */
@@ -2231,10 +2264,12 @@ static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
     for (;;) {
         uintptr_t e = rt_core_immortal_registry[i];
         if (e == 0) return 0;
-        if (e == p) {
+        if (rt_core_immortal_entry_pointer_v1(e) == p) {
+            RtCoreSourceDictRegistrationV1* owner=rt_core_source_dict_registration_v1(e);
             rt_core_immortal_registry[i] = RT_CORE_IMMORTAL_TOMBSTONE;
             rt_core_immortal_registry_len--;
             rt_core_immortal_registry_tombs++;
+            if (owner) rt_core_source_dict_retire_locked_v1((RtCoreDict*)p,owner);
             return 1;
         }
         i = (i + 1) & mask;
@@ -2251,7 +2286,8 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
     rt_core_immortal_registry = fresh;
     rt_core_immortal_registry_cap = new_cap;
     rt_core_immortal_registry_len = 0;
-    rt_core_immortal_registry_tombs = 0; /* rehash drops tombstones */
+    rt_core_immortal_registry_tombs = 0;
+    rt_core_immortal_max_success_probe_v1 = 0; /* rehash drops tombstones */
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i] != 0 && old[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
             rt_core_immortal_registry_insert_raw(old[i]);
@@ -2300,7 +2336,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
         for (;;) {
             uintptr_t e = rt_core_immortal_registry[i];
             if (e == 0) break;
-            if (e == (uintptr_t)ptr) { found = 1; break; }
+            if (rt_core_immortal_entry_pointer_v1(e) == (uintptr_t)ptr) { found = 1; break; }
             i = (i + 1) & mask;
         }
     }
@@ -2369,6 +2405,11 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
         }
         rt_core_immortal_registry_acquire();
         int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
+        if (erased && kind==RT_VALUE_HEAP_DICT &&
+            (((RtCoreDict*)ptr)->flags & RT_CORE_DICT_SOURCE_REGION_V1))
+            /* A copied header has no SOURCE owner record; its entries may
+             * already dangle. Erasure retired a genuine owner, if any. */
+            ((RtCoreDict*)ptr)->entries=NULL;
         rt_core_immortal_registry_release();
         if (!erased) continue;
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
@@ -8589,6 +8630,7 @@ static int64_t rt_core_deep_free_run(void* root, int root_kind) {
 
         if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_DICT) {
             RtCoreDict* d = (RtCoreDict*)plan.nodes[i].ptr;
+            if (d->flags & RT_CORE_DICT_SOURCE_REGION_V1) { refused=1; break; }
             if (!d->entries) continue;
             /* Walk the whole slot table, not just `len` entries: empty and
              * tombstoned slots carry stale key/value words that must NOT be
@@ -11466,6 +11508,7 @@ static void rt_core_dict_read_advance(RtCoreDict* d) {
 }
 
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
+    if (d->flags & RT_CORE_DICT_SOURCE_REGION_V1) return;
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
@@ -11486,7 +11529,9 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
 }
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
+    if (d && (d->flags & RT_CORE_DICT_SOURCE_REGION_V1)) return 0;
     if (!d || !d->entries) return 0;
+    if (d->flags & RT_CORE_DICT_SOURCE_REGION_V1) return 0;
     rt_core_dict_read_advance(d);
     /* Resize at 70% load (live + tombstones). */
     if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
@@ -11546,6 +11591,7 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
 }
 
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
+    if (d && (d->flags & RT_CORE_DICT_SOURCE_REGION_V1)) return rt_core_nil();
     if (!d || !d->entries || d->len == 0) return rt_core_nil();
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(ck);
@@ -11560,6 +11606,7 @@ static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
 }
 
 static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
+    if (d && (d->flags & RT_CORE_DICT_SOURCE_REGION_V1)) return 0;
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(ck);
@@ -11574,6 +11621,7 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
 }
 
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
+    if (d && (d->flags & RT_CORE_DICT_SOURCE_REGION_V1)) return 0;
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(ck);
@@ -11666,6 +11714,7 @@ int8_t rt_dict_remove(int64_t dict, int64_t key) {
 int8_t rt_dict_clear(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d || !d->entries) return 0;
+    if (d->flags & RT_CORE_DICT_SOURCE_REGION_V1) return 0;
     rt_core_dict_read_advance(d);
     for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
     d->len = 0;
@@ -11673,6 +11722,7 @@ int8_t rt_dict_clear(int64_t dict) {
     return 1;
 }
 
+#include "runtime_source_region_dictionary_v1.inc"
 #include "runtime_dict_scope_read_v1.h"
 
 int64_t rt_dict_len(int64_t dict) {
