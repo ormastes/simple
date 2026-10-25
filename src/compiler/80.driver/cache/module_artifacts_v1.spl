@@ -59,9 +59,11 @@ use compiler.frontend.cache_artifact.generic_tldr_projector.{project_generic_tem
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     build_generic_template_section_v1, generic_template_section_encode_v1}
 use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1,
+    GenericSpecContextV1, GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
     generic_specializations_of_source_v1, generic_templates_of_sections_v1,
     generic_specialization_section_encode_v1}
-use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_v1}
+use compiler.frontend.parser_types.{ParserModule, ParserImport, ImportItem}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 use compiler.frontend.cache_artifact.public_summary_projector.{FrozenPublicFactV1,
     PublicSummaryProjectionInputV1, project_public_summary_v1, render_public_summary_tldr_v1}
@@ -327,38 +329,59 @@ fn _module_import_source_paths_v1(parsed: ParserModule, source_path: text) -> [t
         if path != "" and not out.contains(path): out.push(path)
     out
 
-# Generic templates visible from the imports, read from their FRESH companions.
-# complete=false when any import companion is missing, stale or undecodable.
-pub fn module_tldr_imported_generic_templates_v1(import_source_paths: [text],
-        tldr_root: text) -> ([GenericTemplateEntryV1], bool):
-    var out: [GenericTemplateEntryV1] = []
-    var complete = true
-    for path in import_source_paths:
-        val companion = module_tldr_companion_path_v1(tldr_root, path)
-        if not file_exists(path) or not file_exists(companion):
-            complete = false
+# Generic view of the imports, read from their FRESH companions:
+# (templates, names imported from generic-bearing modules, unknown). unknown
+# when an import does not resolve, its companion is missing/stale/undecodable,
+# or a generic-bearing module is imported by wildcard or alias.
+pub fn module_tldr_imported_generic_view_v1(imports: [ParserImport], source_path: text,
+        tldr_root: text) -> ([GenericTemplateEntryV1], [text], bool):
+    var templates: [GenericTemplateEntryV1] = []
+    var names: [text] = []
+    var unknown = false
+    for imp in imports:
+        val path = resolve_module_path(imp.module, source_path)
+        val companion = if path == "": "" else: module_tldr_companion_path_v1(tldr_root, path)
+        if path == "" or not file_exists(path) or not file_exists(companion):
+            unknown = true
             continue
         val src = file_read(path)
         val content = file_read(companion)
         if module_tldr_companion_body_v1(content, src) == "":
-            complete = false
+            unknown = true
             continue
-        val (entries, ok) = generic_templates_of_sections_v1(module_tldr_companion_sections_v1(content, src))
-        if not ok: complete = false
-        for e in entries: out.push(e)
-    (out, complete)
+        val sections = module_tldr_companion_sections_v1(content, src)
+        var generic_bearing = false
+        for s in sections:
+            if s.starts_with("generic-template|") or s.starts_with("generic|"):
+                generic_bearing = true
+        if not generic_bearing:
+            continue
+        val (entries, ok) = generic_templates_of_sections_v1(sections)
+        if not ok: unknown = true
+        for e in entries: templates.push(e)
+        if imp.items.len() == 0:
+            unknown = true
+        for item in imp.items:
+            if item.name == "*" or item.has_alias:
+                unknown = true
+            elif not names.contains(item.name):
+                names.push(item.name)
+    (templates, names, unknown)
 
 # `generic-spec` section (P-G2): the concrete generic instances this module
-# requires, over its own and its imports' templates. "" when it needs none and
-# its template view is complete.
+# requires, over its own and its imports' templates, keyed under the host
+# profile and this module's ActiveGuardRoot. "" when it provably needs none.
 pub fn module_tldr_generic_spec_section_v1(source: text, module_id: text, own_sections: [text],
-        import_source_paths: [text], tldr_root: text) -> text:
+        imports: [ParserImport], source_path: text, tldr_root: text,
+        guard_root: ActiveGuardRootV1) -> text:
     val (own, own_ok) = generic_templates_of_sections_v1(own_sections)
-    val (imported, imports_ok) = module_tldr_imported_generic_templates_v1(import_source_paths, tldr_root)
+    val (imported, names, unknown) = module_tldr_imported_generic_view_v1(imports, source_path, tldr_root)
     var templates = own
     for e in imported: templates.push(e)
-    var list = generic_specializations_of_source_v1(source, module_id, templates)
-    if not own_ok or not imports_ok:
+    val ctx = GenericSpecContextV1(profile_digest: GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
+        guard_root: guard_root, generic_import_names: names, generic_imports_unknown: unknown)
+    var list = generic_specializations_of_source_v1(source, module_id, templates, ctx)
+    if not own_ok:
         list = GenericSpecializationListV1(complete: false, specs: list.specs)
     if list.complete and list.specs.len() == 0:
         return ""
@@ -416,7 +439,8 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
     if macro_key_section != "":
         sections.push(macro_key_section)
     val spec_section = module_tldr_generic_spec_section_v1(source, module_id, sections,
-        _module_import_source_paths_v1(parsed, source_path), tldr_root)
+        parsed.imports, source_path, tldr_root,
+        active_guard_root_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1, guard_evals))
     if spec_section != "":
         sections.push(spec_section)
     if not module_artifact_publish_atomic_v1(tldr_path,
@@ -434,4 +458,4 @@ export module_tldr_macro_sections_v1, module_tldr_companion_view_sections_with_m
 export module_artifacts_emit_v1
 export module_tldr_macro_key_section_v1, module_tldr_imported_macro_projections_v1
 export macro_projection_mark_imports_incomplete_v1
-export module_tldr_imported_generic_templates_v1, module_tldr_generic_spec_section_v1
+export module_tldr_imported_generic_view_v1, module_tldr_generic_spec_section_v1

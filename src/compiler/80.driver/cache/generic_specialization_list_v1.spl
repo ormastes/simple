@@ -1,9 +1,10 @@
 # Per-file required generic specializations + their `.rr` forward reads (P-G2).
 #
 # A module's TLDR companion records every concrete generic instance the module
-# needs, as a `generic-spec` section: one row per `ConcreteTldrKey`
-# (generic_tldr_view_v1.concrete_tldr_key_v1 over the template's TemplateId and
-# the canonical ArgsId of the concrete type arguments). The section is written
+# needs, as a `generic-spec` section: one row per `ConcreteTldrKey`, derived by
+# the SAME function the P-G1 reader looks instances up with
+# (generic_tldr_view_table_v1.concrete_tldr_key_for_v1: constraint root,
+# profile digest and the consumer module's ActiveGuardRoot). The section is written
 # by the ordinary updateTldr path (module_artifacts_emit_v1: temp + atomic
 # rename), never by a side channel.
 #
@@ -12,30 +13,50 @@
 # projection answers "which importers depend on instance K of template T"
 # exactly. The planner (incremental_rebuild_plan_v1) consumes that answer.
 #
-# Completeness is explicit: an ambiguous template name, an arity mismatch or an
-# unkeyable argument marks the list incomplete, the forward reads are then
-# `Conservative`, and every `.rr` lookup in the family falls back to the wide
-# (interface-digest) rule. A missed instance can therefore never narrow a
-# rebuild.
+# Completeness is explicit. The list is `complete` only when every generic use
+# the module can make is textual (`Name<args>`): an ambiguous template name, an
+# arity mismatch, an unkeyable argument, an inadmissible guard root, a bare
+# mention of an imported template (constructor/inference), any mention of a
+# non-template name imported from a generic-bearing module (e.g. a generic
+# `make_pair` whose instantiation is inferred), or a wildcard/aliased import of
+# such a module all make it incomplete. Incomplete lists emit `Conservative`
+# reads and every `.rr` lookup in the family falls back to the wide
+# (interface-digest) rule.
 #
-# Named gaps: references are found textually (`Name<...>` with the name
-# resolving to a visible template by short or qualified name); import aliases
-# are not resolved, and nominal argument types are qualified to the consuming
-# module exactly like generic_tldr_projector does.
+# Named gap / follow-up (P-G2 -> P-G3): the authoritative instance set is what
+# module-scoped mono actually instantiated for the file
+# (run_monomorphization_module_scoped_v1); this text scan is a pre-pass that is
+# exact only for purely textual uses and otherwise fails closed. Nominal
+# argument types are qualified to the consuming module like
+# generic_tldr_projector does.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.common.string_core.{text_to_bytes}
 use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     GENERIC_PARAM_KIND_CONST, generic_template_id_v1, generic_args_id_v1,
-    concrete_tldr_key_v1, generic_template_section_decode_v1}
+    generic_template_section_decode_v1}
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1}
 use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1,
     generic_type_text_key_v1}
 use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
-    SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1}
+    SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1,
+    semantic_query_key_canonical_v1}
+use compiler.driver.cache.generic_tldr_view_table_v1.{concrete_tldr_key_for_v1}
 
 pub val GENERIC_SPEC_SECTION_MAGIC_V1 = "generic-spec/v1"
+# Profile the `.rr` subjects/consumers are keyed under (identity namespace of
+# the forward reads, not part of the ConcreteTldrKey).
 pub val GENERIC_SPEC_PROFILE_V1 = "generic-spec-profile/host"
+# Host compile profile digest input the companion emitter keys instances
+# under; a reader serving the host profile must pass the same value.
+pub val GENERIC_SPEC_HOST_PROFILE_DIGEST_V1 = "profile:host"
 pub val GENERIC_SPEC_FACET_V1 = "generic-spec"
+
+# What the producer knows about the module's compile context and imports.
+pub struct GenericSpecContextV1:
+    profile_digest: text            # same value the reader passes to acquire_concrete_tldr
+    guard_root: ActiveGuardRootV1   # the consuming module's ActiveGuardRoot
+    generic_import_names: [text]    # names imported from modules exposing generics
+    generic_imports_unknown: bool   # wildcard/aliased/unreadable generic-bearing import
 
 pub struct RequiredSpecializationV1:
     template_symbol: text   # GenericTemplateEntryV1.symbol_id
@@ -168,16 +189,16 @@ fn _arg_key_v1(module_id: text, kind: text, arg: text) -> text:
         case Ok(key): key
         case Err(_e): ""
 
-pub fn required_specialization_v1(entry: GenericTemplateEntryV1, arg_keys: [text]) -> RequiredSpecializationV1:
+# concrete_key is "" when the guard roots cannot key (caller: incomplete).
+pub fn required_specialization_v1(entry: GenericTemplateEntryV1, arg_keys: [text],
+        profile_digest: text, guard_root: ActiveGuardRootV1) -> RequiredSpecializationV1:
     var kinds: [text] = []
     for p in entry.params:
         kinds.push(p.kind)
-    val template_id = generic_template_id_v1(entry)
-    val args_id = generic_args_id_v1(kinds, arg_keys)
-    RequiredSpecializationV1(template_symbol: entry.symbol_id, template_id: template_id,
-        args_id: args_id, arg_keys: arg_keys,
-        concrete_key: concrete_tldr_key_v1(template_id, args_id, "",
-            sha256_text(GENERIC_SPEC_PROFILE_V1), entry.active_guard_root))
+    RequiredSpecializationV1(template_symbol: entry.symbol_id,
+        template_id: generic_template_id_v1(entry), args_id: generic_args_id_v1(kinds, arg_keys),
+        arg_keys: arg_keys,
+        concrete_key: concrete_tldr_key_for_v1(entry, kinds, arg_keys, profile_digest, guard_root))
 
 fn _sorted_unique_specs_v1(specs: [RequiredSpecializationV1]) -> [RequiredSpecializationV1]:
     var out: [RequiredSpecializationV1] = []
@@ -198,13 +219,21 @@ fn _sorted_unique_specs_v1(specs: [RequiredSpecializationV1]) -> [RequiredSpecia
 # References whose arguments mention an enclosing generic binder are template
 # internal (instantiated transitively) and are not recorded.
 pub fn generic_specializations_of_source_v1(source: text, module_id: text,
-        templates: [GenericTemplateEntryV1]) -> GenericSpecializationListV1:
+        templates: [GenericTemplateEntryV1], ctx: GenericSpecContextV1) -> GenericSpecializationListV1:
     var specs: [RequiredSpecializationV1] = []
-    var complete = true
+    var complete = not ctx.generic_imports_unknown
     var scope_indent: [i64] = []
     var scope_binders: [[text]] = []
+    var in_import = false
     for raw in source.split("\n"):
         val trimmed = raw.trim()
+        if in_import:
+            if trimmed.contains("}"): in_import = false
+            continue
+        if trimmed.starts_with("use ") or trimmed.starts_with("export ") or
+                trimmed.starts_with("pub use "):
+            in_import = trimmed.contains("{") and not trimmed.contains("}")
+            continue
         if trimmed == "" or trimmed.starts_with("#"):
             continue
         val hash = raw.index_of(" #")
@@ -243,6 +272,14 @@ pub fn generic_specializations_of_source_v1(source: text, module_id: text,
                 j = j + 1
             val name = line.substring(i, j)
             if j >= line.len() or line.char_at(j) != "<":
+                # A non-textual generic use: a bare imported template (inferred
+                # constructor/annotation) or any other name imported from a
+                # generic-bearing module (inferred instantiation). Fail closed.
+                val (bt, _amb) = _resolve_template_v1(name, module_id, templates)
+                if bt >= 0 and not templates[bt].symbol_id.starts_with(module_id + "."):
+                    complete = false
+                elif bt < 0 and ctx.generic_import_names.contains(name):
+                    complete = false
                 i = j
                 continue
             val gt = _close_angle_v1(line, j)
@@ -286,7 +323,11 @@ pub fn generic_specializations_of_source_v1(source: text, module_id: text,
             if not ok:
                 complete = false
             else:
-                specs.push(required_specialization_v1(entry, keys))
+                val spec = required_specialization_v1(entry, keys, ctx.profile_digest, ctx.guard_root)
+                if spec.concrete_key == "":
+                    complete = false
+                else:
+                    specs.push(spec)
             # Continue inside the argument list: nested instances count too.
             i = j + 1
         if is_decl and decl_binders.len() > 0:
@@ -374,11 +415,19 @@ pub fn generic_spec_instance_key_v1(template_symbol: text, concrete_key: text) -
         semantic_profile_digest: sha256_text(GENERIC_SPEC_PROFILE_V1),
         parameter_digest: sha256_text(concrete_key))
 
-# Canonical-subject prefix shared by every instance of `template_symbol`
-# (semantic_query_key_canonical_v1 framing: kind frame, then entity frame).
+# Canonical-subject prefix shared by every instance of `template_symbol`:
+# derived from semantic_query_key_canonical_v1 itself (canonicalise a key whose
+# parameter digest is a fixed placeholder, cut the placeholder), so a framing
+# change cannot silently make the prefix match nothing.
+val _PARAM_PLACEHOLDER_V1 = "0000000000000000000000000000000000000000000000000000000000000000"
+
 pub fn generic_spec_template_subject_prefix_v1(template_symbol: text) -> text:
-    "13:tldr.concrete" + text_to_bytes(template_symbol).len().to_string() + ":" +
-        template_symbol + "64:"
+    val canon = semantic_query_key_canonical_v1(SemanticQueryKeyV1(kind: "tldr.concrete",
+        stable_entity_id: template_symbol, semantic_profile_digest: sha256_text(GENERIC_SPEC_PROFILE_V1),
+        parameter_digest: _PARAM_PLACEHOLDER_V1))
+    if not canon.ends_with(_PARAM_PLACEHOLDER_V1):
+        return ""   # framing no longer cuttable: callers must fall back
+    canon.substring(0, canon.len() - _PARAM_PLACEHOLDER_V1.len())
 
 pub fn generic_spec_forward_manifest_v1(module_path: text,
         list: GenericSpecializationListV1) -> SemanticQueryReadManifestV1:
@@ -403,6 +452,7 @@ pub fn generic_spec_forward_manifest_v1(module_path: text,
     SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
 
 export RequiredSpecializationV1, GenericSpecializationListV1, GenericSpecializationListDecodeV1
+export GenericSpecContextV1, GENERIC_SPEC_HOST_PROFILE_DIGEST_V1
 export GENERIC_SPEC_SECTION_MAGIC_V1, GENERIC_SPEC_PROFILE_V1, GENERIC_SPEC_FACET_V1
 export required_specialization_v1, generic_specializations_of_source_v1
 export generic_templates_of_sections_v1
