@@ -9,6 +9,8 @@ use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
     compiler_source_authority_open_published_v1}
 use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1}
+use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
+    native_build_mir_output_requires_full_set_v1}
 use app.cli.native_build_mir_selective_admission.{native_mir_selective_admission_v1,
     native_mir_selective_disk_bytes_v1, native_mir_selective_requested_workers_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
@@ -1089,6 +1091,12 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
         return if selective: -1 else: 0
     if selective:
         return native_build_mir_selective_parallel_v1(args)
+    # Ordinary workers cannot evict MIR for Both/SMF output. Screen the known
+    # output intent before budgeting or spawning a worker that must refuse it.
+    if native_build_mir_output_requires_full_set_v1(args, selective,
+            (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
+        eprint "[mir-shard] disabled: output format re-reads MIR set"
+        return 0
     val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
     if requested > 0: requested else: 1
 
@@ -2017,21 +2025,6 @@ fn native_build_has_help(args: [text]) -> bool:
 # (scripts/bootstrap/bootstrap-from-scratch.sh, 6/6 sites) -- all pass an
 # entry, via `--entry <file>` or a bare positional -- so no legitimate
 # caller depends on reaching the worker without one.
-fn native_build_is_value_consuming_flag(arg: text) -> bool:
-    arg == "--backend" or arg == "--backend-plugin" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path"
-        or arg == "--linker-script" or arg == "--entry" or arg == "--source"
-        or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode"
-        or arg == "--cache-dir" or arg == "--input-manifest"
-        or arg == "--target" or arg == "--cpu"
-        or arg == "--opt-level" or arg == "--timeout" or arg == "--threads"
-        or arg == "--jobs" or arg == "-j" or arg == "--log"
-        or arg == "--parser-impl" or arg == "--parser-prefer"
-        or arg == "--parser-require" or arg == "--host-cpu-max"
-        or arg == "--frontend-offload"
-        or arg == "--frontend-offload-fallback"
-        or arg == "--collection-profile" or arg == "--collection-workload"
-        or arg == "--collection-target"
-        or arg == "--collection-policy" or arg == "--collection-memory-budget"
 
 fn native_build_manifest_requested(args: [text]) -> bool:
     for arg in args:
