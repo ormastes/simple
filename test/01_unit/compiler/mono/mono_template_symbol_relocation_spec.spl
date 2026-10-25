@@ -17,7 +17,10 @@ T constant) is E-MONO-041 with the instance not placed.
 use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.{HirFunction}
@@ -28,13 +31,22 @@ use compiler.monomorphize.hir_subst.body_subst.{collect_body_symbol_refs_v1}
 
 val TEMPLATE_SRC = "fn helper(x: i64) -> i64:\n    x\n\nfn wrap<X>(v: X) -> i64:\n    helper(1)\n"
 val CLOSURE_TEMPLATE_SRC = "val bump = \\x: x + 1\n\nfn wrap<X>(v: X) -> i64:\n    bump(1)\n"
-val USER_SRC = "use t.{wrap}\n\nfn main() -> i64:\n    wrap(2)\n"
+val USER_SRC = 'use t.{wrap}' + "\n\nfn main() -> i64:\n    wrap(2)\n"
 
-fn lower_v1(source: text, name: text) -> HirModule:
+fn lower_v1(source: text, name: text, provider: text) -> HirModule:
+    # `use t.{wrap}` only resolves when module t's surface is registered
+    # (the driver's contract); a bare HirLowering leaves the callee as Error.
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["t"] = parse_full_frontend(provider, "testdata/t.spl", "t", log)
+    val sources = [SourceFile(path: "testdata/t.spl", content: provider, module_name: "t")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     val path = "testdata/{name}.spl"
-    val ast = parse_full_frontend(source, path, name, Logger(level: 0))
-    var lowering = HirLowering.with_filename(path)
-    lowering.lower_module(ast)
+    val ast = parse_full_frontend(source, path, name, log)
+    var lowering = hirlowering_for_module(name, surfaces)
+    var lowered = lowering.lower_module(ast)
+    lowered.name = name
+    lowered
 
 fn instance_v1(module: HirModule) -> HirFunction?:
     for key in module.functions.keys():
@@ -58,8 +70,8 @@ fn referenced_names_v1(module: HirModule, func: HirFunction) -> [text]:
 describe "template-symbol relocation":
     it "references the template's private helper by its object symbol name (ordinary build)":
         var templates: Dict<text, HirModule> = {}
-        templates["t"] = lower_v1(TEMPLATE_SRC, "t")
-        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), templates)
+        templates["t"] = lower_v1(TEMPLATE_SRC, "t", TEMPLATE_SRC)
+        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f", TEMPLATE_SRC), templates)
         expect(diags.len()).to_equal(0)
         val inst = instance_v1(out)
         expect(inst.?).to_equal(true)
@@ -67,7 +79,7 @@ describe "template-symbol relocation":
         expect(names).to_contain("helper")
 
     it "marks the helper reachable from a generic template as must-export":
-        val t = lower_v1(TEMPLATE_SRC, "t")
+        val t = lower_v1(TEMPLATE_SRC, "t", TEMPLATE_SRC)
         val reachable = mono_template_reachable_helpers_v1(t)
         val helper = function_named_v1(t, "helper").unwrap()
         val key = "{helper.symbol.id}"
@@ -77,8 +89,8 @@ describe "template-symbol relocation":
 
     it "fails closed with E-MONO-041 for an unrelocatable closure reference":
         var templates: Dict<text, HirModule> = {}
-        templates["t"] = lower_v1(CLOSURE_TEMPLATE_SRC, "t")
-        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f"), templates)
+        templates["t"] = lower_v1(CLOSURE_TEMPLATE_SRC, "t", CLOSURE_TEMPLATE_SRC)
+        val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(USER_SRC, "f", CLOSURE_TEMPLATE_SRC), templates)
         expect(diags.len()).to_equal(1)
         expect(diags[0]).to_contain("E-MONO-041: cannot relocate closure `bump` from t into f")
         expect(instance_v1(out).?).to_equal(false)
