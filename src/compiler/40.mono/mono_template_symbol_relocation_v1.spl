@@ -19,6 +19,7 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.monomorphize.hir_subst.body_subst.{collect_body_symbol_refs_v1}
+use std.io_runtime.{env_get}
 
 
 class MonoTemplateRelocationPlanV1:
@@ -84,7 +85,29 @@ fn mono_const_is_closure_v1(c: HirConst) -> bool:
         case _: false
 
 
+fn mono_template_closure_qualified_v1() -> bool:
+    """True exactly when HIR lowering renames cross-module functions to
+    `<module>.<name>` (`qualify_imported_function_symbol`: ambient bootstrap
+    plus `--entry-closure`). Every other build is an ORDINARY build, where
+    T emits and callers reference T's functions by T's own symbol name."""
+    (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+
+
 fn mono_template_relocation_plan_v1(template: HirModule, template_name: text, first_fresh_id: i64) -> MonoTemplateRelocationPlanV1:
+    """PR #4580 behaviour: entry-closure spelling, no collision check."""
+    mono_template_relocation_plan_v2(template, template_name, first_fresh_id, true, {})
+
+
+fn mono_template_relocation_plan_v2(template: HirModule, template_name: text, first_fresh_id: i64, closure_qualified: bool, target_names: Dict<text, bool>) -> MonoTemplateRelocationPlanV1:
+    """Relocation tables for every non-generic T function, impl/class method
+    and constant. Object spelling:
+    - extern: its C name (every build);
+    - method: T's symbol-table name (`<owner>.<Type>::<m>`, MIR folds `::`
+      to `.`), which is what T's own object and every caller spell;
+    - free function / constant: `<T>.<name>` under an entry-closure build,
+      else T's own symbol name. An ordinary-build bare name that `target`
+      already declares (`target_names`) would bind to F's symbol instead,
+      so it is rejected (E-MONO-041) rather than silently aliased."""
     var names: Dict<text, text> = {}
     var ids: Dict<text, i64> = {}
     var kinds: Dict<text, text> = {}
@@ -100,8 +123,19 @@ fn mono_template_relocation_plan_v1(template: HirModule, template_name: text, fi
             # Extern symbols are spelled by their C name in every object.
             names[key] = f.name
             kinds[key] = "extern"
+        elif f.is_method or f.is_static:
+            val table_name = template.symbols.symbol_name_scalar_raw(f.symbol.id)
+            if table_name == "":
+                reject[key] = "method `{f.name}` (no symbol row in {template_name})"
+                continue
+            names[key] = table_name
+            kinds[key] = "method"
         else:
-            names[key] = mono_template_qualified_symbol_name_v1(template_name, f.name)
+            val object_name = mono_template_object_name_v1(template, template_name, f.symbol.id, f.name, closure_qualified)
+            if not closure_qualified and target_names.has(object_name):
+                reject[key] = "function `{f.name}` (ordinary-build name `{object_name}` collides in target)"
+                continue
+            names[key] = object_name
             kinds[key] = "function"
         ids[key] = next
         next = next + 1
@@ -112,12 +146,62 @@ fn mono_template_relocation_plan_v1(template: HirModule, template_name: text, fi
         if mono_const_is_closure_v1(c):
             reject[key] = "closure `{c.name}`"
             continue
-        names[key] = mono_template_qualified_symbol_name_v1(template_name, c.name)
+        val object_name = mono_template_object_name_v1(template, template_name, c.symbol.id, c.name, closure_qualified)
+        if not closure_qualified and target_names.has(object_name):
+            reject[key] = "constant `{c.name}` (ordinary-build name `{object_name}` collides in target)"
+            continue
+        names[key] = object_name
         kinds[key] = "const"
         ids[key] = next
         next = next + 1
     MonoTemplateRelocationPlanV1(template_module: template_name, names: names, ids: ids,
         kinds: kinds, reject: reject, next_symbol: next)
+
+
+fn mono_target_declared_names_v1(target: HirModule) -> Dict<text, bool>:
+    """Names the target module itself defines (functions and constants):
+    an ordinary-build bare template name equal to one of these is ambiguous."""
+    var names: Dict<text, bool> = {}
+    val funcs: [HirFunction] = target.functions.values()
+    for v in funcs:
+        val f: HirFunction = v
+        names[f.name] = true
+    val consts: [HirConst] = target.constants.values()
+    for v in consts:
+        val c: HirConst = v
+        names[c.name] = true
+    names
+
+
+fn mono_template_object_name_v1(template: HirModule, template_name: text, raw: i64, decl_name: text, closure_qualified: bool) -> text:
+    if closure_qualified:
+        return mono_template_qualified_symbol_name_v1(template_name, decl_name)
+    val table_name = template.symbols.symbol_name_scalar_raw(raw)
+    if table_name == "": decl_name else: table_name
+
+
+fn mono_template_reject_unplanned_refs_v1(template: HirModule, plan: MonoTemplateRelocationPlanV1, refs: [i64], keep: Dict<text, bool>) -> Dict<text, text>:
+    """Fail closed on a `Var`/`NamedVar` naming a T-table function, method
+    or constant the plan does not cover (e.g. a symbol T itself imported):
+    its T-numbered id means nothing in the target. Locals and parameters
+    stay (they are defined inside the copied body)."""
+    var reject: Dict<text, text> = plan.reject
+    for raw in refs:
+        val id: i64 = raw
+        val key = "{id}"
+        if plan.names.has(key) or reject.has(key) or keep.has(key):
+            continue
+        val sym_opt: HirSymbol? = template.symbols.get_symbol_raw(id)
+        if val present = sym_opt:
+            val sym: HirSymbol = present
+            val callable_or_global = match sym.kind:
+                case SymbolKind.Function: true
+                case SymbolKind.Method: true
+                case SymbolKind.Const: true
+                case _: false
+            if callable_or_global:
+                reject[key] = "symbol `{sym.name}` (no relocatable object symbol in {plan.template_module})"
+    reject
 
 
 fn mono_relocation_error_v1(what: text, template_module: text, target_module: text) -> text:

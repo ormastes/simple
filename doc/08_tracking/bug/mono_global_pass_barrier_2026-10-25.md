@@ -78,13 +78,23 @@ Unexpected token: expected Fn, found Colon` (known host blocker).
    closure-valued T constant is `E-MONO-041: cannot relocate closure `<n>`
    from <T> into <F>` and the instance is not placed (caller falls back to
    MONO-PENDING). Spec: `test/01_unit/compiler/mono/mono_template_symbol_relocation_spec.spl`
-   (UNRUN, same Windows parser blocker). Still open: (a) the `<T>.<name>`
-   form matches T's definition only where T's functions are emitted
-   module-qualified (bootstrap `--entry-closure`); the plain per-file
-   build must qualify T's definitions the same way, or the export helper
-   must drive it; (b) relocated T constants/statics rely on MIR resolving a
-   `NamedVar` const to T's `g_...` storage -- unverified; (c) T-nested
-   types/impl methods referenced from a body are not yet in the plan.
+   (UNRUN, same Windows parser blocker). P-B (`mono_template_relocation_plan_v2`,
+   `relocate_template_body_full_v1`; spec
+   `test/01_unit/compiler/mono/mono_template_relocation_pb_spec.spl`, UNRUN:
+   this Windows host's `bin/simple.exe` fails every compiler spec with
+   `variable $txt not found` / unbacked `rt_io_file_open_read`, baseline
+   included): (a) DONE -- `<T>.<name>` only under entry-closure
+   (`SIMPLE_BOOTSTRAP=1` + `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`); an
+   ordinary build spells T's own symbol name, and a name F already declares
+   is E-MONO-041 (collision) instead of a silent alias; (c) DONE -- impl /
+   static methods relocate under T's method symbol name, every
+   `MethodResolution` id is remapped, and nominal type ids at any nesting
+   depth are transported T -> F (`relocate_mono_types`); any unmapped
+   callable/type id, or a `Var` to a T-table function/const outside the plan
+   (e.g. one T imported), is E-MONO-041. Still open: (b) relocated T
+   constants/statics rely on MIR resolving a `NamedVar` const to T's
+   `g_...` storage -- unverified; methods of imported (non-T) types are
+   rejected, not relocated; `Field.resolved` ids are not remapped.
 3. Driver wiring: per-file worker supplies `templates` (from the
    `generic_tldr_view_table_v1` / `mono_module_plan_v1` views or `.rr`
    usage refs) and calls the module-scoped entry when the gate is on.

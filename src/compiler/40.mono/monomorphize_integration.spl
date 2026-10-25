@@ -30,8 +30,8 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
-use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v1, mono_relocation_error_v1}
-use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_v1}
+use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v2, mono_relocation_error_v1, mono_template_closure_qualified_v1, mono_template_reject_unplanned_refs_v1, mono_target_declared_names_v1}
+use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_full_v1, collect_body_relocation_refs_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
@@ -749,6 +749,14 @@ impl MonomorphizationPass:
         # (the module falls back to MONO-PENDING via the diagnostic).
         var plans: Dict<text, MonoTemplateRelocationPlanV1> = {}
         var reloc_next = self.next_symbol
+        # P-B: placed instances are already valid ids in this module.
+        var keep: Dict<text, bool> = {}
+        for mangled in specialized_keys:
+            val km: text = mangled
+            val ks: HirFunction = self.specialized_functions[km]
+            keep["{ks.symbol.id}"] = true
+        val closure_qualified = mono_template_closure_qualified_v1()
+        val target_names = mono_target_declared_names_v1(module)
         for mangled in specialized_keys:
             val m: text = mangled
             var spec: HirFunction = self.specialized_functions[m]
@@ -756,14 +764,33 @@ impl MonomorphizationPass:
             if self.spec_module.has(m):
                 owner = self.spec_module[m]
             if owner != module_name and templates.has(owner):
+                val provider: HirModule = templates[owner]
                 if not plans.has(owner):
-                    val provider: HirModule = templates[owner]
-                    val made = mono_template_relocation_plan_v1(provider, owner, reloc_next)
+                    val made = mono_template_relocation_plan_v2(provider, owner, reloc_next, closure_qualified, target_names)
                     reloc_next = made.next_symbol
                     plans[owner] = made
                     self.register_relocated_symbols_v1(out, made, module_name)
                 val plan: MonoTemplateRelocationPlanV1 = plans[owner]
-                val relocated = relocate_template_body_v1(spec.body, plan.names, plan.ids, plan.reject)
+                # Nominal types (nested type arguments included) the body
+                # names are transported T -> F by declared module + name,
+                # exactly like an instance signature (E-MONO-042 on failure).
+                val refs = collect_body_relocation_refs_v1(spec.body)
+                # Fresh relocation ids come from `reloc_next`; the type
+                # transport must allocate past them.
+                if self.next_symbol < reloc_next:
+                    self.next_symbol = reloc_next
+                val type_map = self.relocate_body_type_ids_v1(refs.types, owner, module_name, keep)
+                if self.next_symbol > reloc_next:
+                    reloc_next = self.next_symbol
+                if self.module_symbols.has(module_name):
+                    # The transport may hand back a new table: keep it, and
+                    # keep the relocated function rows on it.
+                    out.symbols = self.module_symbols[module_name]
+                    for planned_owner in plans.keys():
+                        val po: text = planned_owner
+                        self.register_relocated_symbols_v1(out, plans[po], module_name)
+                val reject = mono_template_reject_unplanned_refs_v1(provider, plan, refs.symbols, keep)
+                val relocated = relocate_template_body_full_v1(spec.body, plan.names, plan.ids, reject, type_map, keep, true)
                 if relocated.diagnostics.len() > 0:
                     for what in relocated.diagnostics:
                         val wt: text = what
@@ -785,6 +812,25 @@ impl MonomorphizationPass:
         out.functions = funcs
         self.prune_consumed_templates(out)
 
+    me relocate_body_type_ids_v1(type_ids: [i64], source_module: text, target_module: text, keep: Dict<text, bool>) -> Dict<text, i64>:
+        """T-numbered nominal type id -> F id for every distinct id a body
+        names. Each id is transported alone through `relocate_mono_types`
+        (declared module + name); a failed one is left out, so the relocating
+        walk reports it unmapped (fail closed) next to the E-MONO-042 row."""
+        var out: Dict<text, i64> = {}
+        for raw in type_ids:
+            val id: i64 = raw
+            val key = "{id}"
+            if out.has(key) or keep.has(key):
+                continue
+            val probe = HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+            if val moved = self.relocate_mono_types([probe], source_module, target_module, "body type of template {source_module}"):
+                val moved_type: HirType = moved[0]
+                match moved_type.kind:
+                    case HirTypeKind.Named(target_id, _args): out[key] = target_id.id
+                    case _: ()
+        out
+
     me register_relocated_symbols_v1(out: HirModule, plan: MonoTemplateRelocationPlanV1, module_name: text):
         """Give every relocated T symbol a row in F's table under its fresh
         id, named by its object symbol and owned by T."""
@@ -792,7 +838,7 @@ impl MonomorphizationPass:
         for k in keys:
             val key: text = k
             val kind_name: text = plan.kinds[key]
-            val kind = if kind_name == "const": SymbolKind.Const else: SymbolKind.Function
+            val kind = if kind_name == "const": SymbolKind.Const elif kind_name == "method": SymbolKind.Method else: SymbolKind.Function
             out.symbols.register_preserved_symbol(HirSymbol(
                 id: SymbolId(id: plan.ids[key]), name: plan.names[key], kind: kind,
                 type_: nil, scope: ScopeId(id: 0), span: Span.empty(),

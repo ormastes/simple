@@ -47,6 +47,16 @@ class HirSubstCtx:
     reloc_reject: Dict<text, text> = {}
     reloc_errors: [text] = []
     seen_symbols: [i64] = []
+    # P-B: types and method resolutions. `reloc_active` turns an unmapped
+    # template-numbered type or callable id into a relocation error (fail
+    # closed); `reloc_keep` lists ids already valid in the target module
+    # (placed `$`-instances).
+    reloc_active: bool = false
+    reloc_collect: bool = false    # walk types only in collect/relocate passes
+    reloc_types: Dict<text, i64> = {}
+    reloc_keep: Dict<text, bool> = {}
+    seen_types: [i64] = []
+    seen_callables: [i64] = []
 
 
 fn hir_subst_diag(ctx: HirSubstCtx, code: text, what: text, span: Span) -> void:
@@ -80,29 +90,52 @@ fn subst_hir_body_with_report(body: HirBlock, subst_map: TypeSubstitution) -> Hi
     HirSubstReport(body: out, diagnostics: ctx.diagnostics, nodes_visited: ctx.nodes_visited)
 
 
+class HirRelocationRefsV1:
+    """Every template-numbered id a body names, by role (P-B collect pass)."""
+    symbols: [i64]      # `Var`/`NamedVar`
+    types: [i64]        # `Named`/`DynTrait` at any nesting depth
+    callables: [i64]    # MethodResolution method/function ids
+
+
 fn relocate_template_body_v1(body: HirBlock, reloc_names: Dict<text, text>, reloc_ids: Dict<text, i64>, reloc_reject: Dict<text, text>) -> HirSubstReport:
+    """Leaf-only relocation (PR #4580): `Var`/`NamedVar` only; types and
+    method resolutions untouched."""
+    relocate_template_body_full_v1(body, reloc_names, reloc_ids, reloc_reject, {}, {}, false)
+
+
+fn relocate_template_body_full_v1(body: HirBlock, reloc_names: Dict<text, text>, reloc_ids: Dict<text, i64>, reloc_reject: Dict<text, text>, reloc_types: Dict<text, i64>, reloc_keep: Dict<text, bool>, active: bool) -> HirSubstReport:
     """Rewrite every `Var`/`NamedVar` naming a relocatable template-module
-    symbol into `NamedVar(<fresh id>, <module-qualified name>)`. Every
-    reference to a rejected symbol lands in the report's `diagnostics` as
-    its `what` text (the caller turns it into E-MONO-041). Types are
-    untouched (empty substitution)."""
+    symbol into `NamedVar(<fresh id>, <object symbol name>)`. With `active`,
+    also rewrite every nominal type id (nested type arguments included)
+    via `reloc_types` and every `MethodResolution` method/function id via
+    `reloc_ids`; an unmapped one is an error (fail closed). Every rejected
+    reference lands in the report's `diagnostics` as its `what` text (the
+    caller turns it into E-MONO-041). No type substitution is applied."""
     val ctx = HirSubstCtx(subst: typesubstitution_empty(), diagnostics: [], nodes_visited: 0,
         reloc_names: reloc_names, reloc_ids: reloc_ids, reloc_reject: reloc_reject,
-        reloc_errors: [], seen_symbols: [])
+        reloc_errors: [], seen_symbols: [], reloc_active: active, reloc_collect: active, reloc_types: reloc_types,
+        reloc_keep: reloc_keep, seen_types: [], seen_callables: [])
     val out = subst_hir_block(body, ctx)
     var errors: [text] = ctx.diagnostics
     for e in ctx.reloc_errors:
         val et: text = e
-        errors = errors.push(et)
+        if not errors.contains(et):
+            errors = errors.push(et)
     HirSubstReport(body: out, diagnostics: errors, nodes_visited: ctx.nodes_visited)
 
 
 fn collect_body_symbol_refs_v1(body: HirBlock) -> [i64]:
     """Every SymbolId (as i64) a `Var`/`NamedVar` in `body` names."""
+    collect_body_relocation_refs_v1(body).symbols
+
+
+fn collect_body_relocation_refs_v1(body: HirBlock) -> HirRelocationRefsV1:
+    """Every template-numbered id `body` names, split by role."""
     val ctx = HirSubstCtx(subst: typesubstitution_empty(), diagnostics: [], nodes_visited: 0,
-        reloc_names: {}, reloc_ids: {}, reloc_reject: {}, reloc_errors: [], seen_symbols: [])
+        reloc_names: {}, reloc_ids: {}, reloc_reject: {}, reloc_errors: [], seen_symbols: [],
+        reloc_active: false, reloc_collect: true, reloc_types: {}, reloc_keep: {}, seen_types: [], seen_callables: [])
     val _ = subst_hir_block(body, ctx)
-    ctx.seen_symbols
+    HirRelocationRefsV1(symbols: ctx.seen_symbols, types: ctx.seen_types, callables: ctx.seen_callables)
 
 
 fn hs_relocate_symbol(kind: HirExprKind, symbol: SymbolId, ctx: HirSubstCtx) -> HirExprKind:
@@ -123,22 +156,125 @@ fn hs_relocate_symbol(kind: HirExprKind, symbol: SymbolId, ctx: HirSubstCtx) -> 
 # ============================================================================
 
 fn hs_type(ty: HirType, ctx: HirSubstCtx) -> HirType:
-    substitute_type(ty, ctx.subst)
+    val substituted = substitute_type(ty, ctx.subst)
+    if not ctx.reloc_collect:
+        return substituted
+    hs_reloc_type(substituted, ctx)
 
 
 fn hs_type_opt(ty: HirType?, ctx: HirSubstCtx) -> HirType?:
     if ty == nil:
         return nil
     val t: HirType = ty
-    substitute_type(t, ctx.subst)
+    hs_type(t, ctx)
 
 
 fn hs_types(types: [HirType], ctx: HirSubstCtx) -> [HirType]:
     var out: [HirType] = []
     for t in types:
         val tt: HirType = t
-        out = out.push(substitute_type(tt, ctx.subst))
+        out = out.push(hs_type(tt, ctx))
     out
+
+
+# ---- P-B: nominal type ids and method resolutions ---------------------------
+
+fn hs_reloc_callable(symbol: SymbolId, method: text, ctx: HirSubstCtx) -> SymbolId:
+    ctx.seen_callables = ctx.seen_callables.push(symbol.id)
+    if not ctx.reloc_active:
+        return symbol
+    val key = "{symbol.id}"
+    if ctx.reloc_keep.has(key):
+        return symbol
+    if ctx.reloc_ids.has(key) and ctx.reloc_names.has(key):
+        return SymbolId(id: ctx.reloc_ids[key])
+    if ctx.reloc_reject.has(key):
+        val what: text = ctx.reloc_reject[key]
+        ctx.reloc_errors = ctx.reloc_errors.push(what)
+    else:
+        ctx.reloc_errors = ctx.reloc_errors.push("method `{method}` (unmapped symbol {symbol.id})")
+    symbol
+
+
+fn hs_reloc_type_id(symbol: SymbolId, ctx: HirSubstCtx) -> SymbolId:
+    ctx.seen_types = ctx.seen_types.push(symbol.id)
+    if not ctx.reloc_active:
+        return symbol
+    val key = "{symbol.id}"
+    if ctx.reloc_keep.has(key):
+        return symbol
+    if ctx.reloc_types.has(key):
+        return SymbolId(id: ctx.reloc_types[key])
+    if ctx.reloc_reject.has(key):
+        val what: text = ctx.reloc_reject[key]
+        ctx.reloc_errors = ctx.reloc_errors.push(what)
+    else:
+        ctx.reloc_errors = ctx.reloc_errors.push("type (unmapped symbol {symbol.id})")
+    symbol
+
+
+fn hs_resolution(resolution: MethodResolution, method: text, ctx: HirSubstCtx) -> MethodResolution:
+    match resolution:
+        case MethodResolution.InstanceMethod(type_id, method_id):
+            MethodResolution.InstanceMethod(hs_reloc_type_id(type_id, ctx), hs_reloc_callable(method_id, method, ctx))
+        case MethodResolution.TraitMethod(trait_id, method_id):
+            MethodResolution.TraitMethod(hs_reloc_type_id(trait_id, ctx), hs_reloc_callable(method_id, method, ctx))
+        case MethodResolution.FreeFunction(func_id):
+            MethodResolution.FreeFunction(hs_reloc_callable(func_id, method, ctx))
+        case MethodResolution.StaticMethod(type_id, method_id):
+            MethodResolution.StaticMethod(hs_reloc_type_id(type_id, ctx), hs_reloc_callable(method_id, method, ctx))
+        case _: resolution
+
+
+fn hs_reloc_types(types: [HirType], ctx: HirSubstCtx) -> [HirType]:
+    var out: [HirType] = []
+    for t in types:
+        val tt: HirType = t
+        out = out.push(hs_reloc_type(tt, ctx))
+    out
+
+
+fn hs_reloc_effects(effects: [Effect], ctx: HirSubstCtx) -> [Effect]:
+    if effects == nil: return effects
+    var out: [Effect] = []
+    for raw in effects:
+        val effect: Effect = raw
+        var rewritten = effect
+        match effect.kind:
+            case EffectKind.Throws(thrown):
+                rewritten.kind = EffectKind.Throws(hs_reloc_type(thrown, ctx))
+            case _: ()
+        out = out.push(rewritten)
+    out
+
+
+fn hs_reloc_type(ty: HirType, ctx: HirSubstCtx) -> HirType:
+    """Record (and, when relocating, rewrite) every nominal id in `ty`,
+    including ids nested in type arguments, containers and signatures --
+    the same variant coverage as `HirNominalTypeRelocator.relocate_type`.
+    A no-op shape copy outside relocation."""
+    val kind = match ty.kind:
+        case HirTypeKind.Named(id, args): HirTypeKind.Named(hs_reloc_type_id(id, ctx), hs_reloc_types(args, ctx))
+        case HirTypeKind.DynTrait(id): HirTypeKind.DynTrait(hs_reloc_type_id(id, ctx))
+        case HirTypeKind.Tuple(items): HirTypeKind.Tuple(hs_reloc_types(items, ctx))
+        case HirTypeKind.Union(items): HirTypeKind.Union(hs_reloc_types(items, ctx))
+        case HirTypeKind.Array(inner, size): HirTypeKind.Array(hs_reloc_type(inner, ctx), size)
+        case HirTypeKind.Slice(inner): HirTypeKind.Slice(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Ref(inner, mutable): HirTypeKind.Ref(hs_reloc_type(inner, ctx), mutable)
+        case HirTypeKind.Ptr(inner, mutable): HirTypeKind.Ptr(hs_reloc_type(inner, ctx), mutable)
+        case HirTypeKind.Optional(inner): HirTypeKind.Optional(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Isolated(inner): HirTypeKind.Isolated(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Unique(inner): HirTypeKind.Unique(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Shared(inner): HirTypeKind.Shared(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Weak(inner): HirTypeKind.Weak(hs_reloc_type(inner, ctx))
+        case HirTypeKind.Projection(inner, name): HirTypeKind.Projection(hs_reloc_type(inner, ctx), name)
+        case HirTypeKind.Tensor(inner, dims, device): HirTypeKind.Tensor(hs_reloc_type(inner, ctx), dims, device)
+        case HirTypeKind.Dict(a, b): HirTypeKind.Dict(hs_reloc_type(a, ctx), hs_reloc_type(b, ctx))
+        case HirTypeKind.Result(a, b): HirTypeKind.Result(hs_reloc_type(a, ctx), hs_reloc_type(b, ctx))
+        case HirTypeKind.TypeParam(name, bounds): HirTypeKind.TypeParam(name, hs_reloc_types(bounds, ctx))
+        case HirTypeKind.Function(params, ret, effects): HirTypeKind.Function(hs_reloc_types(params, ctx), hs_reloc_type(ret, ctx), hs_reloc_effects(effects, ctx))
+        case _: ty.kind
+    HirType(kind: kind, span: ty.span)
 
 
 fn hs_expr_opt(e: HirExpr?, ctx: HirSubstCtx) -> HirExpr?:
@@ -510,11 +646,11 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
             handled = true
         case HirExprKind.MethodCall(receiver, method, args, resolution):
             val mr: HirExpr = receiver
-            out.kind = HirExprKind.MethodCall(subst_hir_expr(mr, ctx), method, hs_call_args(args, ctx), resolution)
+            out.kind = HirExprKind.MethodCall(subst_hir_expr(mr, ctx), method, hs_call_args(args, ctx), hs_resolution(resolution, method, ctx))
             handled = true
         case HirExprKind.StaticCall(ty, method, args, resolution):
             val st: HirType = ty
-            out.kind = HirExprKind.StaticCall(hs_type(st, ctx), method, hs_call_args(args, ctx), resolution)
+            out.kind = HirExprKind.StaticCall(hs_type(st, ctx), method, hs_call_args(args, ctx), hs_resolution(resolution, method, ctx))
             handled = true
 
         # ---- Control flow ---------------------------------------------------
