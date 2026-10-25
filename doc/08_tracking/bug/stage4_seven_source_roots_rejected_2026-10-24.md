@@ -17,3 +17,11 @@ via entry closure). The compiler cap and its spec are unchanged, since a compile
 relaxation would not reach the prebuilt Stage 2 compiler.
 
 Verification: `sh -n` only; no bootstrap was run.
+
+## Follow-up 2026-10-25 (P4-ROOTS)
+
+The "reachable via entry closure" claim was wrong: the preclosed-alias pass
+(`driver_preclosed_source_aliases.spl`) resolves `os.*` against the roots, so
+Stage 4 failed with `PRECLOSED_ALIAS_IMPORT_MISSING: .../args_and_os_commands.spl|os.cli`.
+The focused cap is now six (`35bfc034c52`), so `src/os` is restored as the sixth
+root of `bootstrap_native_build_main`. `examples/10_tooling` stays out.
