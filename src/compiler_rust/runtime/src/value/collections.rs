@@ -34,6 +34,79 @@ thread_local! {
 struct TransientHeapScope {
     paused: bool,
     objects: Vec<RuntimeValue>,
+    /// Lazily built header-address -> `objects` position index, so promotion
+    /// answers ownership and removal in O(reachable) instead of rescanning
+    /// every object the scope ever tracked. Tracking only appends while the
+    /// scope is running and promotion only runs while it is paused, so the
+    /// index is synced (extended over `objects[indexed..]`) at promote time.
+    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
+    /// two full rescans were ~50% of parse-phase samples.
+    by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
+    indexed: usize,
+    /// Two tracked objects share a header address; fall back to the exact
+    /// original linear scans for this scope.
+    index_ambiguous: bool,
+    /// Exact value bits promoted while the index is ambiguous. Compaction of
+    /// `objects` is deferred to ONE filter at scope end instead of a
+    /// per-promote `retain` (O(objects) per call -> O(N^2) for N promotes;
+    /// doc/05_design/compiler/memory/build_session_memory_model_v1.md §6, BSM P0).
+    promoted: super::heap::HeapPtrSet<u64>,
+}
+
+impl TransientHeapScope {
+    fn sync_index(&mut self) {
+        while self.indexed < self.objects.len() {
+            let object = self.objects[self.indexed];
+            if object.is_heap() {
+                let ptr = object.as_heap_ptr() as usize;
+                if self.by_ptr.insert(ptr, self.indexed).is_some() {
+                    self.index_ambiguous = true;
+                }
+            }
+            self.indexed += 1;
+        }
+    }
+
+    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+        self.sync_index();
+        if self.index_ambiguous {
+            return self.objects.iter().any(|object| {
+                object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
+            });
+        }
+        self.by_ptr.contains_key(&(root_ptr as usize))
+    }
+
+    /// Drop every tracked object whose exact value bits are in `reachable`.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        self.sync_index();
+        if self.index_ambiguous {
+            // Deferred: rt_transient_array_scope_end filters once.
+            // Only tracked addresses are recorded, so the set stays bounded
+            // by `objects` however much persistent graph a promote walks.
+            let by_ptr = &self.by_ptr;
+            self.promoted.extend(reachable.iter().copied().filter(|bits| {
+                let value = RuntimeValue(*bits);
+                value.is_heap() && by_ptr.contains_key(&(value.as_heap_ptr() as usize))
+            }));
+            return;
+        }
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if !value.is_heap() {
+                continue;
+            }
+            let ptr = value.as_heap_ptr() as usize;
+            if let Some(&position) = self.by_ptr.get(&ptr) {
+                if self.objects[position].0 == *bits {
+                    // Tombstone: NIL is not heap, so scope end skips it and
+                    // the free order of the survivors is unchanged.
+                    self.objects[position] = RuntimeValue::NIL;
+                    self.by_ptr.remove(&ptr);
+                }
+            }
+        }
+    }
 }
 
 /// Nodes whose promotion fully committed earlier in the open share window:
@@ -2687,9 +2760,24 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         *slot = Some(TransientHeapScope {
             paused: false,
             objects: Vec::new(),
+            by_ptr: Default::default(),
+            indexed: 0,
+            index_ambiguous: false,
+            promoted: Default::default(),
         });
         true
     })
+}
+
+/// Test hook: force the ambiguous-index fallback on this thread's scope.
+#[cfg(test)]
+pub(crate) fn transient_scope_force_index_ambiguous() {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.sync_index();
+            scope.index_ambiguous = true;
+        }
+    });
 }
 
 /// Read this thread's actual scope; no mutation, allocation or lease grant.
@@ -2869,12 +2957,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
     ) {
         let root_ptr = value.as_heap_ptr();
         let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|scope| {
-                scope
-                    .objects
-                    .iter()
-                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
-            })
+            slot.borrow_mut().as_mut().is_some_and(|scope| scope.owns_heap_ptr(root_ptr))
         });
         if !scope_owned {
             return true;
@@ -2951,7 +3034,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        scope.release_reachable(&reachable_heap);
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3008,9 +3091,15 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // A promotion share window never outlives its scope.
     TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take());
     let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
-    let Some(scope) = scope else {
+    let Some(mut scope) = scope else {
         return false;
     };
+    // The ONE deferred compaction (BSM P0): drop objects promoted while the
+    // index was ambiguous. The common path already tombstoned them to NIL.
+    if !scope.promoted.is_empty() {
+        let promoted = std::mem::take(&mut scope.promoted);
+        scope.objects.retain(|object| !promoted.contains(&object.0));
+    }
     for object in scope.objects {
         free_transient_heap(object);
     }

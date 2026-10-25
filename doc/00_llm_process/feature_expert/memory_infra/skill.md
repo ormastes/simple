@@ -42,6 +42,7 @@ foundation: CowEnv dirty-tracking, byte-level heap counters — see
 | `src/app/mem/main.spl` | M8 `simple mem` CLI: `top --profile` (post-mortem file mode), `diff`, `help`, and `top --pid <P> [--path F] [--wait-ms N]` (live SIGUSR2 poll of a running process via `src/app/mem/live_poll.spl`, landed `0a4c3f64129` — that file was previously a real orphan, never called from `main.spl`) |
 | `src/app/memstat/main.spl` | L5 out-of-process RSS sampler feeding the stage-4 gate |
 | `scripts/check/check-stage4-memory-gate.shs` | CI RSS gate over `memstat` output; PASS/FAIL verdict line |
+| `scripts/perf/measure-peak-rss.shs` | BSM P0: wall + peak RSS of one command (`--label X -- cmd`), last line `peak-rss: ... method=gnu-time\|proc-sample\|ps-sample`, fail-closed exit 2, `--selftest`; Rust `TransientHeapScope.promoted` defers ambiguous-index compaction to ONE filter at `rt_transient_array_scope_end` (`collections.rs`) |
 
 ## Env gates
 | Env | Layer | Default | Status |
