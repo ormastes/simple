@@ -2,6 +2,12 @@
 
 This is an evidence update, not a fresh compiler build or acceptance run. Historical [82-scope inventory](releasephase3_coding_inventory_2026_10_25.md) and [selector reconciliation](robust_acceptance_selector_reconciliation_2026_10_25.md) are unchanged. Local `/tmp` evidence links name retained host artifacts; they are not portable repository artifacts.
 
+## Landing update — 2026-10-25 04:31 UTC
+
+[Runtime repair PR #4641](https://github.com/ormastes/simple/pull/4641) is now **MERGED** at `89d2e18cd1487a1f3c5b2c248f9096b3df6b4b0a`, following independent Astra source review. Its production/test code matches the reviewed `8e535e297367e2fec0c332af9b52067a9fce3d95` repair. The retained 22 runtime unit passes and expected negative-control failure below remain the same evidence; they were not rerun. Accumulated-root quadratic growth remains performance debt, and the original compiler graph on a rebuilt matching runtime remains **UNRUN**. All 82 feature acceptance scopes remain UNRUN; the 500-item cached batch remains requested, not executed. The 75d260 GitHub snapshot and then-pending runtime review below are preserved as dated history.
+
+The retained core analysis links below identify the inspected failure. The extracted CoreDump was subsequently removed after a duplicate-hash check; the original apport path was later rewritten by another crash. Core-file recovery is uncertain; this report claims only the retained stack/owner/disassembly observations, not current availability of the original core.
+
 ## GitHub snapshot and implementation
 
 Fresh `git ls-remote` and GitHub PR queries observed `release_phase3` at **75d260930c3b16af91c79d4fc860cf6749e2000d**, and `release/1.0.0` at **7c761b605398b4c401c85914581f57c6179fe03c**. No open PR targeting release_phase3 appeared in the query; the latest 15 listed PRs were merged. This does not assert anything about other branches or every repository PR.
