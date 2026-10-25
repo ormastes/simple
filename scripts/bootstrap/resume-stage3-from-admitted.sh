@@ -500,6 +500,8 @@ stage2_preflight_context=$(bootstrap_stage3_stage2_transcript_preflight_context 
   bootstrap_stage3_error 'recorded Stage 2 preflight context is invalid'
 stage2_recorded_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 compiler RSS ceiling is invalid'
+stage2_recorded_compiler_cap=$(bootstrap_stage3_transcript_compiler_cap "$stage2_transcript") || \
+  bootstrap_stage3_error 'recorded Stage 2 compiler RSS cap is invalid'
 stage2_recorded_diagnostics=$(bootstrap_stage3_stage2_transcript_diagnostics "$stage2_transcript") || \
   bootstrap_stage3_error 'recorded Stage 2 diagnostics are invalid'
 # Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
@@ -582,6 +584,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
   ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
   ${stage2_recorded_compiler_ceiling:+"SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$stage2_recorded_compiler_ceiling"} \
+  ${stage2_recorded_compiler_cap:+"SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$stage2_recorded_compiler_cap"} \
   ${stage2_preflight_context:+"SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=$stage2_preflight_context"} \
   ${stage2_recorded_diagnostics} \
   "$@") || exit 1
@@ -928,10 +931,18 @@ esac
 stage3_compiler_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || \
   bootstrap_stage3_error 'invalid new Stage 3 compiler RSS ceiling'
 stage3_compiler_cap=
-if [ -n "$stage3_compiler_ceiling_env" ]; then
+stage3_requested_cap_env=$(bootstrap_stage3_compiler_cap_environment) || \
+  bootstrap_stage3_error 'invalid new Stage 3 compiler RSS cap'
+if [ -n "$stage3_compiler_ceiling_env" ] || [ -n "$stage3_requested_cap_env" ]; then
   # systemd user services do not inherit the invoking shell. Admit the
   # caller's mode/fixture/cap here, then transport its exact cap separately
   # from the ceiling. The worker re-probes live headroom before execution.
+  [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE+x}" ] || \
+    bootstrap_stage3_error 'explicit Stage 3 compiler cap requires enforced real policy'
   . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
   bootstrap_tree_rss_resolve "$stage3_threads" "$root" || \
     bootstrap_stage3_error "$bootstrap_tree_rss_refusal"
@@ -963,6 +974,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
   ${stage3_compiler_ceiling_env:+"$stage3_compiler_ceiling_env"} \
+  ${stage3_compiler_cap:+"SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$stage3_compiler_cap"} \
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
   ${stage3_timeout_args} --cache-dir "$stage3_cache" \

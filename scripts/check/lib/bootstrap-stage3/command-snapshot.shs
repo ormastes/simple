@@ -404,10 +404,29 @@ bootstrap_stage3_run_transcribed() {
         return 1
     }
     bootstrap_stage3_run_ceiling_seen=0
+    bootstrap_stage3_run_cap_seen=0
+    bootstrap_stage3_run_cap_arg=
+    bootstrap_stage3_run_stage3_route=0
+    bootstrap_stage3_run_native_target=
     for bootstrap_stage3_run_env in "$@"; do
         [ "$bootstrap_stage3_run_env" != -- ] || break
         bootstrap_stage3_run_env_name=${bootstrap_stage3_run_env%%=*}
         bootstrap_stage3_run_env_upper=$(printf '%s' "$bootstrap_stage3_run_env_name" | tr '[:lower:]' '[:upper:]')
+        if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE ]; then
+            bootstrap_stage3_run_stage3_route=1
+        fi
+        if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_NATIVE_BUILD_TARGET ]; then
+            bootstrap_stage3_run_native_target=${bootstrap_stage3_run_env#*=}
+        fi
+        if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ]; then
+            [ "$bootstrap_stage3_run_cap_seen" = 0 ] &&
+                bootstrap_stage3_compiler_ceiling_valid "${bootstrap_stage3_run_env#*=}" || {
+                echo 'bootstrap-transcript-error: malformed or duplicate compiler RSS cap' >&2
+                return 1
+            }
+            bootstrap_stage3_run_cap_seen=1
+            bootstrap_stage3_run_cap_arg=$bootstrap_stage3_run_env
+        fi
         if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB ]; then
             [ "$bootstrap_stage3_run_ceiling_seen" = 0 ] &&
                 [ -n "$bootstrap_stage3_run_ceiling_env" ] &&
@@ -422,6 +441,23 @@ bootstrap_stage3_run_transcribed() {
         echo 'bootstrap-transcript-error: compiler RSS ceiling missing from explicit environment' >&2
         return 1
     }
+    # Strict new Stage 3 bindings must survive env-i exactly. Ordinary historic
+    # callers without a cap row retain their original ambient-cap behavior.
+    if [ "$bootstrap_stage3_run_stage3_route" = 1 ] || [ "$bootstrap_stage3_run_cap_seen" = 1 ]; then
+        bootstrap_stage3_run_cap_env=$(bootstrap_stage3_compiler_cap_environment) || {
+            echo 'bootstrap-transcript-error: invalid compiler RSS cap' >&2; return 1;
+        }
+        bootstrap_stage3_run_legacy_darwin_cap=0
+        if [ "$bootstrap_stage3_run_cap_seen" = 0 ] && [ -z "$bootstrap_stage3_run_ceiling_env" ]; then
+            case "$bootstrap_stage3_run_native_target:$(uname -s):${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-}" in
+                *-apple-darwin:Darwin:6835937) bootstrap_stage3_run_legacy_darwin_cap=1 ;;
+            esac
+        fi
+        [ "$bootstrap_stage3_run_cap_arg" = "$bootstrap_stage3_run_cap_env" ] ||
+            [ "$bootstrap_stage3_run_legacy_darwin_cap" = 1 ] || {
+            echo 'bootstrap-transcript-error: conflicting or missing explicit compiler RSS cap' >&2; return 1;
+        }
+    fi
     # The same finite cap feeds the watchdog and the child's shard admission.
     # Carry it as explicit-env before freezing the transcript; do not widen the
     # fixed host-env schema or allow a caller to substitute a different budget.
@@ -446,6 +482,9 @@ bootstrap_stage3_run_transcribed() {
         return 1
     }
     bootstrap_stage3_run_rss_cap=$bootstrap_tree_rss_cap_kib
+    if [ "$bootstrap_stage3_run_cap_seen" = 1 ]; then
+        [ "$bootstrap_stage3_run_rss_cap" = "${bootstrap_stage3_run_cap_arg#*=}" ] || return 1
+    fi
     bootstrap_stage3_run_rss_ceiling=$bootstrap_tree_rss_ceiling_kib
     bootstrap_stage3_run_rss_ceiling_arg=
     if [ -n "$bootstrap_stage3_run_ceiling_env" ]; then
