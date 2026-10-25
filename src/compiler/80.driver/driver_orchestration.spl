@@ -188,9 +188,29 @@ impl CompilerDriver:
                 "reverse-reference owner already active in this process")
         # BSM P2: open the build session before any module scope exists.
         # SIMPLE_BUILD_SESSION=0 or a pre-P1 runtime leaves heap 0 (legacy
-        # promote path). Never ended in P2 (see session/build_session.spl).
+        # promote path). BSM P6: ended below once the kept values are shared.
         val _session_on = self.ctx.session.begin()
         log_phase("build-session: id={self.ctx.session.heap}")
+        val result = self.compile_in_session_v1()
+        val _session_ended = self.ctx.session.end(self.session_kept_values_v1(result))
+        result
+
+    # Leaves first (rc_graph.rs: a node already an rc root is not reclaimed
+    # by a parent's share), the CompileResult last. Callers that read ctx
+    # products after compile() set config "build-session-retain-products".
+    fn session_kept_values_v1(result: CompileResult) -> [Any]:
+        var kept: [Any] = []
+        kept = kept.push(self.ctx.errors)
+        kept = kept.push(self.ctx.warnings)
+        kept = kept.push(self.ctx.visibility_warnings)
+        if (self.ctx.config["build-session-retain-products"] ?? "") == "1":
+            kept = kept.push(self.ctx.mir_modules)
+            kept = kept.push(self.ctx.cold_hir_typed_receipts)
+            kept = kept.push(self.ctx.runtime_std_hir_emissions)
+            kept = kept.push(self.ctx.runtime_std_mir_emissions)
+        kept.push(result)
+
+    me compile_in_session_v1() -> CompileResult:
         var requested_mode = self.ctx.options.mode.to_text()
         if self.ctx.options.cli_mode_text != "":
             requested_mode = self.ctx.options.cli_mode_text
