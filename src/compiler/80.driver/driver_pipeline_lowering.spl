@@ -987,7 +987,13 @@ impl CompilerDriver:
             if self.ctx.sources[bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
                 bootstrap_entry_requested = true
             bootstrap_entry_idx = bootstrap_entry_idx + 1
-        if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        # Per-module is the default (src -> MIR -> object per module, feeding
+        # the per-module object cache in driver_aot_native_output.spl). The
+        # single-instance whole-program fixed-entry lane below is opt-out only:
+        # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1. driver_aot_pipeline.spl's flat-pass
+        # skip and context dispatch read the same variable; move them together.
+        val bootstrap_whole_program = (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "") == "1"
+        if self.ctx.runtime_std_full_inventory_selection == nil and allow_bootstrap_shortcuts and bootstrap_entry_requested and bootstrap_whole_program and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -1140,6 +1146,7 @@ impl CompilerDriver:
             # CompileContext lives in the fenced driver_types.spl. All three
             # sites must move together.
             if self.ctx.runtime_std_full_inventory_selection != nil or
+                    not bootstrap_whole_program or
                     not (allow_bootstrap_shortcuts and bootstrap_entry_requested):
                 direct_lowering.use_explicit_semantic_policy()
             direct_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
