@@ -34,4 +34,23 @@ int64_t rt_source_region_close_v1(int64_t control, int64_t generation,
     int64_t prepaid_work);
 int64_t rt_source_region_release_v1(int64_t control, int64_t generation,
     int64_t prepaid_work);
+
+/* UNSAFE/compiler-private LIVE cleanup ABI. A positive integer, generation,
+ * SourceRegionContextV1 object or live boolean is NOT a lifetime proof.
+ * The compiler must prove birth -> owner-pinned borrows -> lease end -> one
+ * release, with no escape/stored alias/copy-after-release. Each native attempt
+ * consumes a separately prepaid credit, including an unsuccessful trylock.
+ * Arbitrary/saved/freed tokens are invalid operands: these operations directly
+ * dereference a genuinely retained control. Safe facade access stays gated on
+ * the actual affine pin-verifier receipt. Native availability enables no such
+ * authority, and this ABI must never be admitted as an ordinary raw SOURCE call.
+ * Bound ops: 1 revoke=16, 2 read-end=24, 3 release=64 logical work units;
+ * metrics 1 state fields / 2 bytes are zero. Metric 0 is work. */
+int64_t rt_source_region_live_cleanup_bound_v1(int64_t operation, int64_t metric);
+int64_t rt_source_region_revoke_live_v1(int64_t pinned_control,
+    int64_t generation, int64_t prepaid_work);
+int64_t rt_source_region_read_end_live_v1(int64_t pinned_control,
+    int64_t generation, int64_t lease, int64_t prepaid_work);
+int64_t rt_source_region_release_live_v1(int64_t pinned_control,
+    int64_t generation, int64_t prepaid_work);
 #endif

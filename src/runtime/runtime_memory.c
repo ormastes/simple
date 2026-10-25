@@ -13,6 +13,7 @@ const volatile int rt_alloc_observer_memory_owner_v1 = 1;
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdatomic.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -377,6 +378,13 @@ typedef struct RtSourceAllocationMetadataV1 {
     uint8_t control;
 } RtSourceAllocationMetadataV1;
 
+/* Only a SOURCE control carries this backlink. Ordinary entries and SOURCE
+ * member metadata retain their existing footprints. */
+typedef struct RtSourceControlMetadataV1 {
+    RtSourceAllocationMetadataV1 allocation;
+    size_t registry_slot;
+} RtSourceControlMetadataV1;
+
 /* Ordinary allocations retain their original two-word registry footprint.
  * Positive i64 extents cannot set size_t's high bit on the 64-bit provider. */
 typedef struct RtStructAllocation {
@@ -400,6 +408,15 @@ static int rt_struct_source_metadata_bits_v1(RtSourceAllocationMetadataV1* metad
         (ptr & RT_SOURCE_EXTENT_METADATA_V1) || ptr % 8) return 0;
     *bits=(size_t)ptr | RT_SOURCE_EXTENT_METADATA_V1;
     return 1;
+}
+
+static void rt_struct_source_control_slot_v1(size_t bits, size_t slot) {
+    if (sizeof(size_t)==8 && (bits & RT_SOURCE_EXTENT_METADATA_V1)) {
+        RtSourceAllocationMetadataV1* metadata=(RtSourceAllocationMetadataV1*)(uintptr_t)
+            (bits & ~RT_SOURCE_EXTENT_METADATA_V1);
+        if (metadata->control)
+            ((RtSourceControlMetadataV1*)metadata)->registry_slot=slot;
+    }
 }
 
 #define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
@@ -463,6 +480,7 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
         if (entry == 0) {
             size_t target = first_tomb == SIZE_MAX ? index : first_tomb;
             rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
+            rt_struct_source_control_slot_v1(bytes,target);
             if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
             rt_struct_alloc_len++;
             if (probes > rt_struct_alloc_max_success_probe_v1)
@@ -474,6 +492,7 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
             if (first_tomb == SIZE_MAX) first_tomb = index;
         } else if (entry == ptr) {
             rt_struct_allocs[index].bytes = bytes;
+            rt_struct_source_control_slot_v1(bytes,index);
             if (probes > rt_struct_alloc_max_success_probe_v1)
                 rt_struct_alloc_max_success_probe_v1=probes;
             rt_source_region_registry_changed_v1();
