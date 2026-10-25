@@ -14,6 +14,7 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.backend.common.source_region_descriptor_v1.{source_region_descriptor_slots_v1, source_region_llvm_descriptor_v1}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -593,6 +594,28 @@ impl MirToLlvm:
         # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
         # Falls back to __simple_intrinsic_<name> for unknown names.
         match name:
+            case "source_region_struct_descriptor_v1":
+                if val target = dest:
+                    match source_region_descriptor_slots_v1(args):
+                        case Ok(slots):
+                            val descriptor_name = ".c4.descriptor.{self.string_counter}"
+                            self.string_counter = self.string_counter + 1
+                            match source_region_llvm_descriptor_v1(descriptor_name, 8, slots.len() * 8, slots):
+                                case Ok(declaration):
+                                    if self.native_int() != "i64":
+                                        self.codegen_error("C4 descriptor requires qualified 64-bit native storage")
+                                        return
+                                    if self.bootstrap_string_globals_active:
+                                        llvm_bootstrap_string_globals_add(declaration)
+                                    else:
+                                        self.string_globals = self.string_globals.push(declaration)
+                                    val target_name = self.get_local(target.id)
+                                    self.builder.emit("  {target_name} = ptrtoint ptr @{descriptor_name} to i64")
+                                    self.value_types[target_name] = "i64"
+                                case Err(_): self.codegen_error("C4 descriptor has unclassified storage")
+                        case Err(_): self.codegen_error("C4 descriptor operands must be compiler layout constants")
+                else:
+                    self.codegen_error("C4 descriptor intrinsic requires an address destination")
             case "__simple_ssa_phi":
                 if not self.emit_ssa_phi_intrinsic(dest, args):
                     eprint("[mir-to-llvm] ERROR: malformed __simple_ssa_phi intrinsic")
