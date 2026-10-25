@@ -1,0 +1,75 @@
+# Source-only: explicit-state samples must preserve every successor RNG.
+use testing.fuzz as fuzzing
+use std.common.random_pure.{lcg_rng, lcg_value}
+
+fn seven(value: i32) -> bool:
+    value == 7
+
+fn never(value: i32) -> bool:
+    false
+
+fn nested_sevens(value: [[i32]]) -> bool:
+    value.len() == 2 and value[0] == [7, 7] and value[1] == [7, 7]
+
+fn below_fifty(value: i32) -> bool:
+    value < 50
+
+fn main() -> i64:
+    val ranged = fuzzing.int(0, 99)
+    val initial = lcg_rng(0)
+    val first = ranged.generate(initial)
+    val second = ranged.generate(first.next_rng)
+    val third = ranged.generate(second.next_rng)
+    assert(first.value == 23)
+    assert(second.value == 62)
+    assert(third.value == 97)
+    assert(lcg_value(initial) == 0)
+    assert(lcg_value(third.next_rng) == 3519870697)
+    val replay = ranged.generate(lcg_rng(0))
+    assert(replay.value == first.value)
+    assert(lcg_value(replay.next_rng) == lcg_value(first.next_rng))
+    val independent = ranged.generate(lcg_rng(7))
+    assert(lcg_value(independent.next_rng) != lcg_value(first.next_rng))
+    val independent_replay = ranged.generate(lcg_rng(7))
+    assert(lcg_value(independent_replay.next_rng) == lcg_value(independent.next_rng))
+    val nested_ranged = fuzzing.list(fuzzing.list(ranged, 2, 2), 2, 2)
+    val nested_draw = nested_ranged.generate(lcg_rng(0))
+    assert(nested_draw.value == [[97, 84], [22, 29]])
+    assert(lcg_value(nested_draw.next_rng) == 1476291629)
+    val empty_draw = fuzzing.list(ranged, 0, 0).generate(lcg_rng(0))
+    assert(empty_draw.value == [])
+    assert(lcg_value(empty_draw.next_rng) == 1013904223)
+    val text_draw = fuzzing.text(2, 2).generate(lcg_rng(0))
+    assert(text_draw.value == "^O")
+    assert(lcg_value(text_draw.next_rng) == 3519870697)
+    val boolean = fuzzing.bool().generate(lcg_rng(0))
+    assert(boolean.value)
+    assert(lcg_value(boolean.next_rng) == 1013904223)
+    match fuzzing.fuzz_seeded(below_fifty, ranged, 5, 0):
+        fuzzing.FuzzResult.Fail(input, message, iteration):
+            assert(input == "62")
+            assert(message == "Property returned false")
+            assert(iteration == 2)
+        _: assert(false)
+    match fuzzing.fuzz_seeded(never, ranged, 0, 0):
+        fuzzing.FuzzResult.Pass(count): assert(count == 0)
+        _: assert(false)
+    val integers = fuzzing.int(7, 7)
+    match fuzzing.fuzz(seven, integers, 3):
+        fuzzing.FuzzResult.Pass(count): assert(count == 3)
+        _: assert(false)
+    val config = fuzzing.IntGen(min: 7, max: 7)
+    match fuzzing.fuzz_seeded(seven, config.as_generator(), 1, 0):
+        fuzzing.FuzzResult.Pass(count): assert(count == 1)
+        _: assert(false)
+    val nested = fuzzing.list(fuzzing.list(integers, 2, 2), 2, 2)
+    match fuzzing.fuzz_seeded(nested_sevens, nested, 2, 0):
+        fuzzing.FuzzResult.Pass(count): assert(count == 2)
+        _: assert(false)
+    match fuzzing.fuzz_seeded(never, integers, 5, 0):
+        fuzzing.FuzzResult.Fail(input, message, iteration):
+            assert(input == "7")
+            assert(message == "Property returned false")
+            assert(iteration == 1)
+        _: assert(false)
+    0
