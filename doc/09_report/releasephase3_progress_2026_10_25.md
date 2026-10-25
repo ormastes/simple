@@ -155,7 +155,7 @@ All following commits exist locally and are **not ancestors** of checked target
 |---|---|
 | Actual caller `294fccf3aaa` | A generated retained `me` caller body uses canonical Optional Some/None and Result flow. It is a WIP source candidate, not integrated caller acceptance; actual lowering/capture/verification/lifecycle closure remains incomplete. |
 | Retained Optional CFG `b1c9fc84f510` | Construction verifier handles retained Optional storage/guarded borrow and authored CFG controls. Current caller lane also has tracked working edits. It is not a landed complete caller or executed native proof. |
-| Verifier repair `7a9b9bc5ffc` | Rejects wrong-variant/default/shared branch targets with authored negative controls. Exact review was pending at this snapshot; do not count it as accepted or landed. |
+| Verifier repair `7a9b9bc5ffc` | Rejects wrong-variant/default/shared branch targets with authored negative controls. Scoped Astra SOURCE_GO is recorded; the repair remains unlanded and runtime/integration UNRUN. Source approval adds no feature-acceptance count. |
 | Stable origin `acab67c325db` | Separates stable declaration identity from later producer bodies. Reviewed candidate remains dependency-blocked and unlanded; source review is not execution. |
 | Typed captures `297619c5f1ee`; request proof `2eb9285108e1` | Resolver identities and prepaid typed count changes exist locally. Final integration and actual caller/native verification remain open. |
 
