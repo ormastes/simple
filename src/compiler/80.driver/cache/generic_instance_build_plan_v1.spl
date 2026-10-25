@@ -1,0 +1,151 @@
+# Needed generic instances + per-instance object cache (P-G5).
+#
+# The TLDR `generic-spec` lists (generic_specialization_list_v1) say which
+# object variations the build needs. A scheduler reads EVERY module's list up
+# front and unions them into the set of needed instances (ConcreteTldrKey).
+# Each instance's compiled object is cached under (producer identity,
+# ConcreteTldrKey); when a list changes only the added keys are built and only
+# the keys no list needs any more are dropped.
+#
+# Producer identity: ConcreteTldrKey is deliberately target-neutral (plan §3.2:
+# target/ABI/layout attach to OBJECT keys), so the cache root is partitioned by
+# a producer id -- file_worker_inc_producer_v1 (native_build_cache_scope_key +
+# native-build args), the same identity P-E folds into object caches -- and a
+# cached object is admitted only when its header records that producer, that
+# key and the sha256 of its body (never by file existence alone).
+#
+# STATUS (honest scope): this module only COMPUTES the plan and owns the cache
+# layout/verification. Nothing consumes GenericInstanceBuildPlanV1 yet:
+# instances are still emitted per using object with COMDAT linkage, no
+# instance object is built once or linked, and `drop` deletes nothing.
+# Scheduler consumption + per-key instance build/link + COMDAT retirement is
+# the follow-up P-G6, filed as
+# doc/08_tracking/bug/generic_instance_plan_has_no_consumer_pg6_2026-10-25.md.
+# The instance BODY comes from the template body loader (P-G4/P-G5b).
+#
+# Completeness is explicit: a module whose list is missing, stale, undecodable
+# or incomplete makes the plan incomplete, and the scheduler must keep
+# instantiating per module (module-scoped mono) instead of trusting the set.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1,
+    GenericSpecializationListV1}
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_v1}
+
+val _INSTANCE_OBJECT_MAGIC_V1 = "generic-instance-object/v1"
+
+pub struct GenericInstanceBuildPlanV1:
+    needed: [RequiredSpecializationV1]   # sorted by concrete_key, unique
+    build: [text]    # needed keys with no verified cached instance object
+    reuse: [text]    # needed keys whose cached instance object verified
+    drop: [text]     # previously needed keys no list needs any more
+    complete: bool   # every module's list was known and complete
+
+fn _insert_sorted_v1(out: [text], key: text) -> [text]:
+    var r = out
+    if r.contains(key):
+        return r
+    var j = r.len()
+    r.push(key)
+    while j > 0 and r[j - 1] > key:
+        r[j] = r[j - 1]
+        j = j - 1
+    r[j] = key
+    r
+
+# Union of every module's list; complete only when every list is known and complete.
+pub fn generic_instance_needed_v1(lists: [GenericSpecializationListV1?]) -> ([RequiredSpecializationV1], bool):
+    var complete = true
+    var keys: [text] = []
+    var by_key: Dict<text, RequiredSpecializationV1> = {}
+    for entry in lists:
+        match entry:
+            case Some(l):
+                if not l.complete: complete = false
+                for s in l.specs:
+                    if not by_key.contains_key(s.concrete_key):
+                        by_key[s.concrete_key] = s
+                        keys = _insert_sorted_v1(keys, s.concrete_key)
+            case nil:
+                complete = false
+    var needed: [RequiredSpecializationV1] = []
+    for k in keys:
+        needed.push(by_key[k])
+    (needed, complete)
+
+# Cache location of one instance object; "" when the producer is unknown
+# (no shared cache without a producer identity).
+pub fn generic_instance_object_path_v1(cache_root: text, producer: text, concrete_key: text) -> text:
+    if cache_root == "" or producer == "" or concrete_key == "":
+        return ""
+    cache_root + "/generic_instances/" + sha256_text(producer) + "/" + sha256_text(concrete_key) + ".o"
+
+pub fn generic_instance_object_encode_v1(producer: text, concrete_key: text, object_bytes: text) -> text:
+    _INSTANCE_OBJECT_MAGIC_V1 + "\t" + sha256_text(producer) + "\t" + sha256_text(concrete_key) + "\t" +
+        sha256_text(object_bytes) + "\n" + object_bytes
+
+# True only when `content` is an instance object recorded for exactly this
+# producer and key whose body matches its recorded digest.
+pub fn generic_instance_object_verify_v1(content: text, producer: text, concrete_key: text) -> bool:
+    val nl = content.index_of("\n")
+    if nl < 0:
+        return false
+    val head = content.substring(0, nl).split("\t")
+    if head.len() != 4 or head[0] != _INSTANCE_OBJECT_MAGIC_V1:
+        return false
+    head[1] == sha256_text(producer) and head[2] == sha256_text(concrete_key) and
+        head[3] == sha256_text(content.substring(nl + 1))
+
+pub fn generic_instance_cached_v1(cache_root: text, producer: text, concrete_key: text) -> bool:
+    val path = generic_instance_object_path_v1(cache_root, producer, concrete_key)
+    if path == "" or not file_exists(path):
+        return false
+    generic_instance_object_verify_v1(file_read(path), producer, concrete_key)
+
+pub fn generic_instance_build_plan_v1(previous_needed: [text], lists: [GenericSpecializationListV1?],
+        cached: [text]) -> GenericInstanceBuildPlanV1:
+    val (needed, complete) = generic_instance_needed_v1(lists)
+    var build: [text] = []
+    var reuse: [text] = []
+    var now: [text] = []
+    for s in needed:
+        now.push(s.concrete_key)
+        if cached.contains(s.concrete_key):
+            reuse.push(s.concrete_key)
+        else:
+            build.push(s.concrete_key)
+    var drop: [text] = []
+    for k in previous_needed:
+        if not now.contains(k):
+            drop = _insert_sorted_v1(drop, k)
+    GenericInstanceBuildPlanV1(needed: needed, build: build, reuse: reuse, drop: drop,
+        complete: complete)
+
+# Scheduler entry: read every module's fresh TLDR list, verify the instance cache.
+pub fn generic_instance_build_plan_of_tldr_v1(module_paths: [text], tldr_root: text,
+        cache_root: text, producer: text, previous_needed: [text]) -> GenericInstanceBuildPlanV1:
+    var lists: [GenericSpecializationListV1?] = []
+    for path in module_paths:
+        lists.push(generic_spec_list_of_module_v1(path, tldr_root))
+    val (needed, _complete) = generic_instance_needed_v1(lists)
+    var cached: [text] = []
+    for s in needed:
+        if generic_instance_cached_v1(cache_root, producer, s.concrete_key):
+            cached.push(s.concrete_key)
+    generic_instance_build_plan_v1(previous_needed, lists, cached)
+
+# Publish one built instance object (header + body, temp + atomic rename).
+pub fn generic_instance_cache_publish_v1(cache_root: text, producer: text, concrete_key: text,
+        object_bytes: text) -> bool:
+    val path = generic_instance_object_path_v1(cache_root, producer, concrete_key)
+    if path == "":
+        return false
+    module_artifact_publish_atomic_v1(path, generic_instance_object_encode_v1(producer, concrete_key, object_bytes))
+
+export GenericInstanceBuildPlanV1
+export generic_instance_needed_v1, generic_instance_object_path_v1
+export generic_instance_object_encode_v1, generic_instance_object_verify_v1, generic_instance_cached_v1
+export generic_instance_build_plan_v1, generic_instance_build_plan_of_tldr_v1
+export generic_instance_cache_publish_v1

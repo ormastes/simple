@@ -36,7 +36,8 @@ use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
-use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys}
+use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys,
+    MonoObservedGenericUseV1, mono_generic_uses_of_type_v1, mono_type_source_text_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use std.io_runtime.{env_get, time_now_monotonic_ms}
@@ -699,6 +700,7 @@ impl MonomorphizationPass:
         self.module_scoped_target_v1 = module_name
         self.declared_global_types = {}
         mono_instance_profile_v1 = {}
+        mono_scoped_generic_uses_reset_v1()
         if self.invocation_budget == nil: mono_diag_refresh_v1()
         val template_keys: [text] = templates.keys()
         for tname in template_keys:
@@ -810,6 +812,7 @@ impl MonomorphizationPass:
         if out.symbols.next_symbol_id < reloc_next:
             out.symbols.next_symbol_id = reloc_next
         out.functions = funcs
+        mono_scoped_generic_uses_ready_v1 = true
         self.prune_consumed_templates(out)
 
     me relocate_body_type_ids_v1(type_ids: [i64], source_module: text, target_module: text, keep: Dict<text, bool>) -> Dict<text, i64>:
@@ -1235,8 +1238,31 @@ impl MonomorphizationPass:
             if hir_type_is_concrete(declared): return declared
         nil
 
+    me observe_generic_uses_v1(t: HirType):
+        """P-G5: record the concrete generic type uses module-scoped mono
+        sees (after inference), for the TLDR `generic-spec` list."""
+        if not self.module_scoped_v1 or t == nil or not hir_type_is_concrete(t):
+            return
+        val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+        val (uses, ok) = mono_generic_uses_of_type_v1(t, symbols)
+        if not ok:
+            mono_scoped_generic_uses_complete_v1 = false
+        for u in uses:
+            var use_: MonoObservedGenericUseV1 = u
+            if use_.owner == "":
+                use_.owner = self.current_module
+            val seen_key = use_.owner + "\u001f" + use_.name + "\u001f" + use_.arg_texts.join("\u001f")
+            if mono_scoped_generic_seen_v1.has(seen_key):
+                continue
+            mono_scoped_generic_seen_v1[seen_key] = true
+            mono_scoped_generic_uses_v1 = mono_scoped_generic_uses_v1.push(use_)
+
     me rewrite_function(func: HirFunction) -> HirFunction:
         if not self.invocation_enter_v1(): return func
+        self.observe_generic_uses_v1(func.return_type)
+        for observed_param in func.params:
+            val op: HirParam = observed_param
+            self.observe_generic_uses_v1(op.type_)
         val previous_env = self.env
         val previous_return_type = self.current_return_type
         val previous_match_hint = self.match_enum_hint
@@ -1512,6 +1538,17 @@ impl MonomorphizationPass:
         val sym = self.next_symbol
         self.next_symbol = self.next_symbol + 1
         self.spec_symbols[mangled] = sym
+        if self.module_scoped_v1 and spec_mod != self.module_scoped_target_v1:
+            # P-G5: an imported generic FUNCTION instance (`id(1)` -> id$i64)
+            # may carry no `Name<args>` type at all; record its identity so
+            # the generic-spec list cannot certify complete coverage without it.
+            var arg_texts: [text] = []
+            val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+            for ta in completed_args:
+                val tat: HirType = ta
+                arg_texts = arg_texts.push(mono_type_source_text_v1(tat, symbols))
+            mono_scoped_generic_fn_instances_v1 = mono_scoped_generic_fn_instances_v1.push(
+                MonoObservedGenericUseV1(owner: spec_mod, name: func_name, arg_texts: arg_texts))
         var signature = self.template_signature_v1(func_name)
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             # The archive consumer fulfills this request with
@@ -2668,6 +2705,7 @@ impl MonomorphizationPass:
                 val li: HirExpr = init
                 val ls: SymbolId = sym
                 if lt != nil and hir_type_is_concrete(lt):
+                    self.observe_generic_uses_v1(lt)
                     self.env[ls.id] = lt
                 else:
                     # HIR keeps the if-val payload type in the symbol table,
@@ -3513,6 +3551,8 @@ impl MonomorphizationPass:
 
     me rewrite_expr(expr: HirExpr) -> HirExpr:
         if not self.invocation_enter_v1(): return expr
+        if expr != nil and expr.has_type_:
+            self.observe_generic_uses_v1(expr.type_)
         val result = self.rewrite_expr_invocation_inner_v1(expr)
         self.invocation_leave_v1()
         result
@@ -4955,6 +4995,34 @@ fn run_monomorphization_module_scoped_v1(module: HirModule, templates: Dict<text
 # (pointer copy, the registry transport class); scalars/diagnostics stay in
 # the 3-tuple. Reset on every entry; single-threaded per lane.
 pub var mono_report_modules_owner: Dict<text, HirModule> = {}
+
+# P-G5: concrete generic type uses (`Name<args>`) the LAST module-scoped mono
+# run observed, after inference: let/param/return/expression types of the
+# module's roots and of every instance it placed. `complete` is false when a
+# use could not be rendered; `ready` is set only when the run finished, so a
+# caller can tell "no uses" from "no data". Single-threaded per lane.
+pub var mono_scoped_generic_uses_v1: [MonoObservedGenericUseV1] = []
+pub var mono_scoped_generic_uses_complete_v1: bool = true
+pub var mono_scoped_generic_uses_ready_v1: bool = false
+# Instances of generic FUNCTIONS declared in another module ("<module>.<fn>",
+# concrete argument spellings), requested by the last module-scoped run.
+pub var mono_scoped_generic_fn_instances_v1: [MonoObservedGenericUseV1] = []
+
+# (uses, complete, ready) of the last module-scoped run.
+fn mono_scoped_generic_uses_last_v1() -> ([MonoObservedGenericUseV1], bool, bool):
+    (mono_scoped_generic_uses_v1, mono_scoped_generic_uses_complete_v1, mono_scoped_generic_uses_ready_v1)
+
+fn mono_scoped_generic_fn_instances_last_v1() -> [MonoObservedGenericUseV1]:
+    mono_scoped_generic_fn_instances_v1
+
+var mono_scoped_generic_seen_v1: Dict<text, bool> = {}
+
+fn mono_scoped_generic_uses_reset_v1():
+    mono_scoped_generic_seen_v1 = {}
+    mono_scoped_generic_fn_instances_v1 = []
+    mono_scoped_generic_uses_v1 = []
+    mono_scoped_generic_uses_complete_v1 = true
+    mono_scoped_generic_uses_ready_v1 = false
 
 # The global is a one-shot transport, never a retained owner: the consumer takes
 # the dict and the global is cleared in the same step, so no second reference to

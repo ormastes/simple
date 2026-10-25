@@ -24,7 +24,8 @@ use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.{HirModule, SymbolId}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass,
-    run_monomorphization_module_scoped_v1}
+    run_monomorphization_module_scoped_v1, mono_scoped_generic_uses_last_v1,
+    mono_scoped_generic_fn_instances_last_v1}
 
 val TEMPLATE_SRC = "fn id<X>(x: X) -> X:\n    x\n"
 val USER_SRC = 'use t.{id}' + "\n\nfn main() -> i64:\n    id(1)\n"
@@ -101,3 +102,20 @@ describe "module-scoped monomorphization":
         expect(diags[0]).to_contain("E-MONO-040: template")
         expect(diags[0]).to_contain("not visible to module")
         expect(instance_names_v1(out).len()).to_equal(0)
+
+    it "records an imported generic function instance with primitive arguments (P-G5)":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val f = lower_v1(USER_SRC, "f")
+        var templates: Dict<text, HirModule> = {}
+        templates["t"] = t
+        val (_o, _s, diags) = run_monomorphization_module_scoped_v1(f, templates)
+        expect(diags.len()).to_equal(0)
+        val (_uses, _complete, ready) = mono_scoped_generic_uses_last_v1()
+        expect(ready).to_equal(true)
+        val fns = mono_scoped_generic_fn_instances_last_v1()
+        expect(fns.len()).to_equal(1)
+        if fns.len() == 1:
+            expect(fns[0].owner).to_equal("t")
+            expect(fns[0].name).to_equal("id")
+            expect(fns[0].arg_texts).to_equal(["i64"])
+
