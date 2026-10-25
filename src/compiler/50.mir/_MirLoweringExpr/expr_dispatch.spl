@@ -4953,6 +4953,42 @@ impl MirLowering:
                         self.builder = b_narrow
                         return bool_local
 
+                # Array `==` / `!=` compares CONTENTS (length + elements), as
+                # the interpreter does. An array value is a heap handle, so the
+                # generic emit_binop(Eq/Ne) below compared two handles by
+                # identity: two separately built equal lists were `!=`
+                # (doc/08_tracking/bug/array_eq_lowered_as_identity_compare_2026-10-25.md,
+                # native_u8_array_ne_compares_reference_2026-10-25.md).
+                # rt_native_eq compares registered arrays element-wise
+                # (byte-packed, u64-packed and generic lanes). Detection is the
+                # one the array-concat `+` arm uses. An integer-literal peer
+                # (`xs == 0`, a zero-word probe) keeps the word compare.
+                var bin_is_array_eq = false
+                match op:
+                    case Eq | NotEq:
+                        if self.local_is_runtime_array(left_local) or self.local_is_runtime_array(right_local):
+                            bin_is_array_eq = true
+                            match left.kind:
+                                case IntLit(_, _): bin_is_array_eq = false
+                                case _: ()
+                            match right.kind:
+                                case IntLit(_, _): bin_is_array_eq = false
+                                case _: ()
+                    case _:
+                        ()
+                if bin_is_array_eq:
+                    val array_eq_local = self.emit_runtime_word_eq(left_local, right_local)
+                    match op:
+                        case NotEq:
+                            var b_array_ne = self.builder
+                            val array_false = b_array_ne.new_temp(MirType.bool())
+                            b_array_ne.emit_const(array_false, MirConstValue.Bool(false), MirType.bool())
+                            val array_ne_local = b_array_ne.emit_binop(MirBinOp.Eq, mir_operand_copy(array_eq_local), mir_operand_copy(array_false), MirType.bool())
+                            self.builder = b_array_ne
+                            return array_ne_local
+                        case _:
+                            return array_eq_local
+
                 # Any values use the tagged RuntimeValue ABI. Once either
                 # operand carries that provenance, normalize its peer and use
                 # tag-aware equality; raw word equality is incorrect for
