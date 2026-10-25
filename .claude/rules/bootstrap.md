@@ -462,6 +462,8 @@ rebuild. #4498 prescans all closure structs in the bootstrap-fixed MIR lane;
 (#4430).
 
 Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs. A full
+
+Per-file pipeline flip readiness (P-F): unset `SIMPLE_FILE_WORKERS` takes `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` (`native_file_worker_v1.spl`, today `"0"`) -- the flip is that one line; `SIMPLE_FILE_WORKERS=0` is the opt-out. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash, resume-compatible; worker gets `per-file:fw=0|1`). Prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (obj_done(A) < hir_start(B), first-object ms, objects/min). See `doc/07_guide/tooling/bootstrap_options.md`.
 Stage 3 run of the per-file lane is not yet proven.
 
 Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =

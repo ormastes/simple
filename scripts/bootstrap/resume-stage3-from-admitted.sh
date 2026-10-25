@@ -936,6 +936,19 @@ case "${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM:-}" in
      stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
   *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
 esac
+# Per-file pipeline knob (P-F): SIMPLE_FILE_WORKERS. Unset => compiler default
+# (NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 in native_file_worker_v1.spl). When
+# set (exactly 0 or 1) it is passed to the Stage 3 child AND hashed into
+# the args receipt; unset adds nothing, so existing receipts stay resumable. The
+# worker receives them as a lane suffix (per-file:fw=0|1).
+stage3_per_file_env= stage3_per_file_lane=
+case "${SIMPLE_FILE_WORKERS:-}" in
+  '') ;;
+  0|1) stage3_per_file_env="SIMPLE_FILE_WORKERS=$SIMPLE_FILE_WORKERS"
+       stage3_per_file_lane=":fw=$SIMPLE_FILE_WORKERS" ;;
+  *) echo "error: SIMPLE_FILE_WORKERS must be unset, 0 or 1" >&2; exit 1 ;;
+esac
+case "$stage3_lowering_lane" in per-file) stage3_lowering_lane="per-file$stage3_per_file_lane" ;; esac
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   '') ;;
@@ -956,7 +969,7 @@ if [ -n "$stage3_compiler_ceiling_env" ]; then
 fi
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=$stage3_bootstrap_flag" ${stage3_whole_program_env} \
+  "SIMPLE_BOOTSTRAP=$stage3_bootstrap_flag" ${stage3_whole_program_env} ${stage3_per_file_env} \
   "SIMPLE_ABI_POLICY=$resume_abi_policy" \
   "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
   "SIMPLE_NO_DEPRECATED_WARNINGS=1" \

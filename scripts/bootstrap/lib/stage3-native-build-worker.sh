@@ -38,10 +38,21 @@ fi
 # lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
 # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1. Legacy 28/30/31-argument callers keep the
 # historical SIMPLE_BOOTSTRAP=1 vector byte-for-byte.
-bootstrap_flag=1 whole_program_env=
+# A per-file lane may carry a ":fw=0|1" suffix, forwarded as
+# SIMPLE_FILE_WORKERS (systemd does not inherit).
+bootstrap_flag=1 whole_program_env= per_file_env=
 if [ "$worker_arg_count" -eq 32 ]; then
   case "${14}" in
-    per-file) bootstrap_flag= ;;
+    per-file|per-file:*)
+      bootstrap_flag= lane_rest=${14#per-file}
+      while [ -n "$lane_rest" ]; do
+        lane_rest=${lane_rest#:} lane_item=${lane_rest%%:*}
+        lane_rest=${lane_rest#"$lane_item"}
+        case "$lane_item" in
+          fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
+          *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
+        esac
+      done ;;
     whole-program) whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
     *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
   esac
@@ -135,7 +146,7 @@ timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
-  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} \
+  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \

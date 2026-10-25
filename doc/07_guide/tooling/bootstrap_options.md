@@ -134,6 +134,21 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
 - Not yet proven: a full Stage 3 run of the per-file lane under
   `SIMPLE_BOOTSTRAP_STAGE3=1` with `SIMPLE_BOOTSTRAP` empty. If it fails, use
   `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` and record the failure.
+- Per-file pipeline default flip (P-F, prepared, NOT flipped): the default
+  for `SIMPLE_FILE_WORKERS` when unset is the
+  single constant `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` in
+  `src/compiler/80.driver/driver_build/native_file_worker_v1.spl` (today
+  `"0"`). Every read site uses `?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1`, so the
+  flip is that one line; `SIMPLE_FILE_WORKERS=0` stays the opt-out. The Stage 3
+  scripts pass the knob through when set (exactly `0` or `1`, anything else
+  is refused) and hash it into the Stage 3 args receipt; unset adds nothing,
+  so existing receipts stay resume-compatible. The resume worker receives it
+  as a lane suffix (`per-file:fw=0|1`) because systemd does not inherit
+  the caller's env. Jobs still come from `~/.config/simple/host.sdn`
+  `max_build_jobs`. Overlap proof:
+  `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>...`
+  (`--selftest` first, always) passes only when some `obj_done(A) <
+  hir_start(B)` and reports `first_object_ms` and `objects_per_min`.
 - Known WA: `WA-PERFILE-TRIPLE-QUOTE`
   (`doc/08_tracking/bug/perfile_lane_triple_quote_interpolation_parse_2026-10-25.md`).
 
