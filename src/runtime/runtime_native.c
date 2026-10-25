@@ -11878,7 +11878,7 @@ int64_t rt_dict_scope_read_bound_v1(void) {
     return (int64_t)probes * 3 + 1;
 }
 
-static void* rt_core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64_t* fuel) {
+static void* core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64_t* fuel) {
     uintptr_t raw = (uintptr_t)value;
     if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
     uintptr_t ptr = raw & ~RT_VALUE_TAG_MASK;
@@ -11903,11 +11903,11 @@ static void* rt_core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64
     return *(uint32_t*)ptr == kind ? (void*)ptr : NULL;
 }
 
-static RtCoreDict* rt_core_dict_scope_read_checked_v1(
+static RtCoreDict* core_dict_scope_read_checked_v1(
     int64_t dict, int64_t owner, int64_t epoch, int64_t fuel) {
     int64_t bound = rt_dict_scope_read_bound_v1();
     if (bound < 0 || fuel < bound) return NULL;
-    RtCoreDict* d = rt_core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
     if (!d || owner <= 0 || epoch <= 0 || d->read_owner != owner ||
         d->read_epoch != epoch || d->read_backing <= 0 || !d->entries)
         return NULL;
@@ -11917,21 +11917,21 @@ static RtCoreDict* rt_core_dict_scope_read_checked_v1(
 int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel) {
     int64_t bound = rt_dict_scope_read_bound_v1();
     if (bound < 0 || fuel < bound) return -1;
-    RtCoreDict* d = rt_core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
     return d && d->read_owner > 0 && d->read_epoch > 0 ? d->read_owner : -1;
 }
 
 int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel) {
     int64_t bound = rt_dict_scope_read_bound_v1();
     if (bound < 0 || fuel < bound) return -1;
-    RtCoreDict* d = rt_core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
     return d && owner > 0 && d->read_owner == owner && d->read_epoch > 0
         ? d->read_epoch : -1;
 }
 
 int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner,
     int64_t epoch, int64_t field, int64_t fuel) {
-    RtCoreDict* d = rt_core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
     if (!d || d->cap <= 0 || d->len < 0 || d->len > d->cap ||
         (uint64_t)d->cap > INT64_MAX / sizeof(RtCoreDictEntry)) return -1;
     switch (field) {
@@ -11947,7 +11947,7 @@ int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner,
 
 int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner,
     int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel) {
-    RtCoreDict* d = rt_core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
     if (!d || slot < 0 || slot >= d->cap) return -1;
     RtCoreDictEntry* entry = &d->entries[slot];
     if (field == 0) return entry->occupied == 1 ? 1 : 0;
@@ -11958,9 +11958,9 @@ int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner,
         ? rt_core_immortal_registry_cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
     if ((uint64_t)fuel <= owner_probes) return -1;
     fuel -= (int64_t)owner_probes;
-    RtCoreString* key = rt_core_dict_scope_read_heap_v1(entry->key, RT_VALUE_HEAP_STRING, &fuel);
+    RtCoreString* key = core_dict_scope_read_heap_v1(entry->key, RT_VALUE_HEAP_STRING, &fuel);
     if (!key || key->len > INT64_MAX) return -1;
-    RtCoreWideInt* wide = rt_core_dict_scope_read_heap_v1(entry->value, RT_VALUE_HEAP_INT, &fuel);
+    RtCoreWideInt* wide = core_dict_scope_read_heap_v1(entry->value, RT_VALUE_HEAP_INT, &fuel);
     if (!wide && !rt_core_is_int(entry->value)) return -1;
     int64_t value = wide ? wide->value : rt_core_as_int(entry->value);
     if (value < 0) return -1;
