@@ -41,7 +41,8 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
     worker_surface_restrict_claims_v1, worker_surface_text_v1,
     worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
-    worker_hir_restrict_loads_v1, source_paths_by_canonical_v1}
+    worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
@@ -754,11 +755,20 @@ impl CompilerDriver:
             worker_surface_closure_selected_v1(worker_spec, worker_flag))
         var worker_needed: [bool] = []
         var worker_built: [bool] = []
+        var mir_advice_paths: [text] = []
         if worker_closure:
             var seeds: [bool] = []
+            var seed_index = 0
             for seed_path in source_paths:
-                if mir_scoped: seeds.push(mir_targets.contains(seed_path))
+                if mir_scoped:
+                    # Possible AOP advice modules are seeded too: the weave
+                    # reads advice from every loaded HIR module.
+                    val is_advice = worker_source_may_declare_advice_v1(source_contents[seed_index])
+                    if is_advice and not mir_advice_paths.contains(seed_path):
+                        mir_advice_paths.push(seed_path)
+                    seeds.push(mir_targets.contains(seed_path) or is_advice)
                 else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
+                seed_index = seed_index + 1
             worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
             for _p in source_paths:
                 worker_built.push(false)
@@ -939,42 +949,44 @@ impl CompilerDriver:
                 if ready_canonical.contains_key(canonical_paths[ai]): allowed_paths.push(source_paths[ai])
                 ai = ai + 1
             if mir_scoped:
-                # Every target must have a fully built closure, else fail
-                # closed: no MIR from a placeholder surface.
-                var target_indices: [i64] = []
+                # Every target and every possible advice module must have a
+                # fully built closure, else fail closed (MONO-PENDING): no MIR
+                # from a placeholder surface, no weave missing an advice.
+                val mir_queue_dir = _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+                val source_of_canonical = source_path_by_canonical_map_v1(canonical_paths, source_paths)
+                var surface_source: [text] = []
+                for rs in retained_surfaces.surfaces:
+                    surface_source.push(source_of_canonical.get(rs.canonical_path) ?? "")
+                var root_indices: [i64] = []
                 var found_targets: [text] = []
+                var pending_reason = ""
                 var ti = 0
-                while ti < retained_surfaces.surfaces.len():
-                    val tpath = source_paths_by_canonical_v1(canonical_paths, source_paths,
-                        retained_surfaces.surfaces[ti].canonical_path)
-                    if mir_targets.contains(tpath):
+                while ti < surface_source.len():
+                    val tpath = surface_source[ti]
+                    val is_target = mir_targets.contains(tpath)
+                    if is_target or mir_advice_paths.contains(tpath):
                         if not surface_ready[ti]:
-                            val _pending = native_file_worker_mono_pending_publish_v1(
-                                _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", tpath,
-                                "import-closure surface missing")
-                            self.ctx.add_error("MONO-PENDING: import-closure surface missing for {tpath}")
-                            return false
-                        target_indices.push(ti)
-                        if not found_targets.contains(tpath): found_targets.push(tpath)
+                            pending_reason = if is_target: "import-closure surface missing for {tpath}"
+                                else: "aop advice outside import closure ({tpath})"
+                        root_indices.push(ti)
+                        if is_target and not found_targets.contains(tpath): found_targets.push(tpath)
                     ti = ti + 1
-                if found_targets.len() != mir_targets.len():
-                    for missing in mir_targets:
-                        if found_targets.contains(missing): continue
-                        val _pending = native_file_worker_mono_pending_publish_v1(
-                            _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", missing,
-                            "target surface missing")
-                    self.ctx.add_error("MONO-PENDING: a MIR target has no surface in this closure")
+                if pending_reason == "" and found_targets.len() != mir_targets.len():
+                    pending_reason = "a MIR target has no surface in this closure"
+                if pending_reason != "":
+                    for target in mir_targets:
+                        val _pending = native_file_worker_mono_pending_publish_v1(mir_queue_dir, target, pending_reason)
+                    self.ctx.add_error("MONO-PENDING: {pending_reason}")
                     return false
-                val closure = worker_surface_import_closure_v1(target_indices, surface_edges)
+                val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
                 var load_paths: [text] = []
                 var ci = 0
                 while ci < closure.len():
-                    if closure[ci]:
-                        load_paths.push(source_paths_by_canonical_v1(canonical_paths, source_paths,
-                            retained_surfaces.surfaces[ci].canonical_path))
+                    if closure[ci] and surface_source[ci] != "":
+                        load_paths.push(surface_source[ci])
                     ci = ci + 1
                 worker_hir_restrict_loads_v1(load_paths)
-                print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count}"
+                print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count} advice_modules={mir_advice_paths.len()}"
             else:
                 worker_surface_restrict_claims_v1(allowed_paths)
         self.streaming_module_surfaces_owner = retained_surfaces

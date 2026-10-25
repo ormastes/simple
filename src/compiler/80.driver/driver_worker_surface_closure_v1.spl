@@ -40,6 +40,7 @@ use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
     module_tldr_companion_sections_v1}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1}
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v1"
 
@@ -183,12 +184,26 @@ pub fn worker_surface_claim_allowed_v1(path: text) -> bool:
 # Admitted targets of a module-scoped MIR child, or [] when this child must
 # keep the whole-closure behaviour (global mono, opt-out, or no targets).
 pub fn worker_mir_scoped_targets_v1(mono_scoped: text, only_paths: text, flag: text) -> [text]:
-    var out: [text] = []
     if mono_scoped != "1" or flag == "0":
-        return out
-    for part in only_paths.split("\n"):
-        if part != "" and not out.contains(part):
-            out.push(part)
+        return []
+    native_file_worker_only_paths_parse_v1(only_paths)
+
+# AOP advice is collected from EVERY loaded HIR module at weave time, and an
+# aspect module is normally not imported by its join points, so it is not in
+# the import closure. A module that may declare `on pc{...}` advice is loaded
+# too. Text superset of the parser's rule (current_ident_is_on_advice_decl:
+# `on`, inline ws, then `pc{`): every real advice decl contains "pc{".
+pub fn worker_source_may_declare_advice_v1(source: text) -> bool:
+    source.contains("pc{")
+
+# Source path for each canonical path (first wins), built once.
+pub fn source_path_by_canonical_map_v1(canonical_paths: [text], source_paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    var i = 0
+    while i < canonical_paths.len() and i < source_paths.len():
+        if not out.contains_key(canonical_paths[i]):
+            out[canonical_paths[i]] = source_paths[i]
+        i = i + 1
     out
 
 # Transitive closure (targets included) over frozen surface edges.
@@ -210,15 +225,6 @@ pub fn worker_surface_import_closure_v1(targets: [i64], edges: [[i64]]) -> [bool
                 needed[t] = true
                 queue.push(t)
     needed
-
-# Source path whose canonical path is `canonical` ("" when absent).
-pub fn source_paths_by_canonical_v1(canonical_paths: [text], source_paths: [text], canonical: text) -> text:
-    var i = 0
-    while i < canonical_paths.len() and i < source_paths.len():
-        if canonical_paths[i] == canonical:
-            return source_paths[i]
-        i = i + 1
-    ""
 
 # Restrict this MIR child's HIR loads (cache hit or local lowering) to `paths`.
 # Set once per process: the first restriction wins (lazy set-once ref).
@@ -309,5 +315,6 @@ export worker_surface_closure_selected_v1, worker_surface_seed_v1, worker_surfac
 export worker_surface_closure_v1, worker_surface_ready_v1
 export worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1
 export worker_surface_text_v1, worker_surface_counters_v1
-export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1, source_paths_by_canonical_v1
+export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
+export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
 export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1

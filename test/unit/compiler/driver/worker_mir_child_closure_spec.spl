@@ -1,6 +1,7 @@
 use std.spec
 use compiler.driver.driver_worker_surface_closure_v1.{worker_mir_scoped_targets_v1,
-    worker_surface_import_closure_v1, worker_surface_ready_v1, source_paths_by_canonical_v1,
+    worker_surface_import_closure_v1, worker_surface_ready_v1, source_path_by_canonical_map_v1,
+    worker_source_may_declare_advice_v1,
     worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1}
 
 # P-A (true_per_file_pipeline_v1.md): a module-scoped MIR child loads HIR only
@@ -32,9 +33,22 @@ describe "MIR child import-closure-only HIR":
         expect(ready[0]).to_equal(false)
         expect(ready[3]).to_equal(true)
 
+    it "keeps an advice module z that target a does not import":
+        # z.spl declares advice and is not imported by a: roots = [a, z].
+        expect(worker_source_may_declare_advice_v1("on pc{call(*)} use h before\n")).to_equal(true)
+        expect(worker_source_may_declare_advice_v1("fn f(on: bool):\n    on\n")).to_equal(false)
+        val edges: [[i64]] = [[1], [2], [], [4], [], [], []]
+        val needed = worker_surface_import_closure_v1([0, 6], edges)
+        expect(needed[6]).to_equal(true)
+        expect(needed[3]).to_equal(false)
+        # z not surface-ready -> not ready -> child fails closed (MONO-PENDING).
+        val ready = worker_surface_ready_v1([true, true, true, true, true, true, false], edges)
+        expect(ready[6]).to_equal(false)
+
     it "maps canonical paths back to source paths":
-        expect(source_paths_by_canonical_v1(["/r/a.spl"], ["a.spl"], "/r/a.spl")).to_equal("a.spl")
-        expect(source_paths_by_canonical_v1(["/r/a.spl"], ["a.spl"], "/r/z.spl")).to_equal("")
+        val m = source_path_by_canonical_map_v1(["/r/a.spl", "/r/a.spl"], ["a.spl", "dup.spl"])
+        expect(m.get("/r/a.spl") ?? "").to_equal("a.spl")
+        expect(m.contains_key("/r/z.spl")).to_equal(false)
 
     it "loads N=3 of M=6 modules, and the restriction is set once":
         worker_hir_restrict_loads_v1(["a.spl", "b.spl", "c.spl"])
