@@ -1,0 +1,60 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# Per-file lane: owner template bodies by HIR cache content key (P-G5b)
+
+The HIR child publishes each claimed module's HIR cache key (`.hirkey` record
+next to its `.deps` record), so a MIR child can load a template owner's body it
+does not hold by content identity instead of guessing the key (closes the
+P-G4 gap in doc/08_tracking/bug/pg4_template_body_hir_cache_load_gap_2026-10-25.md).
+E-MONO-040 rows carry the call's argument keys so the body seam can key the
+missing instance.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hirkey_publish_v1,
+    native_file_worker_hirkey_read_v1, native_file_worker_hirkey_path_v1,
+    native_file_worker_missing_template_args_v1, native_file_worker_missing_templates_v1}
+
+val QUEUE = "build/test_tmp/pg5b_hirkey_queue"
+
+describe "HIR cache key ledger record":
+    it "round-trips the key published for a module":
+        expect(dir_create_all(QUEUE)).to_equal(true)
+        expect(native_file_worker_hirkey_publish_v1(QUEUE, "src/a/owner.spl", "hirkey:abc")).to_equal(true)
+        val read = native_file_worker_hirkey_read_v1(QUEUE, "src/a/owner.spl")
+        expect(read.is_ok()).to_equal(true)
+        expect(read.unwrap()).to_equal("hirkey:abc")
+
+    it "is a miss for a module with no record":
+        expect(native_file_worker_hirkey_read_v1(QUEUE, "src/a/none.spl").is_err()).to_equal(true)
+
+    it "refuses a record that belongs to another path":
+        expect(dir_create_all(QUEUE)).to_equal(true)
+        val _w = file_write(native_file_worker_hirkey_path_v1(QUEUE, "src/a/x.spl"), "src/a/y.spl\nk\n")
+        expect(native_file_worker_hirkey_read_v1(QUEUE, "src/a/x.spl").is_err()).to_equal(true)
+
+    it "refuses to publish an empty key or no queue":
+        expect(native_file_worker_hirkey_publish_v1(QUEUE, "src/a/owner.spl", "")).to_equal(false)
+        expect(native_file_worker_hirkey_publish_v1("", "src/a/owner.spl", "k")).to_equal(false)
+
+describe "E-MONO-040 argument keys":
+    it "extracts the argument keys of the named template, name unchanged":
+        val diags = ["E-MONO-040: template pick not visible to module app arg-types i64\u001fnamed(1:a4:Pair)"]
+        expect(native_file_worker_missing_templates_v1(diags)).to_equal(["pick"])
+        expect(native_file_worker_missing_template_args_v1(diags, "pick")).to_equal(
+            ["arg-types:", "i64", "named(1:a4:Pair)"])
+
+    it "distinguishes explicit type arguments":
+        val diags = ["E-MONO-040: template mk not visible to module app type-args f64"]
+        expect(native_file_worker_missing_template_args_v1(diags, "mk")).to_equal(["type-args:", "f64"])
+
+    it "is empty for a row without keys or another template":
+        val diags = ["E-MONO-040: template mk not visible to module app"]
+        expect(native_file_worker_missing_template_args_v1(diags, "mk")).to_equal([])
+        expect(native_file_worker_missing_template_args_v1(diags, "other")).to_equal([])

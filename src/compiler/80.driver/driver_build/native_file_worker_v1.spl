@@ -354,6 +354,51 @@ pub fn native_file_worker_mono_template_missing_v1(diagnostics: [text]) -> bool:
             return true
     false
 
+# HIR cache key record (P-G5b): the HIR child publishes each claimed module's
+# hir_cache_key (content identity incl. its closure digest) next to its deps
+# record, so a MIR child can load an owner body it does not hold by content
+# identity instead of guessing or re-deriving the key.
+pub fn native_file_worker_hirkey_path_v1(queue: text, path: text) -> text:
+    "{queue}/{sha256_text(path)}.hirkey"
+
+pub fn native_file_worker_hirkey_publish_v1(queue: text, path: text, key: text) -> bool:
+    if queue == "" or path == "" or key == "" or path.contains("\n") or key.contains("\n"):
+        return false
+    val target = native_file_worker_hirkey_path_v1(queue, path)
+    val temporary = "{target}.{getpid()}.tmp"
+    file_write(temporary, path + "\n" + key + "\n") and file_rename(temporary, target)
+
+# Err when missing, malformed, or recorded for another path (fail closed).
+pub fn native_file_worker_hirkey_read_v1(queue: text, path: text) -> Result<text, text>:
+    if queue == "":
+        return Err("no hir queue")
+    val record = native_file_worker_hirkey_path_v1(queue, path)
+    if not file_exists(record):
+        return Err("no hirkey record for {path}")
+    val rows = file_read(record).split("\n")
+    if rows.len() < 2 or rows[0] != path or rows[1] == "":
+        return Err("hirkey record does not belong to {path}")
+    Ok(rows[1])
+
+# Argument keys an E-MONO-040 row carries for `name` (` type-args k1<US>k2`
+# or ` arg-types ...`, P-G5b); [] when the row has none.
+pub fn native_file_worker_missing_template_args_v1(diagnostics: [text], name: text) -> [text]:
+    val marker = "E-MONO-040: template " + name + " not visible"
+    for d in diagnostics:
+        val at = d.index_of(marker) ?? -1
+        if at < 0:
+            continue
+        for label in [" type-args ", " arg-types "]:
+            val l = d.index_of(label) ?? -1
+            if l >= 0:
+                val body = d.substring(l + label.len(), d.len())
+                var out: [text] = [label.trim() + ":"]
+                for k in body.split("\u001f"):
+                    out = out.push(k)
+                return out
+        return []
+    []
+
 # Template names named by "E-MONO-040: template <name> not visible to module
 # <m>" diagnostics, deduplicated, in first-seen order. These are exactly the
 # instances F needs that its visible HIR could not provide.

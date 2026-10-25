@@ -39,10 +39,12 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_
     native_file_worker_transitive_deps_v1, native_file_worker_mono_pending_publish_v1,
     native_file_worker_global_mono_forbidden_v1, native_file_worker_missing_templates_v1,
     native_file_worker_reader_instances_available_v1, native_file_worker_reader_instances_enabled_v1,
-    NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1}
+    NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
+    native_file_worker_hirkey_read_v1, native_file_worker_missing_template_args_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_counters_v1}
 use compiler.driver.cache.reader.template_body_loader_v1.{TemplateBodyLoaderV1,
-    template_body_loader_new_v1, template_body_owner_of_v1, template_body_import_closure_v1}
+    template_body_loader_new_v1, template_body_owner_of_v1}
 
 # Template-BODY-on-demand seam (P-G4). Serves the OWNER module's HIR that
 # carries the body of `template`, taken from the HIR this MIR child already
@@ -73,25 +75,88 @@ fn driver_template_decl_names_v1(module: HirModule) -> [text]:
             names = names.push(cl.name)
     names
 
+# P-G5b: owner bodies this child did NOT admit, loaded from the HIR cache by
+# the content key the HIR child published (`.hirkey` record). Single-flight and
+# set-once per process: a module is loaded at most once; a failed load is
+# remembered and never retried (fail closed -> widen / MONO-PENDING).
+var driver_template_owner_bodies_v1: Dict<text, HirModule> = {}
+var driver_template_owner_load_failed_v1: Dict<text, text> = {}
+
+fn driver_template_owner_body_v1(owner: text, owner_path: text, hir_queue: text,
+        modules: Dict<text, HirModule>) -> HirModule?:
+    if owner == "":
+        return nil
+    if modules.contains_key(owner) and modules[owner] != nil:
+        return modules[owner]
+    if driver_template_owner_bodies_v1.contains_key(owner):
+        return driver_template_owner_bodies_v1[owner]
+    if driver_template_owner_load_failed_v1.contains_key(owner):
+        return nil
+    var reason = ""
+    if owner_path == "":
+        reason = "owner-path-unknown"
+    else:
+        val key = native_file_worker_hirkey_read_v1(hir_queue, owner_path)
+        if key.is_err():
+            reason = key.unwrap_err()
+        else:
+            val loaded = hir_cache_load_in_owned_scope(key.unwrap())
+            if loaded == nil:
+                reason = "hir-cache-miss"
+            else:
+                driver_template_owner_bodies_v1[owner] = loaded
+                print "[file-worker] template-body owner-load module={owner}"
+                return loaded
+    driver_template_owner_load_failed_v1[owner] = reason
+    print "[file-worker] template-body owner-load-miss module={owner} reason={reason}"
+    nil
+
+# F's transitive import closure as module names, walked over the HIR ledger's
+# path-keyed deps records (frozen surface import targets), never over
+# HirImport.module_path spellings: a spelling that differs from the module key
+# no longer stops the walk. An unreadable record or an unknown path stops that
+# edge only (fail closed: a miss, never a wrong owner).
+fn driver_template_import_closure_v1(path: text, hir_queue: text,
+        name_of_path: Dict<text, text>) -> [text]:
+    var out: [text] = []
+    var frontier: [text] = [path]
+    var pos = 0
+    while pos < frontier.len():
+        val node = frontier[pos]
+        pos = pos + 1
+        val deps = native_file_worker_deps_read_v1(hir_queue, node)
+        if deps.is_err():
+            continue
+        for d in deps.unwrap():
+            if d == path or frontier.contains(d):
+                continue
+            frontier = frontier.push(d)
+            if name_of_path.contains_key(d):
+                out = out.push(name_of_path[d])
+    out
+
 fn driver_reader_concrete_instance_v1(template: text, requester_path: text,
         modules: Dict<text, HirModule>, declared: Dict<text, [text]>, closure: [text],
-        content_of: Dict<text, text>) -> Option<HirModule>:
+        content_of: Dict<text, text>, path_of_name: Dict<text, text>, hir_queue: text,
+        type_arg_keys: [text]) -> Option<HirModule>:
     if not native_file_worker_reader_instances_enabled_v1(
             env_get(NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1) ?? "",
             native_file_worker_reader_instances_available_v1()):
         return None
     val owner = template_body_owner_of_v1(template, declared, closure)
-    var loaded = owner != "" and modules.contains_key(owner) and modules[owner] != nil
-    if loaded and modules[owner].path == requester_path:
+    val owner_path = if owner != "" and path_of_name.contains_key(owner): path_of_name[owner] else: ""
+    val body = driver_template_owner_body_v1(owner, owner_path, hir_queue, modules)
+    var loaded = body != nil
+    if loaded and owner_path == requester_path:
         loaded = false
     # Lazy: only the resolved owner is hashed, only on an E-MONO-040 miss.
     val digest = if owner != "" and content_of.contains_key(owner): sha256_text(content_of[owner]) else: ""
-    val result = driver_template_body_loader_v1.load(owner, template, [], digest, loaded)
+    val result = driver_template_body_loader_v1.load(owner, template, type_arg_keys, digest, loaded)
     if not result.found:
         print "[file-worker] template-body miss template={template} owner={owner} reason={result.pending_reason}"
         return None
     print "[file-worker] template-body {result.source} template={template} owner={owner}"
-    Some(modules[owner])
+    Some(body!)
 
 
 impl CompilerDriver:
@@ -248,8 +313,10 @@ impl CompilerDriver:
         var name_of_path: Dict<text, text> = {}
         # Owner content for the template-body loader (P-G4); hashed lazily.
         var content_of: Dict<text, text> = {}
+        var path_of_name: Dict<text, text> = {}
         for src in self.ctx.sources:
             name_of_path[src.path] = src.module_name
+            path_of_name[src.module_name] = src.path
             content_of[src.module_name] = src.content
         # Template declarations of closure modules, filled lazily (set-once).
         var declared: Dict<text, [text]> = {}
@@ -288,20 +355,19 @@ impl CompilerDriver:
                         continue
                     reader_asked = reader_asked.push(missing)
                     if not closure_built:
-                        var edges: Dict<text, [text]> = {}
-                        for mname in self.ctx.hir_modules.keys():
-                            if self.ctx.hir_modules[mname] != nil:
-                                var imported: [text] = []
-                                for imp in self.ctx.hir_modules[mname].imports:
-                                    imported = imported.push(imp.module_path)
-                                edges[mname] = imported
-                        import_closure = template_body_import_closure_v1(name, edges)
+                        import_closure = driver_template_import_closure_v1(path, hir_queue, name_of_path)
                         for member in import_closure:
-                            if not declared.contains_key(member) and self.ctx.hir_modules.contains_key(member) and self.ctx.hir_modules[member] != nil:
-                                declared[member] = driver_template_decl_names_v1(self.ctx.hir_modules[member])
+                            if declared.contains_key(member):
+                                continue
+                            val member_path = if path_of_name.contains_key(member): path_of_name[member] else: ""
+                            val member_body = driver_template_owner_body_v1(member, member_path,
+                                hir_queue, self.ctx.hir_modules)
+                            if member_body != nil:
+                                declared[member] = driver_template_decl_names_v1(member_body!)
                         closure_built = true
                     val served = driver_reader_concrete_instance_v1(missing, path,
-                        self.ctx.hir_modules, declared, import_closure, content_of)
+                        self.ctx.hir_modules, declared, import_closure, content_of, path_of_name,
+                        hir_queue, native_file_worker_missing_template_args_v1(scoped_diags, missing))
                     if served.is_some():
                         val carrier = served.unwrap()
                         reader_templates[carrier.name] = carrier
