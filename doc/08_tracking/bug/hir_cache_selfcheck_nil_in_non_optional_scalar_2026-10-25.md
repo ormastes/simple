@@ -100,3 +100,17 @@ All now set from the parser's own `has_*` (or `false`/`true` where fixed),
 matching class/function lowering. Spec:
 `test/01_unit/compiler/20.hir/hir_lowering_desugared_has_flags_spec.spl`.
 Needs a stage2 rebuilt at or after this commit to take effect.
+
+## Fix 4 — HirSymbol.generic_param_count field default not applied (2026-10-25)
+
+Stage2 built from `f9d07913dcc` (contains #4785) still refused 799/1515.
+Reproduced with that stage2: `struct P: x: i64` and `class K: x: i64` fixtures
+-> `SELFCHECK FAILED ... line=496/527 token=N`; fn/enum/trait/default-param
+fixtures store fine. The slot is `HirSymbol.generic_param_count: i64 = 0`,
+first encoded by fix 2. 13 named `HirSymbol(...)` constructions omit it and
+rely on the `= 0` default, which staged-native codegen does not apply to an
+omitted named arg -- the slot stays nil and encodes as `N`. All 13 now pass it
+explicitly (copies preserve the source value). Spec:
+`test/01_unit/compiler/20.hir/hir_symbol_generic_param_count_explicit_spec.spl`.
+Underlying codegen gap (struct field defaults dropped on named construction
+under staged-native) is still open and is the general form of fixes 3 and 4.
