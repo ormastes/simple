@@ -3305,12 +3305,6 @@ int64_t stdin_read_char(void) {
 }
 
 #if defined(_WIN32)
-#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
-#else
-#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
-#endif
-
-#if defined(_WIN32)
 /*
  * Windows CRT stdio defaults to TEXT mode, which rewrites every '
 ' written to
@@ -3363,6 +3357,14 @@ __declspec(allocate(".CRT$XCU"))
 void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor;
 #endif
 #endif /* _WIN32 */
+
+/* Shared read opens use the Windows long-path helper on Windows and stdio on
+ * other platforms. Keep this selector outside the Windows-only setup block. */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
 
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;

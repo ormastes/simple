@@ -3,6 +3,45 @@
 Dated 2026-10-25, against `release/1.0.0`. Each item names the PR or file it was
 checked against. Opt-in means the default is OFF today.
 
+## Essential applications after Stage 4
+
+Every completed Stage 4 bootstrap must build and check DevHub, the Caret suite,
+the hosted DB server, and the web server before recording acceptance or
+performing deployment. Run `--full-bootstrap --full-cli` for the complete
+bootstrap and required applications. The Stage 4 gates have no opt-out. Bare
+`--full-bootstrap` retains its existing dynload phase boundary; explicit
+`--stop-after-*` boundaries still stop at their requested phase.
+
+After validating the full CLI and its basic tooling, the script produces the
+Simple core archive, the core-C DB runtime capsule, and the host-GPU web runtime
+capsule through their normal owners. It then runs
+`scripts/check/check-bootstrap-essential-apps.shs` against that exact Stage 4
+binary and provenance. Missing authorities, missing binaries, failed builds,
+empty suites, or failed tests stop bootstrap. Runtime builds and application
+checks retain separate logs under the bootstrap output directory.
+
+The DB checks include SimpleDB SDN durability separately from the hosted
+PostgreSQL-mimic executable. Application and GUI semantic tests do not establish
+live window/input/capture acceptance; those results remain separately required
+for GUI qualification.
+
+## Reusing a Rust Cargo cache with a fresh output directory
+
+On macOS and Linux, set `SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT` to an existing,
+canonical cache parent directory in this Git worktree or a linked worktree of
+the same repository. The selected target remains
+`<cache-root>/rust-cargo-target-<computed-build-configuration-key>`; the caller
+cannot supply or override that key. Windows keeps its existing short-path
+cache layout and rejects this override.
+
+Use a fresh `--output` directory for new logs and authority receipts while
+retaining the existing cache parent. The script validates repository identity,
+checks free space on the cache filesystem, and serializes canonical Cargo writers with
+a lock in the common Git directory before taking the worktree's publication
+lock. Cargo still decides which crates are fresh. Source fingerprints,
+immutable generation publication, and admission checks remain required.
+No cache copy, move, symlink, or forced producer stamp is involved.
+
 ## Stage 3 and the sanctioned script
 
 - The sanctioned bootstrap is `scripts/bootstrap/bootstrap-from-scratch.sh`

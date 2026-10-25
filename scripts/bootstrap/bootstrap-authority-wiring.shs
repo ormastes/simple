@@ -158,13 +158,100 @@ bootstrap_authority_rust_build_config_key() {
 # bootstrap's own two same-profile, different-LTO cargo invocations) and picks
 # the newest by mtime -- see its comments in authority.shs. This selector
 # never moves/removes data.
+bootstrap_authority_git_common_dir() (
+  [ "$#" -eq 1 ] || return 64
+  bootstrap_cache_git_root=$1
+  [ -d "${bootstrap_cache_git_root}" ] || return 1
+  bootstrap_cache_git_common=$(git -C "${bootstrap_cache_git_root}" rev-parse --git-common-dir 2>/dev/null) || {
+    echo 'error: cannot resolve repository Git common directory' >&2
+    return 1
+  }
+  case "${bootstrap_cache_git_common}" in
+    /*) bootstrap_cache_git_common_path=${bootstrap_cache_git_common} ;;
+    *) bootstrap_cache_git_common_path="${bootstrap_cache_git_root}/${bootstrap_cache_git_common}" ;;
+  esac
+  [ -d "${bootstrap_cache_git_common_path}" ] || return 1
+  CDPATH= cd -- "${bootstrap_cache_git_common_path}" && pwd -P
+)
+
+bootstrap_authority_rust_cargo_cache_lock_root() (
+  [ "$#" -eq 1 ] || return 64
+  bootstrap_cache_lock_common=$(bootstrap_authority_git_common_dir "$1") || return 1
+  printf '%s/simple-rust-cargo-cache-locks\n' \
+    "${bootstrap_cache_lock_common}"
+)
+
+bootstrap_authority_validate_rust_cargo_cache_root() (
+  [ "$#" -eq 2 ] || return 64
+  bootstrap_cache_root_input=$1
+  bootstrap_cache_repo_input=$2
+  case "${bootstrap_cache_root_input}" in
+    /*) ;;
+    *) echo 'error: Rust Cargo cache root must be absolute' >&2; return 64 ;;
+  esac
+  case "${bootstrap_cache_root_input}" in
+    /|*//*|*/|*/./*|*/../*|*/.|*/..) \
+      echo 'error: Rust Cargo cache root must be a canonical directory path' >&2
+      return 64 ;;
+  esac
+  [ -d "${bootstrap_cache_root_input}" ] || {
+    echo 'error: Rust Cargo cache root must already exist as a directory' >&2
+    return 1
+  }
+  # Reject symlinks in every component, not only at the selected root.
+  bootstrap_cache_remaining=${bootstrap_cache_root_input#/}
+  bootstrap_cache_component_path=
+  while [ -n "${bootstrap_cache_remaining}" ]; do
+    case "${bootstrap_cache_remaining}" in
+      */*)
+        bootstrap_cache_component=${bootstrap_cache_remaining%%/*}
+        bootstrap_cache_remaining=${bootstrap_cache_remaining#*/} ;;
+      *)
+        bootstrap_cache_component=${bootstrap_cache_remaining}
+        bootstrap_cache_remaining= ;;
+    esac
+    [ -n "${bootstrap_cache_component}" ] || return 64
+    bootstrap_cache_component_path="${bootstrap_cache_component_path}/${bootstrap_cache_component}"
+    [ ! -L "${bootstrap_cache_component_path}" ] || {
+      echo 'error: Rust Cargo cache root cannot contain a symlink component' >&2
+      return 1
+    }
+    [ -d "${bootstrap_cache_component_path}" ] || return 1
+  done
+  bootstrap_cache_root_physical=$(CDPATH= cd -- "${bootstrap_cache_root_input}" && pwd -P) || return 1
+  [ "${bootstrap_cache_root_physical}" = "${bootstrap_cache_root_input}" ] || {
+    echo 'error: Rust Cargo cache root is not canonical' >&2
+    return 1
+  }
+  bootstrap_cache_repo_common=$(bootstrap_authority_git_common_dir \
+    "${bootstrap_cache_repo_input}") || return 1
+  bootstrap_cache_root_common=$(bootstrap_authority_git_common_dir \
+    "${bootstrap_cache_root_physical}") || {
+    echo 'error: Rust Cargo cache root must be inside a Git worktree' >&2
+    return 1
+  }
+  [ "${bootstrap_cache_root_common}" = "${bootstrap_cache_repo_common}" ] || {
+    echo 'error: Rust Cargo cache root belongs to a different Git repository' >&2
+    return 1
+  }
+  printf '%s\n' "${bootstrap_cache_root_physical}"
+)
+
+bootstrap_authority_rust_cargo_cache_common_dir() (
+  [ "$#" -eq 2 ] || return 64
+  bootstrap_cache_common_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
+    "$2" "$1") || return $?
+  bootstrap_authority_git_common_dir "$1"
+)
+
 bootstrap_authority_rust_cargo_target() (
-  [ "$#" -eq 5 ] || return 64
+  { [ "$#" -eq 5 ] || [ "$#" -eq 6 ]; } || return 64
   bootstrap_cargo_repo=$1
   bootstrap_cargo_host=$2
   bootstrap_cargo_fingerprint=$3
   bootstrap_cargo_legacy_root=$4
   bootstrap_cargo_config_key=$5
+  bootstrap_cargo_shared_root=${6:-}
   # bootstrap_cargo_fingerprint is still validated (defense against a caller
   # bug passing an unsanitized value through, e.g. a path-traversal string)
   # but is intentionally NOT used to build the target path -- see the
@@ -175,6 +262,28 @@ bootstrap_authority_rust_cargo_target() (
     LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 64
   printf '%s\n' "${bootstrap_cargo_config_key}" |
     LC_ALL=C grep -Eq '^[0-9a-f]{12}$' || return 64
+  if [ -n "${bootstrap_cargo_shared_root}" ]; then
+    if [ "${bootstrap_cargo_host}" = windows ]; then
+      echo 'error: SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT is not supported on Windows' >&2
+      return 69
+    fi
+    bootstrap_cargo_shared_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
+      "${bootstrap_cargo_shared_root}" "${bootstrap_cargo_repo}") || return $?
+    bootstrap_cache_target="${bootstrap_cargo_shared_root}/rust-cargo-target-${bootstrap_cargo_config_key}"
+    if [ -e "${bootstrap_cache_target}" ] || [ -L "${bootstrap_cache_target}" ]; then
+      [ -d "${bootstrap_cache_target}" ] && [ ! -L "${bootstrap_cache_target}" ] || {
+        echo 'error: keyed Rust Cargo cache target must be a real directory' >&2
+        return 1
+      }
+      bootstrap_cache_target_physical=$(CDPATH= cd -- "${bootstrap_cache_target}" && pwd -P) || return 1
+      [ "${bootstrap_cache_target_physical}" = "${bootstrap_cache_target}" ] || {
+        echo 'error: keyed Rust Cargo cache target is not canonical' >&2
+        return 1
+      }
+    fi
+    printf '%s\n' "${bootstrap_cache_target}"
+    return 0
+  fi
   bootstrap_cargo_target_base=$(dirname -- "${bootstrap_cargo_legacy_root}") ||
     return 1
   if [ "${bootstrap_cargo_host}" != windows ]; then
@@ -350,6 +459,11 @@ bootstrap_authority_migrate_complete_legacy() {
 #     `generation=` line via bootstrap_stage3_manifest_value -- the same
 #     accessor bootstrap_stage3_recover_seed_transaction uses to trust that
 #     field), and
+#   - are not named in SIMPLE_BOOTSTRAP_RETAIN_GENERATIONS, an optional
+#     comma-separated finite keep-set of existing safe generation basenames.
+#     Every requested member is validated before the first deletion; missing,
+#     duplicate, unsafe, or symlinked entries fail closed. Unset/empty retains
+#     the historical current-only pruning behavior.
 #   - pass bootstrap_stage3_safe_generation_name (rejects '.', '..', empty,
 #     path separators) -- which transient entries never do: staging dirs are
 #     named `.staging.<nonce>`, in-flight snapshots `.snapshot.<nonce>` /
@@ -378,6 +492,46 @@ bootstrap_authority_prune_generations() {
     generation "${bootstrap_authority_prune_marker}") || return 0
   bootstrap_stage3_safe_generation_name \
     "${bootstrap_authority_prune_current}" || return 0
+
+  # Optional, explicit finite keep-set for retained immutable generations.
+  # This is a deletion safeguard only; it never changes the current marker,
+  # seed fingerprint, cache key, or admission. Validate the ENTIRE set before
+  # deleting anything. Names are comma-separated safe generation basenames,
+  # and every requested member must already be a physical direct-child dir.
+  bootstrap_authority_prune_keep_names=' '
+  bootstrap_authority_prune_keep_csv=${SIMPLE_BOOTSTRAP_RETAIN_GENERATIONS:-}
+  if [ -n "${bootstrap_authority_prune_keep_csv}" ]; then
+    case ",${bootstrap_authority_prune_keep_csv}," in *,,*) return 64 ;; esac
+    bootstrap_authority_prune_keep_remaining=${bootstrap_authority_prune_keep_csv}
+    bootstrap_authority_prune_keep_count=0
+    while :; do
+      case "${bootstrap_authority_prune_keep_remaining}" in
+        *,*)
+          bootstrap_authority_prune_keep_name=${bootstrap_authority_prune_keep_remaining%%,*}
+          bootstrap_authority_prune_keep_remaining=${bootstrap_authority_prune_keep_remaining#*,}
+          bootstrap_authority_prune_keep_last=0
+          ;;
+        *)
+          bootstrap_authority_prune_keep_name=${bootstrap_authority_prune_keep_remaining}
+          bootstrap_authority_prune_keep_remaining=
+          bootstrap_authority_prune_keep_last=1
+          ;;
+      esac
+      bootstrap_stage3_safe_generation_name \
+        "${bootstrap_authority_prune_keep_name}" || return 64
+      case "${bootstrap_authority_prune_keep_names}" in
+        *" ${bootstrap_authority_prune_keep_name} "*) return 64 ;;
+      esac
+      bootstrap_authority_prune_keep_path="${bootstrap_authority_prune_root}/${bootstrap_authority_prune_keep_name}"
+      [ -d "${bootstrap_authority_prune_keep_path}" ] &&
+        [ ! -L "${bootstrap_authority_prune_keep_path}" ] || return 64
+      bootstrap_authority_prune_keep_names="${bootstrap_authority_prune_keep_names}${bootstrap_authority_prune_keep_name} "
+      bootstrap_authority_prune_keep_count=$((bootstrap_authority_prune_keep_count + 1))
+      [ "${bootstrap_authority_prune_keep_count}" -le 256 ] || return 64
+      [ "${bootstrap_authority_prune_keep_last}" -eq 1 ] && break
+    done
+  fi
+
   bootstrap_authority_prune_count=0
   for bootstrap_authority_prune_entry in \
     "${bootstrap_authority_prune_root}"/*; do
@@ -392,6 +546,9 @@ $(basename -- "${bootstrap_authority_prune_entry}")
     esac
     [ "${bootstrap_authority_prune_name}" != \
       "${bootstrap_authority_prune_current}" ] || continue
+    case "${bootstrap_authority_prune_keep_names}" in
+      *" ${bootstrap_authority_prune_name} "*) continue ;;
+    esac
     chmod -R u+w "${bootstrap_authority_prune_entry}" 2>/dev/null || true
     rm -rf "${bootstrap_authority_prune_entry}" || return 1
     bootstrap_authority_prune_count=$((bootstrap_authority_prune_count + 1))

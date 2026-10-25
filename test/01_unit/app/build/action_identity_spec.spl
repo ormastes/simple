@@ -21,10 +21,14 @@ use app.build.targets.action_identity.{
 use app.build.targets.artifact_receipt.{
     ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
     publish_imported_closure_layer_v1, target_cache_namespace_v1,
-    target_action_key_v1, digest_is_sha256
+    target_action_key_v1, digest_is_sha256, declared_path_valid
 }
 use std.common.crypto.sha256.{sha256_text}
 use app.io.mod.{file_write, file_hash_sha256, dir_create_all, getpid}
+use app.io.process_ops.{process_run_bounded_direct}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use app.build.targets.native_tool_path.{native_tool_path_valid_v1,
+    native_tool_absolute_path_v1, native_tool_receipt_path_v1}
 
 
 val ACTION_IDENTITY_ROOT = "/tmp/simple-action-identity-spec-{getpid()}"
@@ -34,7 +38,7 @@ fn _setup_identity() -> NativeActionInputIdentityV1:
     dir_create_all(ACTION_IDENTITY_ROOT + "/src")
     dir_create_all(ACTION_IDENTITY_ROOT + "/build/tools")
     file_write(ACTION_IDENTITY_ROOT + "/src/main.spl", "fn main(): 0\n")
-    file_write(ACTION_IDENTITY_ROOT + "/build/tools/simple", "admitted-simple-tool\n")
+    file_write(ACTION_IDENTITY_ROOT + "/build/tools/simple", "#!/bin/sh\nexit 0\n")
     val tool_artifact = file_hash_sha256(ACTION_IDENTITY_ROOT + "/build/tools/simple")
     val tool_behavior = sha256_text("compiler-behavior-v1")
     val dependency_digest = publish_dependency_manifest_layer_v1(
@@ -72,6 +76,67 @@ fn _setup_identity() -> NativeActionInputIdentityV1:
         linker_policy: "elf-hardened-v1", runtime_provider_receipt: "none",
         action_key: key, errors: []
     )
+
+fn _external_tool_identity() -> NativeActionInputIdentityV1:
+    var identity = _setup_identity()
+    val external_dir = ACTION_IDENTITY_ROOT + "-external"
+    expect(dir_create_all(external_dir)).to_be(true)
+    val external_tool = external_dir + "/simple"
+    expect(file_write(external_tool, "#!/bin/sh\nexit 0\n")).to_be(true)
+    val (_, _, status) = process_run_bounded_direct("/bin/chmod", ["700", external_tool], 1000, 1024)
+    expect(status).to_equal(0)
+    match path_final_existing(external_tool):
+        case Ok(resolved): identity.tool_path = resolved.path
+        case Err(message): fail("external fixture identity unavailable: " + message)
+    identity
+
+fn _current_identity_error(identity: NativeActionInputIdentityV1) -> text:
+    native_action_input_error_v1(
+        ACTION_IDENTITY_ROOT, ACTION_IDENTITY_ROOT + "/build/target_cache/app",
+        "//app:main", "P1", "B3", "src/main.spl", "binary",
+        identity.tool_artifact_digest, identity)
+
+describe "external native compiler identity":
+    it "round trips an immutable external executable without weakening source paths":
+        val identity = _external_tool_identity()
+        expect(declared_path_valid(identity.tool_path)).to_be(false)
+        expect(native_tool_receipt_path_v1(ACTION_IDENTITY_ROOT, identity.tool_path)).to_equal(identity.tool_path)
+        val parsed = parse_native_action_input_receipt_v1(native_action_input_receipt_text_v1(identity))
+        expect(parsed.errors.len()).to_equal(0)
+        expect(_current_identity_error(parsed)).to_equal("")
+
+    it "retains the existing repository-relative tool contract":
+        val identity = _setup_identity()
+        expect(native_tool_absolute_path_v1(ACTION_IDENTITY_ROOT, identity.tool_path)).to_equal(ACTION_IDENTITY_ROOT + "/build/tools/simple")
+        expect(_current_identity_error(identity)).to_equal("")
+
+    it "rejects malformed external spellings and unsupported relative paths":
+        for path in ["/", "/tmp//simple", "/tmp/./simple", "/tmp/../simple", "/tmp/simple/", "/tmp/simple\n", "/tmp/simple\r", "/tmp/simple\0", "/tmp/a|b", "/tmp/a\\b", "../simple", "tools/simple"]:
+            expect(native_tool_path_valid_v1(path)).to_be(false)
+
+    it "rejects a missing external executable":
+        var identity = _external_tool_identity()
+        identity.tool_path = identity.tool_path + "/missing"
+        expect(_current_identity_error(identity)).to_contain("current-tool-artifact-mismatch")
+
+    it "rejects changed executable bytes with the original receipt":
+        val identity = _external_tool_identity()
+        expect(file_write(identity.tool_path, "#!/bin/sh\nexit 1\n")).to_be(true)
+        expect(_current_identity_error(identity)).to_contain("current-tool-artifact-mismatch")
+
+    it "rejects an external regular file without execute permission":
+        val identity = _external_tool_identity()
+        val (_, _, status) = process_run_bounded_direct("/bin/chmod", ["600", identity.tool_path], 1000, 1024)
+        expect(status).to_equal(0)
+        expect(_current_identity_error(identity)).to_contain("current-tool-artifact-mismatch")
+
+    it "rejects a receipt that names a symlink instead of the canonical executable":
+        var identity = _external_tool_identity()
+        val alias = identity.tool_path + "-alias"
+        val (_, _, status) = process_run_bounded_direct("/bin/ln", ["-sf", identity.tool_path, alias], 1000, 1024)
+        expect(status).to_equal(0)
+        identity.tool_path = alias
+        expect(_current_identity_error(identity)).to_contain("current-tool-artifact-mismatch")
 
 describe "independent current native action identity":
     # MBH-NFR-001: canonical current inputs produce deterministic identities.

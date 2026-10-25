@@ -222,7 +222,7 @@ impl CompilerDriver:
         var i = 0
         var has_project_source = false
         var driver_inputs: [text] = []
-        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 6:
+        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 7:
             if self.ctx.options.bootstrap_input_count > 0:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_0]
             if self.ctx.options.bootstrap_input_count > 1:
@@ -235,6 +235,8 @@ impl CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_4]
             if self.ctx.options.bootstrap_input_count > 5:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
+            if self.ctx.options.bootstrap_input_count > 6:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_6]
         else:
             driver_inputs = self.ctx.options.input_files
         var closure_source_roots = driver_inputs
@@ -387,6 +389,11 @@ impl CompilerDriver:
                     cold_snapshot_root, selected.unwrap())
                 if admitted.valid:
                     cold_entry_input = admitted.canonical_path
+                    # Keep code generation aligned with the validated frozen entry.
+                    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", admitted.canonical_path):
+                        self.ctx.add_error("frozen cold entry codegen identity unavailable")
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
                 else:
                     frozen_reason = admitted.reason
             if frozen_reason != "":
@@ -1220,6 +1227,15 @@ impl CompilerDriver:
             # produced thousands of invalid export origins, and eventually
             # crashed the post-mono walker on poisoned statements.
             rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+
+        # Preclosed source selection has already validated the complete entry
+        # closure, but the existing parser still needs closure mode to preserve
+        # its entry-source semantics.
+        if admitted_preclosed != nil:
+            if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1"):
+                self.ctx.add_error("preclosed entry parser mode unavailable")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load

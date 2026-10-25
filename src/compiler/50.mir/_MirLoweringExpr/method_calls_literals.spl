@@ -1996,7 +1996,7 @@ impl MirLowering:
                 case _: ()
         -1
 
-    me reject_unresolved_method_call_v1(receiver: HirExpr, method: text) -> LocalId:
+    me reject_unresolved_method_call_v1(receiver: HirExpr, method: text, route: text) -> LocalId:
         # SIMPLE_ENUM_REG_TRACE=1 (cycle-51/52 discriminator): an unresolved
         # static call whose receiver is an enum type (SdnValue.Bool et al.)
         # means the variant/constructor registry had no entry for the owner
@@ -2016,7 +2016,13 @@ impl MirLowering:
         # ships as SILENT data loss (exit 0, no stderr) -- exactly
         # how the `.join()` no-op survived undetected. Surface it
         # loudly at lowering time, naming the method.
-        print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145) module={self.current_module_id}"
+        var receiver_type_kind: i64 = -1
+        if receiver.has_type_:
+            receiver_type_kind = hir_type_kind_discriminant(receiver.type_.kind)
+        if receiver.span.file != "":
+            print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145) route={route} module={self.current_module_id} at={receiver.span.file}:{receiver.span.line}:{receiver.span.col} receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
+        else:
+            print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145) route={route} module={self.current_module_id} at=<span-unavailable> receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
         var b = self.builder
         val temp = b.new_temp(MirType.i64())
         # FAIL CLOSED (Task #145). The collected self.error above is
@@ -4349,7 +4355,7 @@ impl MirLowering:
                     # A recovered nominal declaration has no runtime value.
                     # Its exact method lookup has failed; do not evaluate the
                     # type name as a local or try another owner's method.
-                    return self.reject_unresolved_method_call_v1(receiver, method)
+                    return self.reject_unresolved_method_call_v1(receiver, method, "static-nominal")
 
                 # Keep this aggregate LocalId selection statement-shaped.
                 # The Stage 2 self-host compiler corrupted the result of the
@@ -5145,7 +5151,7 @@ impl MirLowering:
                         self.struct_value_syms[unresolved_receiver_local.id] = recovered_field_owner
                 if val field_call = self.try_lower_function_field_call(receiver, unresolved_receiver_local, method, args):
                     return field_call
-                self.reject_unresolved_method_call_v1(receiver, method)
+                self.reject_unresolved_method_call_v1(receiver, method, "runtime-fallback")
 
     me bootstrap_coerce_to_raw_str(local: LocalId) -> LocalId:
         """Bootstrap-only: coerce a lowered value to a raw char* (Opaque
