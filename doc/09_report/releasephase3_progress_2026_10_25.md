@@ -95,3 +95,31 @@ The [older stalled diagnostic log](/tmp/phase3-provisional-stage3-ce7738-f5c0-20
 4. Execute the selected acceptance matrix with the existing runner; record actual executed/pass/fail/skip counts and source/runtime identities. Only accepted receipts can change UNRUN or close the selected requirements. No new test toolchain or inferred PASS from merged code.
 
 No release tag/publication, full Phase3 PASS, current-head acceptance PASS or final feature-completion claim is made by this update.
+
+
+## Annotated continuation — 2026-10-25, through PR #4728
+
+This append records a later bounded snapshot; the preceding failed and pending reports remain historical evidence. GitHub merged-state inspection confirmed all ten PRs below, through release head `0731c69ea8fcf9f589edee22b0f37b06cf810fb4`. No fresh 82-scope audit or feature acceptance run was performed. The historical inventory remains 15 complete-unverified / 54 partial / 4 absent selected behaviors / 9 authority decisions = 82, with full acceptance of all 82 scopes UNRUN. Authored specs and source GO are not executed PASS counts.
+
+| Merged PR | Scoped source head | Result and qualification limit |
+|---|---|---|
+| [#4671](https://github.com/ormastes/simple/pull/4671) | `ae98d9af9c9` | Generic enum receiver source repair; focused frozen-candidate receiver control passed, broader feature acceptance UNRUN. |
+| [#4674](https://github.com/ormastes/simple/pull/4674) | `8901574c710` | MMIO owner/test-mode repair; source review GO, authored feature specs UNRUN. |
+| [#4675](https://github.com/ormastes/simple/pull/4675) | `29e3fbd72cc` | CUDA no-guess layout source repair; runtime/PTX execution UNRUN, portable-type acceptance OPEN. |
+| [#4680](https://github.com/ormastes/simple/pull/4680) | `ae0006adbc6` | Root semantic Markdown lint dispatch; source GO, runtime/docgen acceptance UNRUN. |
+| [#4712](https://github.com/ormastes/simple/pull/4712) | `5fe28b79e77` | Exact pinned reviewed transient exceptions coded; source GO, authored root/doc controls UNRUN. |
+| [#4717](https://github.com/ormastes/simple/pull/4717) | `715ad78fd5f` | LLVM descriptor source integration; full SOURCE execution OPEN. |
+| [#4722](https://github.com/ormastes/simple/pull/4722) | `89fd8c288b2` | Cranelift bridge: actual AOT readonly relocation/RELRO controls PASS; JIT/facade execution UNRUN. |
+| [#4725](https://github.com/ormastes/simple/pull/4725) | `bae38b2d10b` | Scalar Result helpers; preservation source GO, compiler specs UNRUN. |
+| [#4727](https://github.com/ormastes/simple/pull/4727) | `02d0bcd3d47` | Scoped scalar SOURCE integration; exact preservation source GO, executable acceptance UNRUN. |
+| [#4728](https://github.com/ormastes/simple/pull/4728) | `91bccabbb26` | Active native provider and standalone ASan/UBSan controls PASS; merge `0731c69ea8f`, full SOURCE acceptance OPEN. |
+
+Native provider verification used six attempts in total and preserved the ordinary 16-byte allocation-registry entry. It establishes focused active-provider and standalone sanitizer behavior, not full compiler-produced SOURCE execution. Generic per-function owner replay, actual request/context lifetime and cleanup, final ELF-span protection, remaining roots/container transports, pure/hosted parity and performance remain OPEN. Cranelift AOT relocation/RELRO results do not qualify JIT or facade execution.
+
+### Frozen Stage2 continuation and retained receipts
+
+Frozen source `46772223a7c39ddd50a4f8198c6c4724f40ab444` rebuilt 1,497 objects, 0 failed, in approximately 269 seconds, producing candidate SHA256 `991be8f97493426d22fa944bd212afa22487bb22b31d2a6ea0ab95e8b4e05974`. The first frontend mode-1 control timed out under contention; the instrumented mode-1 diagnostic passed. Canonical cycle 3 reused 1,495 objects and rebuilt 2, yielding the identical candidate. See [build log](/tmp/phase3-resume-20261025-4674/cycle3-build.log), [timeout diagnosis](/tmp/phase3-resume-20261025-4674/admission-timeout-diagnosis.sdn) and [actual product budget](/tmp/phase3-resume-20261025-4674/cycle3-actual-product-budget.env). The budget reports sequential HIR fallback (`HIR threads 0`) and backend argv 10; configured concurrency is not proof of parallel execution.
+
+The [focused Stage2 admission](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-admitted/admission.env) is admitted and [sanity receipt](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env) passes. Both [frontend mode 0](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.status.env) and [frontend mode 1](/tmp/phase3-resume-20261025-4674/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-1.status.env) record Hello positional raw status 0; the canonical owner requires exit 0 and Hello stdout before recording PASS. Full-profile stdout is not retained separately. Receiver and planner controls also passed. These are candidate-bound controls, not acceptance of newer live source.
+
+The latest coordinator watcher observation was HIR 814/2,914, succeeded 814, failed 0, elapsed 1,120,664ms in the [running compiler CLI build log](/tmp/phase3-resume-20261025-4674/canonical-admission/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/compiler_cli_build.log). This is a nonterminal snapshot: MATRIX RUNNING, full CLI not yet qualified. Stage3 has NOT STARTED. The requested cache-backed 500-item batch is NOT YET EXECUTED. No new build, test launch or whole-feature audit was performed for this documentation append; full Phase3 remains incomplete.
