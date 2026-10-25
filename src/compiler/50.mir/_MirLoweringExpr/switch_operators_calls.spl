@@ -2624,6 +2624,19 @@ impl MirLowering:
                     match found_callee_type.kind:
                         case HirTypeKind.Function(_, ret, _): return Some(ret)
                         case _: ()
+                # A generic free function's callee carries no Function type
+                # (its symbol type is the unsubstituted scheme): use the
+                # callee's DECLARED return type, which still names the owner
+                # (`Result<...>`, a named enum) the bare arms resolve against.
+                match callee.kind:
+                    case Var(call_sym) | NamedVar(call_sym, _):
+                        if self.module_fn_declared_returns.contains(call_sym.id):
+                            val declared_ret = self.module_fn_declared_returns[call_sym.id]
+                            match declared_ret.kind:
+                                case HirTypeKind.Infer(_, _): ()
+                                case HirTypeKind.Error: ()
+                                case _: return Some(declared_ret)
+                    case _: ()
             case MethodCall(receiver, method, method_args, resolution):
                 # ROOT-FIX (native_try_op_on_option_silent_wrong_2026-07-14):
                 # the `resolution.get_symbol_id()` arm below was landed by
@@ -3014,7 +3027,7 @@ impl MirLowering:
             case _: ()
         nil
 
-    me resolve_enum_pattern_owner(etype: HirType, variant: text, span: Span) -> text:
+    me resolve_enum_pattern_owner(etype: HirType, variant: text, span: Span, owner_hint: text = "") -> text:
         """Owning enum NAME for a NESTED enum sub-pattern (`case W(Inner.A(n))`
         -> "Inner"). Prefers the pattern's own qualifier type; falls back to a
         unique-owner search over every registered enum for bare variants.
@@ -3049,8 +3062,13 @@ impl MirLowering:
         var owner = if owner_count > 0: owner_keys[0] else: ""
         if owner_count == 1:
             return owner
+        # Bare sub-pattern whose slot's declared enum is known (subject
+        # payload or enclosing variant's slot type): it owns the variant,
+        # whatever other enums also declare it.
+        if owner_count > 1 and owner_hint != "" and self.enum_variant_discriminant(owner_hint, variant) >= 0:
+            return owner_hint
         if owner_count > 1:
-            self.error("enum match: bare nested variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(span))
+            self.error_fatal("enum match: bare nested variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(span))
         else:
             self.error("enum match: unknown nested variant '{variant}' (no registered enum declares it)", Some(span))
         ""
@@ -3129,7 +3147,7 @@ impl MirLowering:
         bt.switch_to_block(lit_ok_block)
         self.builder = bt
 
-    me emit_deep_subpattern(value_local: LocalId, pat: HirPattern, next_block: BlockId, semantic_capture: i64 = -1, semantic_node: i64 = -1, typed_value: MirType? = nil, nil_optional_slot: bool = false):
+    me emit_deep_subpattern(value_local: LocalId, pat: HirPattern, next_block: BlockId, semantic_capture: i64 = -1, semantic_node: i64 = -1, typed_value: MirType? = nil, nil_optional_slot: bool = false, owner_hint: text = ""):
         """One nested payload sub-pattern (`value_local` = its extracted slot
         word): emit its runtime test (failure branches to `next_block`, i.e.
         falls through to the NEXT arm) and/or install its binding, then
@@ -3148,7 +3166,7 @@ impl MirLowering:
             case Literal(lit_expr):
                 self.emit_deep_literal_test(value_local, lit_expr, next_block, pat.span, typed_value, nil_optional_slot)
             case Enum(nested_etype, nested_variant, nested_payload):
-                val nested_ename = self.resolve_enum_pattern_owner(nested_etype, nested_variant, pat.span)
+                val nested_ename = self.resolve_enum_pattern_owner(nested_etype, nested_variant, pat.span, owner_hint)
                 if nested_ename == "":
                     # Owner unresolved (error already recorded): make the arm
                     # permanently DEAD rather than always-matching. Keep the
@@ -3240,7 +3258,7 @@ impl MirLowering:
                 # Error: still unsupported — loud, never an always-match.
                 self.error("enum match: unsupported nested sub-pattern kind inside an enum payload (nested enum variants, int/bool/text literals, bindings and wildcards are lowered here) — unsupported construct", Some(pat.span))
 
-    me emit_enum_payload_deep(enum_local: LocalId, payload: HirPatternPayload?, payload_fn: text, next_block: BlockId, top_level: bool, span: Span, slot_owner: text, slot_variant: text, semantic_capture: i64 = -1, semantic_node: i64 = -1):
+    me emit_enum_payload_deep(enum_local: LocalId, payload: HirPatternPayload?, payload_fn: text, next_block: BlockId, top_level: bool, span: Span, slot_owner: text, slot_variant: text, semantic_capture: i64 = -1, semantic_node: i64 = -1, subject_payload_owner: text = ""):
         """Runtime tests + nested binds for the payload sub-patterns of one
         enum-match arm whose payload contains a nested Enum or Literal
         sub-pattern (enum_deep_flags classification in lower_enum_match). Called with the
@@ -3353,7 +3371,17 @@ impl MirLowering:
                                                 case _: ()
                             case _: ()
                     case _: ()
-                self.emit_deep_subpattern(slot_local, sub_pat, next_block, semantic_capture, semantic_child, nil, nil_optional_slot)
+                # Owner hint for a BARE nested enum sub-pattern: the subject's
+                # declared payload (`Some(Tuple(a))` over `Payload?`) at the
+                # top level, else the enclosing variant's declared slot enum.
+                var slot_owner_hint = if top_level and pats.len() == 1: subject_payload_owner else: ""
+                if slot_owner_hint == "" and slot_owner != "" and not (self.generic_enum_constructor_owners.get(slot_owner) ?? false):
+                    val hint_key = "{slot_owner}::{slot_variant}"
+                    self.ensure_declaration_enum_payloads_v1(hint_key)
+                    if val hint_slots = self.enum_variant_payload_types.get(hint_key):
+                        if slot_i < hint_slots.len():
+                            slot_owner_hint = self.enum_match_type_owner_key(hint_slots[slot_i])
+                self.emit_deep_subpattern(slot_local, sub_pat, next_block, semantic_capture, semantic_child, nil, nil_optional_slot, slot_owner_hint)
                 self.builder.enum_semantic_node = semantic_node
             slot_i = slot_i + 1
 
@@ -3893,7 +3921,24 @@ impl MirLowering:
         var scrut_enum_name = ""
         var scrut_enum_key = ""
         var scrut_enum_symbol_id: i64 = -1
-        if val scrut_declared = scrutinee_enum_type:
+        # An Optional subject matched with bare payload-enum arms
+        # (`match p: case Tuple(a):` with p: Payload?) is owned by its
+        # payload enum, not by Option.
+        var subject_owner_type = scrutinee_enum_type
+        if val opt_subject = scrutinee_enum_type:
+            match opt_subject.kind:
+                case HirTypeKind.Optional(opt_payload):
+                    var names_option_variant = false
+                    for opt_arm in source_arms:
+                        match opt_arm.pattern.kind:
+                            case Enum(_, opt_variant, _):
+                                if opt_variant == "Some" or opt_variant == "None":
+                                    names_option_variant = true
+                            case _: ()
+                    if not names_option_variant and self.enum_match_type_owner_key(opt_payload) != "":
+                        subject_owner_type = Some(opt_payload)
+                case _: ()
+        if val scrut_declared = subject_owner_type:
             scrut_enum_key = self.enum_match_type_owner_key(scrut_declared)
             if scrut_enum_key != "":
                 scrut_enum_name = self.enum_bare_of(scrut_enum_key)
@@ -4149,7 +4194,7 @@ impl MirLowering:
                                 self.error_fatal("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
                         elif owner_count > 1:
                             val subject_hint = self.enum_match_ambiguity_subject_hint(scrutinee, scrutinee_enum_type)
-                            self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}; {subject_hint}", Some(arm.pattern.span))
+                            self.error_fatal("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}; {subject_hint}", Some(arm.pattern.span))
                         else:
                             self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
                     enum_discs = enum_discs.push(d)
@@ -4509,7 +4554,10 @@ impl MirLowering:
                 b_cmp.switch_to_block(deep_block)
                 self.builder = b_cmp
                 val deep_owner = if enum_key != "": enum_key else: enum_name
-                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, deep_owner, enum_variants[ci], enum_semantic_capture, semantic_pattern_root)
+                var deep_subject_owner = ""
+                if val deep_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci], scrut_local.id):
+                    deep_subject_owner = self.enum_match_type_owner_key(deep_payload_type)
+                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, deep_owner, enum_variants[ci], enum_semantic_capture, semantic_pattern_root, deep_subject_owner)
                 # The pre-existing `b_arm.switch_to_block(arm_block)` just
                 # below performs the actual switch into arm_block for BOTH
                 # branches of this `if`; do not switch here (a second
