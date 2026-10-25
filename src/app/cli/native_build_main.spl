@@ -7,7 +7,8 @@ use app.cli.native_mir_worker_launch_ledger_v1.{native_mir_worker_launch_ledger_
 use app.cli.native_mir_worker_private_paths_v1.{NativeMirWorkerOwnedLaunchV1,
     native_mir_worker_private_paths_v1}
 use app.cli.native_mir_managed_process_owner_v1.{NativeMirManagedWorkerV1,
-    NativeMirManagedProcessConfigV1, native_mir_managed_process_config_v1,
+    NativeMirManagedProcessConfigV1, NativeMirManagedProcessPrerequisitesV1,
+    native_mir_managed_process_preflight_v1, native_mir_managed_process_config_v1,
     native_mir_managed_worker_start_v1, native_mir_managed_worker_poll_v1,
     native_mir_managed_worker_drain_v1, native_mir_managed_worker_relay_v1}
 use std.common.crypto.sha256.{sha256_text}
@@ -1264,13 +1265,20 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
+    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
+    var managed_preflight: NativeMirManagedProcessPrerequisitesV1? = nil
+    if selective:
+        val checked = native_mir_managed_process_preflight_v1(simple_bin, timeout_ms)
+        if checked.is_err():
+            eprint "[mir-selective] pre-export managed capability refused: {checked.unwrap_err()}; exporter and MIR workers not started"
+            return ("fail", "")
+        managed_preflight = Some(checked.unwrap())
     val queue_dir = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if queue_dir == "":
         eprint "[mir-shard] cannot establish invocation ledger"
         # Without an invocation ledger there is no complete worker protocol
         # receipt authorizing the ordinary zero-claim fallback.
         return (native_mir_shard_outcome_v1(1, 0, 0, true, false, false), "")
-    val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     var count = native_build_mir_shard_count(parallel)
@@ -1302,7 +1310,7 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
             return ("fail", "")
     var managed_config: NativeMirManagedProcessConfigV1? = nil
     if val envelope = private_envelope:
-        val configured = native_mir_managed_process_config_v1(simple_bin, export_dir, envelope)
+        val configured = native_mir_managed_process_config_v1(managed_preflight.unwrap(), export_dir, envelope)
         if configured.is_err():
             env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
             env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)

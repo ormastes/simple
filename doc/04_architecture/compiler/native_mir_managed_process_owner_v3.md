@@ -111,3 +111,16 @@ peak is retained if greater than an earlier observation. Diagnostic state
 records use bounded canonical SDN, with no repeated writes of unchanged errors.
 These state-decoder specs are authored UNRUN; no additional kernel, native,
 compiler or resource-heavy attempt was made for this correction.
+
+## Existing selective caller migration
+
+The static broker/estimate/platform/lifetime and existing Linux delegation
+preflight now precedes MIR invocation creation and retained-HIR export. The
+post-export step only binds the immutable manifest to those retained
+prerequisites. Existing explicit selective callers require the new broker pin
+and broker estimate; the existing process acceptance fixture is migrated and
+has an actual missing-configuration refusal scenario. Nonselective calls never
+enter this preflight. See `doc/07_guide/compiler/native_mir_selective_managed_setup.md`
+for exact cached-tool, external qualification, delegation and environment setup.
+No authenticated host-broker discovery registry is available in this source;
+manual pins are externally supplied inputs, not approval issued from a self-hash.

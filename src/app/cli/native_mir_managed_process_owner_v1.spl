@@ -12,11 +12,24 @@ use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, GroupProcessR
     group_process_child_identity_v1}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256,
     file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_available_capacity_v1}
 use std.nogc_sync_mut.io.time_ops.{sleep_ms}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub struct NativeMirManagedBrokerPrerequisitesV1:
+    broker: text
+    broker_digest: text
+    directory: text
+    memory_bytes: i64
+    broker_kib: i64
+
+pub struct NativeMirManagedProcessPrerequisitesV1:
+    program: text
+    program_digest: text
+    broker: NativeMirManagedBrokerPrerequisitesV1
 
 pub struct NativeMirManagedProcessConfigV1:
     program: text
@@ -47,32 +60,74 @@ pub struct NativeMirManagedPollV1:
 
 var native_mir_managed_launcher_registered_v1 = false
 
-pub fn native_mir_managed_process_config_v1(simple_bin: text,
-        export_dir: text, envelope: NativeMirSelectiveLaunchEnvelopeV1
-        ) -> Result<NativeMirManagedProcessConfigV1, text>:
-    if host_os() != "linux": return Err("managed MIR workers currently require Linux cgroup-v2/pidfd owner")
+# Pure validation is shared with the existing selective acceptance fixture.
+# A configured digest is an external caller pin, not tool admission issued here.
+pub fn native_mir_managed_prerequisite_reason_v1(platform: text, broker: text,
+        digest: text, worker_kib: i64, broker_kib: i64, timeout_ms: i64) -> text:
+    if platform != "linux": return "managed MIR workers require Linux cgroup-v2/pidfd ownership"
+    if broker == "": return "missing SIMPLE_MIR_GROUP_BROKER_PROGRAM; configure a qualified cached native-worker-v1 broker"
+    if not broker.starts_with("/") or broker.contains("\0"):
+        return "managed MIR broker requires an explicit absolute cached executable path"
+    if not sha256_lower_hex_valid(digest):
+        return "missing or invalid SIMPLE_MIR_GROUP_BROKER_DIGEST; use the externally qualified image pin"
+    if worker_kib <= 0 or broker_kib <= 0 or worker_kib > 1099511627776 - broker_kib:
+        return "explicit bounded SIMPLE_MIR_SELECTIVE_WORKER_KIB and SIMPLE_MIR_SELECTIVE_BROKER_KIB estimates required"
+    if timeout_ms < 1000 or timeout_ms > 86400000:
+        return "managed selective workers require finite --timeout in 1..86400 seconds"
+    ""
+
+# This calls the EXISTING native capacity/delegation probe. It may briefly
+# create/remove an empty private capability cgroup, but launches no child.
+# Do not run this under a source-only/no-kernel-test admission restriction.
+pub fn native_mir_managed_broker_preflight_v1(timeout_ms: i64
+        ) -> Result<NativeMirManagedBrokerPrerequisitesV1, text>:
     val broker = env_get("SIMPLE_MIR_GROUP_BROKER_PROGRAM") ?? ""
     val digest = env_get("SIMPLE_MIR_GROUP_BROKER_DIGEST") ?? ""
     val worker_kib = (env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "").to_i64() ?? -1
-    if not broker.starts_with("/") or not sha256_lower_hex_valid(digest) or
-            not file_is_regular_no_follow(broker) or file_hash_sha256(broker) != digest:
-        return Err("managed MIR broker requires an admitted cached executable and exact digest")
+    val broker_kib = (env_get("SIMPLE_MIR_SELECTIVE_BROKER_KIB") ?? "").to_i64() ?? -1
+    val reason = native_mir_managed_prerequisite_reason_v1(host_os(), broker,
+        digest, worker_kib, broker_kib, timeout_ms)
+    if reason != "": return Err(reason)
+    if not file_is_regular_no_follow(broker) or file_hash_sha256(broker) != digest:
+        return Err("configured cached MIR broker differs from its external image pin")
+    val directory = cwd()
+    val capacity = linux_available_capacity_v1(directory)
+    if capacity.is_err():
+        return Err("managed MIR unsupported before export: " + capacity.unwrap_err())
+    val available = capacity.unwrap()
+    val required = (worker_kib + broker_kib) * 1024
+    if required > available.0:
+        return Err("managed MIR worker plus broker does not fit current host/cgroup headroom")
+    Ok(NativeMirManagedBrokerPrerequisitesV1(broker: broker, broker_digest: digest,
+        directory: directory, memory_bytes: worker_kib * 1024, broker_kib: broker_kib))
+
+# The CLI executes this before the retained-HIR exporter or any MIR worker.
+pub fn native_mir_managed_process_preflight_v1(simple_bin: text, timeout_ms: i64
+        ) -> Result<NativeMirManagedProcessPrerequisitesV1, text>:
+    val broker = native_mir_managed_broker_preflight_v1(timeout_ms)?
     val program = path_absolute(simple_bin)
     if not file_is_regular_no_follow(program): return Err("managed MIR compiler must be a regular cached executable")
     val program_digest = file_hash_sha256(program)
-    if program_digest != file_hash_sha256("/proc/self/exe"):
+    if not sha256_lower_hex_valid(program_digest) or program_digest != file_hash_sha256("/proc/self/exe"):
         return Err("managed MIR worker must use this exact running compiler image")
-    if not sha256_lower_hex_valid(program_digest) or worker_kib <= 0 or worker_kib > 1099511627776:
-        return Err("managed MIR compiler identity or worker memory budget refused")
     if not native_mir_managed_launcher_registered_v1:
         if not group_process_set_launcher_v1(native_linux_group_broker_launch_v1, "linux"):
             return Err("managed MIR process owner registration conflicts with existing launcher")
         native_mir_managed_launcher_registered_v1 = true
-    val manifest_path = path_absolute("{export_dir}/selective.manifest")
+    Ok(NativeMirManagedProcessPrerequisitesV1(program: program,
+        program_digest: program_digest, broker: broker))
+
+# Only immutable manifest ownership is bound after the exporter completes.
+pub fn native_mir_managed_process_config_v1(preflight: NativeMirManagedProcessPrerequisitesV1,
+        export_dir: text, envelope: NativeMirSelectiveLaunchEnvelopeV1
+        ) -> Result<NativeMirManagedProcessConfigV1, text>:
     if not sha256_lower_hex_valid(envelope.file_digest): return Err("managed MIR manifest file authority absent")
-    Ok(NativeMirManagedProcessConfigV1(program: program, program_digest: program_digest,
-        broker: broker, broker_digest: digest, directory: cwd(), manifest_path: manifest_path,
-        manifest_file_digest: envelope.file_digest, memory_bytes: worker_kib * 1024))
+    val broker = preflight.broker
+    val manifest_path = path_absolute("{export_dir}/selective.manifest")
+    Ok(NativeMirManagedProcessConfigV1(program: preflight.program, program_digest: preflight.program_digest,
+        broker: broker.broker, broker_digest: broker.broker_digest, directory: broker.directory,
+        manifest_path: manifest_path, manifest_file_digest: envelope.file_digest,
+        memory_bytes: broker.memory_bytes))
 
 fn native_mir_managed_environment_v1(paths: NativeMirWorkerPrivatePathsV1) -> Result<[text], text>:
     val snapshot = env_vars()
