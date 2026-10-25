@@ -39,7 +39,10 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transie
 use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
     worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
-    worker_surface_restrict_claims_v1, worker_surface_text_v1}
+    worker_surface_restrict_claims_v1, worker_surface_text_v1,
+    worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
+    worker_hir_restrict_loads_v1, source_paths_by_canonical_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mono_pending_publish_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
@@ -738,14 +741,24 @@ impl CompilerDriver:
         # P5: a HIR shard worker builds real surfaces only for its seeds'
         # import closure (driver_worker_surface_closure_v1.spl).
         val worker_spec = _sffi_env_get("SIMPLE_HIR_SHARD") ?? ""
-        val worker_closure = not parse_shard and worker_surface_closure_selected_v1(
-            worker_spec, _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+        val worker_flag = _sffi_env_get("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+        # P-A: a module-scoped MIR child (file-worker lane) seeds from its
+        # admitted targets and later loads HIR only for their import closure.
+        val mir_targets = if worker_spec == "":
+            worker_mir_scoped_targets_v1(_sffi_env_get("SIMPLE_MONO_MODULE_SCOPED") ?? "",
+                _sffi_env_get("SIMPLE_MIR_SHARD_ONLY_PATHS") ?? "", worker_flag)
+        else:
+            []
+        val mir_scoped = mir_targets.len() > 0
+        val worker_closure = not parse_shard and (mir_scoped or
+            worker_surface_closure_selected_v1(worker_spec, worker_flag))
         var worker_needed: [bool] = []
         var worker_built: [bool] = []
         if worker_closure:
             var seeds: [bool] = []
             for seed_path in source_paths:
-                seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
+                if mir_scoped: seeds.push(mir_targets.contains(seed_path))
+                else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
             worker_needed = worker_surface_closure_v1(source_paths, canonical_paths, source_contents, seeds)
             for _p in source_paths:
                 worker_built.push(false)
@@ -925,7 +938,45 @@ impl CompilerDriver:
             while ai < frozen_source_count:
                 if ready_canonical.contains_key(canonical_paths[ai]): allowed_paths.push(source_paths[ai])
                 ai = ai + 1
-            worker_surface_restrict_claims_v1(allowed_paths)
+            if mir_scoped:
+                # Every target must have a fully built closure, else fail
+                # closed: no MIR from a placeholder surface.
+                var target_indices: [i64] = []
+                var found_targets: [text] = []
+                var ti = 0
+                while ti < retained_surfaces.surfaces.len():
+                    val tpath = source_paths_by_canonical_v1(canonical_paths, source_paths,
+                        retained_surfaces.surfaces[ti].canonical_path)
+                    if mir_targets.contains(tpath):
+                        if not surface_ready[ti]:
+                            val _pending = native_file_worker_mono_pending_publish_v1(
+                                _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", tpath,
+                                "import-closure surface missing")
+                            self.ctx.add_error("MONO-PENDING: import-closure surface missing for {tpath}")
+                            return false
+                        target_indices.push(ti)
+                        if not found_targets.contains(tpath): found_targets.push(tpath)
+                    ti = ti + 1
+                if found_targets.len() != mir_targets.len():
+                    for missing in mir_targets:
+                        if found_targets.contains(missing): continue
+                        val _pending = native_file_worker_mono_pending_publish_v1(
+                            _sffi_env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", missing,
+                            "target surface missing")
+                    self.ctx.add_error("MONO-PENDING: a MIR target has no surface in this closure")
+                    return false
+                val closure = worker_surface_import_closure_v1(target_indices, surface_edges)
+                var load_paths: [text] = []
+                var ci = 0
+                while ci < closure.len():
+                    if closure[ci]:
+                        load_paths.push(source_paths_by_canonical_v1(canonical_paths, source_paths,
+                            retained_surfaces.surfaces[ci].canonical_path))
+                    ci = ci + 1
+                worker_hir_restrict_loads_v1(load_paths)
+                print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count}"
+            else:
+                worker_surface_restrict_claims_v1(allowed_paths)
         self.streaming_module_surfaces_owner = retained_surfaces
         self.streaming_surface_owner_ready = true
         self.ctx.module_surfaces = Some(retained_surfaces)

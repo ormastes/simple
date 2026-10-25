@@ -1,0 +1,46 @@
+use std.spec
+use compiler.driver.driver_worker_surface_closure_v1.{worker_mir_scoped_targets_v1,
+    worker_surface_import_closure_v1, worker_surface_ready_v1, source_paths_by_canonical_v1,
+    worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1}
+
+# P-A (true_per_file_pipeline_v1.md): a module-scoped MIR child loads HIR only
+# for its admitted targets plus their frozen import closure.
+# Fixture closure (M = 6): a -> b -> c, d -> e, f isolated; target = a.
+val PATHS: [text] = ["a.spl", "b.spl", "c.spl", "d.spl", "e.spl", "f.spl"]
+
+fn fixture_edges() -> [[i64]]:
+    [[1], [2], [], [4], [], []]
+
+describe "MIR child import-closure-only HIR":
+    it "is selected only for module-scoped mono with targets and no opt-out":
+        expect(worker_mir_scoped_targets_v1("1", "a.spl\nb.spl\na.spl\n", "").len()).to_equal(2)
+        expect(worker_mir_scoped_targets_v1("", "a.spl", "").len()).to_equal(0)
+        expect(worker_mir_scoped_targets_v1("1", "", "").len()).to_equal(0)
+        expect(worker_mir_scoped_targets_v1("1", "a.spl", "0").len()).to_equal(0)
+
+    it "closes over imports transitively, targets included":
+        val needed = worker_surface_import_closure_v1([0], fixture_edges())
+        var n = 0
+        for b in needed:
+            if b: n = n + 1
+        expect(n).to_equal(3)
+        expect(needed[3]).to_equal(false)
+        expect(needed[5]).to_equal(false)
+
+    it "reports a target not ready when a closure surface is missing":
+        val ready = worker_surface_ready_v1([true, true, false, true, true, true], fixture_edges())
+        expect(ready[0]).to_equal(false)
+        expect(ready[3]).to_equal(true)
+
+    it "maps canonical paths back to source paths":
+        expect(source_paths_by_canonical_v1(["/r/a.spl"], ["a.spl"], "/r/a.spl")).to_equal("a.spl")
+        expect(source_paths_by_canonical_v1(["/r/a.spl"], ["a.spl"], "/r/z.spl")).to_equal("")
+
+    it "loads N=3 of M=6 modules, and the restriction is set once":
+        worker_hir_restrict_loads_v1(["a.spl", "b.spl", "c.spl"])
+        worker_hir_restrict_loads_v1(PATHS)
+        var loaded = 0
+        for p in PATHS:
+            if worker_hir_load_allowed_v1(p): loaded = loaded + 1
+        expect(loaded).to_equal(3)
+        expect(worker_hir_counters_v1()).to_equal("hir_loaded=3 hir_skipped=3")
