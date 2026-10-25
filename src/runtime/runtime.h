@@ -532,6 +532,8 @@ int64_t  rt_string_free(int64_t value);
 int64_t  rt_string_new_literal(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+/* Caller-available disk bytes for a boxed UTF-8 path; 0 if unavailable. */
+int64_t rt_host_disk_headroom_bytes_v1(int64_t path);
 const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
 int64_t  rt_string_chars(int64_t string);

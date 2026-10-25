@@ -3888,40 +3888,6 @@ int64_t rt_host_commit_headroom_bytes_v1(void) {
 #endif
 }
 
-/* Available bytes on the volume holding `path` (Simple text value) via
- * GetDiskFreeSpaceExW. Same interpreter-first rationale as
- * rt_host_memory_headroom_bytes_v1. Returns 0 when unavailable; callers
- * keep the extern path as fallback. */
-int64_t rt_host_disk_headroom_bytes_v1(int64_t path_value) {
-#if defined(_WIN32)
-    RtCoreString* path = rt_core_as_string(path_value);
-    if (!path || path->len == 0 || path->len >= 4096) return 0;
-    WCHAR wide[4096];
-    int converted = MultiByteToWideChar(CP_UTF8, 0, (LPCCH)path->data, (int)path->len, wide, 4095);
-    if (converted <= 0) return 0;
-    wide[converted] = L'\0';
-    ULARGE_INTEGER free_for_caller = {0};
-    if (!GetDiskFreeSpaceExW(wide, &free_for_caller, NULL, NULL)) return 0;
-    if (free_for_caller.QuadPart > (uint64_t)INT64_MAX) return 0;
-    return (int64_t)free_for_caller.QuadPart;
-#elif defined(RT_HAVE_STATVFS)
-    RtCoreString* path = rt_core_as_string(path_value);
-    if (!path || path->len == 0 || path->len >= 4096) return 0;
-    char narrow[4096];
-    memcpy(narrow, path->data, (size_t)path->len);
-    narrow[path->len] = '\0';
-    if (strlen(narrow) != (size_t)path->len) return 0;
-    struct statvfs stat_buf;
-    if (statvfs(narrow, &stat_buf) != 0) return 0;
-    unsigned __int128 available =
-        (unsigned __int128)stat_buf.f_bavail * (unsigned __int128)stat_buf.f_frsize;
-    return available > (unsigned __int128)INT64_MAX ? INT64_MAX : (int64_t)available;
-#else
-    (void)path_value;
-    return 0;
-#endif
-}
-
 int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
     (void)argc;
     (void)argv;
