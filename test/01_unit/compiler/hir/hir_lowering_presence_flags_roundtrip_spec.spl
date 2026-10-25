@@ -1,0 +1,99 @@
+# Behavioral counterpart to the upstream constructor-coverage regression.
+# Execution is UNRUN until a qualified self-hosted test CLI is available.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.hir.hir_definitions.{HirStruct, HirTrait, HirBitfieldField}
+use compiler.frontend.parser_types.{BitfieldField}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_codec.{hir_module_encode, hir_codec_header}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_module,
+    hc_enc_hir_bitfield_field, hc_dec_hir_bitfield_field}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+fn presence_flags_module() -> HirModule:
+    val source = "struct Point:\n    x: i64\n\ntrait Area:\n    fn area() -> i64\n"
+    val parsed = parse_full_frontend(source, "presence_flags.spl", "presence_flags",
+        Logger(level: 0))
+    var lowering = HirLowering.with_filename("presence_flags.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn expect_concrete_absent_flags(module: HirModule):
+    expect(module.structs.len()).to_equal(1)
+    val structs = module.structs.keys()
+    val structure: HirStruct = module.structs[structs[0]]
+    expect(structure.name).to_equal("Point")
+    expect(structure.has_doc_comment).to_equal(false)
+    expect(structure.has_specialization_of).to_equal(false)
+    expect(structure.fields.len()).to_equal(1)
+    expect(structure.fields[0].name).to_equal("x")
+    expect(structure.fields[0].has_fixed_address).to_equal(false)
+    expect(module.traits.len()).to_equal(1)
+    val traits = module.traits.keys()
+    val trait_: HirTrait = module.traits[traits[0]]
+    expect(trait_.name).to_equal("Area")
+    expect(trait_.has_doc_comment).to_equal(false)
+    expect(trait_.has_specialization_of).to_equal(false)
+
+fn bitfield_presence_roundtrip(field: HirBitfieldField) -> HirBitfieldField:
+    var writer = HirCodecWriter.create()
+    hc_enc_hir_bitfield_field(writer, field)
+    expect(writer.ok).to_equal(true)
+    val blob = writer.finish()
+    val reader = FlatPoolReader.new_bounded(blob, 1048576, 1048576, 128, 32, 100000)
+    val decoded = hc_dec_hir_bitfield_field(reader)
+    expect(reader.ok).to_equal(true)
+    expect(reader.pos).to_equal(reader.lines.len() - 1)
+    var second = HirCodecWriter.create()
+    hc_enc_hir_bitfield_field(second, decoded)
+    expect(second.ok).to_equal(true)
+    expect(second.finish()).to_equal(blob)
+    decoded
+
+describe "Lowered HIR presence flags retain concrete false values":
+    it "sets absent struct, field and trait metadata through real lowering":
+        expect_concrete_absent_flags(presence_flags_module())
+
+    it "preserves the values through the hardened bounded decoder":
+        val original = presence_flags_module()
+        val blob = hir_module_encode(original)
+        expect(blob != "").to_equal(true)
+        val reader = FlatPoolReader.new_bounded(blob, 8 * 1024 * 1024,
+            128 * 1024 * 1024, 65536, 128, 1000000)
+        expect(reader.next()).to_equal(hir_codec_header())
+        val decoded = hc_dec_hir_module(reader)
+        expect(reader.ok).to_equal(true)
+        expect(reader.pos).to_equal(reader.lines.len() - 1)
+        expect_concrete_absent_flags(decoded)
+        expect(hir_module_encode(decoded)).to_equal(blob)
+
+    it "keeps reserved untyped fields absent and typed fields present":
+        var lowering = HirLowering.with_filename("bitfield_presence.spl")
+        val reserved = lowering.lower_bitfield_field(BitfieldField(name: "_reserved",
+            has_type_: false, type_: nil, has_bits: true, bits: 7,
+            is_reserved: true, span: Span.empty()), 1)
+        expect(reserved.has_type_).to_equal(false)
+        expect(reserved.type_).to_equal(nil)
+        val restored_reserved = bitfield_presence_roundtrip(reserved)
+        expect(restored_reserved.has_type_).to_equal(false)
+        expect(restored_reserved.type_).to_equal(nil)
+        expect(restored_reserved.bit_width).to_equal(7)
+        expect(restored_reserved.bit_offset).to_equal(1)
+
+        val typed = lowering.lower_bitfield_field(BitfieldField(name: "enabled",
+            has_type_: true, type_: Type(kind: TypeKind.Named("bool", []), span: Span.empty()),
+            has_bits: true, bits: 1, is_reserved: false, span: Span.empty()), 0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(typed.has_type_).to_equal(true)
+        expect(typed.type_.kind).to_equal(HirTypeKind.Bool)
+        val restored_typed = bitfield_presence_roundtrip(typed)
+        expect(restored_typed.has_type_).to_equal(true)
+        expect(restored_typed.type_.kind).to_equal(HirTypeKind.Bool)

@@ -1,0 +1,39 @@
+# Every HIR constructor must set the DESUGARED `has_X` presence flag that pairs
+# with an optional `X`. An omitted flag is nil at runtime; HirCodecWriter.put_bool
+# renders it as the wire nil `N`, and the decoder's non-optional scalar guard
+# refuses the blob (`[hir-cache] SELFCHECK FAILED ... nil_in_non_optional_scalar
+# token=N`). Exact failing shape: any module declaring `struct P: x: i64`
+# (HirStruct.has_doc_comment / has_specialization_of were never passed).
+# doc/08_tracking/bug/hir_presence_flags_phase3_backport_2026-10-25.md
+use std.spec.*
+use std.io_runtime.{file_read}
+
+val LOWER = "src/compiler/20.hir/hir_lowering/"
+
+fn src_has(path: text, needle: text) -> bool:
+    file_read(LOWER + path).contains(needle)
+
+describe "HIR lowering sets desugared has_* flags":
+    it "HirStruct sets has_doc_comment and has_specialization_of":
+        expect(src_has("_Items/declaration_lowering.spl", "has_doc_comment: struct_.has_doc_comment,")).to_equal(true)
+        expect(src_has("_Items/declaration_lowering.spl", "is_generic_template: struct_type_params.len() > 0,\n            has_specialization_of: false,")).to_equal(true)
+
+    it "HirTrait sets has_doc_comment and has_specialization_of":
+        expect(src_has("_Items/trait_impl_lowering.spl", "has_doc_comment: trait_.has_doc_comment,")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "is_generic_template: false,\n            has_specialization_of: false,")).to_equal(true)
+
+    it "HirField, HirConst set has_fixed_address":
+        expect(src_has("_Items/declaration_lowering.spl", "has_fixed_address: fld.has_fixed_address,")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "has_fixed_address: const_.has_fixed_address,")).to_equal(true)
+
+    it "HirBitfield, HirBitfieldField, HirAssocTypeDecl, HirStaticAssert set flags":
+        expect(src_has("_Items/declaration_lowering.spl", "has_doc_comment: bf.has_doc_comment,")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "has_type_: has_type,")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "if val lowered_type = ftype:")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "has_default: at.has_default,")).to_equal(true)
+        expect(src_has("_Items/trait_impl_lowering.spl", "has_message: assert_.has_message,")).to_equal(true)
+
+    it "HirInterpolation, lambda HirParam, HirWithItem set flags":
+        expect(src_has("_Expressions/expression_components.spl", "has_format: i.has_format,")).to_equal(true)
+        expect(src_has("_Expressions/expression_core.spl", "has_default: false,\n                        default: nil,")).to_equal(true)
+        expect(src_has("statements.spl", "has_target: item.has_target,")).to_equal(true)
