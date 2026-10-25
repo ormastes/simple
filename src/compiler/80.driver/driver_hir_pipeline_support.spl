@@ -25,6 +25,8 @@ use compiler.semantics.value_struct_layout.{ValueStructLayoutModuleV1,
 use std.nogc_sync_mut.io.env_ops.{env_get, env_get_opt}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.rt_criticality.{rt_bound_manifest_clear}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
 use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics, validate_rt_criticality_diagnostics_array, validate_rt_criticality_diagnostics_blobs}
 use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{
     DriverHirGateLayoutReportV1, driver_hir_gate_layout_report_v1, driver_hir_gate_publish_warnings_v1,
@@ -263,6 +265,22 @@ fn driver_hir_module_dict_dropped_values(hir_modules: Dict<text, HirModule>) -> 
             dropped = dropped.push(key)
     dropped
 
+pub fn driver_hir_validation_blob_encode_enabled_v1(env_value: text) -> bool:
+    """Per-module HIR validation blobs are opt-in (SIMPLE_HIR_VALIDATION_BLOBS=1).
+
+    The blob was encoded per module in the retained HIR loop (~292 ms each)
+    and decoded again by the RT validator (78 s on 1442 modules), while 85% of
+    blobs were codec-refused and the fallback array was validated anyway.
+    """
+    env_value == "1"
+
+pub fn driver_rt_criticality_policy_needed_v1(claim_count_now: i64, has_rt_hal_flags: [bool]) -> bool:
+    """RT policy runs only when a claim exists or some module has @rt/HAL."""
+    if claim_count_now > 0: return true
+    for flag in has_rt_hal_flags:
+        if flag: return true
+    false
+
 pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
         hir_module_array: [HirModule] = [], hir_module_blobs: [text] = [],
         hir_module_has_rt_hal: [bool] = [], hir_module_claim_counts: [i64] = []) -> [text]:
@@ -280,6 +298,15 @@ pub fn driver_rt_criticality_errors(modules: Dict<text, HirModule>,
     # the next cycle's log without a shim.
     if (env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
         eprint("[enum-reg] rt-criticality lane: dict_keys={modules.keys().len()} array={module_list.len()}")
+    # Cheap short-circuit before any blob decode or body walk. Only taken when
+    # the producer's scalar has_rt_hal flags cover EVERY module (the retained
+    # loop pushes one per module); otherwise (streaming lane, dict fallback)
+    # the full validator decides. Mirrors the validator's own empty-policy
+    # return: clear the bound manifest, publish nothing.
+    if hir_module_has_rt_hal.len() == module_list.len() and
+            not driver_rt_criticality_policy_needed_v1(rt_criticality_claim_keys().len(), hir_module_has_rt_hal):
+        rt_bound_manifest_clear()
+        return []
     val report = driver_hir_gate_rt_report_v1(validate_rt_criticality_diagnostics_blobs(
             hir_module_blobs, module_list, hir_module_has_rt_hal, hir_module_claim_counts))
     driver_hir_gate_publish_warnings_v1(report.warnings)
