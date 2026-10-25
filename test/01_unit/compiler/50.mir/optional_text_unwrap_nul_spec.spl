@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Unwrapping a `text?` keeps every byte, including NUL
+
+Natively, `t!`, `match t: case Some(s)`, `if val s = t` and `t.unwrap()`
+decode the payload through `rt_interp_cstr`, which yields a C string. A text
+holding a NUL byte comes back cut at the first NUL. `t ?? d` keeps the whole
+string. SCV cold init digested `src/lib/scv/identity_corrections.spl` (it holds
+literal NUL bytes) from 11465 bytes down to 4158 and admission refused it as
+`snapshot-index-drift`.
+
+The interpreter has no cstr decode, so this spec passes there. It is red only
+natively, until the unwrap lowering keeps the length-carrying string.
+See doc/08_tracking/bug/optional_text_unwrap_truncates_at_nul_2026-10-25.md
+"""
+
+# @tag: unit, compiler, mir, text
+
+use std.spec.{describe, it, expect}
+
+fn nul_probe_text() -> text?:
+    Some("ab" + "\x00" + "cd")
+
+describe "text? unwrap with an embedded NUL":
+    it "keeps the full length through !":
+        val t = nul_probe_text()
+        expect(t!.len()).to_equal(5)
+
+    it "keeps the full length through match":
+        match nul_probe_text():
+            case Some(s): expect(s.len()).to_equal(5)
+            case _: expect(false).to_equal(true)
+
+    it "keeps the full length through ??":
+        val s = nul_probe_text() ?? ""
+        expect(s.len()).to_equal(5)
