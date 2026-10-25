@@ -1,0 +1,127 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_instances_v1.spl 0%
+"""
+# File-worker generic instance jobs (P-G6)
+
+The file-worker coordinator consumes the P-G5 instance build plan: the union
+of every module's `generic-spec` list is the needed ConcreteTldrKey set, each
+key is one single-flight, receipted job compiled once into a producer-keyed,
+header-verified instance object. Two consumers -> one build; unchanged lists
+-> zero builds; an added key -> one build; a removed key -> dropped + relink.
+An incomplete plan runs no job and links no instance object (fail closed).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use std.io_runtime.{dir_create_all, file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
+use compiler.driver.cache.generic_instance_build_plan_v1.{generic_instance_object_path_v1}
+use compiler.driver.driver_build.native_file_worker_instances_v1.*
+
+fn spec_of(key: text) -> RequiredSpecializationV1:
+    RequiredSpecializationV1(template_symbol: "pkg_a.Pair", template_id: "t:Pair", args_id: "a:" + key,
+        arg_keys: [key], concrete_key: key)
+
+fn list_of(keys: [text]) -> GenericSpecializationListV1?:
+    var specs: [RequiredSpecializationV1] = []
+    for k in keys:
+        specs.push(spec_of(k))
+    Some(GenericSpecializationListV1(complete: true, specs: specs))
+
+fn fresh_root(tag: text) -> text:
+    val root = "build/test_tmp/pg6_" + tag + "_" + "{time_now_unix_micros()}"
+    val _ok = dir_create_all(root)
+    root
+
+fn obj(s: RequiredSpecializationV1) -> text:
+    "OBJ:" + s.concrete_key
+
+fn broken(s: RequiredSpecializationV1) -> text:
+    ""
+
+fn run(root: text, round: text, lists: [GenericSpecializationListV1?]) -> FileWorkerInstanceRunV1:
+    val plan = file_worker_instances_plan_v1(lists, root + "/cache", "producer-1")
+    file_worker_instances_run_v1(plan, root + "/cache", "producer-1", root + "/ledger-" + round,
+        "owner-" + round, true, obj)
+
+describe "file-worker generic instance jobs":
+    it "two consumers of one key build it once":
+        val root = fresh_root("two")
+        val r = run(root, "0", [list_of(["k:i64_f64"]), list_of(["k:i64_f64"])])
+        expect(r.complete).to_equal(true)
+        expect(r.built).to_equal(["k:i64_f64"])
+        expect(r.retire_comdat).to_equal(true)
+        expect(r.link_objects.len()).to_equal(1)
+        expect(file_exists(r.link_objects[0])).to_equal(true)
+        expect(r.relink).to_equal(true)
+
+    it "unchanged lists build zero instances and place the cached objects":
+        val root = fresh_root("same")
+        val _first = run(root, "0", [list_of(["k:a", "k:b"])])
+        val again = run(root, "1", [list_of(["k:a", "k:b"])])
+        expect(again.built.len()).to_equal(0)
+        expect(again.reused).to_equal(["k:a", "k:b"])
+        expect(again.link_objects.len()).to_equal(2)
+        expect(again.relink).to_equal(false)
+
+    it "an added key builds exactly one instance":
+        val root = fresh_root("add")
+        val _first = run(root, "0", [list_of(["k:a"])])
+        val next = run(root, "1", [list_of(["k:a"]), list_of(["k:b"])])
+        expect(next.built).to_equal(["k:b"])
+        expect(next.reused).to_equal(["k:a"])
+        expect(next.relink).to_equal(true)
+
+    it "a removed key drops its object and forces a relink":
+        val root = fresh_root("drop")
+        val _first = run(root, "0", [list_of(["k:a", "k:b"])])
+        val gone = generic_instance_object_path_v1(root + "/cache", "producer-1", "k:b")
+        expect(file_exists(gone)).to_equal(true)
+        val next = run(root, "1", [list_of(["k:a"])])
+        expect(next.built.len()).to_equal(0)
+        expect(next.dropped).to_equal(["k:b"])
+        expect(file_exists(gone)).to_equal(false)
+        expect(next.relink).to_equal(true)
+
+    it "a key already claimed in the ledger is joined, not built twice":
+        val root = fresh_root("flight")
+        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1")
+        val ledger = root + "/ledger"
+        val first = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", ledger, "w0", true, obj)
+        val second = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", ledger, "w1", true, obj)
+        expect(first.built).to_equal(["k:a"])
+        expect(second.built.len()).to_equal(0)
+        expect(second.joined).to_equal(["k:a"])
+
+    it "an incomplete list fails closed: no job, no instance object linked":
+        val root = fresh_root("inc")
+        val inc: GenericSpecializationListV1? = Some(GenericSpecializationListV1(complete: false,
+            specs: [spec_of("k:a")]))
+        val r = run(root, "0", [inc])
+        expect(r.complete).to_equal(false)
+        expect(r.built.len()).to_equal(0)
+        expect(r.link_objects.len()).to_equal(0)
+        expect(r.retire_comdat).to_equal(false)
+        val unknown = run(root, "1", [nil])
+        expect(unknown.complete).to_equal(false)
+
+    it "never links instance objects that could duplicate a strong definition":
+        val root = fresh_root("strong")
+        val plan = file_worker_instances_plan_v1([list_of(["k:a"])], root + "/cache", "producer-1")
+        val not_comdat = file_worker_instances_run_v1(plan, root + "/cache", "producer-1", root + "/l0",
+            "w0", false, obj)
+        expect(not_comdat.retire_comdat).to_equal(false)
+        expect(not_comdat.link_objects.len()).to_equal(0)
+        val root2 = fresh_root("fail")
+        val plan2 = file_worker_instances_plan_v1([list_of(["k:a"])], root2 + "/cache", "producer-1")
+        val failed = file_worker_instances_run_v1(plan2, root2 + "/cache", "producer-1", root2 + "/l0",
+            "w0", true, broken)
+        expect(failed.failed).to_equal(["k:a"])
+        expect(failed.retire_comdat).to_equal(false)
+        expect(failed.link_objects.len()).to_equal(0)
