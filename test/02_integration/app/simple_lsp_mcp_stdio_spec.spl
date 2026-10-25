@@ -1,9 +1,8 @@
 # Simple LSP MCP stdio protocol checks.
 
 use std.spec
-use app.io.mod.{shell}
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use app.io.mod.{env_get, file_write, file_delete, dir_remove, process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 
 fn write_framed_request(body: text) -> text:
     "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: " + body.len().to_string() + "\r\n\r\n" + body
@@ -49,7 +48,7 @@ fn assert_all_content_length_frames(output: text, expected_count: i64):
     var frame_count: i64 = 0
     while remaining != "":
         expect(remaining.starts_with("Content-Length: ")).to_equal(true)
-        val header_end = remaining.index_of("\r\n\r\n")
+        val header_end = remaining.index_of("\r\n\r\n") ?? -1
         expect(header_end >= 0).to_equal(true)
         if header_end < 0:
             return
@@ -75,13 +74,31 @@ fn assert_response_id_preserved(output: text, id_raw: text):
     expect(output.contains("\"id\":null")).to_equal(false)
 
 fn send_lsp_mcp(messages: text) -> text:
-    val tmp = "/tmp/simple_lsp_mcp_stdio_input.txt"
-    rt_file_write_text(tmp, messages)
-    val result = shell("cat " + tmp + " | node bin/mcp_stdio_bridge.js -- $(ls bin/release/*/simple_lsp_mcp_server 2>/dev/null | head -n 1) 2>/dev/null")
-    result.stdout ?? ""
+    # Pin the native server; a Node bridge must not repair its wire output.
+    val binary = env_get("SIMPLE_LSP_MCP_TEST_BINARY")
+    assert(binary != "", "Set SIMPLE_LSP_MCP_TEST_BINARY to the compiled server")
+    val configured_shell = env_get("SIMPLE_LSP_MCP_TEST_SHELL")
+    val shell_path = if configured_shell != "": configured_shell else: "/bin/sh"
+    val temporary_root = env_get("TEMP")
+    val parent = if temporary_root != "": temporary_root else: "/tmp"
+    val directory = secure_temp_dir(parent, "lsp-mcp-stdio-").unwrap()
+    val input_path = directory + "/input"
+    assert(file_write(input_path, messages), "Write the complete protocol input")
+    # Paths are positional arguments, not shell source. The process owner bounds
+    # the child lifetime; closing redirected stdin gives the server a real EOF.
+    val (output, stderr, code) = process_run_timeout(shell_path,
+        ["-c", "exec \"$1\" < \"$2\"", "lsp-mcp-stdio-spec", binary, input_path], 15000)
+    val removed_input = file_delete(input_path)
+    val removed_directory = dir_remove(directory, false)
+    expect(code).to_equal(0)
+    expect(stderr).to_equal("")
+    expect(removed_input).to_equal(true)
+    expect(removed_directory).to_equal(true)
+    output
 
 describe "Simple LSP MCP stdio":
     it "mirrors Claude-style JSONL requests with JSONL responses":
+        step("Send consecutive requests directly to the selected native server")
         val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_tools_body("2"))
         val output = send_lsp_mcp(input)
         expect(output.starts_with("{\"jsonrpc\":\"2.0\"")).to_equal(true)
@@ -92,6 +109,7 @@ describe "Simple LSP MCP stdio":
         expect(output.contains("\"error\":")).to_equal(false)
 
     it "keeps Content-Length framing for framed MCP clients":
+        step("Read the native server's frames without a protocol bridge")
         val input = write_framed_request(lsp_init_body("1")) + write_framed_request(lsp_tools_body("2"))
         val output = send_lsp_mcp(input)
         assert_all_content_length_frames(output, 2)
@@ -101,6 +119,7 @@ describe "Simple LSP MCP stdio":
         expect(output.contains("\"error\":")).to_equal(false)
 
     it "preserves numeric and string ids across consecutive framed responses":
+        step("Verify numeric and string request IDs on the native wire")
         val numeric_init = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
         val string_tools = lsp_tools_body("request-alpha")
         val output = send_lsp_mcp(write_framed_request(numeric_init) + write_framed_request(string_tools))
@@ -109,8 +128,15 @@ describe "Simple LSP MCP stdio":
         assert_response_id_preserved(output, "\"request-alpha\"")
 
     it "swallows Claude and Gemini initialized notification before tools/list":
+        step("Send an initialized notification between two native requests")
         val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_initialized_notification_body()) + lsp_mcp_jsonl(lsp_tools_body("2"))
         val output = send_lsp_mcp(input)
         expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
         expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
         expect(output.contains("\"error\":")).to_equal(false)
+
+    it "preserves a multilingual request ID and its UTF-8 frame length":
+        step("Round trip a multilingual string ID through the compiled server")
+        val output = send_lsp_mcp(write_framed_request(lsp_init_body("검증🙂")))
+        assert_all_content_length_frames(output, 1)
+        assert_response_id_preserved(output, "\"검증🙂\"")
