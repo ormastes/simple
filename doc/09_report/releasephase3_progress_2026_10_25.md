@@ -2,6 +2,31 @@
 
 This is an evidence update, not a fresh compiler build or acceptance run. Historical [82-scope inventory](releasephase3_coding_inventory_2026_10_25.md) and [selector reconciliation](robust_acceptance_selector_reconciliation_2026_10_25.md) are unchanged. Local `/tmp` evidence links name retained host artifacts; they are not portable repository artifacts.
 
+## Current update — 2026-10-25, after PR #4657
+
+GitHub confirms [PR #4657](https://github.com/ormastes/simple/pull/4657) merged at **c345d0a6e589a40c237d0dbe97899bae7c89da17** (04:59:54 UTC). The bounded dictionary scope-read providers and five interpreter wrappers are landed with source review GO. This adds real scalar reads through existing native C, pure Simple and hosted Rust owners, with owner/epoch/backing/fuel checks; it does not add the pending HIR constructor account or complete SOURCE integration.
+
+| Newly recorded boundary | Evidence and limitation |
+|---|---|
+| Actual interpreter dispatch | [Retained test log](/tmp/c4-scope-read-interpreter-cycle6-20261025.log): **3 passed,0 failed**, through registered handlers; raw-handle order/UTF-8/wide IDs, stale/invalid/fuel refusal, rich-dictionary refusal and arity controls. No tests rerun for this report. |
+| Hosted runtime scope reads | Prior **8 focused runtime tests passed**; see [admission-index overhead record](../08_tracking/bug/c4_hosted_scope_read_admission_index_overhead_2026-10-25.md). The extra lifecycle admission index has allocation/mutation cost even without queries; whole-compiler overhead remains unmeasured. |
+| Native provider | [Executed native controls](../08_tracking/bug/c4_scope_read_runtime_qualification_2026_10_25.md):2,049 bindings,300,000 reads,zero read allocations,12.7ms and isolated maximum RSS 1,616KiB. This is the isolated reader, not a full-compiler performance result. |
+| Pure runtime and typed facade | Array/numeric/memory objects compiled. Full pure runtime execution remains blocked by reproduced baseline string HIR failures; the typed facade/account closure reached HIR but crashed in MIR. Typed facade execution, actual SOURCE queries, physical storage accounting and whole-compiler performance remain **OPEN**. |
+
+These bounded runtime/dispatch results do not change the full **82-scope feature acceptance matrix: all UNRUN**. The carried inventory remains 15 complete-unverified/54 partial/4 absent selected behaviors/9 authority decisions; this update does not re-audit every row or mark an entire scope complete. The static 33, C4 foundation 37 and builder 20 SSpecs below remain UNRUN.
+
+### New compiler snapshot, still awaiting matrix result
+
+Source **89d2e18cd1487a1f3c5b2c248f9096b3df6b4b0a** (including the persistent-root runtime fix) rebuilt **1,496 modules,0 reused,0 failed**, and linked candidate **95c332194465d5ea2a126687c4152168cb59d7c2be0e48bde53e168966476c1f**. [Build log](/tmp/phase3-stage2fix-89d2/canonical-admission/logs/aarch64-unknown-linux-gnu/stage2-native-build.log); [focused admission receipt](/tmp/phase3-stage2fix-89d2/canonical-admission/stage3/aarch64-unknown-linux-gnu/stage2-admitted/admission.env). The receipt binds source snapshot 3196f166… and runtime snapshot 52bd28a4…. This older source does not qualify the newer c345d0 scope-read code.
+
+[Planner admission](/tmp/phase3-stage2fix-89d2/canonical-admission/stage3-planner-admission.receipt) is pass. Its [negative control](/tmp/phase3-stage2fix-89d2/canonical-admission/admission/d2d412f8f9c1a62f69f6b2decb438e0c4a10fbd53f98b29f946f6d53f1d7951a/planner-smoke.txt) rejects an untyped reason with exit 2 and writes no receipt; the [authorized control](/tmp/phase3-stage2fix-89d2/canonical-admission/admission/d2d412f8f9c1a62f69f6b2decb438e0c4a10fbd53f98b29f946f6d53f1d7951a/planner-stdout.txt) records the selected reason and execution=not-attempted. These are planner controls, not completed Stage3 execution.
+
+The [compiler test matrix summary](/tmp/phase3-stage2fix-89d2/canonical-admission/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/summary.env) is still being written at this snapshot; no terminal matrix PASS/FAIL or new full CLI/runner qualification is claimed. The requested 500-item cached batch is not yet recorded as executed.
+
+### Older provisional campaign: terminal watchdog refusal
+
+The older ce7738/f5c0 campaign is now terminal: [watchdog receipt](/tmp/phase3-provisional-stage3-ce7738-f5c0-20261025/tmp/simple-process-tree-rss.614077.env) reports **rss-measurement-failed,exit 89,quiescent=1**. The [retained log](/tmp/phase3-provisional-stage3-ce7738-f5c0-20261025/stage3-diagnostic.log) last records **HIR 960/1,441**; no final compiler binary was produced. The earlier 942 observation below is preserved as an earlier progress point, not a unique-object inventory. The terminal helper observation took about 2,095.6ms; session_helper_integrity=verified. This timing does **not** establish a SHA/hash root cause, an OOM, or a compiler pass. It is separate from the newer source 1690 SIG11 record below.
+
 ## Landing update — 2026-10-25 04:31 UTC
 
 [Runtime repair PR #4641](https://github.com/ormastes/simple/pull/4641) is now **MERGED** at `89d2e18cd1487a1f3c5b2c248f9096b3df6b4b0a`, following independent Astra source review. Its production/test code matches the reviewed `8e535e297367e2fec0c332af9b52067a9fce3d95` repair. The retained 22 runtime unit passes and expected negative-control failure below remain the same evidence; they were not rerun. Accumulated-root quadratic growth remains performance debt, and the original compiler graph on a rebuilt matching runtime remains **UNRUN**. All 82 feature acceptance scopes remain UNRUN; the 500-item cached batch remains requested, not executed. The 75d260 GitHub snapshot and then-pending runtime review below are preserved as dated history.
