@@ -500,3 +500,4 @@ programs never change layout. Rules to keep when editing:
 - Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
   wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
   correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.
+- **BSM P3 bootstrap MIR store:** the flat `_bootstrap_mir_*` / function-value / callable registries live on `BootstrapMirStore` (`_MirLowering/bootstrap_mir_store.spl`); never add a module-level registry var back — add a store field + forwarder, keep reads read-through (committed then pending), and publish only at `bootstrap_mir_registries_promote` (scope paused).
