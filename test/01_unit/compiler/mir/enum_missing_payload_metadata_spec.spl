@@ -86,6 +86,9 @@ describe "builtin generic declaration payload admission":
         expect(lowering.enum_variant_payload_types["Option::Some"][0].kind).to_equal(HirTypeKind.TypeParam("T", []))
         expect(lowering.enum_variant_payload_kind["Option::None"]).to_equal("unit")
         expect(lowering.enum_variant_payload_types["Option::None"].len()).to_equal(0)
+        expect(lowering.enum_single_payload_types.has("Option::Some")).to_equal(false)
+        expect(lowering.enum_single_payload_types.has("Result::Ok")).to_equal(false)
+        expect(lowering.enum_single_payload_types.has("Result::Err")).to_equal(false)
 
     it "constructs inferred Ok Err Some and None with real payloads":
         step("Lower all builtin variants using the ordinary named constructor")
@@ -156,3 +159,24 @@ describe "builtin generic declaration payload admission":
             has_type_: true, type_: Some(option_type), span: Span.empty())
         val rejected = lowering.lower_expr(call)
         expect(lowering.errors.len()).to_be_greater_than(0)
+
+    it "revokes builtin authority when a later module declares its own Option":
+        step("Register an actual user declaration after builtin seeding, then seed again")
+        var lowering = builtin_payload_metadata_lowering()
+        val empty = HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+            type_: nil, span: Span.empty())
+        val variant = HirVariant(symbol: SymbolId(id: 191), name: "Some",
+            kind: HirVariantKind.Unit, has_discriminant: false,
+            discriminant: empty, span: Span.empty())
+        val declaration = HirEnum(symbol: SymbolId(id: 190), name: "Option",
+            runtime_name: "other_module.Option", type_params: [], variants: [variant],
+            visibility: Visibility.Public, is_public: true, doc_comment: nil,
+            span: Span.empty(), is_generic_template: false, specialization_of: nil, type_bindings: {})
+        lowering.register_enum_variants(declaration)
+        lowering.register_enum_runtime_id(declaration)
+        lowering.register_builtin_enum_seeds()
+        expect(lowering.builtin_enum_constructor_owners_v1["Option"]).to_equal(false)
+        expect(lowering.enum_variant_payload_kind["other_module.Option::Some"]).to_equal("unit")
+        val accepted = lowering.lower_enum_construct_named("other_module.Option", "Some", [])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(accepted.id).to_be_greater_than(-1)

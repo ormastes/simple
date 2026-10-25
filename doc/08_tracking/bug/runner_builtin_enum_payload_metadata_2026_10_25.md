@@ -20,6 +20,8 @@ as a complete semantic repair.
 
 The repair registers Option's T and Result's ordered T/E payload schemas and
 unit None, with exact builtin authority revoked by user enum registration.
+Template T/E schema entries are excluded from the concrete single-payload
+decoder map so instantiated Option scrutinee types remain authoritative.
 Generic builtin constructors validate declaration arity and argument names.
 Expected wrapper types now cross expression and method dispatch; Result uses
 the existing typed constructor, with canonical payload checking/encoding.
@@ -31,11 +33,12 @@ Regression scope:
 
 - `enum_missing_payload_metadata_spec.spl`: metadata T/E ordering, all four
   constructors, zero/excess arity rejection, distinct Result T/E mismatch,
-  Option payload mismatch, typed None, explicit owner shadow, actual Call
+  Option payload mismatch, typed None, owner shadows in both registration orders, actual Call
   expression expected-type forwarding, and preexisting nongeneric fail-closed
   checks.
 - `builtin_enum_payload_runtime_spec.spl`: real provider/importer construction
-  and extraction of integer Ok, text Err, text Some and typed None.
+  and extraction of integer Ok, text Err, text Some, float Some, array Some
+  and typed None.
 
 No compiler test, seed substitution, runner build, or bootstrap was executed.
 The bounded campaign owner reports no qualified interpreter/full CLI in this

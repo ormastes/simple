@@ -922,14 +922,16 @@ impl MirLowering:
                 self.generic_enum_constructor_owners[bare_name] = true
                 self.builtin_enum_constructor_owners_v1[bare_name] = true
         if self.builtin_enum_constructor_owners_v1.get(bare_name) ?? false:
+            # Templates prove arity, not an instantiated match payload type.
+            # Keep them out of the concrete single-slot decoder registry.
             val t = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
             if bare_name == "Option":
-                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Some", [t], [""], "tuple")
-                self.register_enum_payload_metadata_v1(bare_name, bare_name, "None", [], [], "unit")
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Some", [t], [""], "tuple", true, true, false)
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "None", [], [], "unit", true, true, false)
             elif bare_name == "Result":
                 val e = HirType(kind: HirTypeKind.TypeParam("E", []), span: Span.empty())
-                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Ok", [t], [""], "tuple")
-                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Err", [e], [""], "tuple")
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Ok", [t], [""], "tuple", true, true, false)
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Err", [e], [""], "tuple", true, true, false)
         if not self.enum_variant_index_q.has(bare_name):
             self.enum_variant_index_q[bare_name] = names
             self.enum_variant_discriminants_q[bare_name] = discriminants
@@ -1157,7 +1159,7 @@ impl MirLowering:
         true
 
     me register_enum_payload_metadata_v1(enum_name: text, runtime_name: text, variant: text,
-            types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true):
+            types: [HirType], names: [text], kind: text, store_types: bool = true, write_bare: bool = true, store_single_type: bool = true):
         # Kind/names are ID-free and needed by unit-arm inference even before
         # a consumer demands nominal payload types. Keep the legacy tuple-only
         # bare single-slot rule and the qualified any-single-slot rule exact.
@@ -1167,7 +1169,7 @@ impl MirLowering:
             self.enum_variant_payload_kind[key] = kind
             if store_types:
                 self.enum_variant_payload_types[key] = types
-                if kind == "tuple" and types.len() == 1:
+                if store_single_type and kind == "tuple" and types.len() == 1:
                     self.enum_single_payload_types[key] = types[0]
         if runtime_name != "":
             val key = "{runtime_name}::{variant}"
@@ -1175,7 +1177,7 @@ impl MirLowering:
             self.enum_variant_payload_kind[key] = kind
             if store_types:
                 self.enum_variant_payload_types[key] = types
-                if types.len() == 1:
+                if store_single_type and types.len() == 1:
                     self.enum_single_payload_types[key] = types[0]
 
     me register_module_enum_inventory_v1(modules: [HirModule]):
