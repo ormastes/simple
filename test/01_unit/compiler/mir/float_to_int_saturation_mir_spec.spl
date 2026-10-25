@@ -1,0 +1,117 @@
+# MIR-only validation. Original LLVM integration spec remains failing and unchanged.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn float_artifacts(source: text, target: text) -> (text, text):
+    val filename = "float_to_int_" + target + ".spl"
+    print "FLOAT_TEST_STAGE {target} parse:start"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    print "FLOAT_TEST_STAGE {target} parse:done hir:start"
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    print "FLOAT_TEST_STAGE {target} hir:done mir:start"
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    print "FLOAT_TEST_STAGE {target} mir:done checker:start"
+    var serialized = ""
+    for error in hir_lowering.errors:
+        serialized = serialized + "HIR_ERROR:" + error.message + "\n"
+    for error in lowering.errors:
+        serialized = serialized + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with("." + target):
+            serialized = serialized + serialize_mir_function(function)
+            serialized = serialized + float_guard_evidence(function)
+    print "FLOAT_TEST_STAGE {target} checker:done"
+    if hir_lowering.errors.len() != 0 or lowering.errors.len() != 0:
+        return (serialized, "")
+    (serialized, "")
+
+fn float_guard_evidence(function: MirFunction) -> text:
+    var names: {i64: text} = {}
+    var merge_value: i64 = -1
+    for block in function.blocks:
+        names[block_id_value(block.id)] = block.label ?? ""
+        if (block.label ?? "") == "float_to_int_merge":
+            match block.terminator:
+                case MirTerminator.Ret(value):
+                    if val operand = value:
+                        match operand.kind:
+                            case MirOperandKind.Copy(local): merge_value = local_id_value(local)
+                            case _: ()
+                case _: ()
+    var entry_guard = false
+    var upper_guard = false
+    var lower_guard = false
+    var finite_casts = 0
+    var unsafe_casts = 0
+    var initialized_paths = 0
+    for block in function.blocks:
+        val label = block.label ?? ""
+        match block.terminator:
+            case MirTerminator.If(_, success, failure):
+                val yes = names.get(block_id_value(success)) ?? ""
+                val no = names.get(block_id_value(failure)) ?? ""
+                if yes == "float_to_int_upper" and no == "float_to_int_nan": entry_guard = true
+                if label == "float_to_int_upper" and yes == "float_to_int_max" and no == "float_to_int_lower": upper_guard = true
+                if label == "float_to_int_lower" and yes == "float_to_int_min" and no == "float_to_int_finite": lower_guard = true
+            case _: ()
+        var copied = false
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Cast(_, _, target):
+                    match target.kind:
+                        case MirTypeKind.I64:
+                            if label == "float_to_int_finite": finite_casts = finite_casts + 1
+                            else: unsafe_casts = unsafe_casts + 1
+                        case _: ()
+                case MirInstKind.Copy(destination, _):
+                    if merge_value >= 0 and local_id_value(destination) == merge_value: copied = true
+                case _: ()
+        if label == "float_to_int_nan" or label == "float_to_int_max" or label == "float_to_int_min" or label == "float_to_int_finite":
+            match block.terminator:
+                case MirTerminator.Goto(next):
+                    if copied and (names.get(block_id_value(next)) ?? "") == "float_to_int_merge": initialized_paths = initialized_paths + 1
+                case _: ()
+    if entry_guard and upper_guard and lower_guard and finite_casts == 1 and unsafe_casts == 0 and initialized_paths == 4:
+        return "SATURATION_GUARDS_OK"
+    "SATURATION_GUARDS_MISSING"
+
+describe "Saturating float builtin integer conversion MIR-only":
+    it "guards the sole f64 conversion and initializes every merge path":
+        val artifacts = float_artifacts("fn convert(value: f64) -> i64:\n    value.to_int()\n", "convert")
+        expect(artifacts.0.contains("HIR_ERROR:")).to_be(false)
+        expect(artifacts.0.contains("MIR_ERROR:")).to_be(false)
+        expect(artifacts.0).to_contain("SATURATION_GUARDS_OK")
+
+    it "widens f32 before applying the same guards for to_i64":
+        val artifacts = float_artifacts("fn convert32(value: f32) -> i64:\n    value.to_i64()\n", "convert32")
+        expect(artifacts.0.contains("MIR_ERROR:")).to_be(false)
+        expect(artifacts.0).to_contain("SATURATION_GUARDS_OK")
+        expect(artifacts.0).to_contain("\"target\":\"F64\"")
+
+    it "keeps integral conversion outside the floating saturation CFG":
+        val artifacts = float_artifacts("fn integral(value: i64) -> i64:\n    value.to_int()\n", "integral")
+        expect(artifacts.0.contains("MIR_ERROR:")).to_be(false)
+        expect(artifacts.0).to_contain("\"name\"")
+        expect(artifacts.0.contains("float_to_int_nan")).to_be(false)
+
+    it "retains a custom to_int method instead of builtin saturation":
+        val source = """
+class Custom:
+    value: i64
+impl Custom:
+    fn to_int(self) -> i64:
+        17
+fn custom(value: Custom) -> i64:
+    value.to_int()
+"""
+        val artifacts = float_artifacts(source, "custom")
+        expect(artifacts.0.contains("MIR_ERROR:")).to_be(false)
+        expect(artifacts.0).to_contain("\"name\"")
+        expect(artifacts.0.contains("float_to_int_nan")).to_be(false)
