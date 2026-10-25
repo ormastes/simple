@@ -1,0 +1,129 @@
+# Real immutable inventory reads exercise admission and scratch ownership.
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
+    CompileSourceInventoryEntryV1, compile_source_inventory_encode_v1}
+use app.compiler_entrypoint.inventory_binding_scratch.{compiler_inventory_binding_reason_v1}
+use std.nogc_sync_mut.io_runtime.{cwd, dir_create_all, file_write_exact,
+    getpid, time_now_unix_micros}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+
+val BINDING_SCRATCH_ROOT: text = cwd() + "/build/test/inventory-binding-" +
+    getpid().to_text() + "-" + time_now_unix_micros().to_text()
+
+fn binding_fixture(name: text) -> (text, text):
+    val cache = BINDING_SCRATCH_ROOT + "/" + name + "/build/scv"
+    assert_true(dir_create_all(cache + "/source-inventory/generations"),
+        "create isolated immutable generation directory")
+    val source = "fn main() -> i64: 42\n"
+    val digest = sha256_text(source)
+    val row = CompileSourceInventoryEntryV1(
+        "src/main.spl", digest, digest, digest, digest, digest, source.len())
+    val content = compile_source_inventory_encode_v1(
+        CompileSourceInventoryV1(1, 7, [row]))
+    assert_true(content != "", "fixture has a canonical inventory row")
+    val pointer = sha256_text(content)
+    assert_true(file_write_exact(cache + "/source-inventory/generations/" +
+        pointer + ".inventory", content), "publish real inventory bytes")
+    (cache, pointer)
+
+describe("warm inventory binding scratch", fn():
+    it("authenticates actual rows and retires only its own scratch", fn():
+        val (cache, pointer) = binding_fixture("valid")
+        assert_equal(transient_array_scope_state_v1(), 0, "no caller scope")
+        val reason = compiler_inventory_binding_reason_v1(cache, pointer, pointer, 7)
+        assert_equal(transient_array_scope_state_v1(), 0, "owned scratch retired")
+        assert_equal(reason, "", "canonical generation admitted")
+    )
+
+    it("preserves digest and generation mismatch diagnostics", fn():
+        val (cache, pointer) = binding_fixture("mismatch")
+        assert_equal(compiler_inventory_binding_reason_v1(
+            cache, pointer, pointer, 8), "generation", "generation still checked")
+        assert_equal(compiler_inventory_binding_reason_v1(
+            cache, pointer, sha256_text("other"), 7), "digest", "digest still checked")
+        assert_equal(transient_array_scope_state_v1(), 0, "error scratch retired")
+    )
+
+    it("rejects changed bytes under the original content address", fn():
+        val (cache, pointer) = binding_fixture("tampered")
+        assert_true(file_write_exact(cache + "/source-inventory/generations/" +
+            pointer + ".inventory", "changed"), "tamper fixture bytes")
+        val reason = compiler_inventory_binding_reason_v1(cache, pointer, pointer, 7)
+        assert_equal(transient_array_scope_state_v1(), 0, "rejection scratch retired")
+        assert_equal(reason, "inventory-generation-invalid", "hash validation preserved")
+    )
+
+    it("retains a decoder error across later allocations and another inventory read", fn():
+        val (cache, _original_pointer) = binding_fixture("decoder-error")
+        val malformed = "wrong-inventory-header\ngeneration=7\ncount=0"
+        val pointer = sha256_text(malformed)
+        assert_true(file_write_exact(cache + "/source-inventory/generations/" +
+            pointer + ".inventory", malformed), "publish hash-valid malformed generation")
+        # Decoder reasons may be persistent interned literals. Their complete
+        # bytes must remain valid after scratch retirement and later reads.
+        val reason = compiler_inventory_binding_reason_v1(cache, pointer, pointer, 7)
+        assert_equal(transient_array_scope_state_v1(), 0, "decoder scratch retired")
+        var later: [text] = []
+        var index = 0
+        while index < 512:
+            later.push("later-inventory-allocation-{index}-" + sha256_text(index.to_text()))
+            index = index + 1
+        val (other_cache, other_pointer) = binding_fixture("after-decoder-error")
+        assert_equal(compiler_inventory_binding_reason_v1(
+            other_cache, other_pointer, other_pointer, 7), "", "another generation still reads")
+        assert_equal(later.len(), 512, "later allocations remain live during error check")
+        assert_equal(reason.len(), "inventory-header-invalid".len(), "retained error length")
+        assert_equal(sha256_text(reason), sha256_text("inventory-header-invalid"),
+            "retained complete error bytes survive later allocations")
+    )
+
+    it("promotes a newly allocated scalar text through the selected wrapper ABI", fn():
+        assert_true(transient_scope_begin(), "own scalar-text fixture scratch")
+        # A runtime join allocates these bytes; a literal could be persistent
+        # already and would not exercise scalar text graph promotion.
+        val allocated_reason = ["inventory", "header", "invalid"].join("-")
+        assert_true(transient_scope_pause(), "pause before scalar text promotion")
+        val retained = transient_promote(allocated_reason)
+        val ended = transient_scope_end()
+        assert_true(retained, "selected wrapper promotes newly allocated scalar text")
+        assert_true(ended, "retire original scalar-text scratch")
+        var after: [text] = []
+        var index = 0
+        while index < 512:
+            after.push("allocated-after-promotion-{index}-" + sha256_text(index.to_text()))
+            index = index + 1
+        assert_equal(after.len(), 512, "later allocations remain live")
+        assert_equal(allocated_reason.len(), "inventory-header-invalid".len(),
+            "promoted scalar text length survives")
+        assert_equal(sha256_text(allocated_reason), sha256_text("inventory-header-invalid"),
+            "promoted allocated text bytes survive later allocations")
+    )
+
+    it("leaves an active caller scope active", fn():
+        val (cache, pointer) = binding_fixture("active")
+        assert_true(transient_scope_begin(), "caller acquired scratch")
+        val reason = compiler_inventory_binding_reason_v1(cache, pointer, pointer, 7)
+        val state = transient_array_scope_state_v1()
+        val accepted = reason == ""
+        val ended = transient_scope_end()
+        assert_true(ended, "caller still owns retirement")
+        assert_equal(state, 1, "callee did not pause or retire caller")
+        assert_true(accepted, "borrowed scope read still authenticates")
+    )
+
+    it("leaves a paused caller scope paused", fn():
+        val (cache, pointer) = binding_fixture("paused")
+        assert_true(transient_scope_begin(), "caller acquired scratch")
+        assert_true(transient_scope_pause(), "caller paused scratch")
+        val reason = compiler_inventory_binding_reason_v1(cache, pointer, pointer, 7)
+        val state = transient_array_scope_state_v1()
+        val accepted = reason == ""
+        val ended = transient_scope_end()
+        assert_true(ended, "caller still owns retirement")
+        assert_equal(state, 2, "callee did not retire paused caller")
+        assert_true(accepted, "paused caller read still authenticates")
+    )
+)

@@ -1,0 +1,41 @@
+# Warm refresh authenticates a complete inventory but retains only a reason.
+# Reclaim decoded rows before Git/event work and the compiler child coexist.
+use std.scv.compile_source_inventory.{compile_source_inventory_read_at_pointer_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+
+fn compiler_inventory_binding_reason_unscoped_v1(cache_root: text,
+        pointer_content: text, expected_digest: text, expected_generation: i64) -> text:
+    val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    if not current.valid: return current.reason
+    if current.inventory == nil: return "inventory-absent"
+    if current.digest != expected_digest: return "digest"
+    if current.inventory!.generation != expected_generation: return "generation"
+    ""
+
+pub fn compiler_inventory_binding_reason_v1(cache_root: text,
+        pointer_content: text, expected_digest: text, expected_generation: i64) -> text:
+    # A caller-owned active/paused scope must never be paused or retired here.
+    if transient_array_scope_state_v1() != 0:
+        return compiler_inventory_binding_reason_unscoped_v1(
+            cache_root, pointer_content, expected_digest, expected_generation)
+    if not transient_scope_begin():
+        return compiler_inventory_binding_reason_unscoped_v1(
+            cache_root, pointer_content, expected_digest, expected_generation)
+    val reason = compiler_inventory_binding_reason_unscoped_v1(
+        cache_root, pointer_content, expected_digest, expected_generation)
+    val state = transient_array_scope_state_v1()
+    if state != 1:
+        if state == 2:
+            val ended = transient_scope_end()
+        return "inventory-binding-scratch-state-invalid"
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return "inventory-binding-scratch-pause-failed"
+    val retained = transient_promote(reason)
+    val ended = transient_scope_end()
+    # Failure strings are allocated after retirement; reason may be dangling.
+    if not retained: return "inventory-binding-scratch-promote-failed"
+    if not ended: return "inventory-binding-scratch-end-failed"
+    reason
