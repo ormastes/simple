@@ -14,6 +14,11 @@
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
 use compiler.hir.hir_types.{SymbolId, SymbolTable, HirType, hir_type_metadata_symbol_free}
+use compiler.mir.bootstrap_fn_registration_origin_v1.{BootstrapFnRegistrationOriginV1}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirFunctionDeclarationV1}
+use compiler.mir.hir_declaration_binding_contract_v1.{mir_hir_callable_record_binding_valid_v1}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.encoding.utf8.{text_byte_len}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_definitions.{HirParam, HirConst}
 use compiler.common.diagnostics.span.{Span}
@@ -2390,6 +2395,102 @@ var _bootstrap_fn_replaced_default_rows = false
 # handle) are covered; every later promotion is delta-only.
 var _bootstrap_fn_registries_adopted = false
 
+# Origins are a separate journaled owner. No ambient/current-origin setter
+# exists: a checked declaration reaches exactly one registration call.
+var _bootstrap_fn_registration_origins_v1: Dict<text, BootstrapFnRegistrationOriginV1> = {}
+var _bootstrap_fn_journal_registration_origins_v1: [BootstrapFnRegistrationOriginV1] = []
+var _bootstrap_fn_registration_event_v1: i64 = 0
+var _bootstrap_fn_registration_bytes_v1: i64 = 0
+var _bootstrap_fn_registration_available_v1: bool = true
+var _bootstrap_fn_registration_pending_v1: bool = false
+var _bootstrap_fn_registration_rows_v1: i64 = 0
+val BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
+val BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1: i64 = 1000000
+
+fn _bootstrap_fn_origin_key_v1(registry: text, name: text) -> text:
+    "{registry.len()}:{registry}{name.len()}:{name}"
+
+fn _bootstrap_fn_delta_registration_origin_v1(value: BootstrapFnRegistrationOriginV1):
+    if _bootstrap_fn_registration_available_v1 and _bootstrap_fn_delta_live():
+        _bootstrap_fn_registration_pending_v1 = true
+        _bootstrap_fn_journal_registration_origins_v1 = _bootstrap_fn_journal_registration_origins_v1.push(value)
+
+fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFnRegistrationOriginV1?):
+    if not _bootstrap_fn_registration_available_v1: return
+    # The ordinary unbound route pays no new metadata allocation while no
+    # checked declaration has supplied an origin to revoke.
+    if origin == nil and _bootstrap_fn_registration_rows_v1 == 0: return
+    val text_bytes = text_byte_len(registry) + text_byte_len(name)
+    # Prepay the key, record, dictionary growth and journal reference before
+    # allocation. This conservative lifetime ledger never silently resets;
+    # exhaustion revokes provenance availability, not ordinary row semantics.
+    if text_bytes > (BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - 1024) / 4 or
+            _bootstrap_fn_registration_event_v1 >= BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1:
+        _bootstrap_fn_registration_available_v1 = false
+        return
+    val charge = 1024 + text_bytes * 4
+    if _bootstrap_fn_registration_bytes_v1 > BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1 - charge:
+        _bootstrap_fn_registration_available_v1 = false
+        return
+    _bootstrap_fn_registration_bytes_v1 = _bootstrap_fn_registration_bytes_v1 + charge
+    val key = _bootstrap_fn_origin_key_v1(registry, name)
+    if origin == nil:
+        if not _bootstrap_fn_registration_origins_v1.has(key): return
+        if not _bootstrap_fn_registration_origins_v1[key].bound: return
+    _bootstrap_fn_registration_event_v1 = _bootstrap_fn_registration_event_v1 + 1
+    val record = if val source = origin:
+        BootstrapFnRegistrationOriginV1(bound: true, registry: registry, row_name: name,
+            repository_authority: source.repository_authority, module_key: source.module_key,
+            declaration_digest: source.declaration_digest, function_digest: source.function_digest,
+            function_symbol: source.function_symbol, selector: source.selector,
+            write_event: _bootstrap_fn_registration_event_v1)
+    else:
+        # A real legacy write revokes previous evidence instead of inheriting
+        # an unrelated declaration's origin. It remains an ordinary valid row.
+        BootstrapFnRegistrationOriginV1(bound: false, registry: registry, row_name: name,
+            repository_authority: "", module_key: "", declaration_digest: "",
+            function_digest: "", function_symbol: -1, selector: "",
+            write_event: _bootstrap_fn_registration_event_v1)
+    val first_insert = not _bootstrap_fn_registration_origins_v1.has(key)
+    _bootstrap_fn_registration_origins_v1[key] = record
+    _bootstrap_fn_delta_text(key)
+    _bootstrap_fn_delta_registration_origin_v1(record)
+    if first_insert:
+        _bootstrap_fn_registration_rows_v1 = _bootstrap_fn_registration_rows_v1 + 1
+
+fn _bootstrap_fn_declaration_origin_v1(module: MirHirModuleDeclarationsV1,
+        function: MirHirFunctionDeclarationV1, selector: text) -> BootstrapFnRegistrationOriginV1?:
+    if not _bootstrap_fn_registration_available_v1: return nil
+    if module.source_binding == nil or not sha256_lower_hex_valid(module.final_repository_authority) or
+            not sha256_lower_hex_valid(module.declaration_digest) or
+            not sha256_lower_hex_valid(function.complete_function_digest):
+        return nil
+    if not mir_hir_callable_record_binding_valid_v1(module, function): return nil
+    val source = module.source_binding.unwrap()
+    if source.logical_key == "" or source.physical_path != module.path: return nil
+    Some(BootstrapFnRegistrationOriginV1(bound: true, registry: "", row_name: "",
+        repository_authority: module.final_repository_authority, module_key: source.logical_key,
+        declaration_digest: module.declaration_digest, function_digest: function.complete_function_digest,
+        function_symbol: function.symbol.id, selector: selector, write_event: 0))
+
+fn bootstrap_fn_registry_origin_v1(registry: text, name: text) -> BootstrapFnRegistrationOriginV1?:
+    if not _bootstrap_fn_registration_available_v1: return nil
+    val present = match registry:
+        case "return_mir": _bootstrap_fn_ret_types.has(name)
+        case "return_hir": _bootstrap_fn_ret_hir_types.has(name) and not _bootstrap_fn_ret_hir_ambig.has(name)
+        case "parameter_hir": _bootstrap_fn_param_hir_types.has(name) and not _bootstrap_fn_param_hir_rejected.has(name) and not _bootstrap_fn_ret_hir_ambig.has(name)
+        case "parameter_defaults": _bootstrap_fn_param_defaults.has(name) and not _bootstrap_fn_param_defaults_ambig.has(name)
+        case "provider_symbols": _bootstrap_default_provider_symbols.has(name)
+        case "provider_globals": _bootstrap_default_provider_globals.has(name)
+        case _: false
+    if not present: return nil
+    val key = _bootstrap_fn_origin_key_v1(registry, name)
+    if not _bootstrap_fn_registration_origins_v1.has(key): return nil
+    val record = _bootstrap_fn_registration_origins_v1[key]
+    if not record.bound: return nil
+    Some(record)
+
+
 fn _bootstrap_fn_delta_live() -> bool:
     transient_array_scope_state_v1() != 0
 
@@ -2435,6 +2536,11 @@ fn bootstrap_fn_registries_discard_delta_v1():
     """Drop a journal left by a scope that ended without registry promotion
     (an aborted module). Call only right after a successful scope begin: no
     live scope can still own those rows then."""
+    # Called at every ordinary module begin, including after successful
+    # promotion. The persistent scalar alone identifies an abandoned delta;
+    # never inspect journal storage that the prior scope may have released.
+    if _bootstrap_fn_registration_pending_v1:
+        _bootstrap_fn_registration_available_v1 = false
     _bootstrap_fn_delta_reset()
 
 fn _bootstrap_fn_delta_reset():
@@ -2445,6 +2551,7 @@ fn _bootstrap_fn_delta_reset():
     _bootstrap_fn_journal_params = []
     _bootstrap_fn_journal_symbol_tables = []
     _bootstrap_fn_journal_consts = []
+    _bootstrap_fn_journal_registration_origins_v1 = []
     _bootstrap_fn_replaced_ret_hir_types = false
     _bootstrap_fn_replaced_ret_shapes = false
     _bootstrap_fn_replaced_ret_array_element_shapes = false
@@ -2459,6 +2566,7 @@ fn bootstrap_fn_ret_type_register(name: text, ty: MirType):
     if not _bootstrap_fn_ret_types.contains_key(name):
         _bootstrap_fn_delta_text(name)
     _bootstrap_fn_ret_types[name] = ty
+    _bootstrap_fn_origin_write_v1("return_mir", name, nil)
     _bootstrap_fn_delta_mir_type(ty)
 
 fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
@@ -2480,6 +2588,17 @@ var _bootstrap_fn_ret_hir_types: Dict<text, HirType> = {}
 var _bootstrap_fn_ret_hir_ambig: Dict<text, bool> = {}
 
 fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
+    _bootstrap_fn_ret_hir_type_register_origin_v1(name, ty, nil)
+
+fn bootstrap_fn_ret_hir_type_register_declaration_v1(name: text,
+        module: MirHirModuleDeclarationsV1, function_index: i64):
+    if function_index < 0 or function_index >= module.functions.len(): return
+    val function: MirHirFunctionDeclarationV1 = module.functions[function_index]
+    val origin = _bootstrap_fn_declaration_origin_v1(module, function, "return_type")
+    _bootstrap_fn_ret_hir_type_register_origin_v1(name, function.return_type, origin)
+
+fn _bootstrap_fn_ret_hir_type_register_origin_v1(name: text, ty: HirType,
+        origin: BootstrapFnRegistrationOriginV1?):
     if not hir_type_metadata_symbol_free(ty):
         _bootstrap_fn_ret_hir_ambig[name] = true
         _bootstrap_fn_delta_text(name)
@@ -2501,6 +2620,7 @@ fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
         _bootstrap_fn_replaced_ret_hir_types = _bootstrap_fn_replaced_ret_hir_types or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_ret_hir_types[name] = ty
+    _bootstrap_fn_origin_write_v1("return_hir", name, origin)
     _bootstrap_fn_delta_text(name)
     _bootstrap_fn_delta_hir_type(ty)
 
@@ -2700,6 +2820,20 @@ var _bootstrap_fn_param_hir_types: Dict<text, [HirType]> = {}
 var _bootstrap_fn_param_hir_rejected: Dict<text, bool> = {}
 
 fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
+    _bootstrap_fn_param_hir_types_register_origin_v1(name, tys, nil)
+
+fn bootstrap_fn_param_hir_types_register_declaration_v1(name: text,
+        module: MirHirModuleDeclarationsV1, function_index: i64):
+    if function_index < 0 or function_index >= module.functions.len(): return
+    val function: MirHirFunctionDeclarationV1 = module.functions[function_index]
+    var types: [HirType] = []
+    for parameter in function.params:
+        types.push(parameter.type_)
+    val origin = _bootstrap_fn_declaration_origin_v1(module, function, "parameter_types")
+    _bootstrap_fn_param_hir_types_register_origin_v1(name, types, origin)
+
+fn _bootstrap_fn_param_hir_types_register_origin_v1(name: text, tys: [HirType],
+        origin: BootstrapFnRegistrationOriginV1?):
     if _bootstrap_fn_param_hir_rejected.contains_key(name):
         return
     for ty in tys:
@@ -2729,6 +2863,7 @@ fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
     else:
         _bootstrap_fn_delta_text(name)
     _bootstrap_fn_param_hir_types[name] = tys
+    _bootstrap_fn_origin_write_v1("parameter_hir", name, origin)
     _bootstrap_fn_delta_hir_type_list(tys)
 
 fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
@@ -2785,10 +2920,13 @@ fn bootstrap_default_provider_register(owner: text, symbols: SymbolTable, global
             _bootstrap_default_provider_globals.contains_key(owner):
         return
     _bootstrap_default_provider_symbols[owner] = symbols
-    _bootstrap_default_provider_globals[owner] = globals
     _bootstrap_fn_delta_text(owner)
     _bootstrap_fn_delta_symbol_table(symbols)
+    _bootstrap_fn_origin_write_v1("provider_symbols", owner, nil)
+    _bootstrap_default_provider_globals[owner] = globals
+    _bootstrap_fn_delta_text(owner)
     _bootstrap_fn_delta_consts(globals)
+    _bootstrap_fn_origin_write_v1("provider_globals", owner, nil)
 
 fn bootstrap_default_provider_symbols(owner: text) -> SymbolTable?:
     _bootstrap_default_provider_symbols.get(owner)
@@ -2859,6 +2997,7 @@ fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: t
             _bootstrap_fn_replaced_param_defaults = _bootstrap_fn_replaced_param_defaults or _bootstrap_fn_delta_live()
         return
     _bootstrap_fn_param_defaults[name] = params
+    _bootstrap_fn_origin_write_v1("parameter_defaults", name, nil)
     _bootstrap_fn_delta_text(name)
     _bootstrap_fn_delta_params(params)
 
@@ -2901,6 +3040,11 @@ fn _bootstrap_fn_registries_promote_all() -> bool:
     walk visits every bucket's key+value pair (collections.rs
     `transient_heap_children`), so this costs the WHOLE accumulated registry.
     Used once per process (see `_bootstrap_fn_registries_adopted`)."""
+    # A prior abandoned first scope may have left released records in this
+    # unavailable map. Revocation guards promotion as well as public lookup.
+    val origins_ok = if _bootstrap_fn_registration_available_v1:
+        _promote_bootstrap_registry(_bootstrap_fn_registration_origins_v1)
+    else: true
     val ret_types_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_types)
     val ret_hir_types_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_types)
     val ret_hir_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_ambig)
@@ -2921,7 +3065,7 @@ fn _bootstrap_fn_registries_promote_all() -> bool:
     val default_owners_ok = _promote_bootstrap_registry(_bootstrap_fn_param_default_owners)
     val default_symbols_ok = _promote_bootstrap_registry(_bootstrap_default_provider_symbols)
     val default_globals_ok = _promote_bootstrap_registry(_bootstrap_default_provider_globals)
-    ret_types_ok and ret_hir_types_ok and ret_hir_ambig_ok and ret_shapes_ok and
+    origins_ok and ret_types_ok and ret_hir_types_ok and ret_hir_ambig_ok and ret_shapes_ok and
         ret_shape_ambig_ok and ret_err_shapes_ok and ret_ok_shapes_ok and ret_ok_shape_ambig_ok and
         ret_opt_shapes_ok and ret_opt_shape_ambig_ok and
         ret_array_element_shapes_ok and ret_array_element_shape_ambig_ok and ret_array_element_identities_ok and
@@ -2929,7 +3073,8 @@ fn _bootstrap_fn_registries_promote_all() -> bool:
         default_owners_ok and default_symbols_ok and default_globals_ok
 
 fn _bootstrap_fn_registry_rows() -> i64:
-    _bootstrap_fn_ret_types.len() + _bootstrap_fn_ret_hir_types.len() + _bootstrap_fn_ret_hir_ambig.len() +
+    val origin_rows = if _bootstrap_fn_registration_available_v1: _bootstrap_fn_registration_rows_v1 else: 0
+    origin_rows + _bootstrap_fn_ret_types.len() + _bootstrap_fn_ret_hir_types.len() + _bootstrap_fn_ret_hir_ambig.len() +
         _bootstrap_fn_ret_shapes.len() + _bootstrap_fn_ret_shape_ambig.len() +
         _bootstrap_fn_ret_array_element_identities.len() + _bootstrap_fn_ret_array_element_shapes.len() +
         _bootstrap_fn_ret_array_element_shape_ambig.len() + _bootstrap_fn_ret_err_shapes.len() +
@@ -2958,10 +3103,13 @@ fn bootstrap_fn_registries_promote() -> bool:
     because the bucket storage is not scope-allocated. The promoted-root count
     is published for the scaling spec
     (test/01_unit/compiler/mir/bootstrap_fn_registry_delta_promote_spec.spl)."""
+    val origin_roots = if _bootstrap_fn_registration_available_v1:
+        _bootstrap_fn_journal_registration_origins_v1.len()
+    else: 0
     var roots = _bootstrap_fn_journal_texts.len() + _bootstrap_fn_journal_mir_types.len() +
         _bootstrap_fn_journal_hir_types.len() + _bootstrap_fn_journal_hir_type_lists.len() +
         _bootstrap_fn_journal_params.len() + _bootstrap_fn_journal_symbol_tables.len() +
-        _bootstrap_fn_journal_consts.len()
+        _bootstrap_fn_journal_consts.len() + origin_roots
     var ok = true
     if not _bootstrap_fn_registries_adopted:
         roots = roots + _bootstrap_fn_registry_rows()
@@ -3005,6 +3153,12 @@ fn bootstrap_fn_registries_promote() -> bool:
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_params) and ok
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_symbol_tables) and ok
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_consts) and ok
+    if _bootstrap_fn_registration_available_v1:
+        ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_registration_origins_v1) and ok
+    if ok:
+        _bootstrap_fn_registration_pending_v1 = false
+    else:
+        _bootstrap_fn_registration_available_v1 = false
     _bootstrap_fn_delta_reset()
     _bootstrap_fn_promote_last_roots = roots
     ok
@@ -3026,3 +3180,6 @@ export bootstrap_fn_registries_discard_delta_v1
 export bootstrap_fn_ret_array_element_shape_register, bootstrap_fn_ret_array_element_shape_lookup
 
 export bootstrap_fn_ret_err_shape_register, bootstrap_fn_ret_err_shape_lookup
+
+export bootstrap_fn_registry_origin_v1
+export bootstrap_fn_ret_hir_type_register_declaration_v1, bootstrap_fn_param_hir_types_register_declaration_v1
