@@ -3,7 +3,8 @@
 # process boundary; a worker decodes its claimed body in its own scratch scope.
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode, hir_codec_header, hir_module_has_rt_hal}
-use compiler.hir.generated.hir_codec.{hc_dec_hir_module}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_module, hc_enc_hir_module}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape}
 use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1, MirHirDeclarationSourceV1}
 use compiler.mir.hir_declaration_summary_v1.{mir_hir_project_module_in_owned_scope_v1, mir_hir_declarations_same_physical_source_v1}
@@ -450,7 +451,14 @@ pub fn native_mir_selective_load_body_in_owned_scope_v1(dir: text,
     val module = hc_dec_hir_module(reader)
     if not reader.ok or reader.pos != reader.lines.len() - 1 or reader.lines[reader.pos] != "":
         return Err("selective MIR complete body bounded decode refused")
-    if hir_module_encode(module) != payload:
+    var writer = HirCodecWriter.create_canonical_bounded(NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1,
+        128 * 1024 * 1024, 1000000)
+    writer.canonical = false
+    hc_enc_hir_module(writer, module)
+    if not writer.ok:
+        return Err("selective MIR complete body re-encode bound refused")
+    val encoded = writer.finish_with_header(hir_codec_header())
+    if not writer.ok or encoded != payload:
         return Err("selective MIR complete body codec round-trip refused")
     if module.name != declaration.name or module.path != declaration.path or module.aop_advices.len() != 0:
         return Err("selective MIR complete body owner/post-MIR metadata refused")
