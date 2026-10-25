@@ -42,6 +42,7 @@ foundation: CowEnv dirty-tracking, byte-level heap counters — see
 | `src/app/mem/main.spl` | M8 `simple mem` CLI: `top --profile` (post-mortem file mode), `diff`, `help`, and `top --pid <P> [--path F] [--wait-ms N]` (live SIGUSR2 poll of a running process via `src/app/mem/live_poll.spl`, landed `0a4c3f64129` — that file was previously a real orphan, never called from `main.spl`) |
 | `src/app/memstat/main.spl` | L5 out-of-process RSS sampler feeding the stage-4 gate |
 | `scripts/check/check-stage4-memory-gate.shs` | CI RSS gate over `memstat` output; PASS/FAIL verdict line |
+| `src/runtime/runtime_native.c` (block after `rt_string_free`) + `src/compiler_rust/runtime/src/value/rc_graph.rs` | BSM P4 object-graph refcount twins: `rt_rc_share`/`rt_rc_retain`/`rt_rc_release`/`rt_rc_count`/`rt_heap_graph_bytes`. **Ownership rule:** an object is owned by exactly one of {transient scope, session, rc root, process (tag 0, rc 0)}; a sub-object shared by two rc roots must itself be an rc root retained by each parent. rc lives in a pointer-keyed side table (layouts frozen, I6); `SIMPLE_RC_CYCLE_CHECK=1` refuses cyclic graphs at share (I5). Tests: `src/runtime/test/rt_rc_selfcheck.c`, `value/rc_graph_tests.rs`. Design: `doc/05_design/compiler/memory/build_session_memory_model_v1.md` §4 |
 
 ## Env gates
 | Env | Layer | Default | Status |

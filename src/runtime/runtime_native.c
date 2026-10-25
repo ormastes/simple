@@ -8940,6 +8940,464 @@ int64_t rt_string_free(int64_t value) {
     return 1;
 }
 
+/* ============================================================================
+ * Object-graph refcount (Build Session Memory Model v1 section 2 "RC shared",
+ * section 3 I5/I6/I8, section 4 refcount surface; package P4). Rust twin:
+ * src/compiler_rust/runtime/src/value/rc_graph.rs.
+ *
+ * Ownership rule: every registered heap object is owned by exactly ONE of
+ *   {transient scope (tag = scope id), session, rc root, process (tag 0, rc 0)}.
+ * rt_rc_share(root) makes the root an rc root (rc = 1) and claims its OWNED
+ * graph: every node reachable from the root that is not itself an rc root, is
+ * not tagged with a scope other than the active one, and is not a
+ * RT_CORE_STRING_FLAG_SHARED cache string. Claimed nodes get tag 0 (strings
+ * lose RT_CORE_STRING_FLAG_TRANSIENT) so no scope end frees them.
+ * A sub-object shared between two rc roots MUST itself be an rc root retained
+ * by each parent; otherwise the first release frees it under the other.
+ * rt_rc_release reaching 0 frees the owned graph (tag 0, rc 0 nodes). An
+ * rc-root child is RELEASED once per distinct child (not freed); a child
+ * tagged with a live scope/session and a SHARED string are left alone.
+ * RC graphs are acyclic (I5): SIMPLE_RC_CYCLE_CHECK=1 makes share fail closed
+ * on a back-edge.
+ *
+ * The count lives in a pointer-keyed side table (I6: the frozen RtCore*
+ * layouts and the registry probe code are untouched); only rc roots have a
+ * row, so ordinary objects pay nothing. All rc state is guarded by
+ * rt_core_heap_lifecycle_lock, the lock scope-end reclaim holds, so share and
+ * release never interleave with a reclaim. Not covered in v1: untyped raw
+ * struct allocations (RT_CORE_TRANSIENT_RAW) are not graph nodes here.
+ * ========================================================================== */
+
+typedef struct RtCoreRcSet {
+    uintptr_t* keys; /* 0 = empty, RT_CORE_IMMORTAL_TOMBSTONE = erased */
+    uint32_t* vals;
+    size_t cap;
+    size_t len;
+    size_t tombs;
+} RtCoreRcSet;
+
+static RtCoreRcSet rt_core_rc_table = {0};
+
+static uint32_t* core_rc_set_find(RtCoreRcSet* set, uintptr_t p) {
+    if (set->cap == 0) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = set->keys[i];
+        if (e == 0) return NULL;
+        if (e == p) return &set->vals[i];
+        i = (i + 1) & mask;
+    }
+}
+
+static int core_rc_set_grow(RtCoreRcSet* set) {
+    size_t new_cap = set->cap == 0 ? 64 : set->cap * 2;
+    if (set->cap != 0 && set->tombs > set->len) new_cap = set->cap;
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+    uintptr_t* keys = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    uint32_t* vals = (uint32_t*)calloc(new_cap, sizeof(uint32_t));
+    if (!keys || !vals) {
+        free(keys);
+        free(vals);
+        return 0;
+    }
+    for (size_t k = 0; k < set->cap; k++) {
+        uintptr_t e = set->keys[k];
+        if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+        size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+        while (keys[j] != 0) j = (j + 1) & (new_cap - 1);
+        keys[j] = e;
+        vals[j] = set->vals[k];
+    }
+    free(set->keys);
+    free(set->vals);
+    set->keys = keys;
+    set->vals = vals;
+    set->cap = new_cap;
+    set->tombs = 0;
+    return 1;
+}
+
+/* p must not already be present. */
+static uint32_t* core_rc_set_insert(RtCoreRcSet* set, uintptr_t p, uint32_t v) {
+    if ((set->len + set->tombs + 1) * 10 >= set->cap * 7 && !core_rc_set_grow(set)) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (set->keys[i] != 0 && set->keys[i] != RT_CORE_IMMORTAL_TOMBSTONE) i = (i + 1) & mask;
+    if (set->keys[i] == RT_CORE_IMMORTAL_TOMBSTONE) set->tombs--;
+    set->keys[i] = p;
+    set->vals[i] = v;
+    set->len++;
+    return &set->vals[i];
+}
+
+static void core_rc_set_erase(RtCoreRcSet* set, uintptr_t p) {
+    uint32_t* slot = core_rc_set_find(set, p);
+    if (!slot) return;
+    set->keys[slot - set->vals] = RT_CORE_IMMORTAL_TOMBSTONE;
+    set->len--;
+    set->tombs++;
+}
+
+static void core_rc_set_free(RtCoreRcSet* set) {
+    free(set->keys);
+    free(set->vals);
+    *set = (RtCoreRcSet){0};
+}
+
+typedef struct RtCoreRcNode {
+    void* ptr;
+    uint32_t kind;
+} RtCoreRcNode;
+
+/* 1 = registered graph node; 0 = immediate, unregistered, or unknown kind.
+ * Membership is checked before any dereference. */
+static int core_rc_node(int64_t value, RtCoreRcNode* node) {
+    if (!rt_core_is_heap(value)) return 0;
+    void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!ptr || !rt_core_is_registered_immortal_ptr(ptr)) return 0;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING:
+        case RT_VALUE_HEAP_ARRAY:
+        case RT_VALUE_HEAP_DICT:
+        case RT_VALUE_HEAP_ENUM:
+        case RT_VALUE_HEAP_CLOSURE:
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:
+        case RT_VALUE_HEAP_UINT:
+            node->ptr = ptr;
+            node->kind = kind;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static uint32_t* core_rc_scope_slot(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: return &((RtCoreArray*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_DICT: return &((RtCoreDict*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_ENUM: return &((RtCoreEnum*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_CLOSURE: return &((RtCoreClosure*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:
+            return &((RtCoreFloat*)n->ptr)->transient_scope_id;
+        default:
+            return NULL;
+    }
+}
+
+/* Children visitor shared by share / release / graph_bytes / cycle check. */
+static int64_t core_rc_child_count(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) return 0;
+            return a->data ? a->len : 0;
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return d->entries ? d->cap * 2 : 0;
+        }
+        case RT_VALUE_HEAP_ENUM: return 1;
+        case RT_VALUE_HEAP_CLOSURE: return ((RtCoreClosure*)n->ptr)->capture_count;
+        default: return 0;
+    }
+}
+
+static int core_rc_child_at(const RtCoreRcNode* n, int64_t i, int64_t* out) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY:
+            *out = ((int64_t*)((RtCoreArray*)n->ptr)->data)[i];
+            return 1;
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDictEntry* e = &((RtCoreDict*)n->ptr)->entries[i / 2];
+            if (e->occupied != 1) return 0;
+            *out = (i & 1) ? e->value : e->key;
+            return 1;
+        }
+        case RT_VALUE_HEAP_ENUM:
+            *out = ((RtCoreEnum*)n->ptr)->payload;
+            return 1;
+        case RT_VALUE_HEAP_CLOSURE:
+            *out = ((RtCoreClosure*)n->ptr)->captures[i];
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int64_t core_rc_node_bytes(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_STRING:
+            return (int64_t)sizeof(RtCoreString) + (int64_t)((RtCoreString*)n->ptr)->len;
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            int64_t elem = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : (int64_t)sizeof(int64_t);
+            return (int64_t)sizeof(RtCoreArray) + (a->data ? a->cap * elem : 0);
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return (int64_t)sizeof(RtCoreDict) +
+                (d->entries ? d->cap * (int64_t)sizeof(RtCoreDictEntry) : 0);
+        }
+        case RT_VALUE_HEAP_ENUM: return (int64_t)sizeof(RtCoreEnum);
+        case RT_VALUE_HEAP_CLOSURE:
+            return (int64_t)sizeof(RtCoreClosure) +
+                ((RtCoreClosure*)n->ptr)->capture_count * (int64_t)sizeof(int64_t);
+        default: return (int64_t)sizeof(RtCoreFloat);
+    }
+}
+
+/* Claimable by an rc graph: not a SHARED cache string and not tagged with a
+ * scope other than `allowed_scope` (the active scope at share, 0 at release).
+ * A transient string carries no scope id; it is claimable only while a scope
+ * is active (it belongs to that scope). */
+static int core_rc_owned(const RtCoreRcNode* n, uint32_t allowed_scope) {
+    if (n->kind == RT_VALUE_HEAP_STRING) {
+        uint32_t flags = ((RtCoreString*)n->ptr)->reserved;
+        if (flags & RT_CORE_STRING_FLAG_SHARED) return 0;
+        if (flags & RT_CORE_STRING_FLAG_TRANSIENT) return allowed_scope != 0;
+        return 1;
+    }
+    uint32_t* tag = core_rc_scope_slot(n);
+    return !tag || *tag == 0 || *tag == allowed_scope;
+}
+
+typedef struct RtCoreRcWalk {
+    RtCoreRcNode* nodes;
+    size_t len;
+    size_t cap;
+    RtCoreRcSet seen;
+} RtCoreRcWalk;
+
+static int core_rc_walk_push(RtCoreRcWalk* w, RtCoreRcNode n) {
+    if (core_rc_set_find(&w->seen, (uintptr_t)n.ptr)) return 1;
+    if (!core_rc_set_insert(&w->seen, (uintptr_t)n.ptr, 1)) return 0;
+    if (w->len == w->cap) {
+        size_t next = w->cap == 0 ? 32 : w->cap * 2;
+        RtCoreRcNode* fresh = (RtCoreRcNode*)realloc(w->nodes, next * sizeof(RtCoreRcNode));
+        if (!fresh) return 0;
+        w->nodes = fresh;
+        w->cap = next;
+    }
+    w->nodes[w->len++] = n;
+    return 1;
+}
+
+static void core_rc_walk_free(RtCoreRcWalk* w) {
+    free(w->nodes);
+    core_rc_set_free(&w->seen);
+    *w = (RtCoreRcWalk){0};
+}
+
+/* Lifecycle lock held. Appends `root` and its owned non-rc descendants to
+ * `owned`; distinct rc-root children go to `rc_children` (not descended). */
+static int core_rc_collect(RtCoreRcNode root, uint32_t allowed_scope,
+        RtCoreRcWalk* owned, RtCoreRcWalk* rc_children) {
+    size_t start = owned->len;
+    if (core_rc_set_find(&owned->seen, (uintptr_t)root.ptr)) return 1;
+    if (!core_rc_walk_push(owned, root)) return 0;
+    for (size_t i = start; i < owned->len; i++) {
+        RtCoreRcNode n = owned->nodes[i];
+        int64_t count = core_rc_child_count(&n);
+        for (int64_t j = 0; j < count; j++) {
+            int64_t value;
+            RtCoreRcNode child;
+            if (!core_rc_child_at(&n, j, &value) || !core_rc_node(value, &child)) continue;
+            if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)child.ptr)) {
+                if (rc_children && !core_rc_walk_push(rc_children, child)) return 0;
+                continue;
+            }
+            if (!core_rc_owned(&child, allowed_scope)) continue;
+            if (!core_rc_walk_push(owned, child)) return 0;
+        }
+    }
+    return 1;
+}
+
+typedef struct RtCoreRcFrame {
+    RtCoreRcNode n;
+    int64_t next;
+    int64_t count;
+} RtCoreRcFrame;
+
+/* Lifecycle lock held. 1 = back-edge reachable from root, 0 = DAG, -1 = OOM. */
+static int core_rc_has_cycle(RtCoreRcNode root) {
+    RtCoreRcSet color = {0}; /* 1 = on the DFS stack, 2 = finished */
+    size_t len = 0, cap = 32;
+    int result = 0;
+    RtCoreRcFrame* frames = (RtCoreRcFrame*)malloc(cap * sizeof(RtCoreRcFrame));
+    if (!frames || !core_rc_set_insert(&color, (uintptr_t)root.ptr, 1)) {
+        free(frames);
+        core_rc_set_free(&color);
+        return -1;
+    }
+    frames[len++] = (RtCoreRcFrame){root, 0, core_rc_child_count(&root)};
+    while (len > 0) {
+        RtCoreRcFrame* f = &frames[len - 1];
+        if (f->next >= f->count) {
+            *core_rc_set_find(&color, (uintptr_t)f->n.ptr) = 2;
+            len--;
+            continue;
+        }
+        int64_t value;
+        RtCoreRcNode child;
+        int64_t j = f->next++;
+        if (!core_rc_child_at(&f->n, j, &value) || !core_rc_node(value, &child)) continue;
+        uint32_t* c = core_rc_set_find(&color, (uintptr_t)child.ptr);
+        if (c) {
+            if (*c == 1) { result = 1; break; }
+            continue;
+        }
+        if (!core_rc_set_insert(&color, (uintptr_t)child.ptr, 1)) { result = -1; break; }
+        if (len == cap) {
+            RtCoreRcFrame* fresh =
+                (RtCoreRcFrame*)realloc(frames, cap * 2 * sizeof(RtCoreRcFrame));
+            if (!fresh) { result = -1; break; }
+            frames = fresh;
+            cap *= 2;
+        }
+        frames[len++] = (RtCoreRcFrame){child, 0, core_rc_child_count(&child)};
+    }
+    free(frames);
+    core_rc_set_free(&color);
+    return result;
+}
+
+/* Lifecycle lock held. Frees one owned node exactly like scope-end reclaim. */
+static void core_rc_free_node(RtCoreRcNode n) {
+    if (n.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)n.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) return;
+    if (n.kind == RT_VALUE_HEAP_CLOSURE) {
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(n.ptr);
+        if (pin) { pin->orphaned = 1; return; } /* last rt_closure_release frees it */
+    }
+    rt_core_immortal_registry_acquire();
+    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)n.ptr);
+    rt_core_immortal_registry_release();
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    core_transient_share_forget((uintptr_t)n.ptr);
+    if (n.kind == RT_VALUE_HEAP_ARRAY) free(((RtCoreArray*)n.ptr)->data);
+    else if (n.kind == RT_VALUE_HEAP_DICT) free(((RtCoreDict*)n.ptr)->entries);
+    free(n.ptr);
+}
+
+static uint32_t core_rc_active_scope(void) {
+    return rt_core_transient_array_scope_active ? rt_core_transient_array_scope_id : 0;
+}
+
+int8_t rt_rc_share(int64_t value) {
+    RtCoreRcNode root;
+    RtCoreRcWalk owned = {0};
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (!core_rc_node(value, &root)) goto out;
+    if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr)) { ok = 1; goto out; }
+    if (root.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)root.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) goto out;
+    const char* check = getenv("SIMPLE_RC_CYCLE_CHECK");
+    if (check && check[0] == '1' && core_rc_has_cycle(root) != 0) goto out;
+    if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL) &&
+            core_rc_set_insert(&rt_core_rc_table, (uintptr_t)root.ptr, 1)) {
+        for (size_t i = 0; i < owned.len; i++) {
+            RtCoreRcNode n = owned.nodes[i];
+            if (n.kind == RT_VALUE_HEAP_STRING) {
+                ((RtCoreString*)n.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            } else {
+                uint32_t* tag = core_rc_scope_slot(&n);
+                if (tag) *tag = 0;
+            }
+        }
+        ok = 1;
+    }
+out:
+    core_rc_walk_free(&owned);
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_retain(int64_t value) {
+    RtCoreRcNode root;
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc && *rc < UINT32_MAX) { (*rc)++; ok = 1; }
+    }
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_release(int64_t value) {
+    RtCoreRcNode root;
+    rt_core_heap_lifecycle_acquire();
+    uint32_t* rc = core_rc_node(value, &root)
+        ? core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr) : NULL;
+    if (!rc) { rt_core_heap_lifecycle_release(); return 0; }
+    if (--(*rc) > 0) { rt_core_heap_lifecycle_release(); return 1; }
+    /* rc hit 0: free the owned graph and cascade into rc children that reach
+     * 0. Everything is collected first and freed after, so no node is read
+     * after it is freed. On OOM the uncollected remainder leaks (never freed
+     * while reachable). */
+    RtCoreRcWalk dead = {0};
+    RtCoreRcWalk zero_roots = {0};
+    core_rc_set_erase(&rt_core_rc_table, (uintptr_t)root.ptr);
+    int ok = core_rc_walk_push(&zero_roots, root);
+    for (size_t k = 0; ok && k < zero_roots.len; k++) {
+        RtCoreRcWalk kids = {0};
+        ok = core_rc_collect(zero_roots.nodes[k], 0, &dead, &kids);
+        for (size_t i = 0; ok && i < kids.len; i++) {
+            uintptr_t kid = (uintptr_t)kids.nodes[i].ptr;
+            uint32_t* krc = core_rc_set_find(&rt_core_rc_table, kid);
+            if (krc && --(*krc) == 0) {
+                core_rc_set_erase(&rt_core_rc_table, kid);
+                ok = core_rc_walk_push(&zero_roots, kids.nodes[i]);
+            }
+        }
+        core_rc_walk_free(&kids);
+    }
+    for (size_t i = 0; i < dead.len; i++) core_rc_free_node(dead.nodes[i]);
+    core_rc_walk_free(&dead);
+    core_rc_walk_free(&zero_roots);
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+int64_t rt_rc_count(int64_t value) {
+    RtCoreRcNode root;
+    int64_t count = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc) count = (int64_t)*rc;
+    }
+    rt_core_heap_lifecycle_release();
+    return count;
+}
+
+/* Bytes of the owned graph: struct headers + payload buffers (array data at
+ * cap * elem, dict entries at cap * sizeof(entry), string bytes). rc-root
+ * children contribute 0. -1 for an invalid root or OOM. */
+int64_t rt_heap_graph_bytes(int64_t value) {
+    RtCoreRcNode root;
+    int64_t total = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        RtCoreRcWalk owned = {0};
+        if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL)) {
+            total = 0;
+            for (size_t i = 0; i < owned.len; i++) total += core_rc_node_bytes(&owned.nodes[i]);
+        }
+        core_rc_walk_free(&owned);
+    }
+    rt_core_heap_lifecycle_release();
+    return total;
+}
+
 SplArray* rt_byte_array_new(uint64_t cap) {
     if (cap > (uint64_t)INT64_MAX) {
         return NULL;

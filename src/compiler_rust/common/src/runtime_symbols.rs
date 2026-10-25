@@ -411,6 +411,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_heap_promote_share_begin",
     "rt_transient_heap_promote_share_end",
     "rt_transient_array_scope_end",
+    "rt_rc_share",
+    "rt_rc_retain",
+    "rt_rc_release",
+    "rt_rc_count",
+    "rt_heap_graph_bytes",
     // Unconditionally defined in value/heap.rs and emitted by codegen; absent
     // from this list until 2026-08-01, so any module tagging heap ownership
     // silently fell back to the interpreter.

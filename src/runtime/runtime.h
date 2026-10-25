@@ -496,6 +496,19 @@ int8_t rt_transient_heap_promote(int64_t value);
  * whether a window was open. Promotion results are identical either way. */
 int8_t rt_transient_heap_promote_share_begin(void);
 int8_t rt_transient_heap_promote_share_end(void);
+/* Object-graph refcount (Build Session Memory Model v1 section 4, P4). An
+ * object is owned by exactly one of {transient scope, session, rc root,
+ * process (tag 0, rc 0)}; a sub-object shared by two rc roots must itself be an
+ * rc root retained by each parent. share: rc = 1 and the owned graph leaves
+ * scopes (idempotent; 0 for non-heap or, with SIMPLE_RC_CYCLE_CHECK=1, a
+ * cyclic graph). release at 0 frees the owned graph and releases rc-root
+ * children. count: -1 when not an rc root. graph_bytes: owned-graph bytes,
+ * rc-root children excluded; -1 on an invalid root. */
+int8_t rt_rc_share(int64_t value);
+int8_t rt_rc_retain(int64_t value);
+int8_t rt_rc_release(int64_t value);
+int64_t rt_rc_count(int64_t value);
+int64_t rt_heap_graph_bytes(int64_t value);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);

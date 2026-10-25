@@ -8887,3 +8887,39 @@ mod lazy_string_hash_tests {
         assert_eq!(FNV1A_HASH_CALLS.load(Ordering::Relaxed) - before, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Object-graph refcount hooks (BSM P4, see rc_graph.rs). New entry points
+// over the private transient-scope machinery above; they change none of it.
+// ---------------------------------------------------------------------------
+
+/// Children of one heap node, exactly as transient promotion walks them.
+pub(crate) fn rc_graph_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
+    transient_heap_children(value)
+}
+
+/// Free one heap node through the same per-kind path as scope end.
+pub(crate) fn rc_graph_free(value: RuntimeValue) {
+    free_transient_heap(value)
+}
+
+/// True when this thread's live transient scope still owns `value`.
+pub(crate) fn rc_graph_scope_owns(value: RuntimeValue) -> bool {
+    if !value.is_heap() {
+        return false;
+    }
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        slot.try_borrow_mut()
+            .ok()
+            .is_some_and(|mut slot| slot.as_mut().is_some_and(|scope| scope.owns_heap_ptr(value.as_heap_ptr())))
+    })
+}
+
+/// Move `reachable` out of this thread's transient scope (no-op without one).
+pub(crate) fn rc_graph_scope_release(reachable: &super::heap::HeapPtrSet<u64>) {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.release_reachable(reachable);
+        }
+    });
+}

@@ -58,6 +58,8 @@ pub mod monoio_future;
 pub mod net;
 mod numeric_kernels;
 mod objects;
+mod rc_graph;
+pub use rc_graph::{rt_heap_graph_bytes, rt_rc_count, rt_rc_release, rt_rc_retain, rt_rc_share};
 mod ownership;
 pub mod pbkdf2_native;
 mod process;
