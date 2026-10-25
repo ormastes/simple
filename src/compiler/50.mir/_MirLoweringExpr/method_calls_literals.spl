@@ -848,6 +848,53 @@ impl MirLowering:
         self.builder = b
         result ?? value_local
 
+    me option_record_receiver_payload_v1(receiver: HirExpr, local: LocalId) -> LocalId:
+        """Field-read receiver of type `T?` where T is a struct or class:
+        return a local holding the record itself.
+
+        MIR has no flow typing. After `if v == nil: return` the local still
+        has type `Optional(T)`, and its value may be the canonical Option
+        box (enum id 1) that a `-> T?` producer returned. A field read on the
+        box reads its HEADER word as the field
+        (doc/08_tracking/bug/nil_narrowed_option_field_read_skips_unwrap_2026-10-25.md).
+        rt_unwrap_or_self is the unwrap `if val` and `??` use: Some(x) -> x,
+        any other word (a raw record pointer, nil) -> itself. So this is sound
+        on both lanes. It accepts no new programs: a nil receiver stays nil
+        and still faults on the read, as before. The payload local gets the
+        record's HIR type and layout provenance, so field indexes resolve as
+        for a plain record local. Any other receiver is returned unchanged.
+        """
+        if self.local_is_runtime_array(local):
+            return local
+        val optional_inner = self.option_inner_hir_type_for_local(receiver, local)
+        if val inner = optional_inner:
+            var layout_key = ""
+            match inner.kind:
+                case HirTypeKind.Named(record_symbol, _):
+                    # A bitfield value is a packed word with its own
+                    # get/set lowering; leave it to that path.
+                    if self.bitfield_map.has(record_symbol.id):
+                        return local
+                    if val record_owner = self.symbols.get_symbol_raw(record_symbol.id):
+                        if record_owner.kind == SymbolKind.Struct or record_owner.kind == SymbolKind.Class:
+                            val owner_key = self.declared_struct_layout_key(self.composite_layout_key(record_owner))
+                            if self.struct_field_order.has(owner_key):
+                                layout_key = owner_key
+                case _: ()
+            if layout_key == "":
+                return local
+            val payload = self.option_payload_or_self(local)
+            if payload.id == local.id:
+                return local
+            self.remember_local_hir_type(payload.id, inner, 0, 0)
+            # contains + index, not Dict.get: get is unreliable on the Stage 2 lane.
+            if self.struct_value_syms.contains(local.id):
+                self.struct_value_syms[payload.id] = self.struct_value_syms[local.id]
+            else:
+                self.struct_value_syms[payload.id] = layout_key
+            return payload
+        local
+
     me option_bool_value(value_local: LocalId) -> LocalId:
         """Decode an `Option<bool>` receiver back to a genuine i1.
 
@@ -4045,7 +4092,8 @@ impl MirLowering:
                             self.builder = wb_b
                         wb_kind = 1
                 case Field(base, field_name, resolved):
-                    wb_base = self.lower_expr(base)
+                    # A `T?` record base reads the record, not its Option box.
+                    wb_base = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
                     wb_field_idx = self.resolve_field_index(base, wb_base, field_name, resolved)
                     var wb_b = self.builder
                     wb_receiver = wb_b.emit_get_field(mir_operand_copy(wb_base), wb_field_idx, receiver_type)
