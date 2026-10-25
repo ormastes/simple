@@ -71,11 +71,51 @@ exclude the sources.
 
 ### Toolchain policy
 
-Simple is clang-only (2026-09-24). On Windows the C compiler is `clang-cl`.
-Do not use `cl`, `gcc`, or `g++`. The linker is `lld-link`, because mold has no
-PE/COFF backend. There is one exception: `link.exe` is still the sanctioned
-linker for Rust's MSVC target, which the seed build uses. See
+Simple is clang-only (2026-09-24). **The default Windows build is MinGW UCRT
+with clang** (updated 2026-10-25): the repo-managed
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw) toolchain supplies `clang`,
+`ld.lld`, `llvm-ar`, compiler-rt and libunwind, and Rust builds as
+`x86_64-pc-windows-gnullvm`. Do not use `cl`, `gcc`, or `g++`, and never put a
+GCC distribution (for example scoop `mingw-winlibs`) on `PATH`. MSVC
+(`clang-cl` + `lld-link`, with `link.exe` only as Rust's MSVC-target linker) is
+the **opt-in** `--msvc` lane, described after the default lane below. See
 `.claude/rules/code-style.md` § Toolchain policy.
+
+### Default lane: MinGW clang (llvm-mingw)
+
+One-time host setup, in Git Bash:
+
+```sh
+sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw   # pinned + SHA-256 verified
+rustup set default-host x86_64-pc-windows-gnullvm
+(cd src/compiler_rust && rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)")
+```
+
+`rustup set default-host` matters because the bootstrap runs Cargo under
+`env -i` and resolves the pinned channel through rustup's
+`default_host_tuple`; `RUSTUP_TOOLCHAIN` does not survive. With the old
+`x86_64-pc-windows-gnu` host, Cargo build scripts link with explicit `-lgcc`
+and `-lgcc_eh`, which llvm-mingw does not ship (`lld: unable to find library
+-lgcc_eh`). A gnullvm host links them against compiler-rt and libunwind
+instead, with no GCC. llvm-mingw is installed under
+`$SIMPLE_TOOLCHAINS_ROOT` (default `~/.simple/toolchains`). Without it, the
+Stage 2 link fails with `lld: unable to find library -lunwind`.
+
+Entry command:
+
+```sh
+bash scripts/bootstrap/bootstrap-windows.sh --full-bootstrap --stop-after-stage2 --backend=cranelift
+```
+
+`--backend=cranelift` is required unless an LLVM 23 prefix with a MinGW
+`lib/libLLVM-23.dll.a` import library is present (for example MSYS2
+`CLANG64`). A static-only LLVM build such as `C:\llvm\install` is a valid
+MinGW clang for C code but cannot satisfy the seed's shared-LLVM backend
+lane. On a host whose C: drive is nearly full, also export
+`SIMPLE_USER_STORAGE_ROOT`, `SIMPLE_TOOLCHAINS_ROOT`, `TMPDIR`, `TMP` and `TEMP`
+on another drive, or the disk preflight measures the full drive and refuses.
+
+### Opt-in lane: MSVC (`--msvc`)
 
 ### Checkout
 
@@ -87,7 +127,7 @@ linker for Rust's MSVC target, which the seed build uses. See
 
 ### Environment
 
-Source the MSVC lane environment in the same shell (Git Bash / MSYS2) that runs
+For the opt-in MSVC lane only: source the MSVC lane environment in the same shell (Git Bash / MSYS2) that runs
 the bootstrap:
 
 ```sh
@@ -361,4 +401,4 @@ filter is attached (section 0).
 
 ## Toolchain rule (Windows)
 
-Never use GCC. Toolchain is clang + lld (mold where the target format supports it: ELF on Linux/FreeBSD/SimpleOS hosts; lld for Windows PE/COFF, since mold has no COFF/PE support; Mach-O uses ld64.lld/system ld). Windows default = GitHub llvm-mingw UCRT (mstorsjo/llvm-mingw, installed under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 by `scripts/setup/bootstrap-prereqs.shs install`); MSVC (clang-cl) is the optional `--msvc` lane. If Rust windows-gnu wants -lgcc/-lgcc_eh, serve them from compiler-rt/libunwind (shim dir, or x86_64-pc-windows-gnullvm) -- never install GCC.
+Never use GCC. Toolchain is clang + lld (mold where the target format supports it: ELF on Linux/FreeBSD/SimpleOS hosts; lld for Windows PE/COFF, since mold has no COFF/PE support; Mach-O uses ld64.lld/system ld). Windows default = GitHub llvm-mingw UCRT (mstorsjo/llvm-mingw, installed under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 by `scripts/setup/bootstrap-prereqs.shs install`); MSVC (clang-cl) is the optional `--msvc` lane. Rust must use the x86_64-pc-windows-gnullvm host (`rustup set default-host x86_64-pc-windows-gnullvm`) so -lgcc/-lgcc_eh are never requested; compiler-rt and libunwind come from llvm-mingw -- never install GCC.
