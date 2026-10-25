@@ -1,4 +1,4 @@
-# Phase 3 tooling matrix continuation — 2026-10-25
+﻿# Phase 3 tooling matrix continuation — 2026-10-25
 
 This adds independent findings to the existing Markdown repair report; it does
 not reset its exhausted six-attempt budget. Same isolated worktree and producer
@@ -168,3 +168,92 @@ executable specs. Generic tool-parameter key scoping remains a separate concern.
 STATUS: FAIL for landing admission. Focused MCP wire checks PASS; mandatory
 compiler, suite, and full-tool functionality gates have not passed. Do not merge
 over these missing gates or describe authored SSpec examples as executed.
+
+## Remaining envelope checks and concrete JSONL defect
+
+Continuation of candidate-six verification (no rebuild): eight additional wire
+cases passed: duplicate escaped ID, duplicate method, fractional/boolean/object
+IDs, trailing JSON token, scalar params, and a quoted/backslash string ID.
+Evidence: `build/tooling-check/mcp-envelope-extra-results.sdn` and associated
+captures. These are direct native checks, not executed SSpec examples.
+
+One additional case FAILED: JSONL `[]` followed by EOF returns exit 0 with no
+reply instead of Invalid Request. `_mcp_read_message` at main.spl's JSONL branch
+recognizes only lines starting with an opening brace; it consumes other JSON
+values as if they were headers. The same `[]` sent with Content-Length framing
+returns -32600 correctly, isolating the defect before envelope parsing.
+Removal criterion: real native JSONL invalid-root array/scalar inputs receive
+the appropriate error and a subsequent valid request still dispatches; framed
+traffic remains intact. The exhausted six-cycle MCP budget prohibits another
+repair/build retry without the requested explicit extension. Keep the PR draft.
+
+The integration SSpec now records that removal criterion with actual stdin:
+each non-object JSONL root (array, null, bool, number, string) precedes a ping;
+the expected output is exactly one Invalid Request reply followed by that ping's
+correlated reply. It contains real assertions and no placeholder pass. This
+new regression is authored/UNRUN, and the existing array wire evidence predicts
+failure against the retained candidate. No new MCP build or repair cycle ran.
+
+The startup integration framing gate also now walks exact byte-length frame
+boundaries and requires the expected two replies, replacing header-substring
+counting. Its parser rejects signed-integer overflow before multiplication.
+Negative controls cover short, negative, oversized and overflowing lengths plus
+trailing stdout. This is authored SSpec coverage, not an execution PASS.
+
+## Independent T32/CMM object collection
+
+While compiler cycle five remained live, two bounded native object diagnostics
+used separate source-owned caches and enforced 2097152 KiB caps, LLVM and the
+pinned local stage-three producer. CMM lexer compilation succeeded: exit 0,
+peak 259812 KiB, `build/tooling-check/cmm_lexer.o` 54025 bytes, with real code
+symbols. Its two-source closure completed; this is not a linked CMM server or
+executed lexer/SSpec regression. Evidence: `cmm-lexer-object/`.
+
+T32 MCP `json_helpers.spl` object compilation failed before object emission:
+exit 1, peak 355516 KiB, 54 HIR sources, one poisoned module. Root diagnostic:
+unresolved `rt_process_run` at line 328 in `t32_shell_cmd`. That helper also
+hardcodes `/bin/sh`, shell `export`, and `/dev/null`, so adding an import alone
+would not prove Windows execution. Repair must use the platform process owner
+and preserve stdout/exit/error semantics; verify a real bounded command on
+Windows and POSIX, then the actual T32 MCP handler. Evidence: `t32-json-object/`.
+No diagnostic policy or environment/process guard was disabled.
+
+Conservative T32 campaign accounting is six diagnostic rows: CLI, actual MCP,
+CMM server, current-resolver probe, CMM lexer object and T32 helper object.
+No further repair/compile retry in this lane without an explicit budget
+extension. These results do not narrow the still-incomplete full phase matrix.
+
+## Compiler cycle-five terminal and final cycle
+
+Cycle five completed its 1515-entry HIR work but terminated before object/link
+completion at the enforced 20971520 KiB cap: exit 88, peak20976348 KiB. Receipt
+reports quiescent=1; the previously live parent/worker processes were confirmed
+absent before continuation. No usable compiler candidate or Hello result exists.
+Evidence: producer worktree `build/tooling-producer/compile4/`.
+
+Cycle six, the final allowed compiler repair cycle, uses the exact supported
+`--low-memory` option with the same enforced 20 GiB cap, preserved compatible
+caches and unchanged source c0bbd9e91e7500848081e57b8e3befa70f300d51. Release fetch
+confirmed base3fafd89481d remained current. No guard is disabled. New evidence:
+`build/tooling-producer/compile5-low-memory/`, exec session16908; planned output
+`simple_resolver_fix_low_memory.exe`. Source remains frozen while live. This is
+RUNNING, not PASS. If it fails, stop the compiler repair lane at six cycles;
+continuation requires the explicit budget extension. A successful link still
+requires real Hello compile and output execution before dependent producer use.
+
+## Final compiler-cycle terminal evidence (2026-10-26)
+
+The low-memory sixth cycle is FAILED, exit88, enforced RSS cap20971520 KiB,
+observed peak20978344 KiB. Its receipt reports quiescent=1, and the recorded
+parent/child process tree is absent. All1515 HIR entries completed (1289 lowered,
+226 cached), followed by HIR-complete; object compilation/link completion is
+unproven. The planned compiler executable does not exist. Evidence remains in
+the producer worktree's `build/tooling-producer/compile5-low-memory/`, including
+the retained temporary compiler log and terminal RSS receipt.
+
+The supported low-memory option did not keep this full build within20 GiB;
+do not infer success or manufacture a post-HIR checkpoint. Compiler repair has
+now exhausted six accounted cycles. Together with exhausted tooling lanes,
+this blocks the full requested verification and PR landing. A bounded extension
+of up to three cycles per exhausted lane has been requested explicitly. No
+additional repair/build cycle starts merely because that question is pending.
