@@ -1,0 +1,160 @@
+# NOT_RUN. Configured nogc-sync-mut must select this generic public import.
+# Representation/clock arithmetic and early-rejection controls; no provider pass.
+use std.spec.{describe, it, expect, step}
+use std.sosix.mux.{MuxSosixConfigV1, SosixMuxClientV1, mux_sosix_client_v1, mux_sosix_validate_config_v1}
+use std.sosix.mux.config_v1.{mux_sosix_lease_deadline_v1, mux_sosix_reply_limit_v1}
+use std.sosix.mux.admission_v1.{mux_sosix_connect_disposition_v1}
+use std.common.debug.capability.{CapLevel}
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_envelope_v1.{mux_wire_encode_request_v1}
+use std.sosix.mux.transport_v1.{mux_transport_remaining_v1}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+
+fn client_test_config() -> MuxSosixConfigV1:
+    MuxSosixConfigV1(host: "127.0.0.1", port: 23456,
+        auth_token: "0123456789abcdef0123456789abcdef", max_frame_bytes: 4194304)
+
+fn client_test_connect(backend: MuxBackendV1, policy: MuxEndpointPolicyV1) -> MuxConnectV1:
+    MuxConnectV1(backend: backend, namespace: "contract_values", endpoint_policy: policy,
+        client_identity: "client", limits: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536))
+
+fn client_test_connection() -> MuxConnectionV1:
+    val limits = MuxCoreLimitsV1(discovery: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536),
+        max_windows: 8, max_panes: 16, max_clients: 4, max_input_bytes: 4096,
+        max_capture_bytes: 8192, max_events: 32, max_request_timeout_ms: 1000)
+    var capabilities: [MuxOperationCapabilityV1] = []
+    for operation in mux_mandatory_operations_v1():
+        capabilities.push(MuxOperationCapabilityV1(operation: operation, level: CapLevel.Native,
+            backend: MuxBackendV1.Smux, backend_version: "untrusted-unit-values",
+            owner_id: "owner-a", owner_generation: 7, limits: limits, constraints: [], evidence: MuxEvidenceV1.NotRun))
+    MuxConnectionV1(snapshot: MuxSnapshotV1(backend: MuxBackendV1.Smux, namespace: "contract_values",
+        handle: MuxHandleV1(owner_id: "owner-a", owner_generation: 7, lease_id: "issued-value-for-unit-only"), revision: 0,
+        sessions: [], windows: [], panes: [], clients: [], limits: limits, capabilities: capabilities),
+        lease_terms: MuxLeaseTermsV1(lifetime_ms: 30000, renew_after_ms: 10000,
+            retained_receipt_ms: 60000, max_retained_receipts: 64))
+
+describe "Sosix CoreMux client boundary controls":
+    it "requires explicit literal loopback and bounded configuration":
+        step("Refuse discovery remote hosts wildcard and malformed auth")
+        val config = client_test_config()
+        expect(mux_sosix_validate_config_v1(config).unwrap()).to_equal(config)
+        for host in ["", "localhost", "0.0.0.0", "127.0.0.1:1", "192.0.2.1"]:
+            var invalid = config
+            invalid.host = host
+            expect(mux_sosix_client_v1(invalid).is_err()).to_equal(true)
+        for port in [0, -1, 65536]:
+            var invalid = config
+            invalid.port = port
+            expect(mux_sosix_client_v1(invalid).is_err()).to_equal(true)
+        var short = config
+        short.auth_token = "short"
+        val failure = mux_sosix_client_v1(short).unwrap_err()
+        expect(failure.kind).to_equal(MuxErrorKindV1.InvalidRequest)
+        expect(failure.detail.contains(short.auth_token)).to_equal(false)
+        expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+
+    it "does not create resources or claim a lease at construction":
+        step("Construct only explicit transport configuration")
+        val client = mux_sosix_client_v1(client_test_config()).unwrap()
+        expect(client.backend()).to_equal(MuxBackendV1.Smux)
+        expect(client.recovery_handle()).to_be_nil()
+
+    it "refuses CreateOwned and other backends before network I O":
+        step("Reject unsupported admission without a fallback")
+        var client = mux_sosix_client_v1(client_test_config()).unwrap()
+        for options in [client_test_connect(MuxBackendV1.Smux, MuxEndpointPolicyV1.CreateOwned),
+            client_test_connect(MuxBackendV1.Tmux, MuxEndpointPolicyV1.ExistingOnly)]:
+            val failure = client.connect(options, MuxDeadlineV1(timeout_ms: 1000)).unwrap_err()
+            expect(failure.kind).to_equal(MuxErrorKindV1.Unsupported)
+            expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+            expect(failure.cleanup_pending).to_equal(false)
+            expect(client.recovery_handle()).to_be_nil()
+
+    it "never manufactures an idle heartbeat without an issued lease":
+        step("Require the owner issued lease before maintenance")
+        var client = mux_sosix_client_v1(client_test_config()).unwrap()
+        val failure = client.maintain_lease().unwrap_err()
+        expect(failure.kind).to_equal(MuxErrorKindV1.PermissionDenied)
+        expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(client.recovery_handle()).to_be_nil()
+
+    it "uses a single elapsed budget and rejects backwards or expired clocks":
+        step("Bound deadline arithmetic across fragmented I O")
+        expect(mux_transport_remaining_v1(1000, 100, 1000).unwrap()).to_equal(100)
+        expect(mux_transport_remaining_v1(1000, 100, 1075).unwrap()).to_equal(25)
+        expect(mux_transport_remaining_v1(1000, 100, 1099).unwrap()).to_equal(1)
+        for now in [999, 1100, 2000]:
+            expect(mux_transport_remaining_v1(1000, 100, now).is_err()).to_equal(true)
+        expect(mux_transport_remaining_v1(1000, 0, 1000).is_err()).to_equal(true)
+
+    it "bases lease intervals on request start without overflow":
+        step("Check conservative lease and recovery interval bounds")
+        expect(mux_sosix_lease_deadline_v1(1000, 30000).unwrap()).to_equal(31000)
+        expect(mux_sosix_lease_deadline_v1(31000, 60000).unwrap()).to_equal(91000)
+        expect(mux_sosix_lease_deadline_v1(9223372036854775807, 1).is_err()).to_equal(true)
+        expect(mux_sosix_lease_deadline_v1(-1, 30000).is_err()).to_equal(true)
+        expect(mux_sosix_lease_deadline_v1(1000, 0).is_err()).to_equal(true)
+
+
+    it "retains bounded cleanup disposition for late and over-request issued connections":
+        step("Separate correlated cleanup retention from full admission")
+        val options = client_test_connect(MuxBackendV1.Smux, MuxEndpointPolicyV1.ExistingOnly)
+        val connection = client_test_connection()
+        val deadline = MuxDeadlineV1(timeout_ms: 1000)
+        val admitted = mux_sosix_connect_disposition_v1(options, deadline, connection, 4194304, 1000, 1050).unwrap()
+        expect(admitted.normal_admitted).to_equal(true)
+        val late = mux_sosix_connect_disposition_v1(options, deadline, connection, 4194304, 1000, 2000).unwrap()
+        expect(late.normal_admitted).to_equal(false)
+        expect(late.connection.snapshot.handle).to_equal(connection.snapshot.handle)
+        expect(late.rejection.unwrap().commit_state).to_equal(MuxCommitStateV1.Unknown)
+        expect(late.lease_expires_ms).to_equal(31000)
+        expect(late.recovery_expires_ms).to_equal(91000)
+        var excessive = connection
+        excessive.snapshot.limits.discovery.max_reply_bytes = 131072
+        val retained = mux_sosix_connect_disposition_v1(options, deadline, excessive, 4194304, 1000, 1050).unwrap()
+        expect(retained.normal_admitted).to_equal(false)
+        expect(retained.recovery_reply_limit).to_equal(65536)
+        expect(retained.rejection.unwrap().commit_state).to_equal(MuxCommitStateV1.Unknown)
+        var client = SosixMuxClientV1(config: client_test_config(), connection: Some(retained.connection),
+            lease_active: false, cleanup_only: true, lease_started_ms: 1000,
+            lease_expires_ms: retained.lease_expires_ms, recovery_expires_ms: retained.recovery_expires_ms,
+            recovery_reply_limit: retained.recovery_reply_limit)
+        expect(client.recovery_handle()).to_equal(Some(connection.snapshot.handle))
+        val refused = client.connect(options, deadline).unwrap_err()
+        expect(refused.kind).to_equal(MuxErrorKindV1.Busy)
+
+    it "keeps recovery transport usable when rejected peer limits are below minimum":
+        step("Select safe request budget for cleanup instead of rejected negotiation")
+        val options = client_test_connect(MuxBackendV1.Smux, MuxEndpointPolicyV1.ExistingOnly)
+        var connection = client_test_connection()
+        connection.snapshot.limits.discovery.max_reply_bytes = 2048
+        val retained = mux_sosix_connect_disposition_v1(options, MuxDeadlineV1(timeout_ms: 1000), connection, 4194304, 1000, 1050).unwrap()
+        expect(retained.normal_admitted).to_equal(false)
+        expect(retained.recovery_reply_limit).to_equal(65536)
+        val handle = retained.connection.snapshot.handle
+        val disconnect = MuxWireCallV1.Disconnect(MuxDisconnectRequestV1(handle: handle, request_id: 21, deadline: MuxDeadlineV1(timeout_ms: 1000)))
+        val limit = mux_sosix_reply_limit_v1(disconnect, 4194304, Some(2048), retained.recovery_reply_limit).unwrap()
+        expect(limit).to_equal(65536)
+        expect(mux_wire_encode_request_v1(MuxWireRequestV1(correlation: 1,
+            auth_token: client_test_config().auth_token, call: disconnect), limit).is_ok()).to_equal(true)
+        val status = MuxWireCallV1.Query(handle, MuxQueryV1.RequestStatus(21), MuxDeadlineV1(timeout_ms: 1000))
+        expect(mux_sosix_reply_limit_v1(status, 4194304, Some(2048), retained.recovery_reply_limit).unwrap()).to_equal(65536)
+        val normal = MuxWireCallV1.Query(handle, MuxQueryV1.Capabilities, MuxDeadlineV1(timeout_ms: 1000))
+        expect(mux_sosix_reply_limit_v1(normal, 4194304, Some(2048), retained.recovery_reply_limit).is_err()).to_equal(true)
+
+    it "does not retain foreign or malformed connection identities for cleanup":
+        step("Require the original namespace backend and valid owner incarnation")
+        val options = client_test_connect(MuxBackendV1.Smux, MuxEndpointPolicyV1.ExistingOnly)
+        val deadline = MuxDeadlineV1(timeout_ms: 1000)
+        var foreign_namespace = client_test_connection()
+        foreign_namespace.snapshot.namespace = "other_namespace"
+        var foreign_backend = client_test_connection()
+        foreign_backend.snapshot.backend = MuxBackendV1.Tmux
+        var malformed = client_test_connection()
+        malformed.snapshot.handle.owner_generation = 0
+        for connection in [foreign_namespace, foreign_backend, malformed]:
+            val failure = mux_sosix_connect_disposition_v1(options, deadline, connection, 4194304, 1000, 1050).unwrap_err()
+            expect(failure.commit_state).to_equal(MuxCommitStateV1.Unknown)
+            expect(failure.cleanup_pending).to_equal(true)
