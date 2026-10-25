@@ -74,7 +74,11 @@ every small dictionary.
 ## Native owner association and lifetime
 
 `RtCoreDict` stays 64 bytes, entries stay 32 bytes, and existing immortal registry
-entries stay one pointer. SOURCE-only flag bit0x80 identifies a backing allocation
+entries stay one pointer. Only SOURCE entries encode an aligned 16-byte owner
+record with alignment tag2; that record authenticates the actual dictionary and
+its current live backing before any prefix dereference. Ordinary entries remain
+raw pointers. All membership/hash/erase/rehash/scope-reader consumers decode the
+actual pointer canonically. SOURCE-only flag bit0x80 identifies a backing allocation
 with an aligned SOURCE-only prefix holding control, generation, descriptor,
 actual dictionary identity and ABI version. `entries` still points to actual
 slots; only SOURCE allocation/free/rehash subtract the prefix. Ordinary memory
@@ -84,7 +88,10 @@ Prefix+`32*capacity` arithmetic is checked and prepaid. Rehash builds a complete
 fresh backing with the same owner identity, copies only actual occupied slots
 under prepaid probes, and publishes the new backing after successful preparation.
 It never reinserts through generic mutation hooks or advances epoch per copied
-row. Destruction frees the actual prefix and decrements region membership once
+row. Publication also updates the existing-entry owner record before the old
+backing is freed. A copied header has no SOURCE owner record: typed operations
+reject it before reading entries/prefix, and native retirement frees only its
+independently registered header without touching a borrowed/dangling backing. Destruction frees the actual prefix and decrements region membership once
 through the existing native owner lifetime. Initial birth requires an actual
 active, unpaused native transient scope; other lifetime routes remain Incomplete.
 
@@ -146,3 +153,20 @@ New dictionary attempt accounting: baseline RED1 is retained in
 /tmp/c4-dictionary-attempt2.log. Later source boundedness hardening is awaiting
 review; the old six-attempt primitive and one-attempt cleanup runners were not
 called. No actual Simple shared-account/HIR/pin/link/performance verdict follows.
+
+## Copied-owner and ordinary-path review repair
+
+Source review of ce0d1ca442e found the missing ordinary-clear guard and that a
+prefix identity check alone could dereference an already-freed backing. The
+repair adds the actual SOURCE-only owner record to the existing pointer slot,
+never another registry. Native erase obtains that record from the matched entry
+and retires its live backing under the existing owner lock before freeing it;
+uncertified copied headers never enter prefix retirement. Birth metrics include
+the extra two fields/16 bytes, and rehash changes the same record's backing.
+
+The new fixture makes two genuine registered ordinary headers and deliberately
+copies a SOURCE header into them. One retains a backing subsequently freed by
+rehash; the other is retired after the original source owner. It also exercises
+ordinary clear refusal with unchanged contents/epoch and a second real native
+scope for tagged-record erase/reinsert and old-owner rejection. Actual address
+reuse is reported if observed, not assumed from a new generation alone.

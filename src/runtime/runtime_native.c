@@ -1520,7 +1520,21 @@ typedef struct RtCoreSourceDictBackingV1 {
     uint64_t abi;
     RtCoreDictEntry entries[];
 } RtCoreSourceDictBackingV1;
-static void rt_core_source_dict_retire_locked_v1(RtCoreDict* dictionary);
+typedef struct RtCoreSourceDictRegistrationV1 {
+    RtCoreDict* dictionary;
+    RtCoreSourceDictBackingV1* backing;
+} RtCoreSourceDictRegistrationV1;
+#define RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1 ((uintptr_t)2)
+static RtCoreSourceDictRegistrationV1* rt_core_source_dict_registration_v1(uintptr_t entry) {
+    return (entry & (uintptr_t)7)==RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1
+        ? (RtCoreSourceDictRegistrationV1*)(entry & ~(uintptr_t)7) : NULL;
+}
+static uintptr_t rt_core_immortal_entry_pointer_v1(uintptr_t entry) {
+    RtCoreSourceDictRegistrationV1* owner=rt_core_source_dict_registration_v1(entry);
+    return owner ? (uintptr_t)owner->dictionary : entry;
+}
+static void rt_core_source_dict_retire_locked_v1(RtCoreDict* dictionary,
+    RtCoreSourceDictRegistrationV1* owner);
 
 
 static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
@@ -2211,7 +2225,8 @@ static void rt_core_reclaim_transient_raw(void) {
 /* caller holds the lock; table has a free slot */
 static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     size_t mask = rt_core_immortal_registry_cap - 1;
-    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    uintptr_t actual=rt_core_immortal_entry_pointer_v1(p);
+    size_t i = rt_core_immortal_hash_ptr(actual) & mask;
     size_t first_tomb = SIZE_MAX;
     for (size_t probes=1;probes<=rt_core_immortal_registry_cap;++probes) {
         uintptr_t e = rt_core_immortal_registry[i];
@@ -2231,7 +2246,7 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
         }
         if (e == RT_CORE_IMMORTAL_TOMBSTONE) {
             if (first_tomb == SIZE_MAX) first_tomb = i;
-        } else if (e == p) {
+        } else if (rt_core_immortal_entry_pointer_v1(e) == actual) {
             if (probes>rt_core_immortal_max_success_probe_v1)
                 rt_core_immortal_max_success_probe_v1=probes;
             return 0;
@@ -2249,10 +2264,12 @@ static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
     for (;;) {
         uintptr_t e = rt_core_immortal_registry[i];
         if (e == 0) return 0;
-        if (e == p) {
+        if (rt_core_immortal_entry_pointer_v1(e) == p) {
+            RtCoreSourceDictRegistrationV1* owner=rt_core_source_dict_registration_v1(e);
             rt_core_immortal_registry[i] = RT_CORE_IMMORTAL_TOMBSTONE;
             rt_core_immortal_registry_len--;
             rt_core_immortal_registry_tombs++;
+            if (owner) rt_core_source_dict_retire_locked_v1((RtCoreDict*)p,owner);
             return 1;
         }
         i = (i + 1) & mask;
@@ -2319,7 +2336,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
         for (;;) {
             uintptr_t e = rt_core_immortal_registry[i];
             if (e == 0) break;
-            if (e == (uintptr_t)ptr) { found = 1; break; }
+            if (rt_core_immortal_entry_pointer_v1(e) == (uintptr_t)ptr) { found = 1; break; }
             i = (i + 1) & mask;
         }
     }
@@ -2390,7 +2407,9 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
         int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
         if (erased && kind==RT_VALUE_HEAP_DICT &&
             (((RtCoreDict*)ptr)->flags & RT_CORE_DICT_SOURCE_REGION_V1))
-            rt_core_source_dict_retire_locked_v1((RtCoreDict*)ptr);
+            /* A copied header has no SOURCE owner record; its entries may
+             * already dangle. Erasure retired a genuine owner, if any. */
+            ((RtCoreDict*)ptr)->entries=NULL;
         rt_core_immortal_registry_release();
         if (!erased) continue;
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
@@ -11695,6 +11714,7 @@ int8_t rt_dict_remove(int64_t dict, int64_t key) {
 int8_t rt_dict_clear(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d || !d->entries) return 0;
+    if (d->flags & RT_CORE_DICT_SOURCE_REGION_V1) return 0;
     rt_core_dict_read_advance(d);
     for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
     d->len = 0;

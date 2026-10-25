@@ -37,7 +37,8 @@ int64_t rt_source_region_dict_observation_bound_v1(void) {
 }
 
 /* Only call after reserving/revalidating observation work. */
-static RtCoreDict* sd_find_locked(int64_t value,int64_t allowance,int64_t* error) {
+static RtCoreDict* sd_find_locked(int64_t value,int64_t allowance,int64_t* error,
+    RtCoreSourceDictRegistrationV1** registration) {
     int64_t required=sd_observation_locked();
     if (required<0 || allowance<required) { *error=SD_CAPACITY; return NULL; }
     uintptr_t raw=(uintptr_t)value;
@@ -46,16 +47,21 @@ static RtCoreDict* sd_find_locked(int64_t value,int64_t allowance,int64_t* error
     }
     uintptr_t ptr=raw&~RT_VALUE_TAG_MASK;
     int found=0;
+    RtCoreSourceDictRegistrationV1* owner=NULL;
     if (rt_core_immortal_registry_cap) {
         size_t slot=rt_core_immortal_hash_ptr(ptr)&(rt_core_immortal_registry_cap-1);
         for(size_t probes=0;probes<rt_core_immortal_max_success_probe_v1;++probes) {
             uintptr_t entry=rt_core_immortal_registry[slot];
             if (!entry) break;
-            if (entry==ptr) { found=1; break; }
+            if (rt_core_immortal_entry_pointer_v1(entry)==ptr) {
+                found=1; owner=rt_core_source_dict_registration_v1(entry); break;
+            }
             slot=(slot+1)&(rt_core_immortal_registry_cap-1);
         }
     }
-    if (!found) { *error=SD_INCOMPLETE; return NULL; }
+    if (!found || !owner || owner->dictionary!=(RtCoreDict*)ptr || !owner->backing) {
+        *error=SD_INCOMPLETE; return NULL;
+    }
     RtCoreDict* d=(RtCoreDict*)ptr;
     if (d->kind!=RT_VALUE_HEAP_DICT || !(d->flags&RT_CORE_DICT_SOURCE_REGION_V1) ||
         !d->entries || d->cap<8 || (d->cap&(d->cap-1)) ||
@@ -63,10 +69,12 @@ static RtCoreDict* sd_find_locked(int64_t value,int64_t allowance,int64_t* error
         (uint64_t)d->cap>((uint64_t)INT64_MAX-sizeof(RtCoreSourceDictBackingV1))/sizeof(RtCoreDictEntry)) {
         *error=SD_INCOMPLETE; return NULL;
     }
-    RtCoreSourceDictBackingV1* b=sd_backing(d);
+    RtCoreSourceDictBackingV1* b=owner->backing;
+    if (d->entries!=b->entries) { *error=SD_INCOMPLETE; return NULL; }
     if (b->abi!=1 || b->dictionary!=ptr || b->control<=0 || b->generation<=0) {
         *error=SD_INCOMPLETE; return NULL;
     }
+    if (registration) *registration=owner;
     return d;
 }
 
@@ -109,8 +117,9 @@ static int64_t sd_metrics_locked(int operation,const uint64_t* descriptor,
         if (!sd_descriptor_header(descriptor) || !rt_core_transient_array_scope_active ||
             rt_core_transient_array_scope_paused || !rt_transient_raw_owner_thread_allows())
             return SD_INCOMPLETE;
-        fields=16+8*4;
-        bytes=sizeof(RtCoreDict)+offsetof(RtCoreSourceDictBackingV1,entries)+8*sizeof(RtCoreDictEntry);
+        fields=18+8*4;
+        bytes=sizeof(RtCoreDict)+sizeof(RtCoreSourceDictRegistrationV1)+
+            offsetof(RtCoreSourceDictBackingV1,entries)+8*sizeof(RtCoreDictEntry);
         int64_t next=sd_registry_next();
         if (next<0) return next;
         uint64_t insertion=next ? (uint64_t)next : rt_core_immortal_registry_cap;
@@ -158,7 +167,7 @@ int64_t rt_source_region_dict_bound_v1(int64_t operation,int64_t operand,
 #else
     if (operation<13 || operation>16 || !sd_try_lock()) return SD_INCOMPLETE;
     int64_t error=0;
-    RtCoreDict* d=operation==13 ? NULL : sd_find_locked(operand,observation,&error);
+    RtCoreDict* d=operation==13 ? NULL : sd_find_locked(operand,observation,&error,NULL);
     uint64_t native_work=0;
     int64_t result=error ? error : sd_metrics_locked((int)operation,
         (const uint64_t*)(uintptr_t)operand,d,(int)metric,&native_work);
@@ -204,7 +213,7 @@ static int sd_insert(RtCoreDictEntry* entries,int64_t cap,int64_t key,int64_t va
     return 0;
 }
 
-static int sd_put_locked(RtCoreDict* d,int64_t key,int64_t value) {
+static int sd_put_locked(RtCoreDict* d,RtCoreSourceDictRegistrationV1* owner,int64_t key,int64_t value) {
     int64_t next=sd_growth_capacity(d);
     if (next<0) return 0;
     if (next) {
@@ -217,6 +226,7 @@ static int sd_put_locked(RtCoreDict* d,int64_t key,int64_t value) {
                 free(fresh); return 0;
             }
         if (!sd_insert(fresh->entries,next,key,value,sd_hash(key),&len,&tombs)) { free(fresh); return 0; }
+        owner->backing=fresh;
         d->entries=fresh->entries; d->cap=next; d->len=len; d->tombstones=tombs;
         if (d->read_backing==INT64_MAX) d->read_epoch=0; else ++d->read_backing;
         free(old);
@@ -265,14 +275,19 @@ int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,int64_t 
     RtCoreDict* d=(RtCoreDict*)rt_observed_calloc_v1(1,sizeof(*d));
     RtCoreSourceDictBackingV1* b=d ? sd_allocate_backing(8,control,generation,
         (const uint64_t*)(uintptr_t)descriptor,d) : NULL;
+    RtCoreSourceDictRegistrationV1* registration=(RtCoreSourceDictRegistrationV1*)
+        rt_observed_calloc_v1(1,sizeof(*registration));
+    if (registration) { registration->dictionary=d; registration->backing=b; }
     int64_t next=sd_registry_next();
-    int ok=d && b && next>=0 && (!next || rt_core_immortal_registry_resize((size_t)next));
+    int ok=d && (uintptr_t)d<=INT64_MAX && !((uintptr_t)d&7) && b && registration &&
+        !((uintptr_t)registration&7) && next>=0 &&
+        (!next || rt_core_immortal_registry_resize((size_t)next));
     if (ok) ok=rt_core_track_transient_immortal(d);
     if (ok) {
         d->kind=RT_VALUE_HEAP_DICT; d->flags=RT_CORE_DICT_SOURCE_REGION_V1;
         d->transient_scope_id=rt_core_transient_array_scope_id;
         d->cap=8; d->entries=b->entries;
-        ok=rt_core_immortal_registry_insert_raw((uintptr_t)d);
+        ok=rt_core_immortal_registry_insert_raw((uintptr_t)registration|RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1);
         if (!ok) --rt_core_transient_heap_scope_object_len;
     }
     if (ok) {
@@ -280,7 +295,7 @@ int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,int64_t 
         d->read_owner=owner+1;
         d->read_epoch=1; d->read_backing=1;
         result=(int64_t)((uintptr_t)d|RT_VALUE_TAG_HEAP);
-    } else { free(b); free(d); result=SD_CAPACITY; }
+    } else { free(registration); free(b); free(d); result=SD_CAPACITY; }
     rt_source_region_native_owner_exit_v1(control,13,0,ok);
     rt_core_immortal_registry_release(); return result;
 #endif
@@ -294,7 +309,8 @@ static int64_t sd_operation(int operation,int64_t control,int64_t generation,
 #else
     if (!sd_try_lock()) return SD_INCOMPLETE;
     int64_t error=0;
-    RtCoreDict* d=sd_find_locked(dictionary,work,&error);
+    RtCoreSourceDictRegistrationV1* registration=NULL;
+    RtCoreDict* d=sd_find_locked(dictionary,work,&error,&registration);
     uint64_t native=0;
     int64_t cost=error ? error : sd_metrics_locked(operation,NULL,d,0,&native);
     if (!error && cost<0) error=cost;
@@ -310,7 +326,7 @@ static int64_t sd_operation(int operation,int64_t control,int64_t generation,
     int changed=0;
     int64_t result=error;
     if (!error) {
-        if (operation==14) { changed=sd_put_locked(d,key,value); result=changed ? 1 : SD_CAPACITY; }
+        if (operation==14) { changed=sd_put_locked(d,registration,key,value); result=changed ? 1 : SD_CAPACITY; }
         else result=sd_project_locked(d,key,operation==15,&changed);
         rt_source_region_native_owner_exit_v1(control,operation,changed,0);
     }
@@ -327,20 +343,18 @@ int64_t rt_source_region_dict_get_v1(int64_t c,int64_t g,int64_t e,int64_t d,int
     return sd_operation(16,c,g,e,d,k,0,w);
 }
 
-static void rt_core_source_dict_retire_locked_v1(RtCoreDict* d) {
-    RtCoreSourceDictBackingV1* b=sd_backing(d);
-    if (b->abi!=1 || b->dictionary!=(uintptr_t)d) {
-        /* Registry erasure proved only this header belongs to the retiring
-         * native owner. An unclassified copied header cannot free or retire
-         * another dictionary's backing/pin. Safe clone/transport is unadmitted. */
-        d->entries=NULL;
-        return;
-    }
+static void rt_core_source_dict_retire_locked_v1(RtCoreDict* d,
+    RtCoreSourceDictRegistrationV1* owner) {
+    /* The existing registry entry authenticates this exact header and its
+     * current live backing BEFORE any prefix access. Copied ordinary headers
+     * have no owner record and never enter this function. */
+    if (owner->dictionary!=d || !owner->backing) return;
+    RtCoreSourceDictBackingV1* b=owner->backing;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (b->control>0) {
+    if (b->abi==1 && b->dictionary==(uintptr_t)d && b->control>0) {
         rt_source_region_native_owner_retire_v1(b->control,b->generation);
         b->control=0;
     }
 #endif
-    free(b); d->entries=NULL;
+    free(b); free(owner); d->entries=NULL;
 }

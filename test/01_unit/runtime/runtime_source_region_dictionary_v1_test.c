@@ -13,6 +13,29 @@ extern int64_t rt_source_region_dict_get_v1(int64_t,int64_t,int64_t,int64_t,int6
 extern int8_t rt_transient_array_scope_begin(void);
 extern int8_t rt_transient_array_scope_end(void);
 extern int8_t rt_dict_set(int64_t,int64_t,int64_t);
+extern int8_t rt_dict_clear(int64_t);
+extern int64_t rt_dict_new(int64_t);
+
+typedef struct FixtureDictHeaderV1 {
+    uint8_t kind,flags;
+    uint16_t reserved;
+    uint32_t scope;
+    int64_t capacity,length,tombstones;
+    void* entries;
+    int64_t reader,epoch,backing;
+} FixtureDictHeaderV1;
+
+/* Deliberately unclassified shallow copy made from two actual registered
+ * runtime headers. Its ordinary registry entry proves no SOURCE backing pin. */
+static int64_t unclassified_copy(int64_t source) {
+    _Static_assert(sizeof(FixtureDictHeaderV1)==64,"frozen native dictionary header");
+    int64_t result=rt_dict_new(0); assert(result>0);
+    FixtureDictHeaderV1* copy=(FixtureDictHeaderV1*)(uintptr_t)(result&~INT64_C(7));
+    const FixtureDictHeaderV1* original=(const FixtureDictHeaderV1*)(uintptr_t)(source&~INT64_C(7));
+    free(copy->entries);
+    memcpy(copy,original,sizeof(*copy));
+    return result;
+}
 
 static const uint64_t child_rows[]={0,8,1,0};
 static const uint64_t child_desc[]={1,1,8,1,(uintptr_t)child_rows,1};
@@ -103,7 +126,15 @@ int main(void) {
     /* An unclassified ordinary alias path cannot mutate SOURCE storage. */
     assert(!rt_dict_set(d,4,child));
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    assert(!rt_dict_clear(d));
+    assert(get(c,g,d,INT64_MIN)==child && epoch(c,g)==current);
+    int64_t copied_before_rehash=unclassified_copy(d);
+    void* old_entries=((FixtureDictHeaderV1*)(uintptr_t)(copied_before_rehash&~INT64_C(7)))->entries;
     for(int64_t k=0;k<22;++k) assert(put(c,g,d,k,child)==1);
+    assert(((FixtureDictHeaderV1*)(uintptr_t)(d&~INT64_C(7)))->entries!=old_entries);
+    assert(rt_source_region_dict_get_v1(c,g,epoch(c,g),copied_before_rehash,0,dict_work(16,d))==SR_INCOMPLETE);
+    int64_t copied_before_retirement=unclassified_copy(d);
+    assert(rt_source_region_dict_get_v1(c,g,epoch(c,g),copied_before_retirement,0,dict_work(16,d))==SR_INCOMPLETE);
     assert(get(c,g,d,INT64_MIN)==child); /* actual backing rehash retained owner */
     assert(get(c,g,d,21)==child);
 
@@ -120,8 +151,23 @@ int main(void) {
      * private retained controls survive until all member counts reach zero. */
     assert(rt_source_region_revoke_live_v1(c,g,16)==0);
     assert(rt_source_region_revoke_live_v1(foreign_c,foreign_g,16)==0);
+    /* Creation order retires original before both copies. One points to a
+     * backing freed by rehash, the other to the backing freed on retirement.
+     * Neither copied-header destructor may even dereference those pointers. */
     assert(rt_transient_array_scope_end());
     assert(sr_control(c)->members==0 && sr_control(foreign_c)->members==0);
+    assert(rt_transient_array_scope_begin());
+    int64_t fresh_g,fresh_c=born_region(&fresh_g);
+    int64_t fresh_dict=rt_source_region_dict_new_v1(fresh_c,fresh_g,epoch(fresh_c,fresh_g),
+        (int64_t)(uintptr_t)dict_desc,0,dict_work(13,(int64_t)(uintptr_t)dict_desc));
+    assert(fresh_dict>0);
+    /* Exercise real tagged owner-record deletion/reinsertion and stale-owner
+     * refusal. Address reuse is allocator-dependent and reported honestly. */
+    assert(rt_source_region_dict_get_v1(c,g,saved,fresh_dict,0,dict_work(16,fresh_dict))==SR_FOREIGN);
+    printf("dictionary_address_reuse=%s\n",fresh_dict==d || fresh_dict==tagged ? "observed" : "not-observed");
+    assert(rt_transient_array_scope_end());
+    assert(sr_control(fresh_c)->members==0);
+    assert(rt_source_region_release_live_v1(fresh_c,fresh_g,64)==0);
     assert(rt_source_region_release_live_v1(c,g,64)==0);
     assert(rt_source_region_release_live_v1(foreign_c,foreign_g,64)==0);
     puts("C4 typed i64/Struct dictionary dependency: PASS (full HIR/SOURCE UNRUN)");
