@@ -3834,36 +3834,6 @@ int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
     exit(70);
 }
 
-/* Windows host memory headroom for the process-admission probe
- * (2026-10-24, doc: 08_tracking/bug/seed_interp_windows_memory_probe_2026_10_24.md).
- * std.nogc_sync_mut.io.windows_process_owner.windows_available_memory_headroom_v1
- * must also run under the bootstrap seed's PURE interpreter, where the raw
- * kernel32 heap externs (GetProcessHeap/HeapAlloc/HeapFree) backing the
- * extern path have no registered implementation: the probe errored, and the
- * native-build / bootstrap-preflight memory admission degraded to
- * "available: 0 via unknown" and refused builds (including devhub/caret
- * entry-closure builds). This wrapper performs the same snapshot in runtime
- * C, where registered rt_* externs resolve under the interpreter, and returns
- * min(ullAvailPhys, ullAvailPageFile), mirroring
- * windows_capacity_headroom_v1. Returns 0 when the query fails or the
- * platform is not Windows; callers keep the extern path as the fallback. */
-int64_t rt_host_memory_headroom_bytes_v1(void) {
-#if defined(_WIN32)
-    MEMORYSTATUSEX status;
-    memset(&status, 0, sizeof(status));
-    status.dwLength = sizeof(status);
-    if (!GlobalMemoryStatusEx(&status)) return 0;
-    if (status.ullAvailPhys > (uint64_t)INT64_MAX) return 0;
-    if (status.ullAvailPageFile > (uint64_t)INT64_MAX) return 0;
-    uint64_t headroom = status.ullAvailPhys < status.ullAvailPageFile
-        ? status.ullAvailPhys
-        : status.ullAvailPageFile;
-    return (int64_t)headroom;
-#else
-    return 0;
-#endif
-}
-
 /* Commit headroom (CommitLimit - CommitTotal) * PageSize via
  * K32GetPerformanceInfo, resolved with GetProcAddress because the symbol
  * lives in kernel32 on modern Windows. Use the SDK's typed layout: PageSize is at
