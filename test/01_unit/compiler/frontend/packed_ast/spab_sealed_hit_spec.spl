@@ -1,0 +1,103 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_exists}
+use std.io_runtime.{file_write_bytes, file_read_bytes, file_delete}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped, build_module_from_packed_view_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_encode_v1, flat_packed_open_v1,
+    flat_packed_close_v1, flat_packed_store_v1, flat_packed_admit_view_v1, flat_packed_seal_path_v1,
+    SpabDigestV1}
+extern fn rt_file_read_text(path: text) -> text
+
+# Zero-copy .spab hit (per-file P-C): a store seals the verified bytes
+# (size + mtime + body digest) so a hit skips every byte-copying hash pass.
+# A hit must still build the same module as a fresh parse, and any corruption
+# the seal cannot vouch for must be a miss.
+val SAMPLE: text = "src/compiler/80.driver/driver_parse_shard_hash.spl"
+val DIR: text = "build/spab_sealed_hit_spec"
+
+fn ids(source: text) -> [SpabDigestV1]:
+    [SpabDigestV1(subject: 1, algo: 16, hex: xxh3_128_text(source)),
+     SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("spec-compiler"))]
+
+fn sorted_names(names: [text]) -> [text]:
+    var out = names
+    var i = 1
+    while i < out.len():
+        var j = i
+        while j > 0 and out[j] < out[j - 1]:
+            val t = out[j]
+            out[j] = out[j - 1]
+            out[j - 1] = t
+            j = j - 1
+        i = i + 1
+    out
+
+fn store_sample(name: text) -> text:
+    val source = rt_file_read_text(SAMPLE) ?? ""
+    flat_pool_capture_arm()
+    val _fresh = parse_and_build_module_scoped(source, SAMPLE, false)
+    val packed = flat_packed_encode_v1(flat_pool_capture_take(), flat_pool_capture_take_trace(),
+        ids(source), xxh3_128_text(SAMPLE))
+    dir_create_all(DIR)
+    val path = DIR + "/" + name
+    val _stored = flat_packed_store_v1(path, packed)
+    path
+
+describe "sealed zero-copy .spab hit":
+    it "seals on store and a sealed hit builds the same module as a fresh parse":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val fresh = parse_and_build_module_scoped(source, SAMPLE, false)
+        val path = store_sample("eq.spab")
+        expect(file_exists(flat_packed_seal_path_v1(path))).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(true)
+        expect(flat_packed_admit_view_v1(view, ids(source))).to_equal("")
+        val restored = build_module_from_packed_view_v1(view, source, SAMPLE)
+        val _closed = flat_packed_close_v1(view)
+        expect(restored != nil).to_equal(true)
+        val m = restored.unwrap()
+        expect(m.imports.len()).to_equal(fresh.imports.len())
+        expect(sorted_names(m.functions.keys())).to_equal(sorted_names(fresh.functions.keys()))
+
+    it "misses when the file changes size under its seal":
+        val path = store_sample("grown.spab")
+        var bytes = file_read_bytes(path)
+        bytes.push(0 as u8)
+        expect(file_write_bytes(path, bytes)).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(false)
+        val _closed = flat_packed_close_v1(view)
+
+    it "misses on a same-size corruption once the seal no longer vouches for it":
+        val path = store_sample("flipped.spab")
+        var bytes = file_read_bytes(path)
+        val at = bytes.len() - 1
+        bytes[at] = ((bytes[at] as i64 + 1) % 256) as u8
+        expect(file_write_bytes(path, bytes)).to_equal(true)
+        val _gone = file_delete(flat_packed_seal_path_v1(path))
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(false)
+        val _closed = flat_packed_close_v1(view)
+        expect(file_exists(flat_packed_seal_path_v1(path))).to_equal(false)
+
+    it "misses when the seal names a different body digest":
+        val path = store_sample("forged.spab")
+        val seal = flat_packed_seal_path_v1(path)
+        val parts = bytes_to_text(file_read_bytes(seal)).split(" ")
+        val forged = "{parts[0]} {parts[1]} {parts[2]} " + sha256_text("other body")
+        expect(file_write_bytes(seal, text_to_utf8_bytes(forged))).to_equal(true)
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(false)
+        expect(view.reason).to_equal("seal does not match body digest")
+        val _closed = flat_packed_close_v1(view)
+
+    it "re-seals after a full verification when the seal is missing":
+        val path = store_sample("reseal.spab")
+        val _gone = file_delete(flat_packed_seal_path_v1(path))
+        val view = flat_packed_open_v1(path)
+        expect(view.valid).to_equal(true)
+        val _closed = flat_packed_close_v1(view)
+        expect(file_exists(flat_packed_seal_path_v1(path))).to_equal(true)

@@ -58,11 +58,12 @@ use compiler.common.cache_contract.hash_algorithm_compute_v1.{hash_algorithm_nam
     hash_algorithm_computable_v1, hash_algorithm_digest_v1, hash_algorithm_digest_native_v1}
 use std.nogc_async_mut.sosix.packed_blob_view.{PackedBlobView, packed_blob_map, packed_blob_unmap,
     packed_blob_view_ok, packed_blob_u8, packed_blob_u16, packed_blob_u32, packed_blob_u64}
-use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_size}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
 extern fn rt_string_new(bytes: i64, len: i64) -> text
 extern fn rt_is_interpreter_runtime() -> bool
+extern fn rt_file_stat(path: text) -> i64
 
 pub val SPAB_MAGIC_V1: text = "SPLARTF1"
 pub val SPAB_FORMAT_VERSION_V1: i64 = 1
@@ -892,6 +893,15 @@ fn _index_bounds_reason(view: SpabViewV1) -> text:
 
 pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
     """Validate (§4); every doubt is a miss with a reason, never a crash."""
+    _view_src(src, "")
+
+# `sealed_body_hex` != "": the caller holds a store-time seal for exactly these
+# bytes (same size + mtime, see flat_packed_open_v1). The hashing passes --
+# per-section checksums and the body digest, the only steps that copy bytes out
+# of the mapping -- are skipped; the digest table's body digest must still equal
+# the sealed one, and every structural/bounds check below still runs.
+fn _view_src(src: SpabSourceV1, sealed_body_hex: text) -> SpabViewV1:
+    val sealed = sealed_body_hex != ""
     if src.size < SPAB_HEADER_BYTES:
         return _miss(src, "truncated header")
     if _txt(src, 0, 8) != SPAB_MAGIC_V1:
@@ -929,14 +939,15 @@ pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
             return _miss(src, "unknown required section {id}")
         if not hash_algorithm_computable_v1(algo):
             return _miss(src, "section {id} checksum algorithm unavailable")
-        val sum = hash_algorithm_digest_native_v1(algo, _sl(src, at, len))
-        if sum.len() == 0:
-            return _miss(src, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
-        var i = 0
-        while i < 8 and i < sum.len():
-            if _le(src, e + 24 + i, 1) != (sum[i] as i64):
-                return _miss(src, "section {id} checksum mismatch")
-            i = i + 1
+        if not sealed:
+            val sum = hash_algorithm_digest_native_v1(algo, _sl(src, at, len))
+            if sum.len() == 0:
+                return _miss(src, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
+            var i = 0
+            while i < 8 and i < sum.len():
+                if _le(src, e + 24 + i, 1) != (sum[i] as i64):
+                    return _miss(src, "section {id} checksum mismatch")
+                i = i + 1
         sections.push(SpabSectionV1(id: id, encoding: encoding, offset: at, length: len))
         last_id = id
         last_end = at + len
@@ -954,10 +965,16 @@ pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
     # Body digest over [end of the 0x0000 section, blob end): every present
     # computable entry must verify; at least one must.
     val body_start = dig.offset + dig.length
-    val body = _sl(src, body_start, src.size - body_start)
     var body_checked = 0
+    if sealed:
+        if view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1) != sealed_body_hex:
+            return _miss(src, "seal does not match body digest")
+        body_checked = 1
+    var body: [u8] = []
+    if not sealed:
+        body = _sl(src, body_start, src.size - body_start)
     for d in view.digests:
-        if d.subject == SPAB_SUBJECT_BODY and hash_algorithm_computable_v1(d.algo):
+        if not sealed and d.subject == SPAB_SUBJECT_BODY and hash_algorithm_computable_v1(d.algo):
             val body_sum = hash_algorithm_digest_native_v1(d.algo, body)
             if body_sum.len() == 0:
                 return _miss(src, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
@@ -1004,11 +1021,68 @@ pub fn flat_packed_open_v1(path: text) -> SpabViewV1:
     if not file_exists(path):
         return _miss(_bytes_src([]), "absent")
     # The interpreter runtime has no host mapping; it reads the bytes instead.
+    # A store-time seal for exactly this file (size + mtime) lets the mapped
+    # hit skip every byte-copying hash pass; otherwise full verification runs
+    # and, on success, (re)writes the seal so the next hit is zero-copy.
+    val seal = _seal_body_for(path)
+    var view = _miss(_bytes_src([]), "unread")
     if not rt_is_interpreter_runtime():
         val mapped = packed_blob_map(path)
         if packed_blob_view_ok(mapped):
-            return flat_packed_view_src_v1(SpabSourceV1(mapped: true, view: mapped, bytes: [], size: mapped.size))
-    flat_packed_view_v1(file_read_bytes(path))
+            view = _view_src(SpabSourceV1(mapped: true, view: mapped, bytes: [], size: mapped.size), seal)
+    if view.reason == "unread":
+        view = _view_src(_bytes_src(file_read_bytes(path)), seal)
+    if seal == "" and view.valid:
+        val _sealed = flat_packed_seal_v1(path, view.digest(SPAB_SUBJECT_BODY, HASH_ALGO_SHA256_V1))
+    view
+
+# ---- store-time seal (sidecar `<path>.seal`) ---------------------------------
+#
+# "spab-seal-v1 <size> <mtime> <body sha256 hex>": written only after the bytes
+# at `path` were fully verified (store read-back, or a full hit validation). A
+# hit trusts the seal only while the file's size and mtime still match it and
+# the blob's own body digest equals the sealed one; any rewrite of the entry
+# (new size or mtime) or a missing/garbled seal falls back to full verification.
+# Residual, accepted by design: a same-size in-place rewrite within the same
+# mtime second is not re-hashed.
+
+pub fn flat_packed_seal_path_v1(path: text) -> text:
+    path + ".seal"
+
+fn _seal_line(path: text, body_hex: text) -> text:
+    val size = file_size(path)
+    val mtime = _mtime(path)
+    if size <= 0 or mtime <= 0 or body_hex.len() != 64:
+        return ""
+    "spab-seal-v1 {size} {mtime} {body_hex}"
+
+fn _mtime(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_stat(path)
+
+pub fn flat_packed_seal_v1(path: text, body_hex: text) -> bool:
+    val line = _seal_line(path, body_hex)
+    if line == "":
+        return false
+    val seal = flat_packed_seal_path_v1(path)
+    val tmp = seal + ".{getpid()}.tmp"
+    if not file_write_bytes(tmp, text_to_utf8_bytes(line)) or not file_rename(tmp, seal):
+        val _gone = file_delete(tmp)
+        return false
+    true
+
+# Sealed body digest when the seal still describes `path`, else "".
+fn _seal_body_for(path: text) -> text:
+    val seal = flat_packed_seal_path_v1(path)
+    if not file_exists(seal):
+        return ""
+    val stored = bytes_to_text(file_read_bytes(seal))
+    val parts = stored.split(" ")
+    if parts.len() != 4 or parts[0] != "spab-seal-v1" or parts[3].len() != 64:
+        return ""
+    if _seal_line(path, parts[3]) != stored:
+        return ""
+    parts[3]
 
 pub fn flat_packed_close_v1(view: SpabViewV1) -> bool:
     if view.src.mapped:
@@ -1283,7 +1357,29 @@ pub fn flat_packed_store_v1(path: text, bytes: [u8]) -> bool:
     if not file_rename(tmp, path):
         val _gone = file_delete(tmp)
         return false
+    # The bytes were just read back and compared: seal them so the first hit
+    # is already zero-copy. A failed seal only costs that hit a full verify.
+    val _sealed = flat_packed_seal_v1(path, _stored_body_hex(bytes))
     true
+
+# Body (subject 3, sha256) digest as written by the encoder, read from the
+# digest table without re-hashing; "" when the table is not where §7 puts it.
+fn _stored_body_hex(bytes: [u8]) -> text:
+    val src = _bytes_src(bytes)
+    if src.size < SPAB_HEADER_BYTES + SPAB_ENTRY_BYTES or _le(src, 24, 8) != SPAB_HEADER_BYTES:
+        return ""
+    val e = SPAB_HEADER_BYTES
+    if _le(src, e, 4) != SPAB_SECTION_DIGESTS:
+        return ""
+    val sec = SpabSectionV1(id: SPAB_SECTION_DIGESTS, encoding: _le(src, e + 4, 2),
+        offset: _le(src, e + 8, 8), length: _le(src, e + 16, 8))
+    if sec.offset + sec.length > src.size:
+        return ""
+    if val rows = _read_digests(src, sec):
+        for d in rows:
+            if d.subject == SPAB_SUBJECT_BODY and d.algo == HASH_ALGO_SHA256_V1:
+                return d.hex
+    ""
 
 export SPAB_MAGIC_V1, SPAB_FORMAT_VERSION_V1, SPAB_MIN_READER_VERSION_V1, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1
 export SPAB_FLAG_DESUGARED, SPAB_FLAG_HAS_TLDR, SPAB_FLAG_STRINGS_UTF8, SPAB_FLAG_TARGET_DEPENDENT
@@ -1296,4 +1392,4 @@ export SpabDigestV1, SpabSectionV1, SpabViewV1
 export flat_packed_encode_v1, flat_packed_view_v1, flat_packed_admit_v1, flat_packed_decode_lines_v1
 export SpabSourceV1, SpabTokensV1, flat_packed_view_src_v1, flat_packed_open_v1, flat_packed_close_v1
 export flat_packed_admit_view_v1, flat_packed_tokens_v1
-export module_artifact_path_v1, flat_packed_store_v1
+export module_artifact_path_v1, flat_packed_store_v1, flat_packed_seal_v1, flat_packed_seal_path_v1
