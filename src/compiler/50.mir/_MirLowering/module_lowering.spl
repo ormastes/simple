@@ -915,6 +915,21 @@ impl MirLowering:
 
         Seeds only what is missing, exactly like the bare seeds it accompanies,
         so user code that legitimately declares its own `Option` still wins."""
+        # Publish the generic declaration schema, not erased Any slots. The
+        # ordinary declaration registrar revokes builtin authority for shadows.
+        if not self.generic_enum_constructor_owners.has(bare_name):
+            if bare_name == "Option" or bare_name == "Result":
+                self.generic_enum_constructor_owners[bare_name] = true
+                self.builtin_enum_constructor_owners_v1[bare_name] = true
+        if self.builtin_enum_constructor_owners_v1.get(bare_name) ?? false:
+            val t = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+            if bare_name == "Option":
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Some", [t], [""], "tuple")
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "None", [], [], "unit")
+            elif bare_name == "Result":
+                val e = HirType(kind: HirTypeKind.TypeParam("E", []), span: Span.empty())
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Ok", [t], [""], "tuple")
+                self.register_enum_payload_metadata_v1(bare_name, bare_name, "Err", [e], [""], "tuple")
         if not self.enum_variant_index_q.has(bare_name):
             self.enum_variant_index_q[bare_name] = names
             self.enum_variant_discriminants_q[bare_name] = discriminants
@@ -995,6 +1010,8 @@ impl MirLowering:
         # nothing a reader can observe, so skip it.
         if self.enum_registration_is_current_v1(enum_def_r, store_payload_types):
             return
+        if self.builtin_enum_constructor_owners_v1.has(enum_def_r.name):
+            self.builtin_enum_constructor_owners_v1[enum_def_r.name] = false
         val generic_constructor = enum_def_r.type_params.len() > 0 or enum_def_r.is_generic_template
         self.generic_enum_constructor_owners[enum_def_r.name] = generic_constructor
         if enum_def_r.runtime_name != "":

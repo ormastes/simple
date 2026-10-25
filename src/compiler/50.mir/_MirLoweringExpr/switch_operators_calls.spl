@@ -5709,21 +5709,42 @@ impl MirLowering:
                 case _: return Some(known)
         self.option_map_value_hir_type(local, expression.span)
 
-    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
+    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg], expected_type: HirType? = nil) -> LocalId:
         """Same as lower_enum_lit but entered from the MethodCall path, where
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
         is known by NAME (registered in enum_variant_index); the single tuple
         payload is args[0] (0 for Unit variants)."""
         val metadata_owner = self.enum_constructor_metadata_owner(enum_name)
         val metadata_key = if metadata_owner != "": "{metadata_owner}::{variant}" else: ""
-        val typed_slots = self.enum_payload_key_uses_declared_slots(metadata_key)
+        val builtin_owner = self.builtin_enum_constructor_owners_v1.get(metadata_owner) ?? false
+        var typed_slots = self.enum_payload_key_uses_declared_slots(metadata_key)
+        var concrete_payload: HirType? = nil
+        var typed_result: HirType? = nil
+        if builtin_owner:
+            if val expected = expected_type:
+                match expected.kind:
+                    case HirTypeKind.Result(_, _):
+                        if metadata_owner != "Result":
+                            self.error_fatal("Option constructor has non-Option expected type", Some(expected.span))
+                            return self.builder.emit_const_int(0)
+                        typed_result = Some(expected)
+                    case HirTypeKind.Optional(inner):
+                        if metadata_owner != "Option":
+                            self.error_fatal("Result constructor has non-Result expected type", Some(expected.span))
+                            return self.builder.emit_const_int(0)
+                        if variant == "Some": concrete_payload = Some(inner)
+                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                    case _:
+                        self.error_fatal("builtin enum constructor has incompatible expected type", Some(expected.span))
+                        return self.builder.emit_const_int(0)
+            typed_slots = concrete_payload != nil
         if args.len() > 1 and metadata_owner == "":
             self.error_fatal("enum construction '{enum_name}.{variant}': ambiguous or missing payload owner", nil)
             return self.builder.emit_const_int(0)
         # Missing declared slots are not generic authority. A known owner
         # without an explicit generic exemption must fail closed before any
         # argument lowering or untyped tuple boxing can bypass validation.
-        if metadata_owner != "" and not (self.generic_enum_constructor_owners.get(metadata_owner) ?? false):
+        if metadata_owner != "" and (builtin_owner or not (self.generic_enum_constructor_owners.get(metadata_owner) ?? false)):
             val payload_reason = self.enum_positional_payload_reason(metadata_owner, variant, args.len())
             if payload_reason != "":
                 self.error_fatal("enum construction '{metadata_key}': {payload_reason}", nil)
@@ -5737,6 +5758,8 @@ impl MirLowering:
                     self.error_fatal("named enum construction requires declared field binding", Some(args[ni].span))
                     return self.builder.emit_const_int(0)
                 ni = ni + 1
+        if val retained_result = typed_result:
+            return self.lower_result_construct_named(variant, args, retained_result)
         val disc = self.enum_variant_discriminant(enum_name, variant)
         if disc < 0:
             # Was a FULLY SILENT -1 (this site had no guard at all, not even the
@@ -5756,17 +5779,24 @@ impl MirLowering:
         var payload_local = LocalId(id: 0)
         var option_payload_type: HirType? = nil
         if args.len() == 1:
+            val expected_slot: HirType? = if concrete_payload != nil: concrete_payload elif typed_slots: Some(self.enum_variant_payload_types[metadata_key][0]) else: nil
             payload_local = if typed_slots:
-                self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[metadata_key][0], args[0].value)
+                self.lower_declared_enum_payload_expression(expected_slot.unwrap(), args[0].value)
             else:
                 self.lower_untyped_enum_payload_expression(if metadata_owner != "": metadata_owner else: enum_name, args[0].value)
             if typed_slots:
-                val expected = self.enum_variant_payload_types[metadata_key][0]
+                val expected = expected_slot.unwrap()
                 if not self.enum_payload_local_compatible(expected, args[0].value, payload_local):
                     self.enum_payload_mismatch_trace(expected, args[0].value, payload_local)
                     self.error_fatal(self.enum_payload_mismatch_message(metadata_key, 0, expected, args[0].value), Some(args[0].span))
                     return self.builder.emit_const_int(0)
                 payload_local = self.adapt_declared_enum_payload(expected, payload_local)
+            if builtin_owner and not typed_slots:
+                # With no expected instantiation, infer the active parameter
+                # from retained payload evidence; an opaque word is not T/E.
+                if self.explicit_some_payload_hir_type(payload_local, args[0].value) == nil:
+                    self.error_fatal("builtin enum payload has no retained type evidence", Some(args[0].span))
+                    return self.builder.emit_const_int(0)
             if enum_name == "Option" and variant == "Some":
                 option_payload_type = self.explicit_some_payload_hir_type(payload_local, args[0].value)
             val payload_ty = self.local_mir_type_of(payload_local)
@@ -5864,6 +5894,11 @@ impl MirLowering:
                         kind: HirTypeKind.Named(enum_symbol_id, []),
                         span: enum_span
                     ), 2, 0)
+            if builtin_owner and expected_type != nil:
+                val retained = expected_type.unwrap()
+                match retained.kind:
+                    case HirTypeKind.Optional(_): self.remember_local_hir_type(tagged.id, retained, 2, 0)
+                    case _: ()
             return tagged
         payload_local
 
@@ -5898,14 +5933,18 @@ impl MirLowering:
             self.error_fatal("unknown Result constructor '{variant}'", Some(result_hir_type.span))
             return self.builder.emit_const_int(0)
 
-        var payload_local = self.lower_expr(args[0].value)
-        val payload_ty = self.local_mir_type_of(payload_local)
-        val expected_payload_type = if disc == 0: normal_payload_type else: error_payload_type
-        if payload_ty == nil or (payload_ty ?? MirType.unit()).kind != expected_payload_type.kind:
+        val expected_payload: HirType = match result_hir_type.kind:
+            case HirTypeKind.Result(ok_type, err_type): if variant == "Ok": ok_type else: err_type
+            case _: result_hir_type
+        if args[0].has_name:
+            self.error_fatal("builtin Result constructor requires a positional payload", Some(args[0].span))
+            return self.builder.emit_const_int(0)
+        var payload_local = self.lower_declared_enum_payload_expression(expected_payload, args[0].value)
+        if not self.enum_payload_local_compatible(expected_payload, args[0].value, payload_local):
             self.error_fatal("Result {variant} payload type does not match retained Result type", Some(args[0].span))
             return self.builder.emit_const_int(0)
-        if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
-            payload_local = self.box_u64_runtime_value(payload_local)
+        payload_local = self.adapt_declared_enum_payload(expected_payload, payload_local)
+        payload_local = self.encode_declared_enum_payload_slot(payload_local)
 
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
@@ -7477,6 +7516,7 @@ impl MirLowering:
                 lw.enum_variant_payload_names = self.enum_variant_payload_names
                 lw.enum_variant_payload_kind = self.enum_variant_payload_kind
                 lw.generic_enum_constructor_owners = self.generic_enum_constructor_owners
+                lw.builtin_enum_constructor_owners_v1 = self.builtin_enum_constructor_owners_v1
                 lw.enum_tuple_text_slots = self.enum_tuple_text_slots
                 lw.enum_variant_index = self.enum_variant_index
                 # Carry the collision registry into the sub-lowering too, or its
@@ -7777,10 +7817,10 @@ impl MirLowering:
                 return false
         true
 
-    me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
-        self.lower_call_with_value(callee, args, nil)
+    me lower_call(callee: HirExpr, args: [HirCallArg], expected_type: HirType? = nil) -> LocalId:
+        self.lower_call_with_value(callee, args, nil, expected_type)
 
-    me lower_call_with_value(callee: HirExpr, args: [HirCallArg], prelowered_callee: LocalId?) -> LocalId:
+    me lower_call_with_value(callee: HirExpr, args: [HirCallArg], prelowered_callee: LocalId?, expected_type: HirType? = nil) -> LocalId:
         """Lower function call.
 
         Handles both direct calls (Var) and indirect calls (closures, function pointers).
@@ -7894,12 +7934,12 @@ impl MirLowering:
             # Built-in Result construction: `Ok(v)` / `Err(e)` -> rt_enum_new with
             # Result's discriminants (Ok=0, Err=1, registered in enum_variant_index).
             if (direct_name == "Ok" or direct_name == "Err") and self.enum_variant_index.has("Result"):
-                return self.lower_enum_construct_named("Result", direct_name, args)
+                return self.lower_enum_construct_named("Result", direct_name, args, expected_type)
             if direct_name == "Some" or direct_name == "None":
                 if not self.enum_variant_index.has("Option"):
                     self.enum_variant_index["Option"] = ["Some", "None"]
                     self.enum_variant_discriminants["Option"] = [0, 1]
-                return self.lower_enum_construct_named("Option", direct_name, args)
+                return self.lower_enum_construct_named("Option", direct_name, args, expected_type)
 
         if is_direct:
             # `print` MUST newline-terminate. The interpreter treats print and
