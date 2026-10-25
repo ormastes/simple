@@ -1,0 +1,313 @@
+# Compiler-time specialization. Ordinary functions retain their signatures.
+# No SOURCE metadata is published until every selected instruction is planned.
+# Initial subset: i64 function results, scalar inputs/struct fields. Generic
+# payloads require the retained per-function MirLowering codec owner; OPEN.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{SymbolId, SymbolTable, SymbolKind}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction, MirBlock, MirInst}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
+use compiler.mir.source_region_instruction_plan_v1.{SourceRegionInstructionPlanV1, SourceRegionOperationPlanV1, source_region_instruction_plan_v1}
+use compiler.mir.source_region_result_cfg_v1.{source_region_result_cfg_v1, SourceRegionResultFailureRoutesV1}
+use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_operand}
+
+struct SourceRegionTransformErrorV1:
+    message: text
+
+struct SourceRegionSpecializationV1:
+    module: MirModule
+    entry: SymbolId
+    closure_digest: text
+
+struct SourceRegionResultConstructionV1:
+    # Both are supplied by the actual MirLowering owner of canonical Result.
+    constructor: MirOperand
+    runtime_enum_id: i64
+
+struct SourceRegionPreparedFunctionV1:
+    function: MirFunction
+    context: LocalId
+    plans: [SourceRegionInstructionPlanV1?]
+    next_local: i64
+    next_block: i64
+
+fn source_region_transform_error_v1(message: text) -> SourceRegionTransformErrorV1:
+    SourceRegionTransformErrorV1(message: message)
+
+fn source_region_function_operand_v1(function: MirFunction) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(function.name),
+        MirType(kind: MirTypeKind.FuncPtr(function.signature))))
+
+fn source_region_prepare_function_v1(module: MirModule, function: MirFunction,
+        context_type: MirType, error_type: MirType, facades: SourceRegionFacadeSymbolsV1
+) -> Result<SourceRegionPreparedFunctionV1, text>:
+    if (function.source_region_context_abi_v1 != 0 or
+            function.source_region_context_local_v1 != -1 or
+            function.source_region_closure_digest_v1 != ""):
+        return Err("SOURCE-SPECIALIZE: already-specialized input")
+    match function.signature.return_type.kind:
+        case MirTypeKind.I64: ()
+        case _: return Err("SOURCE-SPECIALIZE-INCOMPLETE: initial closure supports i64 results only")
+    for parameter in function.signature.params:
+        match parameter.kind:
+            case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Bool: ()
+            case _: return Err("SOURCE-SPECIALIZE-INCOMPLETE: mutable/foreign parameter provenance is unproved")
+    var next_local = 0
+    for local in function.locals:
+        if local.id.id < 0 or local.id.id >= 9223372036854775790:
+            return Err("SOURCE-SPECIALIZE: local identity exhausted")
+        if local.id.id >= next_local: next_local = local.id.id + 1
+    var next_block = 0
+    for block in function.blocks:
+        if block.id.id < 0 or block.id.id >= 9223372036854775790:
+            return Err("SOURCE-SPECIALIZE: block identity exhausted")
+        if block.id.id >= next_block: next_block = block.id.id + 1
+    val context = LocalId(id: next_local)
+    next_local = next_local + 1
+    var copy = MirFunction.with_blocks(function, [])
+    var locals: [MirLocal] = []
+    for local in function.locals: locals.push(local)
+    locals.push(MirLocal(id: context, name: Some("__source_region_context_v1"),
+        type_: context_type, kind: LocalKind.Arg(function.signature.params.len()), is_ghost: false))
+    copy.locals = locals
+    var params: [MirType] = []
+    for type_ in function.signature.params: params.push(type_)
+    params.push(context_type)
+    copy.signature = MirSignature(params: params, return_type: MirType.result(MirType.i64(), error_type),
+        is_variadic: false, params_known: true)
+    var plans: [SourceRegionInstructionPlanV1?] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, _, _):
+                    # Discovery already authenticated every direct module edge;
+                    # internal calls receive outer Result CFG during rewriting.
+                    plans.push(nil)
+                    continue
+                case _: ()
+            val plan = source_region_instruction_plan_v1(module, copy, instruction,
+                context, facades, next_local)?
+            plans.push(plan)
+            if val present = plan:
+                for local in present.locals: locals.push(local)
+                next_local = present.next_local
+    copy.locals = locals
+    Ok(SourceRegionPreparedFunctionV1(function: copy, context: context,
+        plans: plans, next_local: next_local, next_block: next_block))
+
+pub fn source_region_specialize_module_v1(module: MirModule, entry: SymbolId,
+        context_type: MirType, facades: SourceRegionFacadeSymbolsV1,
+        symbols: SymbolTable, result_construction: SourceRegionResultConstructionV1
+) -> Result<SourceRegionSpecializationV1, SourceRegionTransformErrorV1>:
+    var context_symbol = SymbolId(id: -1)
+    if result_construction.runtime_enum_id < 0:
+        return Err(source_region_transform_error_v1("SOURCE-RESULT: runtime enum identity absent"))
+    match context_type.kind:
+        case MirTypeKind.Struct(symbol): context_symbol = symbol
+        case _: return Err(source_region_transform_error_v1("SOURCE-CONTEXT: resolved struct required"))
+    if not module.types.contains_key(context_symbol):
+        return Err(source_region_transform_error_v1("SOURCE-CONTEXT: context declaration absent"))
+    if (not module.functions.contains_key(facades.create) or
+            not module.functions.contains_key(facades.close) or
+            not module.functions.contains_key(facades.incomplete)):
+        return Err(source_region_transform_error_v1("SOURCE-FACADE: creation/cancellation declaration absent"))
+    val create = module.functions[facades.create]
+    val close = module.functions[facades.close]
+    val incomplete = module.functions[facades.incomplete]
+    if (not create.signature.params_known or create.signature.is_variadic or
+            create.signature.params.len() != 1 or close.signature.is_variadic):
+        return Err(source_region_transform_error_v1("SOURCE-FACADE: exact fixed creation signature required"))
+    match module.types[context_symbol].kind:
+        case MirTypeDefKind.Struct(fields):
+            if (fields.len() != 3 or fields[0].name != "account" or
+                    fields[1].name != "native_control" or fields[2].name != "generation"):
+                return Err(source_region_transform_error_v1("SOURCE-CONTEXT: physical context fields differ"))
+            if (serialize_mir_type(fields[0].type_) != serialize_mir_type(create.signature.params[0]) or
+                    serialize_mir_type(fields[1].type_) != serialize_mir_type(MirType.i64()) or
+                    serialize_mir_type(fields[2].type_) != serialize_mir_type(MirType.i64())):
+                return Err(source_region_transform_error_v1("SOURCE-CONTEXT: account/control/generation types differ"))
+            match fields[0].type_.kind:
+                case MirTypeKind.Struct(_): ()
+                case _: return Err(source_region_transform_error_v1("SOURCE-CONTEXT: account must retain nominal type"))
+        case _:
+            return Err(source_region_transform_error_v1("SOURCE-CONTEXT: context is not a declared struct"))
+    var error_type = MirType.i64()
+    match create.signature.return_type.kind:
+        case MirTypeKind.Result(ok, err):
+            if serialize_mir_type(ok) != serialize_mir_type(context_type):
+                return Err(source_region_transform_error_v1("SOURCE-FACADE: create result context mismatch"))
+            error_type = err
+        case _: return Err(source_region_transform_error_v1("SOURCE-FACADE: create must return Result"))
+    if (not close.signature.params_known or close.signature.params.len() != 1 or
+            serialize_mir_type(close.signature.params[0]) != serialize_mir_type(context_type)):
+        return Err(source_region_transform_error_v1("SOURCE-FACADE: cancellation context mismatch"))
+    val outer_result = MirType.result(MirType.i64(), error_type)
+    if (incomplete.signature.is_variadic or not incomplete.signature.params_known or
+            incomplete.signature.params.len() != 0 or
+            serialize_mir_type(incomplete.signature.return_type) != serialize_mir_type(outer_result)):
+        return Err(source_region_transform_error_v1("SOURCE-FACADE: resolved Incomplete factory differs"))
+    match result_construction.constructor.kind:
+        case MirOperandKind.Const(MirConstValue.Str(_), type_):
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    if (signature.params.len() != 3 or signature.is_variadic or
+                            serialize_mir_type(signature.params[0]) != serialize_mir_type(MirType(kind: MirTypeKind.I32)) or
+                            serialize_mir_type(signature.params[1]) != serialize_mir_type(MirType(kind: MirTypeKind.I32)) or
+                            serialize_mir_type(signature.params[2]) != serialize_mir_type(MirType.i64()) or
+                            serialize_mir_type(signature.return_type) != serialize_mir_type(outer_result)):
+                        return Err(source_region_transform_error_v1("SOURCE-RESULT: canonical construction signature differs"))
+                case _: return Err(source_region_transform_error_v1("SOURCE-RESULT: typed constructor required"))
+        case _: return Err(source_region_transform_error_v1("SOURCE-RESULT: resolved construction operand required"))
+    val closure = match source_region_resolved_call_closure_v1(module, entry):
+        case Ok(value): value
+        case Err(message): return Err(source_region_transform_error_v1(message))
+    var prepared: Dict<SymbolId, SourceRegionPreparedFunctionV1> = {}
+    for symbol in closure.functions:
+        match source_region_prepare_function_v1(module, module.functions[symbol], context_type, error_type, facades):
+            case Ok(value): prepared[symbol] = value
+            case Err(message): return Err(source_region_transform_error_v1(message))
+    # Full instruction admission precedes use of the existing symbol allocator.
+    var specialized: Dict<SymbolId, MirFunction> = {}
+    for symbol in closure.functions:
+        var function = prepared[symbol].function
+        val name = function.name + "__source_region_v1_{symbols.next_symbol_id}"
+        val fresh = symbols.define_with_binding(name, SymbolKind.Function, nil,
+            function.span, Visibility.Private, false, Some(module.name), false)
+        if module.functions.contains_key(fresh):
+            return Err(source_region_transform_error_v1("SOURCE-SPECIALIZE: allocator identity collision"))
+        function.symbol = fresh
+        function.name = name
+        function.is_export_c = false
+        function.is_global = false
+        function.export_name = ""
+        specialized[symbol] = function
+    var rows: [text] = ["SourceRegionSpecialization-v1", closure.input_digest,
+        serialize_mir_type(context_type), serialize_mir_function(create), serialize_mir_function(close),
+        serialize_mir_function(incomplete), "result_enum={result_construction.runtime_enum_id}",
+        serialize_operand(result_construction.constructor)]
+    for symbol in closure.functions:
+        val original = module.functions[symbol]
+        val preparation = prepared[symbol]
+        var function = specialized[symbol]
+        var locals = function.locals
+        var blocks: [MirBlock] = []
+        var next_local = preparation.next_local
+        var next_block = preparation.next_block
+        var plan_index = 0
+        for block in original.blocks:
+            var current_id = block.id
+            var instructions: [MirInst] = []
+            for instruction in block.instructions:
+                var plan = preparation.plans[plan_index]
+                plan_index = plan_index + 1
+                if plan == nil:
+                    match instruction.kind:
+                        case MirInstKind.Call(destination, _, args):
+                            val name = verification_direct_call_name_v2(instruction.kind)
+                            val target = closure.targets_by_name[name]
+                            val callee = specialized[target]
+                            var forwarded: [MirOperand] = []
+                            for argument in args: forwarded.push(argument)
+                            forwarded.push(mir_operand_copy(preparation.context))
+                            plan = Some(SourceRegionInstructionPlanV1(steps: [
+                                SourceRegionOperationPlanV1(prelude: [],
+                                    facade: source_region_function_operand_v1(callee), args: forwarded,
+                                    result_type: outer_result, destination: destination, success: [])],
+                                locals: [], next_local: next_local))
+                        case _: ()
+                if val present = plan:
+                    for operation in present.steps:
+                        if next_block > 9223372036854775804:
+                            return Err(source_region_transform_error_v1("SOURCE-SPECIALIZE: continuation identity exhausted"))
+                        val ok_block = BlockId(id: next_block)
+                        val err_block = BlockId(id: next_block + 1)
+                        val malformed_block = BlockId(id: next_block + 2)
+                        next_block = next_block + 3
+                        var arg_types: [MirType] = []
+                        for argument in operation.args:
+                            match argument.kind:
+                                case MirOperandKind.Const(_, type_): arg_types.push(type_)
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                    var matches = 0
+                                    for actual in locals:
+                                        if actual.id.id == local.id:
+                                            arg_types.push(actual.type_)
+                                            matches = matches + 1
+                                    if matches != 1:
+                                        return Err(source_region_transform_error_v1("SOURCE-CALL: unique actual operand local required"))
+                        val cfg = match source_region_result_cfg_v1(operation.result_type,
+                                error_type, operation.facade, operation.args, arg_types,
+                                SourceRegionResultFailureRoutesV1(err: err_block, malformed: malformed_block),
+                                next_local, ok_block, instruction.span):
+                            case Ok(value): value
+                            case Err(message): return Err(source_region_transform_error_v1(message))
+                        next_local = cfg.next_local
+                        for local in cfg.locals: locals.push(local)
+                        for item in operation.prelude: instructions.push(item)
+                        for item in cfg.check_instructions: instructions.push(item)
+                        blocks.push(MirBlock(id: current_id, label: nil,
+                            instructions: instructions, terminator: cfg.check_terminator))
+                        # Every scalar closure member has exactly the same
+                        # outer Result<i64,E>; preserve the original E intact.
+                        blocks.push(MirBlock(id: err_block, label: nil, instructions: [],
+                            terminator: MirTerminator.Ret(Some(mir_operand_copy(cfg.original_result)))))
+                        val malformed = LocalId(id: next_local)
+                        next_local = next_local + 1
+                        locals.push(MirLocal(id: malformed, name: nil, type_: outer_result,
+                            kind: LocalKind.Temp, is_ghost: false))
+                        blocks.push(MirBlock(id: malformed_block, label: nil,
+                            instructions: [MirInst(kind: MirInstKind.Call(Some(malformed),
+                                source_region_function_operand_v1(incomplete), []), span: instruction.span)],
+                            terminator: MirTerminator.Ret(Some(mir_operand_copy(malformed)))))
+                        current_id = ok_block
+                        instructions = []
+                        for item in cfg.ok_instructions: instructions.push(item)
+                        if val destination = operation.destination:
+                            instructions.push(MirInst(kind: MirInstKind.Copy(destination, cfg.payload), span: instruction.span))
+                        for item in operation.success: instructions.push(item)
+                else: instructions.push(instruction)
+            var terminator = block.terminator
+            match block.terminator:
+                case MirTerminator.Ret(value):
+                    if value == nil:
+                        return Err(source_region_transform_error_v1("SOURCE-RETURN: i64 result missing"))
+                    val wrapped = LocalId(id: next_local)
+                    next_local = next_local + 1
+                    locals.push(MirLocal(id: wrapped, name: nil, type_: outer_result,
+                        kind: LocalKind.Temp, is_ghost: false))
+                    instructions.push(MirInst(kind: MirInstKind.Call(Some(wrapped),
+                        result_construction.constructor, [
+                            MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(result_construction.runtime_enum_id), MirType(kind: MirTypeKind.I32))),
+                            MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))),
+                            value ?? mir_operand_const_int(0)]), span: Some(original.span)))
+                    terminator = MirTerminator.Ret(Some(mir_operand_copy(wrapped)))
+                case _: ()
+            blocks.push(MirBlock(id: current_id, label: nil,
+                instructions: instructions, terminator: terminator))
+        function.blocks = blocks
+        function.locals = locals
+        specialized[symbol] = function
+        rows.push(serialize_mir_function(function))
+    val digest = sha256_text(rows.join("\n"))
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in module.functions.keys(): functions[symbol] = module.functions[symbol]
+    for symbol in closure.functions:
+        var function = specialized[symbol]
+        function.source_region_context_local_v1 = prepared[symbol].context.id
+        function.source_region_context_abi_v1 = 1
+        function.source_region_closure_digest_v1 = digest
+        functions[function.symbol] = function
+    val output = MirModule(name: module.name, functions: functions,
+        statics: module.statics, constants: module.constants, types: module.types,
+        external_layout_traces: module.external_layout_traces,
+        collection_plan_explanations: module.collection_plan_explanations,
+        enum_semantic_declarations: module.enum_semantic_declarations,
+        source_region_context_symbol_v1: context_symbol.id,
+        source_region_closure_digest_v1: digest)
+    Ok(SourceRegionSpecializationV1(module: output, entry: specialized[entry].symbol,
+        closure_digest: digest))

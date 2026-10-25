@@ -1,0 +1,45 @@
+# Real frontend fixtures. Execution UNRUN; no native SOURCE acceptance claimed.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
+
+describe "SOURCE direct closure uses actual parser/HIR/MIR identities":
+    it "computes the finite internal call closure once":
+        val source = "fn child() -> i64: 1\nfn entry() -> i64: child()\n"
+        val parsed = parse_full_frontend(source, "source_closure.spl", "source_closure", Logger(level: 0))
+        var hir_owner = HirLowering.with_filename("source_closure.spl")
+        val hir = hir_owner.lower_module(parsed)
+        expect(hir_owner.errors.len()).to_equal(0)
+        val entry = hir.symbols.lookup("entry")
+        if entry == nil: fail("actual entry SymbolId was not resolved")
+        var mir_owner = MirLowering.new(hir.symbols)
+        val module = mir_owner.lower_module(hir)
+        expect(mir_owner.errors.len()).to_equal(0)
+        if val resolved = entry:
+            match source_region_resolved_call_closure_v1(module, resolved):
+                case Err(message): fail(message)
+                case Ok(closure):
+                    expect(closure.entry.id).to_equal(resolved.id)
+                    expect(closure.functions.len()).to_equal(2)
+                    expect(closure.input_digest.len()).to_be_greater_than(0)
+
+    it "rejects a foreign call rather than closing over its spelling":
+        val source = "extern fn outside() -> i64\nfn entry() -> i64: outside()\n"
+        val parsed = parse_full_frontend(source, "source_foreign.spl", "source_foreign", Logger(level: 0))
+        var hir_owner = HirLowering.with_filename("source_foreign.spl")
+        val hir = hir_owner.lower_module(parsed)
+        expect(hir_owner.errors.len()).to_equal(0)
+        val entry = hir.symbols.lookup("entry")
+        if entry == nil: fail("actual entry SymbolId was not resolved")
+        var mir_owner = MirLowering.new(hir.symbols)
+        val module = mir_owner.lower_module(hir)
+        expect(mir_owner.errors.len()).to_equal(0)
+        if val resolved = entry:
+            match source_region_resolved_call_closure_v1(module, resolved):
+                case Err(message): expect(message).to_contain("SOURCE-CLOSURE")
+                case Ok(_): fail("foreign edge incorrectly acquired closed authority")

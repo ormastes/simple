@@ -7,12 +7,14 @@ use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirTerminator}
 use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
 use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir.verification_region_effects.{verification_region_effect_manifest_with_internal_calls_v1}
 
 struct SourceRegionCallClosureV1:
     entry: SymbolId
     functions: [SymbolId]
     targets_by_name: Dict<text, SymbolId>
     input_digest: text
+    effect_obligations: [text]
 
 pub fn source_region_resolved_call_closure_v1(
     module: MirModule, entry: SymbolId
@@ -48,7 +50,7 @@ pub fn source_region_resolved_call_closure_v1(
         rows.push(serialize_mir_function(function))
         for block in function.blocks:
             match block.terminator:
-                case MirTerminator.Ret(_) | MirTerminator.Goto(_) | MirTerminator.If(_, _, _) | MirTerminator.Switch(_, _, _) | MirTerminator.Abort(_) | MirTerminator.Unreachable:
+                case MirTerminator.Ret(_) | MirTerminator.Goto(_) | MirTerminator.If(_, _, _) | MirTerminator.Switch(_, _, _) | MirTerminator.Unreachable:
                     ()
                 case _:
                     return Err("SOURCE-CLOSURE-TERMINATOR: exceptional or suspended edge is open")
@@ -68,5 +70,16 @@ pub fn source_region_resolved_call_closure_v1(
                         # Actual instruction admission belongs to the typed
                         # birth/store planner, never to this edge discovery.
                         ()
+    var internal_names: [text] = []
+    for symbol in functions: internal_names.push(module.functions[symbol].name)
+    var obligations: [text] = []
+    for symbol in functions:
+        val manifest = verification_region_effect_manifest_with_internal_calls_v1(
+            module.functions[symbol], internal_names)
+        rows.push(manifest.canonical_text())
+        if manifest.diagnostic != "": obligations.push(manifest.diagnostic)
+    # Mutable unsupported C3 effects are explicit obligations discharged by the
+    # birth/store planner. A C3 pure-leaf PASS alone is never mutable admission.
     Ok(SourceRegionCallClosureV1(entry: entry, functions: functions,
-        targets_by_name: targets, input_digest: sha256_text(rows.join("\n"))))
+        targets_by_name: targets, input_digest: sha256_text(rows.join("\n")),
+        effect_obligations: obligations))
