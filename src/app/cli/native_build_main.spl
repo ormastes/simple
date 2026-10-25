@@ -49,6 +49,15 @@ use app.cli.native_build_streaming_request_owner.{native_build_streaming_surface
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1,
+    NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
+    NativeFileWorkerReceiptV1, native_file_workers_selected_v1, native_file_worker_spec_from_args_v1,
+    native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
+    native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
+    native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
+    native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
@@ -1213,6 +1222,17 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     if parse_count > 1:
         print "[capsule-shard] parse shards={parse_count}"
         run_parse_shards_with_base(base, parse_count, simple_bin, timeout_ms)
+    # Opt-in per-file worker pool (SIMPLE_FILE_WORKERS=1): replaces the HIR
+    # pass + MIR pass below with one claim-loop pool; "skip" = not admitted,
+    # continue with the two-pass path.
+    if allow_mir and native_file_workers_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? "") and
+            (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
+        val file_result = run_file_worker_pool_v1(base, args, simple_bin, timeout_ms)
+        if file_result != "skip":
+            env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
+            env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
+            env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
+            return file_result
     var hir_ok = true
     val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
@@ -1253,6 +1273,131 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
     env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
     result
+
+# ===== Per-file worker pool (P3, driver_build/native_file_worker_v1.spl) =====
+#
+# Coordinator side: one pool of `--file-worker=i/n` processes over a fresh HIR
+# ledger and a fresh MIR ledger, admitted by the same memory caps as the two
+# passes it replaces (HIR count, MIR per-worker budget; the smaller wins).
+# Returns the MIR ledger to link from, "fail", "" (in-process fallback) or
+# "skip" (pool not admitted; caller runs the two-pass path).
+fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout_ms: i64) -> text:
+    val hir_count = native_build_hir_shard_count(args)
+    val mir_parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+    val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
+    if parallel <= 1:
+        eprint "[file-worker] not admitted hir_count={hir_count} mir_parallel={mir_parallel}; two-pass path"
+        return "skip"
+    val hir_queue = shard_ledger_queue_dir(args, "queue", "hir-shard")
+    val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
+    if hir_queue == "" or mir_queue == "":
+        return "skip"
+    val old_hir_queue = env_get(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1) ?? ""
+    if not env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, hir_queue):
+        return "skip"
+    print "[file-worker] workers={parallel} hir_ledger={hir_queue} mir_ledger={mir_queue}"
+    val run = run_ledger_shards("file-worker", "--file-worker", NATIVE_FILE_WORKER_QUEUE_ENV_V1,
+        NATIVE_FILE_WORKER_OWNER_ENV_V1, base, mir_queue, args, parallel, parallel,
+        simple_bin, timeout_ms)
+    env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, old_hir_queue)
+    var receipts = native_file_worker_receipts_in_v1(hir_queue)
+    for r in native_file_worker_receipts_in_v1(mir_queue):
+        receipts = receipts.push(r)
+    print "[file-worker] receipts={receipts.len()} overlap_proven={file_worker_overlap_proven_v1(receipts)}"
+    val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped)
+    if outcome == "link":
+        return mir_queue
+    if outcome == "fail":
+        eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"
+        return "fail"
+    eprint "[file-worker] no MIR module verdict; falling back to in-process build"
+    ""
+
+# Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
+# one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
+# child, then lowers + emits objects through a MIR child once the HIR ledger is
+# complete (global mono gate -- see native_file_worker_v1.spl). Exit 0 only
+# when every child succeeded and the MIR ledger has no unclaimed row.
+pub fn run_native_file_worker_v1(args: [text]) -> i64:
+    val spec = native_file_worker_spec_from_args_v1(args)
+    val owner = env_get(NATIVE_FILE_WORKER_OWNER_ENV_V1) ?? spec
+    val mir_queue = env_get(NATIVE_FILE_WORKER_QUEUE_ENV_V1) ?? ""
+    val hir_queue = env_get(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1) ?? ""
+    val simple_bin = self_exe()
+    if not native_file_worker_spec_valid_v1(spec) or mir_queue == "" or hir_queue == "" or simple_bin == "":
+        eprint "[file-worker] invalid role spec={spec} or ledger/self path missing"
+        return 1
+    val batch = native_file_worker_batch_from_env_v1()
+    var round: i64 = 0
+    # Phase A: HIR, one claim batch per child, until the HIR ledger is drained.
+    var hir_drained = false
+    while not hir_drained:
+        val child_owner = "{owner}~h{round}"
+        round = round + 1
+        env_set("SIMPLE_HIR_SHARD_QUEUE", hir_queue)
+        env_set("SIMPLE_HIR_SHARD_OWNER", child_owner)
+        env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{batch}")
+        val hir_start = time_now_monotonic_ms()
+        val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--hir-shard={spec}"))
+        val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, 0)) else: -1
+        val hir_done = time_now_monotonic_ms()
+        env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "")
+        env_set("SIMPLE_HIR_SHARD_QUEUE", "")
+        env_set("SIMPLE_HIR_SHARD_OWNER", "")
+        val _sealed = hir_shard_recovery_seal(hir_queue, child_owner, if code < 0: "CRASH" else: "FAILED")
+        val claimed = native_file_worker_owner_claims_v1(hir_queue, child_owner)
+        for path in claimed:
+            val passed = native_file_worker_terminal_state_v1(hir_queue, path) == "PASS"
+            val _published = native_file_worker_receipt_publish_v1(hir_queue, NativeFileWorkerReceiptV1(
+                module: path, hir_start_ms: hir_start, hir_done_ms: hir_done, mir_done_ms: -1,
+                obj_done_ms: -1, status: if passed: "MONO-PENDING" else: "FAILED", object: ""))
+        if code != 0:
+            eprint "[file-worker] owner={owner} HIR child exit={code} claimed={claimed.len()}"
+            return 1
+        hir_drained = claimed.len() == 0 and hir_shard_recovery_unclaimed_count(hir_queue) == 0
+        if claimed.len() == 0 and not hir_drained:
+            eprint "[file-worker] owner={owner} HIR child claimed nothing with rows unclaimed"
+            return 1
+    # Mono gate: global mono needs every module's HIR (P4 removes this wait).
+    var state = native_file_worker_hir_ledger_state_v1(hir_queue)
+    while state == 0:
+        thread_sleep(SHARD_POOL_POLL_MS)
+        state = native_file_worker_hir_ledger_state_v1(hir_queue)
+    if state < 0:
+        eprint "[file-worker] owner={owner} HIR ledger has a non-PASS module; MIR not admitted"
+        return 1
+    # Phase B: MIR + object, one claim batch per child.
+    val mir_count = native_file_worker_mir_count_v1(native_file_worker_inventory_rows_v1(hir_queue), batch)
+    var mir_round: i64 = 0
+    var mir_drained = false
+    while not mir_drained:
+        val child_owner = "{owner}{HIR_SHARD_FORK_OWNER_MARK_V1}-m{mir_round}"
+        mir_round = mir_round + 1
+        env_set("SIMPLE_MIR_SHARD_QUEUE", mir_queue)
+        env_set("SIMPLE_MIR_SHARD_OWNER", child_owner)
+        val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--mir-shard=0/{mir_count}"))
+        val code = if pid > 0: native_build_normalize_exit_code(process_wait(pid, 0)) else: -1
+        val obj_done = time_now_monotonic_ms()
+        val _sealed = hir_shard_recovery_seal(mir_queue, child_owner, if code < 0: "CRASH" else: "FAILED")
+        val claimed = native_file_worker_owner_claims_v1(mir_queue, child_owner)
+        for name in claimed:
+            val passed = native_file_worker_terminal_state_v1(mir_queue, name) == "PASS"
+            val object_path = native_file_worker_object_path_v1(mir_queue, name)
+            val _published = native_file_worker_receipt_publish_v1(mir_queue, NativeFileWorkerReceiptV1(
+                module: name, hir_start_ms: -1, hir_done_ms: -1, mir_done_ms: -1, obj_done_ms: obj_done,
+                status: if passed: "PASS" else: "FAILED", object: if passed: object_path else: ""))
+        if code != 0:
+            eprint "[file-worker] owner={owner} MIR child exit={code} claimed={claimed.len()}"
+            return 1
+        val unclaimed = hir_shard_recovery_unclaimed_count(mir_queue)
+        mir_drained = claimed.len() == 0 or unclaimed == 0
+        if claimed.len() == 0 and unclaimed != 0:
+            eprint "[file-worker] owner={owner} MIR child claimed nothing with rows unclaimed={unclaimed}"
+            return 1
+    if not hir_shard_recovery_complete(mir_queue, owner):
+        return 1
+    print "[file-worker] done owner={owner} hir_rounds={round} mir_rounds={mir_round}"
+    0
 
 # Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
 # writes per-module declaration summaries

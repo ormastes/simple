@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 0%
+"""
+# Per-file worker role: selection, receipts, overlap proof
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/per_file_pipeline_phase_barriers_2026-10-25.md
+
+## Purpose and Audience
+
+The opt-in `--file-worker=i/n` role claims modules one at a time from one
+ledger. These specs pin its pure helpers: role selection from env/argv, the
+receipt round trip, and the acceptance predicate obj_done(A) < hir_start(B).
+
+## Expected Outcome
+
+Only SIMPLE_FILE_WORKERS=1 selects the pool; the role flag is parsed and
+stripped from child argv; receipts round-trip; malformed receipts are refused;
+overlap holds only for an observed object before another module's HIR start.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    NativeFileWorkerReceiptV1, native_file_workers_selected_v1,
+    native_file_worker_spec_from_args_v1, native_file_worker_spec_valid_v1,
+    native_file_worker_child_args_v1, native_file_worker_batch_v1,
+    native_file_worker_mir_count_v1, native_file_worker_receipt_encode_v1,
+    native_file_worker_receipt_parse_v1, file_worker_overlap_proven_v1}
+
+fn receipt(module: text, hs: i64, od: i64, status: text) -> NativeFileWorkerReceiptV1:
+    NativeFileWorkerReceiptV1(module: module, hir_start_ms: hs, hir_done_ms: -1,
+        mir_done_ms: -1, obj_done_ms: od, status: status, object: "")
+
+describe "file worker role selection":
+    it "selects the pool only for SIMPLE_FILE_WORKERS=1":
+        assert_true(native_file_workers_selected_v1("1"))
+        assert_false(native_file_workers_selected_v1(""))
+        assert_false(native_file_workers_selected_v1("0"))
+
+    it "parses and validates the role spec from argv":
+        val spec = native_file_worker_spec_from_args_v1(["native-build", "--file-worker=2/4"])
+        assert_equal(spec, "2/4")
+        assert_true(native_file_worker_spec_valid_v1(spec))
+        assert_false(native_file_worker_spec_valid_v1("4/4"))
+        assert_false(native_file_worker_spec_valid_v1("x"))
+        assert_equal(native_file_worker_spec_from_args_v1(["native-build"]), "")
+
+    it "strips the role flag from child argv":
+        val child = native_file_worker_child_args_v1(["native-build", "--file-worker=0/2", "a.spl"], "--hir-shard=0/2")
+        assert_equal(child.len(), 3)
+        assert_equal(child[2], "--hir-shard=0/2")
+        assert_false(child.contains("--file-worker=0/2"))
+
+    it "defaults to one module per round":
+        assert_equal(native_file_worker_batch_v1(""), 1)
+        assert_equal(native_file_worker_batch_v1("-3"), 1)
+        assert_equal(native_file_worker_batch_v1("4"), 4)
+        assert_equal(native_file_worker_mir_count_v1(10, 1), 10)
+        assert_equal(native_file_worker_mir_count_v1(10, 4), 3)
+        assert_equal(native_file_worker_mir_count_v1(0, 1), 1)
+
+describe "file worker receipts":
+    it "round-trips encode and parse":
+        val r = NativeFileWorkerReceiptV1(module: "a.b", hir_start_ms: 10, hir_done_ms: 20,
+            mir_done_ms: -1, obj_done_ms: 30, status: "PASS", object: "out/aot-1.o")
+        val parsed = native_file_worker_receipt_parse_v1(native_file_worker_receipt_encode_v1(r))
+        assert_true(parsed.is_ok())
+        val back = parsed.unwrap()
+        assert_equal(back.module, "a.b")
+        assert_equal(back.hir_start_ms, 10)
+        assert_equal(back.hir_done_ms, 20)
+        assert_equal(back.mir_done_ms, -1)
+        assert_equal(back.obj_done_ms, 30)
+        assert_equal(back.status, "PASS")
+        assert_equal(back.object, "out/aot-1.o")
+
+    it "refuses unknown status and missing fields":
+        assert_false(native_file_worker_receipt_parse_v1("module=a\nstatus=OK\n").is_ok())
+        val bad = native_file_worker_receipt_encode_v1(receipt("a", 1, 2, "PASS")).replace("status=PASS", "status=DONE")
+        assert_false(native_file_worker_receipt_parse_v1(bad).is_ok())
+        assert_true(native_file_worker_receipt_parse_v1(native_file_worker_receipt_encode_v1(receipt("a", -1, -1, "MONO-PENDING"))).is_ok())
+
+describe "file worker overlap proof":
+    it "holds when one object is done before another module's HIR starts":
+        assert_true(file_worker_overlap_proven_v1([receipt("a", 0, 50, "PASS"), receipt("b", 60, -1, "MONO-PENDING")]))
+
+    it "fails under a phase barrier and ignores unobserved stamps":
+        assert_false(file_worker_overlap_proven_v1([receipt("a", 0, 90, "PASS"), receipt("b", 60, 95, "PASS")]))
+        assert_false(file_worker_overlap_proven_v1([receipt("a", 0, -1, "PASS"), receipt("b", 60, -1, "PASS")]))
+        assert_false(file_worker_overlap_proven_v1([receipt("a", 0, 50, "FAILED"), receipt("b", 60, -1, "PASS")]))
+        assert_false(file_worker_overlap_proven_v1([receipt("a", 70, 50, "PASS")]))

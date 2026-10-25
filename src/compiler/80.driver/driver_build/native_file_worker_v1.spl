@@ -1,0 +1,223 @@
+# Per-file worker role (--file-worker=i/n, opt-in SIMPLE_FILE_WORKERS=1).
+#
+# Design: doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md
+# (work package P3). One long-lived worker process claims ONE module at a time
+# and drives it through the existing roles instead of the coordinator running
+# a whole HIR shard pass and then a whole MIR shard pass:
+#
+#   round k:  HIR child  (--hir-shard, SIMPLE_HIR_SHARD_CLAIM_LIMIT=batch)
+#             -> lowers <= batch claimed modules into the HIR cache, exits
+#   then:     MIR child  (--mir-shard, claim cap = batch)
+#             -> lowers + emits the object of <= batch claimed modules into
+#                the MIR ledger (same .object sidecar the link worker admits)
+#
+# The HIR ledger, the MIR ledger, claim/terminal/seal records and the
+# link-only final worker (SIMPLE_MIR_SHARD_LINK) are reused unchanged.
+#
+# Monomorphization gate (fail-closed). Mono is still a GLOBAL pass over every
+# HIR module (40.mono/monomorphize_integration.spl process_modules); P4 makes
+# it module-scoped. A MIR child therefore needs every module's HIR in the
+# cache, so a module whose HIR is done while some other module's HIR is not
+# yet PASS is recorded MONO-PENDING and its MIR is deferred until the HIR
+# ledger is complete (native_file_worker_hir_ledger_state_v1). It is never
+# lowered against a partial program, so no wrong object can be emitted.
+# Consequence, stated plainly: until P4, file_worker_overlap_proven_v1 cannot
+# hold on a real build -- the claim loop removes the coordinator-level pass
+# barrier but the mono barrier remains, now inside the pool.
+#
+# Receipts (temp file + rename, "<key>=<value>" lines):
+#   HIR receipt  <hir_queue>/<sha256(path)>.receipt     status MONO-PENDING|FAILED
+#   MIR receipt  <mir_queue>/<sha256(module)>.receipt   status PASS|FAILED,
+#                next to the .object sidecar.
+# Times are monotonic ms; -1 = not observed by this role (a MIR child loads
+# HIR from cache, and MIR lowering and object emission happen inside one child,
+# so mir_done is not separately observable and stays -1).
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_optional, getpid}
+
+pub const NATIVE_FILE_WORKERS_ENV_V1: text = "SIMPLE_FILE_WORKERS"
+pub const NATIVE_FILE_WORKER_FLAG_V1: text = "--file-worker="
+pub const NATIVE_FILE_WORKER_QUEUE_ENV_V1: text = "SIMPLE_FILE_WORKER_QUEUE"
+pub const NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1: text = "SIMPLE_FILE_WORKER_HIR_QUEUE"
+pub const NATIVE_FILE_WORKER_OWNER_ENV_V1: text = "SIMPLE_FILE_WORKER_OWNER"
+pub const NATIVE_FILE_WORKER_BATCH_ENV_V1: text = "SIMPLE_FILE_WORKER_BATCH"
+
+pub struct NativeFileWorkerReceiptV1:
+    module: text
+    hir_start_ms: i64
+    hir_done_ms: i64
+    mir_done_ms: i64
+    obj_done_ms: i64
+    status: text
+    object: text
+
+# The coordinator selects the file-worker pool only for SIMPLE_FILE_WORKERS=1.
+pub fn native_file_workers_selected_v1(flag: text) -> bool:
+    flag == "1"
+
+# "i/n" spec from argv ("" when this process is not a file worker).
+pub fn native_file_worker_spec_from_args_v1(args: [text]) -> text:
+    for arg in args:
+        if arg.starts_with(NATIVE_FILE_WORKER_FLAG_V1):
+            return arg.substring(NATIVE_FILE_WORKER_FLAG_V1.len())
+    ""
+
+# True for a well-formed "i/n" with 0 <= i < n.
+pub fn native_file_worker_spec_valid_v1(spec: text) -> bool:
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return false
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    count > 0 and index >= 0 and index < count
+
+# argv for the HIR/MIR children: the worker's own argv minus its role flag.
+pub fn native_file_worker_child_args_v1(args: [text], role_flag: text) -> [text]:
+    var out: [text] = []
+    for arg in args:
+        if not arg.starts_with(NATIVE_FILE_WORKER_FLAG_V1):
+            out = out.push(arg)
+    out.push(role_flag)
+
+# Modules per round; default 1 (one module at a time), malformed -> 1.
+pub fn native_file_worker_batch_v1(raw: text) -> i64:
+    val parsed = raw.to_i64() ?? 0
+    if parsed > 0: parsed else: 1
+
+pub fn native_file_worker_batch_from_env_v1() -> i64:
+    native_file_worker_batch_v1(env_get_nullable(NATIVE_FILE_WORKER_BATCH_ENV_V1) ?? "")
+
+# MIR child shard count so its claim cap (ceil(scheduled / count)) is `batch`.
+pub fn native_file_worker_mir_count_v1(scheduled: i64, batch: i64) -> i64:
+    val b = if batch > 0: batch else: 1
+    val count = (scheduled + b - 1) / b
+    if count > 0: count else: 1
+
+pub fn native_file_worker_receipt_encode_v1(r: NativeFileWorkerReceiptV1) -> text:
+    "module={r.module}\nhir_start_ms={r.hir_start_ms}\nhir_done_ms={r.hir_done_ms}\nmir_done_ms={r.mir_done_ms}\nobj_done_ms={r.obj_done_ms}\nstatus={r.status}\nobject={r.object}\n"
+
+fn native_file_worker_status_valid_v1(status: text) -> bool:
+    status == "PASS" or status == "FAILED" or status == "MONO-PENDING"
+
+pub fn native_file_worker_receipt_parse_v1(content: text) -> Result<NativeFileWorkerReceiptV1, text>:
+    var fields: {text: text} = {}
+    for line in content.split("\n"):
+        if line != "":
+            val eq = line.index_of("=")
+            if eq <= 0:
+                return Err("malformed receipt line: {line}")
+            fields[line.substring(0, eq)] = line.substring(eq + 1, line.len())
+    for key in ["module", "hir_start_ms", "hir_done_ms", "mir_done_ms", "obj_done_ms", "status", "object"]:
+        if not fields.contains_key(key):
+            return Err("receipt missing field: {key}")
+    val status = fields["status"]
+    if fields["module"] == "" or not native_file_worker_status_valid_v1(status):
+        return Err("receipt module or status invalid")
+    val hs = fields["hir_start_ms"].to_i64() ?? -2
+    val hd = fields["hir_done_ms"].to_i64() ?? -2
+    val md = fields["mir_done_ms"].to_i64() ?? -2
+    val od = fields["obj_done_ms"].to_i64() ?? -2
+    if hs < -1 or hd < -1 or md < -1 or od < -1:
+        return Err("receipt timestamp malformed")
+    Ok(NativeFileWorkerReceiptV1(module: fields["module"], hir_start_ms: hs, hir_done_ms: hd,
+        mir_done_ms: md, obj_done_ms: od, status: status, object: fields["object"]))
+
+# Acceptance proof of per-file overlap: some module's object was done before
+# another module's HIR started. Unobserved (-1) stamps never count.
+pub fn file_worker_overlap_proven_v1(receipts: [NativeFileWorkerReceiptV1]) -> bool:
+    for a in receipts:
+        if a.status == "PASS" and a.obj_done_ms >= 0:
+            for b in receipts:
+                if b.module != a.module and b.hir_start_ms >= 0 and a.obj_done_ms < b.hir_start_ms:
+                    return true
+    false
+
+pub fn native_file_worker_receipt_path_v1(queue: text, key: text) -> text:
+    "{queue}/{sha256_text(key)}.receipt"
+
+pub fn native_file_worker_receipt_publish_v1(queue: text, r: NativeFileWorkerReceiptV1) -> bool:
+    if r.module == "" or r.module.contains("\n") or r.object.contains("\n"):
+        return false
+    val path = native_file_worker_receipt_path_v1(queue, r.module)
+    val temporary = "{path}.{getpid()}.tmp"
+    file_write(temporary, native_file_worker_receipt_encode_v1(r)) and file_rename(temporary, path)
+
+# Every receipt in one ledger directory (unparseable ones are skipped).
+pub fn native_file_worker_receipts_in_v1(queue: text) -> [NativeFileWorkerReceiptV1]:
+    var out: [NativeFileWorkerReceiptV1] = []
+    val listing = dir_list_optional(queue)
+    if listing == nil:
+        return out
+    for name in listing.unwrap():
+        if name.ends_with(".receipt"):
+            val parsed = native_file_worker_receipt_parse_v1(file_read("{queue}/{name}"))
+            if parsed.is_ok():
+                out = out.push(parsed.unwrap())
+    out
+
+# Keys (path for HIR, canonical module name for MIR) claimed by exactly `owner`.
+pub fn native_file_worker_owner_claims_v1(queue: text, owner: text) -> [text]:
+    var out: [text] = []
+    val listing = dir_list_optional(queue)
+    if listing == nil:
+        return out
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            val fields = file_read("{queue}/{name}").split("\n")
+            if fields.len() == 4 and fields[0] == owner and fields[1] != "":
+                out = out.push(fields[1])
+    out
+
+# Terminal state for one ledger key ("" when none).
+pub fn native_file_worker_terminal_state_v1(queue: text, key: text) -> text:
+    val path = "{queue}/{sha256_text(key)}.terminal"
+    if not file_exists(path):
+        return ""
+    val fields = file_read(path).split("\n")
+    if fields.len() != 6: "" else: fields[0]
+
+# Object path recorded in a MIR ledger's .object sidecar ("" when none).
+pub fn native_file_worker_object_path_v1(queue: text, module_name: text) -> text:
+    val path = "{queue}/{sha256_text(module_name)}.object"
+    if not file_exists(path):
+        return ""
+    file_read(path).split("\n")[0]
+
+# Inventory row count of a ledger (0 when none published yet).
+pub fn native_file_worker_inventory_rows_v1(queue: text) -> i64:
+    if not file_exists("{queue}/inventory"):
+        return 0
+    val rows = file_read("{queue}/inventory").split("\n")
+    var count: i64 = 0
+    var index = 1
+    while index < rows.len():
+        if rows[index] != "":
+            count = count + 1
+        index = index + 1
+    count
+
+# Mono gate over the HIR ledger: 1 = every inventory row is a PASS terminal
+# (global mono inputs complete), 0 = not yet, -1 = blocked or a non-PASS
+# terminal (MIR can never be admitted from this ledger).
+pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
+    if file_exists("{queue}/BLOCKED"):
+        return -1
+    if not file_exists("{queue}/inventory"):
+        return 0
+    val rows = file_read("{queue}/inventory").split("\n")
+    if rows.len() < 2:
+        return 0
+    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var complete = true
+    var index = 1
+    while index < rows.len():
+        val path = rows[index]
+        index = index + 1
+        if path != "" and not excluded.contains(path):
+            val state = native_file_worker_terminal_state_v1(queue, path)
+            if state == "":
+                complete = false
+            elif state != "PASS":
+                return -1
+    if complete: 1 else: 0
