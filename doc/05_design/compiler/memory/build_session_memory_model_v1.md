@@ -75,10 +75,10 @@ T0/T1 → RC (`share`). `scope_id = 0` is reserved for genuinely immortal data
   `share()` and fails closed on a back-edge. Parent→child edges in these
   structures are the only edges; child→parent pointers are forbidden by review.
 - **I6 Layout ABI frozen.** `RtCoreArray/Dict/Enum/Closure/Float/String` field
-  offsets do not change (native codegen reads them). The refcount lives in the
-  **header extension row** of the pointer registry (`rt_core_immortal_registry`
-  becomes `ptr → {scope_id-mirror, rc}`; Rust `HEAP_ALLOCATION_REGISTRY`
-  becomes `HashMap<ptr, Meta>`). The 16 spare header bits are not used for rc.
+  offsets do not change (native codegen reads them). The refcount lives in a
+  **pointer-keyed side table** with rows only for rc roots (objects passed to
+  `rt_rc_share`), as landed by P4 — not a row parallel to the whole pointer
+  registry (see the ownership header in `rc_graph.rs`). The 16 spare header bits are not used for rc.
 - **I7 Dual implementation.** Every new `rt_*` symbol lands in
   `src/runtime/runtime_native.c` **and** `src/compiler_rust/runtime/src/value/`
   with the same contract and a selfcheck in `src/runtime/test/` plus a Rust
@@ -133,7 +133,7 @@ public helper names (`bootstrap_hir_modules_add`, `bootstrap_hir_module_count`,
 `bootstrap_fn_*`, …) are kept as forwarding functions over the session store so
 20.hir / 50.mir / 70.backend callers change only where they *promote*.
 
-`GlobalDataset` (`src/lib/nogc_sync_mut/memory/global_dataset.spl`): keyed by
+`GlobalDataset` (`src/lib/nogc_sync_mut/mem/global_dataset.spl`): keyed by
 identity digest; `max_count`, `max_bytes` from `CacheLimits`-style config
 (`SIMPLE_GLOBAL_DATASET_MAX_ENTRIES`, `SIMPLE_GLOBAL_DATASET_MAX_BYTES`), LRU
 clock, `get(key) -> retain`, `put(key, v)` = `rt_rc_share` + admission + evict.
@@ -157,7 +157,7 @@ evicted graphs are `S`-owned, not permanent.
 | **P2** | `BuildSession` + `BootstrapHirStore`; replace the 7 HIR globals; `publish_hir_row`; delete `bootstrap_hir_modules_promote_last` | `80.driver/session/`, `lowering_helpers.spl`, `driver_hir_pipeline_lowering.spl`, `driver_types.spl` | HIR specs, stage-3 HIR time + RSS |
 | **P3** | `BootstrapMirStore`; replace 18 MIR globals; delete `bootstrap_mir_registries_promote` | `bootstrap_globals.spl`, `mir_data.spl`, `module_lowering.spl` | MIR specs, stage-3 time + RSS |
 | **P4** | Refcount: registry meta row, `rt_rc_*`, `rt_heap_graph_bytes`, debug cycle check | C + Rust twins + tests | dual-impl ratchet |
-| **P5** | `GlobalDataset` (count+bytes, LRU, pinned-by-rc); wire TLDR surfaces + interned strings | `src/lib/nogc_sync_mut/memory/`, `module_surface_registry.spl` | unit specs, daemon RSS |
+| **P5** | `GlobalDataset` (count+bytes, LRU, pinned-by-rc); wire TLDR surfaces + interned strings | `src/lib/nogc_sync_mut/mem/`, `module_surface_registry.spl` | unit specs, daemon RSS |
 | **P6** | Session `end()` in daemon/LSP/test-runner; per-module sub-scope freed after object emit | `80.driver`, `app/mcp`, `app/test_runner_new` | request-loop RSS flat over 100 requests |
 
 P0 and P1 may land in either order; P2 requires P1; P3 requires P2; P4 is

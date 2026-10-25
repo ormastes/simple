@@ -1,0 +1,155 @@
+# GlobalDataset — bounded, refcount-aware T2 dataset (BSM P5).
+#
+# The rc surface is a counting fake: values are text, the fake rc table is a
+# Dict keyed by the value, and graph_bytes is the text length.
+
+use std.spec
+use std.mem.global_dataset.{GlobalDataset, GlobalDatasetLimits, RcPort,
+    global_dataset_with_port, global_dataset_limits_load}
+
+var _rc: Dict<text, i64> = {}
+var _shares: i64 = 0
+var _retains: i64 = 0
+var _releases: i64 = 0
+
+fn _reset():
+    _rc = {}
+    _shares = 0
+    _retains = 0
+    _releases = 0
+
+fn _f_share(v: Any) -> bool:
+    val k = "{v}"
+    _shares = _shares + 1
+    _rc[k] = 1
+    true
+
+fn _f_retain(v: Any) -> bool:
+    val k = "{v}"
+    _retains = _retains + 1
+    _rc[k] = (_rc.get(k) ?? 0) + 1
+    true
+
+fn _f_release(v: Any) -> bool:
+    val k = "{v}"
+    _releases = _releases + 1
+    _rc[k] = (_rc.get(k) ?? 0) - 1
+    true
+
+fn _set_rc(k: text, n: i64):
+    _rc[k] = n
+
+fn _f_count(v: Any) -> i64:
+    _rc.get("{v}") ?? 0
+
+fn _f_bytes(v: Any) -> i64:
+    "{v}".len()
+
+fn _ds(max_entries: i64, max_bytes: i64) -> GlobalDataset:
+    _reset()
+    val port = RcPort(share: _f_share, retain: _f_retain, release: _f_release,
+        count: _f_count, graph_bytes: _f_bytes)
+    global_dataset_with_port(port, GlobalDatasetLimits(max_entries: max_entries, max_bytes: max_bytes))
+
+fn _has(ds: GlobalDataset, key: text) -> bool:
+    val got = ds.acquire(key)
+    match got:
+        case Some(_):
+            ds.release(key)
+            true
+        case _:
+            false
+
+describe "GlobalDataset":
+    it "count bound evicts the least-recently-used entry":
+        var ds = _ds(2, 0)
+        expect(ds.put("a", "aa").unwrap()).to_equal(true)
+        expect(ds.put("b", "bb").unwrap()).to_equal(true)
+        expect(ds.put("c", "cc").unwrap()).to_equal(true)
+        expect(ds.stats().entries).to_equal(2)
+        expect(ds.stats().evictions).to_equal(1)
+        expect(_has(ds, "a")).to_equal(false)
+        expect(_has(ds, "c")).to_equal(true)
+
+    it "byte bound evicts until the new value fits":
+        var ds = _ds(0, 10)
+        ds.put("a", "aaaa").unwrap()
+        ds.put("b", "bbbb").unwrap()
+        expect(ds.put("c", "cccc").unwrap()).to_equal(true)
+        expect(ds.stats().total_bytes).to_equal(8)
+        expect(ds.stats().evictions).to_equal(1)
+
+    it "skips a pinned entry and evicts the next LRU instead":
+        var ds = _ds(2, 0)
+        ds.put("a", "aa").unwrap()
+        ds.put("b", "bb").unwrap()
+        _set_rc("aa", 2)
+        expect(ds.put("c", "cc").unwrap()).to_equal(true)
+        expect(ds.stats().pinned_skips).to_equal(1)
+        _set_rc("aa", 1)
+        expect(_has(ds, "a")).to_equal(true)
+        expect(_has(ds, "b")).to_equal(false)
+
+    it "refuses a put when every live entry is pinned":
+        var ds = _ds(1, 0)
+        ds.put("a", "aa").unwrap()
+        _set_rc("aa", 2)
+        expect(ds.put("b", "bb").unwrap()).to_equal(false)
+        expect(ds.stats().refused_puts).to_equal(1)
+        expect(ds.stats().entries).to_equal(1)
+
+    it "acquire bumps recency and retains once":
+        var ds = _ds(2, 0)
+        ds.put("a", "aa").unwrap()
+        ds.put("b", "bb").unwrap()
+        ds.acquire("a")
+        expect(_retains).to_equal(1)
+        ds.release("a")
+        ds.put("c", "cc").unwrap()
+        expect(_has(ds, "a")).to_equal(true)
+        expect(_has(ds, "b")).to_equal(false)
+
+    it "release and remove each call the port exactly once":
+        var ds = _ds(0, 0)
+        ds.put("a", "aa").unwrap()
+        ds.acquire("a")
+        expect(ds.release("a")).to_equal(true)
+        expect(_releases).to_equal(1)
+        expect(ds.remove("a")).to_equal(true)
+        expect(_releases).to_equal(2)
+        expect(ds.remove("a")).to_equal(false)
+        expect(_releases).to_equal(2)
+
+    it "replacing a key releases the old value":
+        var ds = _ds(0, 0)
+        ds.put("a", "old").unwrap()
+        ds.put("a", "newer").unwrap()
+        expect(_releases).to_equal(1)
+        expect(ds.stats().entries).to_equal(1)
+        expect(ds.stats().total_bytes).to_equal(5)
+
+    it "refuses an oversize single value":
+        var ds = _ds(0, 3)
+        expect(ds.put("a", "toolong").unwrap()).to_equal(false)
+        expect(_shares).to_equal(0)
+        expect(ds.stats().refused_puts).to_equal(1)
+
+    it "absent env limits load as unbounded":
+        val limits = global_dataset_limits_load()
+        expect(limits.max_entries).to_equal(0)
+        expect(limits.max_bytes).to_equal(0)
+
+    it "reports exact stats":
+        var ds = _ds(1, 0)
+        ds.put("a", "aa").unwrap()
+        ds.put("b", "bbb").unwrap()
+        ds.acquire("b")
+        ds.acquire("zz")
+        val s = ds.stats()
+        expect(s.entries).to_equal(1)
+        expect(s.total_bytes).to_equal(3)
+        expect(s.evictions).to_equal(1)
+        expect(s.refused_puts).to_equal(0)
+        expect(s.pinned_skips).to_equal(0)
+        expect(s.hits).to_equal(1)
+        expect(s.misses).to_equal(1)

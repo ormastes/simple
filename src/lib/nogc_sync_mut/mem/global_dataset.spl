@@ -1,0 +1,228 @@
+# GlobalDataset — bounded, refcount-aware process-wide dataset (BSM tier T2).
+#
+# Design: doc/05_design/compiler/memory/build_session_memory_model_v1.md
+#   §2 (T2 Global dataset), §3 I5/I8, §4 refcount surface, §5, §7 P5.
+#
+# Ownership (mirrors src/compiler_rust/runtime/src/value/rc_graph.rs header):
+#   put()     -> rc_share(value): the dataset owns exactly one count.
+#   acquire() -> rc_retain(value): the caller owns one more count and must
+#                hand it back with release(key).
+#   remove()/replace/evict -> rc_release(value): drops the dataset's count.
+# An entry whose rc_count == 1 is held only by the dataset and may be evicted;
+# rc_count > 1 means a caller still holds it, so it is PINNED (I8: never
+# delete a protected root).
+#
+# The rc surface is injected as an RcPort so the dataset is testable on a
+# runtime that predates the rt_rc_* externs; the default port calls them.
+
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.sffi.host.{rt_rc_share, rt_rc_retain, rt_rc_release, rt_rc_count,
+    rt_heap_graph_bytes}
+
+
+fn _sffi_rc_share(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_share(value)
+
+fn _sffi_rc_retain(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_retain(value)
+
+fn _sffi_rc_release(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_release(value)
+
+fn _sffi_rc_count(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_rc_count(value)
+
+fn _sffi_heap_graph_bytes(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_heap_graph_bytes(value)
+
+struct RcPort:
+    share: fn(Any) -> bool
+    retain: fn(Any) -> bool
+    release: fn(Any) -> bool
+    count: fn(Any) -> i64
+    graph_bytes: fn(Any) -> i64
+
+fn rc_port_runtime() -> RcPort:
+    RcPort(share: _sffi_rc_share, retain: _sffi_rc_retain,
+        release: _sffi_rc_release, count: _sffi_rc_count,
+        graph_bytes: _sffi_heap_graph_bytes)
+
+# A limit <= 0 means "unbounded on that axis".
+struct GlobalDatasetLimits:
+    max_entries: i64
+    max_bytes: i64
+
+fn _env_limit(name: text) -> i64:
+    val raw = env_get_opt(name) ?? ""
+    if raw == "":
+        return 0
+    match raw.trim().to_i64():
+        case Some(v):
+            if v > 0:
+                return v
+            0
+        case None:
+            0
+
+fn global_dataset_limits_load() -> GlobalDatasetLimits:
+    GlobalDatasetLimits(
+        max_entries: _env_limit("SIMPLE_GLOBAL_DATASET_MAX_ENTRIES"),
+        max_bytes: _env_limit("SIMPLE_GLOBAL_DATASET_MAX_BYTES"),
+    )
+
+struct GlobalDatasetStats:
+    entries: i64
+    total_bytes: i64
+    evictions: i64
+    refused_puts: i64
+    pinned_skips: i64
+    hits: i64
+    misses: i64
+
+class GlobalDataset:
+    port: RcPort
+    limits: GlobalDatasetLimits
+    index: Dict<text, i64>
+    keys: [text]
+    values: [Any]
+    sizes: [i64]
+    stamps: [i64]
+    live: [bool]
+    clock: i64
+    total_bytes: i64
+    evictions: i64
+    refused_puts: i64
+    pinned_skips: i64
+    hits: i64
+    misses: i64
+
+    fn entry_count() -> i64:
+        self.index.len()
+
+    me _tick() -> i64:
+        self.clock = self.clock + 1
+        self.clock
+
+    fn _count(v: Any) -> i64:
+        val f = self.port.count
+        f(v)
+
+    me _drop_slot(slot: i64):
+        val f = self.port.release
+        f(self.values[slot])
+        self.total_bytes = self.total_bytes - self.sizes[slot]
+        self.live[slot] = false
+        self.index.remove(self.keys[slot])
+
+    fn _over(extra_entries: i64, extra_bytes: i64) -> bool:
+        val n = self.index.len() + extra_entries
+        if self.limits.max_entries > 0 and n > self.limits.max_entries:
+            return true
+        if self.limits.max_bytes > 0 and self.total_bytes + extra_bytes > self.limits.max_bytes:
+            return true
+        false
+
+    # Evicts the least-recently-stamped unpinned entry. O(n) over slots per
+    # call (v1 bound: n = live + dead slots; eviction loops are O(n * k)).
+    me _evict_one() -> bool:
+        var best = -1
+        var i = 0
+        while i < self.keys.len():
+            if self.live[i]:
+                if self._count(self.values[i]) > 1:
+                    self.pinned_skips = self.pinned_skips + 1
+                elif best < 0 or self.stamps[i] < self.stamps[best]:
+                    best = i
+            i = i + 1
+        if best < 0:
+            return false
+        self._drop_slot(best)
+        self.evictions = self.evictions + 1
+        true
+
+    me put(key: text, value: Any) -> Result<bool, text>:
+        val gb = self.port.graph_bytes
+        val bytes = gb(value)
+        if bytes < 0 or (self.limits.max_bytes > 0 and bytes > self.limits.max_bytes):
+            self.refused_puts = self.refused_puts + 1
+            return Ok(false)
+        if self.index.contains_key(key):
+            self._drop_slot(self.index[key])
+        while self._over(extra_entries: 1, extra_bytes: bytes):
+            if not self._evict_one():
+                self.refused_puts = self.refused_puts + 1
+                return Ok(false)
+        val sh = self.port.share
+        if not sh(value):
+            return Err("global_dataset: rc_share refused value for key '{key}'")
+        self.keys.push(key)
+        self.values.push(value)
+        self.sizes.push(bytes)
+        self.stamps.push(self._tick())
+        self.live.push(true)
+        self.index[key] = self.keys.len() - 1
+        self.total_bytes = self.total_bytes + bytes
+        Ok(true)
+
+    # Returns the value with one count owned by the caller (hand back via release).
+    me acquire(key: text) -> Any?:
+        if not self.index.contains_key(key):
+            self.misses = self.misses + 1
+            return None
+        val slot = self.index[key]
+        self.stamps[slot] = self._tick()
+        self.hits = self.hits + 1
+        val f = self.port.retain
+        f(self.values[slot])
+        Some(self.values[slot])
+
+    me release(key: text) -> bool:
+        if not self.index.contains_key(key):
+            return false
+        val f = self.port.release
+        f(self.values[self.index[key]])
+
+    me remove(key: text) -> bool:
+        if not self.index.contains_key(key):
+            return false
+        self._drop_slot(self.index[key])
+        true
+
+    me clear():
+        var i = 0
+        while i < self.keys.len():
+            if self.live[i]:
+                self._drop_slot(i)
+            i = i + 1
+        self.keys = []
+        self.values = []
+        self.sizes = []
+        self.stamps = []
+        self.live = []
+        self.total_bytes = 0
+
+    fn stats() -> GlobalDatasetStats:
+        GlobalDatasetStats(entries: self.index.len(), total_bytes: self.total_bytes,
+            evictions: self.evictions, refused_puts: self.refused_puts,
+            pinned_skips: self.pinned_skips, hits: self.hits, misses: self.misses)
+
+fn global_dataset_with_port(port: RcPort, limits: GlobalDatasetLimits) -> GlobalDataset:
+    GlobalDataset(port: port, limits: limits, index: {}, keys: [], values: [],
+        sizes: [], stamps: [], live: [], clock: 0, total_bytes: 0, evictions: 0,
+        refused_puts: 0, pinned_skips: 0, hits: 0, misses: 0)
+
+var _global_dataset: GlobalDataset? = None
+
+fn global_dataset() -> GlobalDataset:
+    match _global_dataset:
+        case Some(ds):
+            return ds
+        case None:
+            val ds = global_dataset_with_port(rc_port_runtime(), global_dataset_limits_load())
+            _global_dataset = Some(ds)
+            ds
