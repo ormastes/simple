@@ -111,3 +111,11 @@ only for the recorded LLVM stdio exchanges. See the
 [design and remaining owner failures](../../../05_design/lsp_mcp_windows_byte_transport.md).
 The T32 startup facade is not the actual MCP server. Native linking and help
 output alone do not prove protocol service or working code-intelligence tools.
+
+## Shared main-MCP wire leaf (2026-10-25)
+
+The main MCP entry consumes `app.protocol.wire_stdout`. Its recorded LLVM JSONL,
+framed exchanges and actual multilingual Markdown read pass. LSP migration to
+that shared leaf is pending its exhausted repair budget and wider qualification;
+do not claim both apps share the implementation yet. Inventory rows are plans,
+not executed examples.
