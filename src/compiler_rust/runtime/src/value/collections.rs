@@ -29,6 +29,68 @@ thread_local! {
     /// Kept outside `TRANSIENT_HEAP_SCOPE` so a heap free can erase from it
     /// without re-borrowing the scope.
     static TRANSIENT_PROMOTE_SHARE: RefCell<Option<TransientPromoteShare>> = const { RefCell::new(None) };
+    /// Build session heap (BSM T1): one live session per thread, twin of the
+    /// C runtime's `rt_core_session_heap_*` state (runtime_native.c).
+    static SESSION_HEAP: RefCell<Option<SessionHeap>> = const { RefCell::new(None) };
+    /// Nodes the last `rt_transient_heap_adopt` visited (I2 pruning evidence).
+    static SESSION_ADOPT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Objects owned by a build session (doc/05_design/compiler/memory/
+/// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
+/// so ownership is membership: `owned` holds header addresses for O(1) checks.
+struct SessionHeap {
+    id: u32,
+    alloc_depth: i32,
+    objects: Vec<RuntimeValue>,
+    owned: super::heap::HeapPtrSet<usize>,
+}
+
+impl SessionHeap {
+    fn adopt(&mut self, value: RuntimeValue) {
+        if value.is_heap() && self.owned.insert(value.as_heap_ptr() as usize) {
+            self.objects.push(value);
+        }
+    }
+
+    /// Drop every session-owned object whose exact value bits are in
+    /// `reachable` (it became an rc root's graph). Entries are tombstoned to
+    /// NIL, as the module scope does, so `free_transient_objects` skips them.
+    /// O(objects) per call; shares are rare (dataset puts), adopts are not.
+    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+        let mut removed = false;
+        for bits in reachable.iter() {
+            let value = RuntimeValue(*bits);
+            if value.is_heap() && self.owned.remove(&(value.as_heap_ptr() as usize)) {
+                removed = true;
+            }
+        }
+        if !removed {
+            return;
+        }
+        for object in self.objects.iter_mut() {
+            if object.is_heap() && reachable.contains(&object.0) {
+                *object = RuntimeValue::NIL;
+            }
+        }
+    }
+}
+
+/// Nodes visited by this thread's last `rt_transient_heap_adopt`.
+pub fn session_adopt_visits_debug() -> u64 {
+    SESSION_ADOPT_VISITS.with(|visits| visits.get())
+}
+
+/// True when the session (if any) owns header address `ptr`.
+pub fn session_heap_owns(value: RuntimeValue) -> bool {
+    value.is_heap()
+        && SESSION_HEAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|session| session.owned.contains(&(value.as_heap_ptr() as usize)))
+        })
 }
 
 struct TransientHeapScope {
@@ -78,17 +140,29 @@ impl TransientHeapScope {
     }
 
     /// Drop every tracked object whose exact value bits are in `reachable`.
-    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
+    /// With `released`, also report each object that left the scope (BSM:
+    /// it moves to the live session instead of becoming permanent).
+    fn release_reachable(
+        &mut self,
+        reachable: &super::heap::HeapPtrSet<u64>,
+        mut released: Option<&mut Vec<RuntimeValue>>,
+    ) {
         self.sync_index();
         if self.index_ambiguous {
             // Deferred: rt_transient_array_scope_end filters once.
             // Only tracked addresses are recorded, so the set stays bounded
             // by `objects` however much persistent graph a promote walks.
-            let by_ptr = &self.by_ptr;
-            self.promoted.extend(reachable.iter().copied().filter(|bits| {
-                let value = RuntimeValue(*bits);
-                value.is_heap() && by_ptr.contains_key(&(value.as_heap_ptr() as usize))
-            }));
+            for bits in reachable.iter().copied() {
+                let value = RuntimeValue(bits);
+                if value.is_heap()
+                    && self.by_ptr.contains_key(&(value.as_heap_ptr() as usize))
+                    && self.promoted.insert(bits)
+                {
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
+                }
+            }
             return;
         }
         for bits in reachable.iter() {
@@ -103,6 +177,9 @@ impl TransientHeapScope {
                     // the free order of the survivors is unchanged.
                     self.objects[position] = RuntimeValue::NIL;
                     self.by_ptr.remove(&ptr);
+                    if let Some(out) = released.as_deref_mut() {
+                        out.push(value);
+                    }
                 }
             }
         }
@@ -136,6 +213,24 @@ pub fn transient_heap_scope_paused() -> bool {
 }
 
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
+    // A live session owns what a paused/absent module scope would have left
+    // permanent, and everything inside rt_session_alloc_begin/end (I3).
+    let to_session = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return false;
+        };
+        let module_running =
+            TRANSIENT_HEAP_SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| !scope.paused));
+        if session.alloc_depth > 0 || !module_running {
+            session.adopt(value);
+            return true;
+        }
+        false
+    });
+    if to_session {
+        return value;
+    }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
@@ -3088,7 +3183,24 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        scope.release_reachable(&reachable_heap);
+        // BSM compatibility alias (design §4): with a live session, the
+        // module-owned nodes move to the SESSION instead of becoming
+        // permanent. The walk above stays FULL (no I2 pruning): legacy
+        // callers may still violate I1 (e8152c252ad unowned roots holding
+        // module-owned children). With no session this is unchanged.
+        if SESSION_HEAP.with(|slot| slot.borrow().is_some()) {
+            let mut released = Vec::new();
+            scope.release_reachable(&reachable_heap, Some(&mut released));
+            SESSION_HEAP.with(|slot| {
+                if let Some(session) = slot.borrow_mut().as_mut() {
+                    for value in released {
+                        session.adopt(value);
+                    }
+                }
+            });
+        } else {
+            scope.release_reachable(&reachable_heap, None);
+        }
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3154,6 +3266,13 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
         let promoted = std::mem::take(&mut scope.promoted);
         scope.objects.retain(|object| !promoted.contains(&object.0));
     }
+    free_transient_objects(&scope.objects);
+    unsafe { rt_transient_raw_scope_end() != 0 }
+}
+
+/// Free every still-registered object in `objects` (module-scope end and
+/// `rt_session_heap_end`, BSM I4 — one sweep).
+fn free_transient_objects(objects: &[RuntimeValue]) {
     // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
     // the old per-object `free_transient_heap` took the registry mutex twice
     // per object, and each erase bumped the free epoch, so the next object's
@@ -3162,10 +3281,10 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // shared strings stay registered, as `rt_string_free` leaves them, and
     // closures take the per-object path below so a pinned one is orphaned
     // (`closure_pin_defer_free`) rather than freed.
-    let mut erased = Vec::with_capacity(scope.objects.len());
+    let mut erased = Vec::with_capacity(objects.len());
     let mut closures = Vec::new();
     super::heap::unregister_heap_ptrs_batch(
-        &scope.objects,
+        objects,
         |value, ptr| unsafe {
             match (*ptr).object_type {
                 HeapObjectType::String => (*ptr).reserved & RT_STRING_FLAG_SHARED == 0,
@@ -3191,7 +3310,177 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     for closure in closures {
         free_transient_heap(closure);
     }
-    unsafe { rt_transient_raw_scope_end() != 0 }
+}
+
+// ============================================================================
+// Build session heap (BSM T1) — design §3 I2-I4, §4. Twin of runtime_native.c.
+// ============================================================================
+
+fn module_scope_state() -> Option<bool> {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().map(|scope| scope.paused))
+}
+
+/// 0 on failure: a session is already live on this thread, a module scope is
+/// active on this thread, or the id space is exhausted.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_begin() -> u32 {
+    if module_scope_state().is_some() {
+        return 0;
+    }
+    SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return 0;
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut id = SESSION_HEAP_NEXT_ID.load(Relaxed);
+        while id != 0 {
+            match SESSION_HEAP_NEXT_ID.compare_exchange_weak(id, id.wrapping_add(1), Relaxed, Relaxed) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
+        if id == 0 {
+            return 0;
+        }
+        *slot = Some(SessionHeap { id, alloc_depth: 0, objects: Vec::new(), owned: Default::default() });
+        id
+    })
+}
+
+/// Frees every object the session still owns in ONE sweep (I4). Refused
+/// while a module scope is active on this thread or for a non-live id.
+#[no_mangle]
+pub extern "C" fn rt_session_heap_end(session: u32) -> bool {
+    if session == 0 || module_scope_state().is_some() {
+        return false;
+    }
+    let taken = SESSION_HEAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|live| live.id == session) {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    let Some(heap) = taken else {
+        return false;
+    };
+    free_transient_objects(&heap.objects);
+    true
+}
+
+/// Depth-counted: while > 0, new objects belong to the session even inside a
+/// running module scope (I3: session containers grow under the session).
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_begin() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth < i32::MAX => {
+            session.alloc_depth += 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_alloc_end() -> bool {
+    SESSION_HEAP.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(session) if session.alloc_depth > 0 => {
+            session.alloc_depth -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_session_heap_id() -> u32 {
+    SESSION_HEAP.with(|slot| slot.borrow().as_ref().map_or(0, |session| session.id))
+}
+
+/// Move the module-owned part of `value`'s graph to the live session: nodes
+/// the ACTIVE paused module scope owns leave its list and join the session;
+/// the walk stops at any node the module scope does not own (I2), so the cost
+/// is O(nodes the module allocated), never O(session). Root rules as in
+/// `rt_transient_heap_promote`: scalars and registered non-module roots are a
+/// no-op success. Raw struct blocks are always walked (their ownership is not
+/// visible here) and promoted to permanent, as promote does — v1 sessions do
+/// not own raw blocks. False without a live session or a paused module scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_adopt(value: RuntimeValue) -> bool {
+    SESSION_ADOPT_VISITS.with(|visits| visits.set(0));
+    if rt_session_heap_id() == 0 || module_scope_state() != Some(true) {
+        return false;
+    }
+    let mut root_words = std::ptr::null();
+    let mut root_ptr = 0usize;
+    let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
+    if !root_raw && !value.is_heap() {
+        return true;
+    }
+    if !root_raw && value.heap_type().is_none() {
+        return false;
+    }
+    let mut visits = 0u64;
+    let mut moved = super::heap::HeapPtrSet::<u64>::default();
+    let mut reachable_raw = super::heap::HeapPtrSet::<usize>::default();
+    let ok = TRANSIENT_HEAP_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(scope) = slot.as_mut() else {
+            return false;
+        };
+        let mut pending = vec![value];
+        while let Some(current) = pending.pop() {
+            let mut words = std::ptr::null();
+            let mut canonical_ptr = 0usize;
+            let word_count = unsafe { rt_transient_raw_words(current.0 as i64, &mut words, &mut canonical_ptr) };
+            if word_count >= 0 {
+                visits += 1;
+                if !reachable_raw.insert(canonical_ptr) {
+                    continue;
+                }
+                if word_count > 0 {
+                    if words.is_null() {
+                        return false;
+                    }
+                    let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
+                    pending.extend(raw_words.iter().map(|word| RuntimeValue(*word as u64)));
+                }
+                continue;
+            }
+            if !current.is_heap() || current.heap_type().is_none() {
+                continue;
+            }
+            visits += 1;
+            if !scope.owns_heap_ptr(current.as_heap_ptr()) {
+                continue; // I2 prune: session-owned, permanent or foreign
+            }
+            if !moved.insert(current.0) {
+                continue;
+            }
+            if let Some(children) = transient_heap_children(current) {
+                pending.extend(children);
+            }
+        }
+        for ptr in reachable_raw.iter() {
+            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                return false;
+            }
+        }
+        let mut released = Vec::with_capacity(moved.len());
+        scope.release_reachable(&moved, Some(&mut released));
+        SESSION_HEAP.with(|slot| {
+            if let Some(session) = slot.borrow_mut().as_mut() {
+                for value in released {
+                    session.adopt(value);
+                }
+            }
+        });
+        true
+    });
+    SESSION_ADOPT_VISITS.with(|cell| cell.set(visits));
+    ok
 }
 
 /// Release the memory of a heap object this thread just erased from the
@@ -8941,11 +9230,21 @@ pub(crate) fn rc_graph_scope_owns(value: RuntimeValue) -> bool {
     })
 }
 
-/// Move `reachable` out of this thread's transient scope (no-op without one).
+/// Move `reachable` out of this thread's transient scope AND out of the live
+/// build session (no-op without either). An rc root is owned by its count, not
+/// by a scope: `None` here because the nodes must not be adopted into the
+/// session, and the session eviction is what keeps `rt_session_heap_end` from
+/// freeing a graph that `rt_rc_share` took over (BSM P1 x P4; the C twin is
+/// safe by construction because its reclaim keys on the tag share zeroes).
 pub(crate) fn rc_graph_scope_release(reachable: &super::heap::HeapPtrSet<u64>) {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
-            scope.release_reachable(reachable);
+            scope.release_reachable(reachable, None);
+        }
+    });
+    SESSION_HEAP.with(|slot| {
+        if let Some(session) = slot.borrow_mut().as_mut() {
+            session.release_reachable(reachable);
         }
     });
 }
