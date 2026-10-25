@@ -14,6 +14,11 @@
 # shard, or a guard-root flip recompiles conservatively, never narrows.
 use compiler.common.cache_contract.aspect_match_shard_v1.{DirectoryJoinPointFactsV1,
     PointcutMatchShardV1, aspect_weave_plan_delta_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{semantic_query_key_canonical_v1}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1,
+    reverse_reference_consumers_v1}
+use compiler.driver.cache.generic_specialization_list_v1.{generic_spec_consumer_key_v1,
+    generic_spec_template_subject_prefix_v1}
 
 pub struct IncrementalModuleV1:
     path: text
@@ -138,6 +143,112 @@ pub fn incremental_rebuild_plan_v1(modules: [IncrementalModuleV1],
     IncrementalRebuildPlanV1(recompile: _sorted_v1(recompile), reasons: reasons,
         pointcut_affected: affected)
 
+# ----------------------------------------------------------------------------
+# Generic-instance invalidation over `.rr` (P-G2).
+#
+# A declaring module whose interface digest changed ONLY because generic
+# templates changed (listed in `generic_only_iface`) does not dirty every
+# importer: only the modules recorded in `.rr` (family generic-specialization)
+# as consumers of an instance of a changed template recompile, whether or not
+# they import the declaring module directly. Any `.rr` doubt (invalid receipt,
+# incomplete family) falls back to the plain interface-digest rule.
+# ----------------------------------------------------------------------------
+
+pub struct GenericTemplateChangeV1:
+    module_path: text       # declaring module
+    template_symbol: text   # GenericTemplateEntryV1.symbol_id
+
+pub struct IncrementalGenericInputV1:
+    changes: [GenericTemplateChangeV1]
+    generic_only_iface: [text]   # module paths whose iface change `changes` fully explains
+    rr: ReverseReferenceReceiptReadV1
+
+pub struct IncrementalGenericPlanV1:
+    plan: IncrementalRebuildPlanV1
+    invalidated_instances: [text]   # sorted `.rr` instance subjects of changed templates
+    exact: bool
+    fallback_reason: text
+
+val _GENERIC_FAMILY_V1 = "generic-specialization"
+
+# (exact, reason, instance subjects, consumer identity -> template symbol)
+fn _generic_dependents_v1(input: IncrementalGenericInputV1) -> (bool, text, [text], Dict<text, text>):
+    var subjects: [text] = []
+    var consumers: Dict<text, text> = {}
+    if not input.rr.valid or input.rr.receipt == nil:
+        return (false, "rr-unavailable:" + input.rr.reason, subjects, consumers)
+    for change in input.changes:
+        val prefix = generic_spec_template_subject_prefix_v1(change.template_symbol)
+        for p in input.rr.receipt!.projections:
+            if p.key.projection_kind == _GENERIC_FAMILY_V1 and
+                    p.key.subject_identity.starts_with(prefix) and
+                    not subjects.contains(p.key.subject_identity):
+                subjects.push(p.key.subject_identity)
+        for subject in subjects:
+            if not subject.starts_with(prefix):
+                continue
+            val found = reverse_reference_consumers_v1(input.rr, subject, _GENERIC_FAMILY_V1)
+            if not found.exact:
+                return (false, found.fallback_reason, subjects, consumers)
+            for c in found.consumers:
+                if not consumers.contains_key(c):
+                    consumers[c] = change.template_symbol
+    # A complete-empty family still needs its coverage marker; without it the
+    # lookups above never ran (no instances) and absence is unproven.
+    val probe = reverse_reference_consumers_v1(input.rr, "@family-complete", _GENERIC_FAMILY_V1)
+    if not probe.exact:
+        return (false, probe.fallback_reason, subjects, consumers)
+    if probe.consumers.len() == 0:
+        return (false, "generic-family-not-projected", subjects, consumers)
+    (true, "", _sorted_v1(subjects), consumers)
+
+pub fn incremental_rebuild_plan_generic_v1(modules: [IncrementalModuleV1],
+        pointcuts: [PointcutDirChangeV1], input: IncrementalGenericInputV1) -> IncrementalGenericPlanV1:
+    val base = incremental_rebuild_plan_v1(modules, pointcuts)
+    if input.changes.len() == 0 or input.generic_only_iface.len() == 0:
+        return IncrementalGenericPlanV1(plan: base, invalidated_instances: [], exact: true,
+            fallback_reason: "")
+    val (exact, why, subjects, consumers) = _generic_dependents_v1(input)
+    if not exact:
+        return IncrementalGenericPlanV1(plan: base, invalidated_instances: subjects, exact: false,
+            fallback_reason: why)
+    var by_path: Dict<text, IncrementalModuleV1> = {}
+    for m in modules:
+        by_path[m.path] = m
+    val affected = base.pointcut_affected
+    var recompile: [text] = []
+    var reasons: [text] = []
+    for m in modules:
+        var reason = ""
+        if m.old_source_digest == "" or m.new_source_digest == "" or
+                m.old_source_digest != m.new_source_digest:
+            reason = "changed-source"
+        if reason == "":
+            for dep in m.imports:
+                if not by_path.contains_key(dep):
+                    reason = "unknown-import:" + dep
+                    break
+                val d = by_path[dep]
+                if input.generic_only_iface.contains(dep):
+                    continue
+                if d.old_iface_digest == "" or d.new_iface_digest == "" or
+                        d.old_iface_digest != d.new_iface_digest:
+                    reason = "iface:" + dep
+                    break
+        if reason == "":
+            val identity = semantic_query_key_canonical_v1(generic_spec_consumer_key_v1(m.path))
+            if consumers.contains_key(identity):
+                reason = "generic:" + consumers[identity]
+        if reason == "" and affected.contains(m.path):
+            reason = "pointcut"
+        if reason != "":
+            recompile.push(m.path)
+            reasons.push(m.path + "\u0000" + reason)
+    IncrementalGenericPlanV1(
+        plan: IncrementalRebuildPlanV1(recompile: _sorted_v1(recompile), reasons: reasons,
+            pointcut_affected: affected),
+        invalidated_instances: subjects, exact: true, fallback_reason: "")
+
 # Relink only when an object hash changed (or appeared/disappeared). When every
 # object is byte-identical and the cached output exists, place it: no new
 # object, no link. A missing cached output relinks.
@@ -155,3 +266,5 @@ pub fn incremental_link_decision_v1(objects: [IncrementalObjectV1],
 export IncrementalModuleV1, PointcutDirChangeV1, IncrementalRebuildPlanV1
 export IncrementalObjectV1, IncrementalLinkDecisionV1
 export pointcut_affected_files_v1, incremental_rebuild_plan_v1, incremental_link_decision_v1
+export GenericTemplateChangeV1, IncrementalGenericInputV1, IncrementalGenericPlanV1
+export incremental_rebuild_plan_generic_v1

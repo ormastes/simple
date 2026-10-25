@@ -1,0 +1,412 @@
+# Per-file required generic specializations + their `.rr` forward reads (P-G2).
+#
+# A module's TLDR companion records every concrete generic instance the module
+# needs, as a `generic-spec` section: one row per `ConcreteTldrKey`
+# (generic_tldr_view_v1.concrete_tldr_key_v1 over the template's TemplateId and
+# the canonical ArgsId of the concrete type arguments). The section is written
+# by the ordinary updateTldr path (module_artifacts_emit_v1: temp + atomic
+# rename), never by a side channel.
+#
+# The same rows become the module's forward semantic reads (kind
+# `tldr.concrete`, family `generic-specialization`), so the `.rr` reverse
+# projection answers "which importers depend on instance K of template T"
+# exactly. The planner (incremental_rebuild_plan_v1) consumes that answer.
+#
+# Completeness is explicit: an ambiguous template name, an arity mismatch or an
+# unkeyable argument marks the list incomplete, the forward reads are then
+# `Conservative`, and every `.rr` lookup in the family falls back to the wide
+# (interface-digest) rule. A missed instance can therefore never narrow a
+# rebuild.
+#
+# Named gaps: references are found textually (`Name<...>` with the name
+# resolving to a visible template by short or qualified name); import aliases
+# are not resolved, and nominal argument types are qualified to the consuming
+# module exactly like generic_tldr_projector does.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
+    GENERIC_PARAM_KIND_CONST, generic_template_id_v1, generic_args_id_v1,
+    concrete_tldr_key_v1, generic_template_section_decode_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1,
+    generic_type_text_key_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1,
+    SemanticQueryKeyV1, SemanticQueryReadV1, SemanticQueryReadManifestV1}
+
+pub val GENERIC_SPEC_SECTION_MAGIC_V1 = "generic-spec/v1"
+pub val GENERIC_SPEC_PROFILE_V1 = "generic-spec-profile/host"
+pub val GENERIC_SPEC_FACET_V1 = "generic-spec"
+
+pub struct RequiredSpecializationV1:
+    template_symbol: text   # GenericTemplateEntryV1.symbol_id
+    template_id: text       # generic_template_id_v1
+    args_id: text           # generic_args_id_v1
+    arg_keys: [text]        # positional structural argument keys
+    concrete_key: text      # ConcreteTldrKey
+
+pub struct GenericSpecializationListV1:
+    complete: bool
+    specs: [RequiredSpecializationV1]   # sorted by concrete_key, unique
+
+pub struct GenericSpecializationListDecodeV1:
+    ok: bool
+    list: GenericSpecializationListV1
+    error: text
+
+# ----------------------------------------------------------------------------
+# Extraction
+# ----------------------------------------------------------------------------
+
+fn _is_ident_char_v1(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or
+        ch == "_" or ch == "."
+
+fn _short_name_v1(symbol: text) -> text:
+    val dot = symbol.rfind(".")
+    if dot < 0: symbol else: symbol.substring(dot + 1)
+
+fn _indent_v1(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line.char_at(i) == " ":
+        i = i + 1
+    i
+
+# Index of the `>` closing the `<` at `open`, or -1.
+fn _close_angle_v1(line: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "<": depth = depth + 1
+        if ch == ">":
+            depth = depth - 1
+            if depth == 0: return i
+        if ch == ":" or ch == "=" or ch == ";":
+            return -1
+        i = i + 1
+    -1
+
+# Top-level comma split of a type-argument list.
+fn _split_args_v1(s: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "<" or ch == "[" or ch == "(": depth = depth + 1
+        if ch == ">" or ch == "]" or ch == ")": depth = depth - 1
+        if ch == "," and depth == 0:
+            out.push(s.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    out.push(s.substring(start).trim())
+    out
+
+fn _idents_v1(s: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < s.len():
+        if _is_ident_char_v1(s.char_at(i)):
+            var j = i
+            while j < s.len() and _is_ident_char_v1(s.char_at(j)):
+                j = j + 1
+            out.push(s.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn _decl_keyword_v1(trimmed: text) -> bool:
+    var t = trimmed
+    if t.starts_with("pub "): t = t.substring(4)
+    t.starts_with("fn ") or t.starts_with("struct ") or t.starts_with("class ") or
+        t.starts_with("enum ") or t.starts_with("trait ") or t.starts_with("impl")
+
+# Index of the `<` opening a declaration's own binder list (`fn name<`,
+# `struct Name<`, `impl<`), or -1. A `<` elsewhere on the line is a use.
+fn _decl_binder_open_v1(line: text) -> i64:
+    var i = _indent_v1(line)
+    if line.substring(i).starts_with("pub "): i = i + 4
+    var k = i
+    while k < line.len() and _is_ident_char_v1(line.char_at(k)):
+        k = k + 1
+    val keyword = line.substring(i, k)
+    if keyword == "impl":
+        if k < line.len() and line.char_at(k) == "<": return k
+        return -1
+    while k < line.len() and line.char_at(k) == " ":
+        k = k + 1
+    var n = k
+    while n < line.len() and _is_ident_char_v1(line.char_at(n)):
+        n = n + 1
+    if n > k and n < line.len() and line.char_at(n) == "<": n else: -1
+
+# (template index or -1, ambiguous) for a referenced name.
+fn _resolve_template_v1(name: text, module_id: text, templates: [GenericTemplateEntryV1]) -> (i64, bool):
+    var found = -1
+    var count = 0
+    var i = 0
+    while i < templates.len():
+        val sym = templates[i].symbol_id
+        if sym == name:
+            return (i, false)
+        if _short_name_v1(sym) == name:
+            if sym == module_id + "." + name:
+                return (i, false)
+            if found < 0: found = i
+            count = count + 1
+        i = i + 1
+    (found, count > 1)
+
+fn _arg_key_v1(module_id: text, kind: text, arg: text) -> text:
+    if kind == GENERIC_PARAM_KIND_CONST:
+        return "k{arg.len()}:" + arg
+    val d = GenericDeclInputV1(module_path: module_id, name: "", params: [], param_kinds: [],
+        fields: [], visibility_root: "", active_guard_root: "", source_digest: "")
+    match generic_type_text_key_v1(d, arg):
+        case Ok(key): key
+        case Err(_e): ""
+
+pub fn required_specialization_v1(entry: GenericTemplateEntryV1, arg_keys: [text]) -> RequiredSpecializationV1:
+    var kinds: [text] = []
+    for p in entry.params:
+        kinds.push(p.kind)
+    val template_id = generic_template_id_v1(entry)
+    val args_id = generic_args_id_v1(kinds, arg_keys)
+    RequiredSpecializationV1(template_symbol: entry.symbol_id, template_id: template_id,
+        args_id: args_id, arg_keys: arg_keys,
+        concrete_key: concrete_tldr_key_v1(template_id, args_id, "",
+            sha256_text(GENERIC_SPEC_PROFILE_V1), entry.active_guard_root))
+
+fn _sorted_unique_specs_v1(specs: [RequiredSpecializationV1]) -> [RequiredSpecializationV1]:
+    var out: [RequiredSpecializationV1] = []
+    for s in specs:
+        var dup = false
+        for o in out:
+            if o.concrete_key == s.concrete_key: dup = true
+        if dup: continue
+        var j = out.len()
+        out.push(s)
+        while j > 0 and out[j - 1].concrete_key > s.concrete_key:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = s
+    out
+
+# Every concrete instance of a visible template referenced by `source`.
+# References whose arguments mention an enclosing generic binder are template
+# internal (instantiated transitively) and are not recorded.
+pub fn generic_specializations_of_source_v1(source: text, module_id: text,
+        templates: [GenericTemplateEntryV1]) -> GenericSpecializationListV1:
+    var specs: [RequiredSpecializationV1] = []
+    var complete = true
+    var scope_indent: [i64] = []
+    var scope_binders: [[text]] = []
+    for raw in source.split("\n"):
+        val trimmed = raw.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val hash = raw.index_of(" #")
+        val line = if hash >= 0: raw.substring(0, hash) else: raw
+        val indent = _indent_v1(line)
+        while scope_indent.len() > 0 and scope_indent[scope_indent.len() - 1] >= indent:
+            scope_indent = scope_indent.slice(0, scope_indent.len() - 1)
+            scope_binders = scope_binders.slice(0, scope_binders.len() - 1)
+        var binders: [text] = []
+        for bs in scope_binders:
+            for b in bs: binders.push(b)
+        val is_decl = _decl_keyword_v1(trimmed)
+        var decl_binders: [text] = []
+        var skip_first_group = false
+        if is_decl:
+            val lt = _decl_binder_open_v1(line)
+            if lt >= 0:
+                val gt = _close_angle_v1(line, lt)
+                if gt > lt:
+                    for a in _split_args_v1(line.substring(lt + 1, gt)):
+                        val ids = _idents_v1(a)
+                        if ids.len() > 0:
+                            # `const N: i64` -> N; `T` -> T
+                            val name = if ids[0] == "const" and ids.len() > 1: ids[1] else: ids[0]
+                            decl_binders.push(name)
+                            binders.push(name)
+                    skip_first_group = true
+        var first_group_seen = false
+        var i = 0
+        while i < line.len():
+            if not _is_ident_char_v1(line.char_at(i)):
+                i = i + 1
+                continue
+            var j = i
+            while j < line.len() and _is_ident_char_v1(line.char_at(j)):
+                j = j + 1
+            val name = line.substring(i, j)
+            if j >= line.len() or line.char_at(j) != "<":
+                i = j
+                continue
+            val gt = _close_angle_v1(line, j)
+            if gt < 0:
+                i = j + 1
+                continue
+            if skip_first_group and not first_group_seen:
+                first_group_seen = true
+                i = gt + 1
+                continue
+            first_group_seen = true
+            val (ti, ambiguous) = _resolve_template_v1(name, module_id, templates)
+            if ti < 0:
+                i = j + 1
+                continue
+            if ambiguous:
+                complete = false
+                i = j + 1
+                continue
+            val entry = templates[ti]
+            val args = _split_args_v1(line.substring(j + 1, gt))
+            var open = false
+            for a in args:
+                for id in _idents_v1(a):
+                    if binders.contains(id): open = true
+            if open:
+                i = j + 1
+                continue
+            if args.len() != entry.params.len():
+                complete = false
+                i = j + 1
+                continue
+            var keys: [text] = []
+            var ok = true
+            var k = 0
+            while k < args.len():
+                val key = _arg_key_v1(module_id, entry.params[k].kind, args[k])
+                if key == "": ok = false
+                keys.push(key)
+                k = k + 1
+            if not ok:
+                complete = false
+            else:
+                specs.push(required_specialization_v1(entry, keys))
+            # Continue inside the argument list: nested instances count too.
+            i = j + 1
+        if is_decl and decl_binders.len() > 0:
+            scope_indent.push(indent)
+            scope_binders.push(decl_binders)
+    GenericSpecializationListV1(complete: complete, specs: _sorted_unique_specs_v1(specs))
+
+# Templates visible to a module: its own `generic-template` section plus the
+# imported companions' sections ("<kind>|<body>" entries).
+pub fn generic_templates_of_sections_v1(sections: [text]) -> ([GenericTemplateEntryV1], bool):
+    var out: [GenericTemplateEntryV1] = []
+    var ok = true
+    for s in sections:
+        if s.starts_with("generic-template|"):
+            val decoded = generic_template_section_decode_v1(s.substring(17))
+            if decoded.ok:
+                for e in decoded.section.entries: out.push(e)
+            else:
+                ok = false
+    (out, ok)
+
+# ----------------------------------------------------------------------------
+# Section codec: header `generic-spec/v1\t<0|1 complete>`, then one row per
+# spec: symbol \t template_id \t args_id \t concrete_key \t arg keys (\x1f).
+# ----------------------------------------------------------------------------
+
+pub fn generic_specialization_section_encode_v1(list: GenericSpecializationListV1) -> text:
+    val flag = if list.complete: "1" else: "0"
+    var lines: [text] = [GENERIC_SPEC_SECTION_MAGIC_V1 + "\t" + flag]
+    for s in list.specs:
+        lines.push(s.template_symbol + "\t" + s.template_id + "\t" + s.args_id + "\t" +
+            s.concrete_key + "\t" + s.arg_keys.join("\u001f"))
+    lines.join("\n")
+
+fn _spec_decode_fail_v1(error: text) -> GenericSpecializationListDecodeV1:
+    GenericSpecializationListDecodeV1(ok: false,
+        list: GenericSpecializationListV1(complete: false, specs: []), error: error)
+
+pub fn generic_specialization_section_decode_v1(data: text) -> GenericSpecializationListDecodeV1:
+    val lines = data.split("\n")
+    if lines.len() == 0:
+        return _spec_decode_fail_v1("empty")
+    val head = lines[0].split("\t")
+    if head.len() != 2 or head[0] != GENERIC_SPEC_SECTION_MAGIC_V1 or
+            (head[1] != "0" and head[1] != "1"):
+        return _spec_decode_fail_v1("bad header")
+    var specs: [RequiredSpecializationV1] = []
+    var i = 1
+    while i < lines.len():
+        val f = lines[i].split("\t")
+        if f.len() != 5:
+            return _spec_decode_fail_v1("bad row {i}")
+        if i > 1 and not (specs[specs.len() - 1].concrete_key < f[3]):
+            return _spec_decode_fail_v1("rows not sorted/unique")
+        val keys = if f[4] == "": [] else: f[4].split("\u001f")
+        specs.push(RequiredSpecializationV1(template_symbol: f[0], template_id: f[1],
+            args_id: f[2], arg_keys: keys, concrete_key: f[3]))
+        i = i + 1
+    GenericSpecializationListDecodeV1(ok: true,
+        list: GenericSpecializationListV1(complete: head[1] == "1", specs: specs), error: "")
+
+# The `generic-spec` section of a companion's sections; ok=false when absent
+# or undecodable (callers must then treat the module's instance set as unknown).
+pub fn generic_specialization_list_of_sections_v1(sections: [text]) -> GenericSpecializationListDecodeV1:
+    for s in sections:
+        if s.starts_with("generic-spec|"):
+            return generic_specialization_section_decode_v1(s.substring(13))
+    _spec_decode_fail_v1("no generic-spec section")
+
+# ----------------------------------------------------------------------------
+# `.rr` producer: forward reads
+# ----------------------------------------------------------------------------
+
+# Consumer identity of a module's object compile. Its stable entity id is the
+# module source path, so the planner maps `.rr` consumers back to modules.
+pub fn generic_spec_consumer_key_v1(module_path: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "obj.emit", stable_entity_id: module_path,
+        semantic_profile_digest: sha256_text(GENERIC_SPEC_PROFILE_V1),
+        parameter_digest: sha256_text("module:" + module_path))
+
+# Producer identity of one concrete instance. All instances of one template
+# share the kind+entity prefix (generic_spec_template_subject_prefix_v1).
+pub fn generic_spec_instance_key_v1(template_symbol: text, concrete_key: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "tldr.concrete", stable_entity_id: template_symbol,
+        semantic_profile_digest: sha256_text(GENERIC_SPEC_PROFILE_V1),
+        parameter_digest: sha256_text(concrete_key))
+
+# Canonical-subject prefix shared by every instance of `template_symbol`
+# (semantic_query_key_canonical_v1 framing: kind frame, then entity frame).
+pub fn generic_spec_template_subject_prefix_v1(template_symbol: text) -> text:
+    "13:tldr.concrete" + text_to_bytes(template_symbol).len().to_string() + ":" +
+        template_symbol + "64:"
+
+pub fn generic_spec_forward_manifest_v1(module_path: text,
+        list: GenericSpecializationListV1) -> SemanticQueryReadManifestV1:
+    val consumer = generic_spec_consumer_key_v1(module_path)
+    val coverage = if list.complete: SemanticCoverageV1.Complete else: SemanticCoverageV1.Conservative
+    var reads: [SemanticQueryReadV1] = []
+    var ordinal: i64 = 0
+    for s in list.specs:
+        reads.push(SemanticQueryReadV1(producer: generic_spec_instance_key_v1(s.template_symbol, s.concrete_key),
+            consumer: consumer, facet: GENERIC_SPEC_FACET_V1, ordinal: ordinal,
+            consumed_fingerprint: sha256_text(s.concrete_key),
+            witness_digest: sha256_text(s.template_id), partition_id: GENERIC_SPEC_FACET_V1,
+            completeness: coverage))
+        ordinal = ordinal + 1
+    if not list.complete and reads.len() == 0:
+        # An incomplete empty list must still poison the family: one marker
+        # read against an unknown-instance subject.
+        reads.push(SemanticQueryReadV1(producer: generic_spec_instance_key_v1("@unknown", module_path),
+            consumer: consumer, facet: GENERIC_SPEC_FACET_V1, ordinal: 0,
+            consumed_fingerprint: sha256_text("unknown"), witness_digest: sha256_text("unknown"),
+            partition_id: GENERIC_SPEC_FACET_V1, completeness: SemanticCoverageV1.Conservative))
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer, ordered_reads: reads)
+
+export RequiredSpecializationV1, GenericSpecializationListV1, GenericSpecializationListDecodeV1
+export GENERIC_SPEC_SECTION_MAGIC_V1, GENERIC_SPEC_PROFILE_V1, GENERIC_SPEC_FACET_V1
+export required_specialization_v1, generic_specializations_of_source_v1
+export generic_templates_of_sections_v1
+export generic_specialization_section_encode_v1, generic_specialization_section_decode_v1
+export generic_specialization_list_of_sections_v1
+export generic_spec_consumer_key_v1, generic_spec_instance_key_v1
+export generic_spec_template_subject_prefix_v1, generic_spec_forward_manifest_v1
