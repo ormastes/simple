@@ -48,3 +48,46 @@ pub fn driver_mir_physical_source_indices_v1(paths: [text], identities: [text],
         index = index + 1
     # Inventory order, not dictionary iteration, selects the representative.
     Ok(selected)
+
+
+pub fn driver_mir_retained_identities_by_path_v1(retained_paths: [text],
+        retained_identities: [text]) -> Result<Dict<text, text>, text>:
+    if retained_paths.len() != retained_identities.len():
+        return Err("MIR projected ownership inventory shape mismatch")
+    var identity_by_path: Dict<text, text> = {}
+    var index = 0
+    while index < retained_paths.len():
+        val path = retained_paths[index]
+        val identity = retained_identities[index]
+        if path == "" or not sha256_lower_hex_valid(identity):
+            return Err("MIR projected ownership lacks admitted identity at {index}")
+        if identity_by_path.has(path) and identity_by_path[path] != identity:
+            return Err("MIR projected ownership content conflict for {path}")
+        identity_by_path[path] = identity
+        index = index + 1
+    Ok(identity_by_path)
+
+pub fn driver_mir_projected_source_identities_v1(retained_paths: [text],
+        retained_identities: [text], selected_paths: [text]) -> Result<[text], text>:
+    """Join selected source order to retained full-content admission.
+    Returned positions belong to selected_paths, never retained receipt rows.
+    This does not reread released source text or infer identity from a basename.
+    """
+    val admission = driver_mir_retained_identities_by_path_v1(retained_paths, retained_identities)
+    if admission.is_err(): return Err(admission.unwrap_err())
+    val identity_by_path = admission.unwrap()
+    var selected_identities: [text] = []
+    for path in selected_paths:
+        if path == "" or not identity_by_path.has(path):
+            return Err("MIR projected ownership missing retained source: {path}")
+        selected_identities = selected_identities.push(identity_by_path[path])
+    Ok(selected_identities)
+
+
+pub fn driver_mir_entry_alias_projection_required_v1(source_count: i64,
+        retained_count: i64, entry_requested: bool,
+        bootstrap_shortcuts: bool, bootstrap_enabled: bool) -> bool:
+    # Streaming entry parsing can retain every logical alias, so equal source
+    # and receipt counts do not prove that the provider feed is physical.
+    source_count > 0 and entry_requested and
+        (source_count != retained_count or (bootstrap_shortcuts and bootstrap_enabled))
