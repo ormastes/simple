@@ -1354,6 +1354,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dict_new", sffi_dict::rt_dict_new_fn);
     insert_simple!("rt_dict_set", sffi_dict::rt_dict_set_fn);
     insert_simple!("rt_dict_values", sffi_dict::rt_dict_values_fn);
+    insert_simple!("rt_dict_scope_read_bound_v1", sffi_dict::rt_dict_scope_read_bound_v1_fn);
+    insert_simple!("rt_dict_scope_read_owner_v1", sffi_dict::rt_dict_scope_read_owner_v1_fn);
+    insert_simple!("rt_dict_scope_read_epoch_v1", sffi_dict::rt_dict_scope_read_epoch_v1_fn);
+    insert_simple!("rt_dict_scope_read_meta_v1", sffi_dict::rt_dict_scope_read_meta_v1_fn);
+    insert_simple!("rt_dict_scope_read_slot_v1", sffi_dict::rt_dict_scope_read_slot_v1_fn);
     insert_simple!("rt_dir_create_all", file_io::rt_dir_create_all);
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);

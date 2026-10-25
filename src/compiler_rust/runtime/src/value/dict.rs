@@ -3,7 +3,7 @@
 use super::collections::{rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
 use super::heap::{
-    get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, unregister_heap_ptr, HeapHeader, HeapObjectType,
+    get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, unregister_heap_ptr_checked, HeapHeader, HeapObjectType,
 };
 
 /// Get typed pointer from heap object with validation, returning early if invalid
@@ -71,6 +71,7 @@ unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
 
 /// Double the dict's capacity, rehashing all entries. Returns false on OOM.
 unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
+    let _mutation = super::dict_scope_read::mutation(d);
     let old_capacity = (*d).capacity;
     let old_data = (*d).data;
     let new_capacity = (old_capacity * 2).max(8);
@@ -97,6 +98,7 @@ unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
     dict_free_slots(old_data, old_capacity);
     (*d).capacity = new_capacity;
     (*d).data = new_data;
+    super::dict_scope_read::storage_replaced(d);
     true
 }
 
@@ -133,10 +135,12 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
     let ptr = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, ());
+    // Close admission before freeing the backing allocation. Only the caller
+    // that removed membership may release storage, including aliased handles.
+    if !unregister_heap_ptr_checked(ptr as *mut HeapHeader) { return; }
     unsafe {
         dict_free_slots((*ptr).data, (*ptr).capacity);
         let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
-        unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
 }
@@ -254,6 +258,7 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
         return false;
     }
     let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
+    let _mutation = super::dict_scope_read::mutation(d);
     unsafe {
         // Grow at 3/4 load so linear probing stays effective and an insert
         // can never hit a full table (the old fixed-capacity behavior
@@ -295,6 +300,7 @@ pub extern "C" fn rt_dict_set_i64_raw(dict: RuntimeValue, key: i64, value: i64) 
 #[no_mangle]
 pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
     let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
+    let _mutation = super::dict_scope_read::mutation(d);
     unsafe {
         let capacity = (*d).capacity;
         let data_ptr = (*d).data;
@@ -365,6 +371,7 @@ pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> Runti
         return RuntimeValue::NIL;
     }
     let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
+    let _mutation = super::dict_scope_read::mutation(d);
     unsafe {
         let capacity = (*d).capacity;
         if capacity == 0 {

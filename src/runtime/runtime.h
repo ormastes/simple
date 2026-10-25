@@ -969,6 +969,12 @@ int64_t  rt_array_remove(int64_t array_value, int64_t index);
 /* Tagged array index or dictionary key; returns the removed element/value. */
 int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);
+/* Borrowed scope Dict<text, nonnegative i64>; scalar errors are -1. */
+int64_t rt_dict_scope_read_bound_v1(void);
+int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel);
+int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel);
+int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t field, int64_t fuel);
+int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner, int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
 int8_t   rt_dict_set(int64_t dict, int64_t key, int64_t value);
 int8_t   rt_dict_contains(int64_t dict, int64_t key);

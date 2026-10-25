@@ -467,6 +467,20 @@ fn runtime_symbol_table_contains_bootstrap_directory_provider() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_contains_scope_read_provider() {
+    for name in [
+        "rt_dict_scope_read_bound_v1",
+        "rt_dict_scope_read_owner_v1",
+        "rt_dict_scope_read_epoch_v1",
+        "rt_dict_scope_read_meta_v1",
+        "rt_dict_scope_read_slot_v1",
+    ] {
+        assert_eq!(RUNTIME_SYMBOL_ENTRIES.iter().filter(|entry| entry.name == name && !entry.ptr.is_null()).count(), 1, "{name}");
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_contains_processing_wire_helpers() {
     for name in [
         "rt_write_u32s_to_raw_checksum",
@@ -979,6 +993,11 @@ pub use value::{
     rt_dict_new,
     rt_dict_set,
     rt_dict_set_i64_raw,
+    rt_dict_scope_read_bound_v1,
+    rt_dict_scope_read_owner_v1,
+    rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1,
+    rt_dict_scope_read_slot_v1,
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_check_variant,
