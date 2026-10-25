@@ -1,0 +1,64 @@
+# Standalone negative control. Run only through the admitted existing Simple
+# CLI in its own process; permanent abort revocation must not poison an
+# aggregate unit runner. This is a fixture, not a replacement test runner.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir.mir_data.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+fn origin_actual_declaration_fixture_v1() -> MirHirModuleDeclarationsV1:
+    val source = "fn actual_origin(value: i64) -> i64:\n    value\n"
+    val ast = parse_full_frontend(source, "origin_fixture.spl", "origin_fixture", Logger(level: 0))
+    var frontend = HirLowering.with_filename("origin_fixture.spl")
+    val actual = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    val function: HirFunction = actual.functions.values()[0]
+    var params: [MirHirParamDeclarationV1] = []
+    for raw in function.params:
+        val param: HirParam = raw
+        params.push(MirHirParamDeclarationV1(symbol: param.symbol, name: param.name,
+            type_: param.type_, has_default: false, default_artifact: nil,
+            span: param.span, is_mutable: param.is_mutable))
+    val record = MirHirFunctionDeclarationV1(symbol: function.symbol, name: function.name,
+        type_params: function.type_params, params: params, return_type: function.return_type,
+        effects: function.effects, visibility: function.visibility, is_async: function.is_async,
+        is_static: function.is_static, is_public: function.is_public, is_method: function.is_method,
+        is_mutable: function.is_mutable, is_const: function.is_const, is_extern: function.is_extern,
+        func_attr: function.func_attr, has_export_attr: function.has_export_attr,
+        export_attr: function.export_attr, is_generic_template: function.is_generic_template,
+        span: function.span, complete_function_digest: mono_complete_function_digest_v1(function))
+    expect(record.complete_function_digest.len()).to_equal(64)
+    MirHirModuleDeclarationsV1(name: actual.name, path: actual.path,
+        final_repository_authority: sha256_text("origin-unit-binding-mechanics"),
+        final_archive_key: "", final_body_digest: sha256_text(source), symbols: actual.symbols,
+        functions: [record], structs: [], classes: [], enums: [], bitfields: [], traits: [],
+        impls: [], globals: [], needs_initialization: false,
+        declaration_digest: sha256_text("origin-unit-declaration-mechanics:" + source),
+        stage: "unit-binding-mechanics-not-admission",
+        source_binding: Some(MirHirDeclarationSourceV1(logical_key: "origin_fixture",
+            physical_path: actual.path, source_digest: sha256_text(source),
+            source_bytes: source.len(), input_archive_key: "")))
+
+
+val module = origin_actual_declaration_fixture_v1()
+val key = "origin.abort.actual-delta"
+if not transient_scope_begin(): panic("abort control scope begin refused")
+bootstrap_fn_ret_hir_type_register_declaration_v1(key, module, 0)
+if bootstrap_fn_registry_origin_v1("return_hir", key) == nil: panic("abort control did not capture actual write")
+# End without promotion: the journal's records have been released.
+if not transient_scope_end(): panic("abort control scope end refused")
+bootstrap_fn_registries_discard_delta_v1()
+if bootstrap_fn_registry_origin_v1("return_hir", key) != nil: panic("abandoned delta retained authority")
+val next = "origin.abort.no-revival"
+bootstrap_fn_ret_hir_type_register_declaration_v1(next, module, 0)
+if bootstrap_fn_ret_hir_type_lookup(next) == nil: panic("ordinary registration was changed by revocation")
+if bootstrap_fn_registry_origin_v1("return_hir", next) != nil: panic("revoked process revived provenance")
+print "bootstrap-origin-abort-control: PASS"

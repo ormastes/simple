@@ -2402,17 +2402,24 @@ var _bootstrap_fn_journal_registration_origins_v1: [BootstrapFnRegistrationOrigi
 var _bootstrap_fn_registration_event_v1: i64 = 0
 var _bootstrap_fn_registration_bytes_v1: i64 = 0
 var _bootstrap_fn_registration_available_v1: bool = true
+var _bootstrap_fn_registration_pending_v1: bool = false
+var _bootstrap_fn_registration_rows_v1: i64 = 0
 val BOOTSTRAP_FN_REGISTRATION_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
 val BOOTSTRAP_FN_REGISTRATION_MAX_EVENTS_V1: i64 = 1000000
 
 fn _bootstrap_fn_origin_key_v1(registry: text, name: text) -> text:
     "{registry.len()}:{registry}{name.len()}:{name}"
 
+fn _bootstrap_fn_delta_registration_origin_v1(value: BootstrapFnRegistrationOriginV1):
+    if _bootstrap_fn_delta_live():
+        _bootstrap_fn_registration_pending_v1 = true
+        _bootstrap_fn_journal_registration_origins_v1 = _bootstrap_fn_journal_registration_origins_v1.push(value)
+
 fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFnRegistrationOriginV1?):
     if not _bootstrap_fn_registration_available_v1: return
     # The ordinary unbound route pays no new metadata allocation while no
     # checked declaration has supplied an origin to revoke.
-    if origin == nil and _bootstrap_fn_registration_origins_v1.len() == 0: return
+    if origin == nil and _bootstrap_fn_registration_rows_v1 == 0: return
     val text_bytes = text_byte_len(registry) + text_byte_len(name)
     # Prepay the key, record, dictionary growth and journal reference before
     # allocation. This conservative lifetime ledger never silently resets;
@@ -2444,10 +2451,12 @@ fn _bootstrap_fn_origin_write_v1(registry: text, name: text, origin: BootstrapFn
             repository_authority: "", module_key: "", declaration_digest: "",
             function_digest: "", function_symbol: -1, selector: "",
             write_event: _bootstrap_fn_registration_event_v1)
+    val first_insert = not _bootstrap_fn_registration_origins_v1.has(key)
     _bootstrap_fn_registration_origins_v1[key] = record
     _bootstrap_fn_delta_text(key)
-    if _bootstrap_fn_delta_live():
-        _bootstrap_fn_journal_registration_origins_v1 = _bootstrap_fn_journal_registration_origins_v1.push(record)
+    _bootstrap_fn_delta_registration_origin_v1(record)
+    if first_insert:
+        _bootstrap_fn_registration_rows_v1 = _bootstrap_fn_registration_rows_v1 + 1
 
 fn _bootstrap_fn_declaration_origin_v1(module: MirHirModuleDeclarationsV1,
         function: MirHirFunctionDeclarationV1, selector: text) -> BootstrapFnRegistrationOriginV1?:
@@ -2526,9 +2535,11 @@ fn bootstrap_fn_registries_discard_delta_v1():
     """Drop a journal left by a scope that ended without registry promotion
     (an aborted module). Call only right after a successful scope begin: no
     live scope can still own those rows then."""
-    # An aborted scope may already have released the journal allocations.
-    # Revoke provenance without dereferencing them or accepting stale origins.
-    _bootstrap_fn_registration_available_v1 = false
+    # Called at every ordinary module begin, including after successful
+    # promotion. The persistent scalar alone identifies an abandoned delta;
+    # never inspect journal storage that the prior scope may have released.
+    if _bootstrap_fn_registration_pending_v1:
+        _bootstrap_fn_registration_available_v1 = false
     _bootstrap_fn_delta_reset()
 
 fn _bootstrap_fn_delta_reset():
@@ -3057,7 +3068,7 @@ fn _bootstrap_fn_registries_promote_all() -> bool:
         default_owners_ok and default_symbols_ok and default_globals_ok
 
 fn _bootstrap_fn_registry_rows() -> i64:
-    _bootstrap_fn_registration_origins_v1.len() + _bootstrap_fn_ret_types.len() + _bootstrap_fn_ret_hir_types.len() + _bootstrap_fn_ret_hir_ambig.len() +
+    _bootstrap_fn_registration_rows_v1 + _bootstrap_fn_ret_types.len() + _bootstrap_fn_ret_hir_types.len() + _bootstrap_fn_ret_hir_ambig.len() +
         _bootstrap_fn_ret_shapes.len() + _bootstrap_fn_ret_shape_ambig.len() +
         _bootstrap_fn_ret_array_element_identities.len() + _bootstrap_fn_ret_array_element_shapes.len() +
         _bootstrap_fn_ret_array_element_shape_ambig.len() + _bootstrap_fn_ret_err_shapes.len() +
@@ -3134,6 +3145,10 @@ fn bootstrap_fn_registries_promote() -> bool:
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_symbol_tables) and ok
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_consts) and ok
     ok = promote_and_release_transient_owner_roots(_bootstrap_fn_journal_registration_origins_v1) and ok
+    if ok:
+        _bootstrap_fn_registration_pending_v1 = false
+    else:
+        _bootstrap_fn_registration_available_v1 = false
     _bootstrap_fn_delta_reset()
     _bootstrap_fn_promote_last_roots = roots
     ok

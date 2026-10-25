@@ -11,6 +11,8 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
 use compiler.mir.hir_declaration_types_v1.*
 use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
 
@@ -46,6 +48,14 @@ fn origin_actual_declaration_fixture_v1() -> MirHirModuleDeclarationsV1:
         source_binding: Some(MirHirDeclarationSourceV1(logical_key: "origin_fixture",
             physical_path: actual.path, source_digest: sha256_text(source),
             source_bytes: source.len(), input_archive_key: "")))
+
+fn origin_actual_lifecycle_module_v1(name: text) -> HirModule:
+    val source = "fn {name}(value: i64) -> i64:\n    value\n"
+    val ast = parse_full_frontend(source, "{name}.spl", name, Logger(level: 0))
+    var frontend = HirLowering.with_filename("{name}.spl")
+    val actual = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    actual
 
 describe "bootstrap actual-write declaration provenance":
     it "captures the declaration selector only beside its actual typed registration":
@@ -113,3 +123,18 @@ describe "bootstrap actual-write declaration provenance":
         expect(origin.function_digest).to_equal(function.complete_function_digest)
         expect(origin.selector).to_equal("parameter_types")
         expect(bootstrap_fn_param_hir_types_lookup(key).unwrap()[0].kind).to_equal(function.params[0].type_.kind)
+
+    it "retains a captured origin through two real ordinary module scope lifecycles":
+        val declaration = origin_actual_declaration_fixture_v1()
+        val key = "origin.controls.real-normal-lifecycle"
+        bootstrap_fn_param_hir_types_register_declaration_v1(key, declaration, 0)
+        val before = bootstrap_fn_registry_origin_v1("parameter_hir", key).unwrap()
+        for name in ["origin_real_first", "origin_real_second"]:
+            val actual = origin_actual_lifecycle_module_v1(name)
+            var lowering = MirLowering.new(actual.symbols)
+            val lowered = lowering.lower_module_transient_scoped(actual, [], false)
+            expect(lowered.is_ok()).to_equal(true)
+            expect(lowering.errors.len()).to_equal(0)
+            val after = bootstrap_fn_registry_origin_v1("parameter_hir", key).unwrap()
+            expect(after.function_digest).to_equal(before.function_digest)
+            expect(after.write_event).to_equal(before.write_event)
