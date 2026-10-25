@@ -18,12 +18,11 @@
 #
 # Those are CODEGEN workers, and that pricing (96 MiB/job) is the Windows
 # default, where the frontend is pinned to one worker by policy. On every other
-# host a native-build with --threads N also fans out N HIR shard workers
-# (measured 2.4-3.3 GB RSS each, src/app/cli/shard_mem_clamp.spl), and the
-# compiler admits them from the enforced cap: workers = cap * 60% / 3000000 KiB.
-# A job is therefore priced at 3000000 / 0.6 ~= 5120 MiB there; the 96 MiB
-# pricing pinned every cap at the 5.59 GiB floor, i.e. one HIR worker at any
-# thread count (bug bootstrap_frontend_budget_pins_one_hir_worker_2026-10-19).
+# host a native-build with --threads N also fans out HIR shards. The measured
+# large-closure reservation is 12000000 KiB per HIR worker; the compiler admits
+# workers from 60% of the enforced cap. A job is priced at
+# ceil(12000000 / 0.6 / 1024) = 19532 MiB there. The old 96 MiB/job price is
+# retained only for Windows, where frontend work is pinned to one worker.
 # Keep the three constants (worker budget, 60%, per-job price) in step.
 #
 # Budget (tunable, host config `tree_rss_*`, see config/host/host_config.sdn):
@@ -100,11 +99,11 @@ BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB=50331648
 BOOTSTRAP_TREE_RSS_RESERVE_KIB=3145728
 BOOTSTRAP_TREE_RSS_PER_JOB_CEILING_KIB=1048576
 BOOTSTRAP_TREE_RSS_BASE_MIB_DEFAULT=3072
-# Per-job price: one 3000000 KiB HIR shard worker admitted at 60% of the cap
+# Per-job price: one 12000000 KiB HIR shard worker admitted at 60% of the cap
 # on fanout hosts; a 57-76 MiB codegen shard where the frontend is pinned.
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MSYS*|MINGW*|CYGWIN*) BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 ;;
-  *) BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=5120 ;;
+  *) BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=19532 ;;
 esac
 BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT=50
 BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=75
@@ -445,7 +444,7 @@ bootstrap_tree_rss__selftest() {
       SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
       # Fixtures price the fanout (HIR) default on every host; the Windows
       # pricing is pinned by its own fixture below.
-      BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=5120
+      BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=19532
       btr_st_use_root=
       if [ "$2" != real ]; then
         BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
@@ -466,9 +465,9 @@ bootstrap_tree_rss__selftest() {
   }
   # Historical behaviour is unchanged while no worker count is declared.
   btr_st_expect undeclared-keeps-floor big 0 '' 5859375:50331648:floor:default
-  # HIR pricing (fanout host, 5120 MiB/job): 8 jobs = 3 GiB + 40 GiB, which the
-  # compiler's clamp turns into exactly 8 admitted HIR workers (x60% / 3000000).
-  btr_st_expect eight-jobs-price-hir-workers big 8 '' 45088768:50331648:budget:default
+  # Measured HIR pricing reaches the enforced ceiling; the CLI clamp reserves
+  # 40% and admits at most two 12000000 KiB workers under that ceiling.
+  btr_st_expect eight-jobs-price-hir-workers big 8 '' 50331648:50331648:hard-ceiling:default
   # Windows pricing (frontend pinned, 96 MiB codegen shard): 8 jobs keep the floor.
   btr_st_expect eight-jobs-windows-price-keep-floor big 8 '' 5859375:50331648:floor:default BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96
   # Beyond that the host fraction and the hard ceiling bound the tree.
@@ -491,13 +490,13 @@ bootstrap_tree_rss__selftest() {
   # Knob overrides, and their fail-closed validation.
   btr_st_expect knob-per-job big 80 '' 19529728:87031808:budget:env-knobs SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=200
   btr_st_expect knob-host-env big 80 '' 67047100:87031808:host-fraction:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
-  btr_st_expect knob-host-env-base-few-jobs big 8 '' 47185920:50331648:budget:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
+  btr_st_expect knob-host-env-base-few-jobs big 8 '' 50331648:50331648:hard-ceiling:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
   btr_st_expect knob-runaway-hits-ceiling big 80 '' 87031808:87031808:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
   btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
   btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
   btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
   # Leading zeros: 08/09 used to crash $(( )) and 040 was read as octal 32.
-  btr_st_expect jobs-leading-zero-08 big 08 '' 45088768:50331648:budget:default
+  btr_st_expect jobs-leading-zero-08 big 08 '' 50331648:50331648:hard-ceiling:default
   btr_st_expect jobs-leading-zero-040 big 040 '' 50331648:50331648:hard-ceiling:default
   btr_st_expect jobs-leading-zero-0080 big 0080 '' 67047100:87031808:host-fraction:default
   btr_st_expect jobs-junk-refused big 8x '' REFUSED

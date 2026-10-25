@@ -298,7 +298,63 @@ bootstrap_stage3_windows_frontend_policy() {
         esac
     done
     printf '%s\n' SIMPLE_SHARD_MEM_CLAMP=1 SIMPLE_PARSE_SHARD_MAX=1 \
-        SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000
+            SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000
+}
+
+# Measured worker reservations for fanout hosts. Keep these rows in the frozen
+# command environment so CLI admission and the watchdog receipt share one cap.
+bootstrap_stage3_fanout_frontend_policy() {
+    bootstrap_stage3_fanout_cap=$1
+    bootstrap_stage3_fanout_mode=$2
+    bootstrap_stage3_fanout_ceiling=$3
+    shift 3
+    for bootstrap_stage3_policy_env in "$@"; do
+        [ "$bootstrap_stage3_policy_env" != -- ] || break
+        bootstrap_stage3_policy_name=${bootstrap_stage3_policy_env%%=*}
+        bootstrap_stage3_policy_name=$(printf '%s' "$bootstrap_stage3_policy_name" | tr '[:lower:]' '[:upper:]')
+        case "$bootstrap_stage3_policy_name" in
+            SIMPLE_SHARD_MEM_CLAMP|SIMPLE_PARSE_SHARD_MAX|SIMPLE_PARSE_SHARD_WORKER_KB|SIMPLE_HIR_SHARD_WORKER_KB)
+                echo 'bootstrap-transcript-error: reserved measured frontend policy' >&2
+                return 1 ;;
+        esac
+    done
+    [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] &&
+        [ "${SIMPLE_PARSE_SHARD_MAX:-1}" = 1 ] &&
+        [ "${SIMPLE_PARSE_SHARD_WORKER_KB:-8000000}" = 8000000 ] &&
+        [ "${SIMPLE_HIR_SHARD_WORKER_KB:-12000000}" = 12000000 ] || return 1
+    bootstrap_stage3_fanout_share=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-$bootstrap_stage3_fanout_cap}
+    bootstrap_stage3_fanout_rows=$(bootstrap_stage3_windows_frontend_environment \
+        "$bootstrap_stage3_fanout_cap" "$bootstrap_stage3_fanout_mode" \
+        "$bootstrap_stage3_fanout_share" "$bootstrap_stage3_fanout_ceiling" \
+        "$bootstrap_stage3_fanout_ceiling") || return 1
+    for bootstrap_stage3_fanout_env in "$@"; do
+        [ "$bootstrap_stage3_fanout_env" != -- ] || break
+        case "$bootstrap_stage3_fanout_env" in
+            [Ss][Ii][Mm][Pp][Ll][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Tt][Rr][Ee][Ee]_[Mm][Ee][Mm][Oo][Rr][Yy]_[Bb][Uu][Dd][Gg][Ee][Tt]_[Kk][Ii][Bb]=*)
+                echo 'bootstrap-transcript-error: reserved shard budget' >&2
+                return 1 ;;
+        esac
+    done
+    while IFS= read -r bootstrap_stage3_fanout_row; do
+        case "$bootstrap_stage3_fanout_row" in
+            SIMPLE_PARSE_SHARD_MAX=1) ;;
+            SIMPLE_PARSE_SHARD_WORKER_KB=*) printf '%s\n' SIMPLE_PARSE_SHARD_WORKER_KB=8000000 ;;
+            SIMPLE_HIR_SHARD_WORKER_KB=*) printf '%s\n' SIMPLE_HIR_SHARD_WORKER_KB=12000000 ;;
+            SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
+                bootstrap_stage3_fanout_budget=${bootstrap_stage3_fanout_row#*=}
+                bootstrap_stage3_fanout_inherited=${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB:-$bootstrap_stage3_fanout_budget}
+                case "$bootstrap_stage3_fanout_inherited" in
+                    ''|0*|*[!0-9]*|??????????????????*) return 1 ;;
+                esac
+                if [ "$bootstrap_stage3_fanout_inherited" -lt "$bootstrap_stage3_fanout_budget" ]; then
+                    bootstrap_stage3_fanout_budget=$bootstrap_stage3_fanout_inherited
+                fi
+                printf 'SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=%s\n' "$bootstrap_stage3_fanout_budget" ;;
+            *) printf '%s\n' "$bootstrap_stage3_fanout_row" ;;
+        esac
+    done <<EOF
+$bootstrap_stage3_fanout_rows
+EOF
 }
 
 # Emit the same Windows scheduling share for every compiler process owner.
@@ -410,6 +466,9 @@ bootstrap_stage3_run_transcribed() {
             [Ss][Ii][Mm][Pp][Ll][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Tt][Rr][Ee][Ee]_[Mm][Ee][Mm][Oo][Rr][Yy]_[Bb][Uu][Dd][Gg][Ee][Tt]_[Kk][Ii][Bb]=*)
                 echo 'bootstrap-transcript-error: reserved shard budget' >&2
                 return 1 ;;
+            [Ss][Ii][Mm][Pp][Ll][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Mm][Ee][Mm]_[Cc][Ll][Aa][Mm][Pp]=*|[Ss][Ii][Mm][Pp][Ll][Ee]_[Pp][Aa][Rr][Ss][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Mm][Aa][Xx]=*|[Ss][Ii][Mm][Pp][Ll][Ee]_[Pp][Aa][Rr][Ss][Ee]_[Ss][Hh][Aa][Rr][Dd]_[Ww][Oo][Rr][Kk][Ee][Rr]_[Kk][Bb]=*|[Ss][Ii][Mm][Pp][Ll][Ee]_[Hh][Ii][Rr]_[Ss][Hh][Aa][Rr][Dd]_[Ww][Oo][Rr][Kk][Ee][Rr]_[Kk][Bb]=*)
+                echo 'bootstrap-transcript-error: reserved frontend worker estimate' >&2
+                return 1 ;;
         esac
     done
     bootstrap_stage3_run_shard_budget=0
@@ -430,6 +489,20 @@ bootstrap_stage3_run_transcribed() {
                 "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
                 "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}" \
                 "$bootstrap_stage3_run_rss_ceiling") || return 1
+            while IFS= read -r bootstrap_stage3_run_frontend_row; do
+                case "$bootstrap_stage3_run_frontend_row" in
+                    SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
+                        bootstrap_stage3_run_shard_budget=${bootstrap_stage3_run_frontend_row#*=} ;;
+                    *) set -- "$bootstrap_stage3_run_frontend_row" "$@" ;;
+                esac
+            done <<EOF
+$bootstrap_stage3_run_frontend_rows
+EOF
+            ;;
+        *)
+            bootstrap_stage3_run_frontend_rows=$(bootstrap_stage3_fanout_frontend_policy \
+                "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+                "$bootstrap_stage3_run_rss_ceiling" "$@") || return 1
             while IFS= read -r bootstrap_stage3_run_frontend_row; do
                 case "$bootstrap_stage3_run_frontend_row" in
                     SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
