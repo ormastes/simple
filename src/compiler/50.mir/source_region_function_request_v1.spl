@@ -16,9 +16,11 @@ use compiler.mir.mir_types.{MirTypeKind}
 use compiler.mir.mir_types.{MirTypeDefKind}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
 
 pub class SourceRegionFunctionPlanV1:
     module: MirModule
+    compile_account: MirLoopResourceAccountV1
     originals: Dict<SymbolId, HirFunction>
     specialized_symbols: Dict<SymbolId, SymbolId>
     specialized_signatures: Dict<SymbolId, MirSignature>
@@ -69,8 +71,13 @@ impl MirLowering:
     pub me prepare_source_region_request_v1(module: MirModule, entry: SymbolId,
             originals: Dict<SymbolId, HirFunction>, context_type: MirType,
             error_type: HirType, facades: SourceRegionFacadeSymbolsV1,
-            result_construction: SourceRegionResultConstructionV1
+            result_construction: SourceRegionResultConstructionV1,
+            compile_account: MirLoopResourceAccountV1
     ) -> Result<SourceRegionFunctionPlanV1, text>:
+        if compile_account == nil: return Err("SOURCE-REQUEST: actual compilation account absent")
+        match compile_account.reserve(1, 0, 0, 0, 0, 0, 0):
+            case Err(_): return Err("SOURCE-REQUEST: compilation account closed or exhausted")
+            case Ok(_): ()
         val closure = source_region_resolved_call_closure_v1(module, entry)?
         self.validate_source_region_context_v1(module, context_type, error_type, facades)?
         val lowered_error = self.lower_type(error_type)
@@ -112,13 +119,27 @@ impl MirLowering:
                 is_variadic: false, params_known: true)
             specialized_names[symbol] = name
             names[name] = true
-        Ok(SourceRegionFunctionPlanV1(module: module, originals: originals,
+        Ok(SourceRegionFunctionPlanV1(module: module, compile_account: compile_account, originals: originals,
             specialized_symbols: symbols, specialized_signatures: signatures,
             specialized_names: specialized_names, call_targets: closure.targets_by_name,
             context_type: context_type, error_type: error_type, facades: facades,
             result_construction: result_construction, closure_digest: closure.input_digest))
 
     pub me lower_source_region_function_v1(original: HirFunction,
+            plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
+        if plan.compile_account == nil: return Err("SOURCE-REQUEST: actual compilation account absent")
+        match plan.compile_account.reserve(2, 0, 0, 0, 1, 0, 0):
+            case Err(_): return Err("SOURCE-REQUEST: compilation account closed or exhausted")
+            case Ok(_): ()
+        self.source_region_compile_account_v1 = Some(plan.compile_account)
+        self.source_region_requested_symbols_v1 = {original.symbol.id: true}
+        val result = self.lower_source_region_function_installed_v1(original, plan)
+        # Both success and failure return through this owning boundary.
+        self.source_region_compile_account_v1 = nil
+        self.source_region_requested_symbols_v1 = {}
+        result
+
+    me lower_source_region_function_installed_v1(original: HirFunction,
             plan: SourceRegionFunctionPlanV1) -> Result<MirFunction, text>:
         if plan.closure_digest == "" or not plan.specialized_symbols.has(original.symbol):
             return Err("SOURCE-REQUEST: function is outside the resolved closure")
