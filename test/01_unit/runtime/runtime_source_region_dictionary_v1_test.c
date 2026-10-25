@@ -133,6 +133,7 @@ int main(void) {
     assert(put(c,g,d,4,(int64_t)(uintptr_t)preexisting)==SR_FOREIGN);
     assert(put(c,g,d,4,0)==SR_FOREIGN);
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
     /* Output validation is distinct from put's input check. */
     assert(replace_projected_value(d,INT64_MIN,foreign)==child);
     assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
@@ -154,12 +155,14 @@ int main(void) {
     int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
     assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
     assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
 
     int64_t allowance=rt_source_region_dict_observation_bound_v1(); assert(allowance>0);
     assert(rt_source_region_bound_v1(14,d,allowance-1,0)==SR_CAPACITY);
     int64_t short_work=dict_work(14,d);
     assert(rt_source_region_dict_put_v1(c,g,current,d,4,child,short_work-1)==SR_CAPACITY);
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
     /* Output validation is distinct from put's input check. */
     assert(replace_projected_value(d,INT64_MIN,foreign)==child);
     assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
@@ -181,10 +184,12 @@ int main(void) {
     int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
     assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
     assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
 
     /* An unclassified ordinary alias path cannot mutate SOURCE storage. */
     assert(!rt_dict_set(d,4,child));
     assert(get(c,g,d,4)==0 && epoch(c,g)==current);
+    {
     /* Output validation is distinct from put's input check. */
     assert(replace_projected_value(d,INT64_MIN,foreign)==child);
     assert(get(c,g,d,INT64_MIN)==SR_FOREIGN);
@@ -206,6 +211,7 @@ int main(void) {
     int64_t get_work=dict_work(16,d), get_epoch=epoch(c,g);
     assert(rt_source_region_dict_get_v1(c,g,get_epoch,d,INT64_MIN,get_work-1)==SR_CAPACITY);
     assert(epoch(c,g)==get_epoch); /* refusal does not mutate or refresh */
+    }
 
     assert(!rt_dict_clear(d));
     assert(get(c,g,d,INT64_MIN)==child && epoch(c,g)==current);
