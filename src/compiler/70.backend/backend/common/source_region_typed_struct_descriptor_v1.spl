@@ -1,0 +1,106 @@
+# Typed compile-time recipe. No nominal IDs are placed in native descriptor
+# rows. The emission seal binds this recipe to the actual module/body owner.
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirConstValue}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.source_region_descriptor_input_v1.{source_region_ordinary_struct_representation_v1, source_region_ordinary_dictionary_representation_v1}
+use compiler.backend.common.source_region_descriptor_v1.{SourceRegionSlotV1, SourceRegionDescriptorErrorV1, source_region_descriptor_slots_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct SourceRegionTypedStructDescriptorV1:
+    slots: [SourceRegionSlotV1]
+    recipe_digest: text
+
+fn source_region_recipe_definition_v1(types: Dict<SymbolId, MirTypeDef>, symbol: SymbolId) -> Result<MirTypeDef, SourceRegionDescriptorErrorV1>:
+    if symbol.id < 0: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+    if val definition = types.get(symbol):
+        if definition.symbol.id != symbol.id: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+        match definition.kind:
+            case Struct(_): return Ok(definition)
+            case _: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+    Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+
+fn source_region_recipe_type_key_v1(types: Dict<SymbolId, MirTypeDef>, type_: MirType) -> Result<text, SourceRegionDescriptorErrorV1>:
+    match type_.kind:
+        case I64: Ok("i64")
+        case U64: Ok("u64")
+        case Bool: Ok("bool")
+        case Struct(symbol):
+            val definition = source_region_recipe_definition_v1(types, symbol)?
+            Ok("Struct:{symbol.id}:{definition.name}")
+        case Dict(key, value):
+            if key.kind != MirTypeKind.I64: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+            match value.kind:
+                case Struct(symbol):
+                    val definition = source_region_recipe_definition_v1(types, symbol)?
+                    Ok("Dict:i64:Struct:{symbol.id}:{definition.name}")
+                case _: Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+        case _: Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+
+fn source_region_value_layout_recipe_v1(types: Dict<SymbolId, MirTypeDef>, symbol: SymbolId) -> Result<text, SourceRegionDescriptorErrorV1>:
+    val definition = source_region_recipe_definition_v1(types, symbol)?
+    var rows = ["SourceRegionValueLayout-v1", "{symbol.id}:{definition.name}"]
+    match definition.kind:
+        case Struct(fields):
+            if fields.len() > 1152921504606846975: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+            var index = 0
+            for field in fields:
+                if field.has_bits_attr or field.offset != index * 8:
+                    return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                val key = source_region_recipe_type_key_v1(types, field.type_)?
+                rows.push("{index}:{field.name}:{field.offset}:{key}")
+                index = index + 1
+        case _: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+    Ok(sha256_text(rows.join("\n")))
+
+fn source_region_struct_descriptor_typed_v1(types: Dict<SymbolId, MirTypeDef>,
+    args: [MirOperand], physical_struct_representation: i64) -> Result<SourceRegionTypedStructDescriptorV1, SourceRegionDescriptorErrorV1>:
+    if args.len() < 3 or args.len() % 2 != 1:
+        return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+    if physical_struct_representation != 1 and physical_struct_representation != 2:
+        return Err(SourceRegionDescriptorErrorV1.InvalidRepresentation)
+    var owner = SymbolId(id: -1)
+    for operand in args:
+        match operand.kind:
+            case Const(Int(_), type_):
+                if type_.kind != MirTypeKind.I64: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+            case _: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+    match args[0].kind:
+        case Const(Int(id), _): owner = SymbolId(id: id)
+        case _: return Err(SourceRegionDescriptorErrorV1.MalformedOperand)
+    val definition = source_region_recipe_definition_v1(types, owner)?
+    val input = source_region_descriptor_slots_v1(args[1:])?
+    var slots: [SourceRegionSlotV1] = []
+    var rows = ["SourceRegionTypedStructRecipe-v1", "{owner.id}:{definition.name}"]
+    match definition.kind:
+        case Struct(fields):
+            if fields.len() != input.len(): return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+            if fields.len() > 1152921504606846975: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+            var index = 0
+            for field in fields:
+                if field.has_bits_attr or field.offset != index * 8: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                val key = source_region_recipe_type_key_v1(types, field.type_)?
+                val requested = input[index]
+                var physical = 0
+                match field.type_.kind:
+                    case I64 | U64 | Bool:
+                        if requested.kind != 1 or requested.representation != 0: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                    case Struct(_):
+                        if requested.kind != 2 or requested.representation != source_region_ordinary_struct_representation_v1():
+                            return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                        physical = physical_struct_representation
+                    case Dict(_, value):
+                        if requested.kind != 2 or requested.representation != source_region_ordinary_dictionary_representation_v1():
+                            return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                        match value.kind:
+                            case Struct(value_symbol):
+                                val layout = source_region_value_layout_recipe_v1(types, value_symbol)?
+                                rows.push("dictionary-field:{index}:value-layout:{layout}")
+                            case _: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                        physical = 4
+                    case _: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+                rows.push("{index}:{field.name}:{field.offset}:{key}:{requested.kind}:{requested.representation}")
+                slots.push(SourceRegionSlotV1(kind: requested.kind, representation: physical))
+                index = index + 1
+        case _: return Err(SourceRegionDescriptorErrorV1.InvalidTypeRecipe)
+    Ok(SourceRegionTypedStructDescriptorV1(slots: slots, recipe_digest: sha256_text(rows.join("\n")) ))
