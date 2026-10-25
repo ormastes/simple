@@ -58,7 +58,8 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_write, file_create_exclusive, file_publish_noreplace}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_claim_allowed_v1, worker_surface_counters_v1}
@@ -101,6 +102,10 @@ var _hir_cache_rejected: [i64] = [0, 0, 0, 0, 0, 0]
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
+var _hir_cache_failed_diagnostic_attempted_v1: bool = false
+val HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1: i64 = 1048576
+val HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1: i64 = 4096
+val HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1: i64 = 512
 
 fn hir_cache_enabled() -> bool:
     if (sosix_env_get_nullable("SIMPLE_HIR_CACHE") ?? "") == "0":
@@ -537,6 +542,7 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
             # A STORE-side refusal: counted as refused + selfcheck_failed,
             # never as a miss (misses count loads).
             eprint("[hir-cache] SELFCHECK FAILED module={module.name} path={module.path} {verdict}; entry not stored")
+            _hir_cache_capture_failed_diagnostic_v1(module, verdict, blob)
             _hir_cache_refuse("selfcheck")
             _hir_cache_selfcheck_failed = _hir_cache_selfcheck_failed + 1
             return false
@@ -599,6 +605,106 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val _cleaned = rt_file_delete(tmp)
     _hir_cache_note_store_failure("rename", "io-rename", final_path)
     false
+
+# Failure-only, explicitly opt-in evidence capture. The payload and manifest
+# live in a directory that the HIR cache loader never scans. The manifest is
+# published last; an absent manifest means a partial capture is not evidence.
+# Capture failures do not affect the refusal, cache counters, or build result.
+fn _hir_cache_capture_failed_diagnostic_v1(module: HirModule, verdict: text, blob: text):
+    if _hir_cache_failed_diagnostic_attempted_v1: return
+    _hir_cache_failed_diagnostic_attempted_v1 = true
+    val configured_root = sosix_env_get_nullable("SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR") ?? ""
+    if configured_root == "": return
+    val artifact = _hir_cache_write_failed_diagnostic_v1(
+        configured_root, module.name, module.path, verdict, blob)
+    if artifact == "":
+        eprint("[hir-cache] failed-selfcheck diagnostic capture unavailable")
+        return
+    eprint("[hir-cache] failed-selfcheck diagnostic captured artifact={artifact}")
+
+# Directory-parameterized writer is separate from the process-once/env wrapper
+# so tests can exercise real payload, bounds, and no-replace behavior directly.
+fn _hir_cache_write_failed_diagnostic_v1(root: text, module_name: text, module_path: text,
+        verdict: text, blob: text) -> text:
+    if root == "": return ""
+    val dir = root + "/hir-selfcheck-quarantine-v1"
+    if not rt_dir_create_all(dir):
+        return ""
+
+    val artifact_id = "hir-selfcheck-{rt_getpid()}-{sha256_text(module_path)}"
+    val payload_name = artifact_id + ".blob"
+    val manifest_path = dir + "/" + artifact_id + ".sdn"
+    val payload_path = dir + "/" + payload_name
+    val payload_bytes = text_byte_len(blob)
+    val payload_limit = HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1 - HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1
+    var payload_present = false
+    var omitted_reason = "size_limit"
+    if payload_bytes <= payload_limit:
+        if _hir_cache_publish_diagnostic_file_v1(payload_path, blob):
+            payload_present = true
+            omitted_reason = ""
+        else:
+            omitted_reason = "payload_write_failed"
+
+    val payload_file = if payload_present: _hir_cache_sdn_quote_bounded_v1(payload_name) else: "null"
+    val payload_digest = if payload_present: "\"{sha256_text(blob)}\"" else: "null"
+    val omitted_value = if payload_present: "false" else: "true"
+    val metadata = "schema: simple-hir-cache-selfcheck-quarantine-v1\n" +
+        "module_name: {_hir_cache_sdn_quote_bounded_v1(module_name)}\n" +
+        "module_path: {_hir_cache_sdn_quote_bounded_v1(module_path)}\n" +
+        "verdict: {_hir_cache_sdn_quote_bounded_v1(verdict)}\n" +
+        "module_name_sha256: \"{sha256_text(module_name)}\"\n" +
+        "module_path_sha256: \"{sha256_text(module_path)}\"\n" +
+        "verdict_sha256: \"{sha256_text(verdict)}\"\n" +
+        "payload_bytes: {payload_bytes}\n" +
+        "payload_file: {payload_file}\n" +
+        "payload_sha256: {payload_digest}\n" +
+        "payload_omitted: {omitted_value}\n" +
+        "payload_omitted_reason: \"{omitted_reason}\"\n"
+    if text_byte_len(metadata) > HIR_CACHE_FAILED_DIAGNOSTIC_METADATA_RESERVE_V1 or
+            not _hir_cache_publish_diagnostic_file_v1(manifest_path, metadata):
+        if payload_present:
+            val _discarded_payload = rt_file_delete(payload_path)
+        return ""
+    manifest_path
+
+fn _hir_cache_publish_diagnostic_file_v1(path: text, content: text) -> bool:
+    val tmp_path = path + ".tmp"
+    if not file_create_exclusive(tmp_path, content): return false
+    val published = match file_publish_noreplace(tmp_path, path):
+        case Ok(created): created
+        case Err(_): false
+    if not published:
+        val _discarded = rt_file_delete(tmp_path)
+    published
+
+# Build an SDN quoted scalar only after checking a small UTF-8 byte bound. If
+# context is too long or contains unsupported control bytes, retain null plus
+# its SHA-256 field instead of allocating an unbounded escaped value.
+fn _hir_cache_sdn_quote_bounded_v1(value: text) -> text:
+    if text_byte_len(value) > HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1:
+        return "null"
+    var parts: [text] = ["\""]
+    for character in value:
+        if character == "\\":
+            parts.push("\\\\")
+        elif character == "\"":
+            parts.push("\\\"")
+        elif character == "\n":
+            parts.push("\\n")
+        elif character == "\r":
+            parts.push("\\r")
+        elif character == "\t":
+            parts.push("\\t")
+        elif character < " ":
+            return "null"
+        else:
+            parts.push(character)
+    parts.push("\"")
+    val quoted = parts.join("")
+    if text_byte_len(quoted) > HIR_CACHE_FAILED_DIAGNOSTIC_FIELD_MAX_BYTES_V1 * 2 + 2:
+        return "null"
+    quoted
 
 # A cache that cannot store is a slow build, not a wrong one, so a failed store
 # stays non-fatal -- but it is counted, shown in the summary (both as
@@ -1100,3 +1206,4 @@ export hir_shard_inventory
 export hir_cache_parser_binding_v1, hir_cache_last_parser_objectless
 export hir_cache_load_parsed_v1
 export hir_cache_path
+export _hir_cache_write_failed_diagnostic_v1, HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1

@@ -1,0 +1,91 @@
+use std.spec.{describe, it, expect, fail}
+use app.io.mod.{cwd, secure_temp_dir, dir_remove_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid_checked}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.io_runtime.{file_read}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser.{parse}
+use compiler.driver.driver_hir_cache.{_hir_cache_write_failed_diagnostic_v1,
+    HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1}
+
+fn _diagnostic_artifact_id(module_path: text) -> text:
+    val pid = getpid_checked().unwrap()
+    "hir-selfcheck-{pid}-{sha256_text(module_path)}"
+
+fn _diagnostic_root(label: text) -> text:
+    secure_temp_dir(cwd(), "hir-cache-selfcheck-{label}").unwrap()
+
+describe "failed HIR selfcheck quarantine writer":
+    it "writes a bounded payload and a matching manifest last":
+        val root = _diagnostic_root("small")
+        val module_name = "sample"
+        val module_path = "src/sample.spl"
+        val verdict = "reason=decode detail=nil_in_non_optional_scalar:Sample.flag"
+        val blob = "hir-blob-v1\nfield\tN\n"
+        val manifest_path = _hir_cache_write_failed_diagnostic_v1(
+            root, module_name, module_path, verdict, blob)
+        val artifact_id = _diagnostic_artifact_id(module_path)
+        val payload_path = root + "/hir-selfcheck-quarantine-v1/" + artifact_id + ".blob"
+        expect(manifest_path != "").to_equal(true)
+        expect(file_exists(payload_path)).to_equal(true)
+        expect(file_read(payload_path)).to_equal(blob)
+        val manifest = file_read(manifest_path)
+        match parse(manifest):
+            case Ok(_): pass
+            case Err(reason): fail("invalid quarantine SDN: {reason}")
+        expect(manifest.contains("module_name: \"sample\"")).to_equal(true)
+        expect(manifest.contains("module_path: \"src/sample.spl\"")).to_equal(true)
+        expect(manifest.contains("verdict: \"reason=decode detail=nil_in_non_optional_scalar:Sample.flag\"")).to_equal(true)
+        expect(manifest.contains("payload_bytes: {blob.len()}")).to_equal(true)
+        expect(manifest.contains("payload_sha256: \"{sha256_text(blob)}\"")).to_equal(true)
+        expect(manifest.contains("payload_omitted: false")).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "records over-limit payload omission without writing it to the cache":
+        val root = _diagnostic_root("oversized")
+        var chars: [text] = []
+        var c = 0
+        while c < 1024:
+            chars.push("x")
+            c = c + 1
+        val chunk = chars.join("")
+        var chunks: [text] = []
+        var i = 0
+        while i <= HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1 / 1024:
+            chunks.push(chunk)
+            i = i + 1
+        val oversized = chunks.join("")
+        val module_path = "src/large.spl"
+        val artifact_id = _diagnostic_artifact_id(module_path)
+        val dir = root + "/hir-selfcheck-quarantine-v1"
+        val manifest_path = _hir_cache_write_failed_diagnostic_v1(
+            root, "large", module_path, "reason=decode", oversized)
+        expect(oversized.len() > HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1).to_equal(true)
+        expect(manifest_path != "").to_equal(true)
+        expect(file_exists(dir + "/" + artifact_id + ".blob")).to_equal(false)
+        expect(file_exists(dir + "/" + artifact_id + ".hir")).to_equal(false)
+        val manifest = file_read(manifest_path)
+        match parse(manifest):
+            case Ok(_): pass
+            case Err(reason): fail("invalid over-limit quarantine SDN: {reason}")
+        expect(manifest.contains("payload_bytes: {oversized.len()}")).to_equal(true)
+        expect(manifest.contains("payload_file: null")).to_equal(true)
+        expect(manifest.contains("payload_omitted: true")).to_equal(true)
+        expect(manifest.contains("payload_omitted_reason: \"size_limit\"")).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "does not overwrite an existing quarantine artifact":
+        val root = _diagnostic_root("no-overwrite")
+        val module_path = "src/reused.spl"
+        val blob = "original payload"
+        val first = _hir_cache_write_failed_diagnostic_v1(root, "reused", module_path, "reason=first", blob)
+        expect(first != "").to_equal(true)
+        val before = file_read(first)
+        val second = _hir_cache_write_failed_diagnostic_v1(root, "reused", module_path, "reason=second", "replacement")
+        expect(second).to_equal("")
+        expect(file_read(first)).to_equal(before)
+        expect(file_read(root + "/hir-selfcheck-quarantine-v1/" + _diagnostic_artifact_id(module_path) + ".blob")).to_equal(blob)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "does no filesystem work when no opt-in directory is provided":
+        expect(_hir_cache_write_failed_diagnostic_v1("", "none", "", "reason=decode", "blob")).to_equal("")

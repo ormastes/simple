@@ -119,3 +119,40 @@ under staged-native) is still open and is the general form of fixes 3 and 4.
 
 The dropped default is a Rust-seed HIR gap (stage2 is seed-built), not
 pure-Simple MIR: see `native_struct_field_default_dropped_on_reexport_2026-10-25.md`.
+## Failure-only quarantine diagnostics (2026-10-25, source change pending execution)
+
+The generated required-scalar rejection now appends its owning field to the
+existing `nil_in_non_optional_scalar` reason. Enum fields also include the
+variant, for example `HirExprKind.IntLit.value`; the decoder still rejects
+the same bare `N` token.
+
+When a write-time self-check fails, an operator may set
+`SIMPLE_HIR_CACHE_FAILED_DIAGNOSTIC_DIR` to a dedicated evidence directory.
+That failure branch alone reads the setting. It writes a payload and an SDN
+manifest under `hir-selfcheck-quarantine-v1`; this namespace is never scanned
+by the HIR cache loader. The manifest is published last with exclusive,
+no-replace file operations. Payload plus reserved metadata is capped at 1 MiB.
+Over-limit payloads record their byte count and omission reason without writing
+the blob. If the setting is empty or capture I/O fails, the original
+self-check refusal remains unchanged.
+
+Focused specs assert `FlatPoolReader.failure_detail` for enum and struct
+fields, and exercise the production quarantine writer with a small payload,
+an over-limit payload, an existing destination, and an empty opt-in directory.
+They verify payload bytes/hash, manifest fields, omission metadata, and
+no-overwrite behavior. They have not been executed with a qualified Simple
+runtime; the new generated-code diagnostic and quarantine artifact remain
+source-reviewed, not runtime-qualified.
+
+The opt-in is available on the canonical CLI worker route without another
+environment allowlist: `src/app/cli/native_build_main.spl:902-912` builds the
+`native_build_worker.spl` command, and `:965-976` launches it with
+`process_spawn_async` after changing only the shard queue/owner variables.
+`src/lib/nogc_sync_mut/io_runtime.spl:659-660` delegates that API to the raw
+process-spawn operation with no replacement environment, so the worker
+inherits the CLI process environment. The builder-owned clean-environment
+lists in `src/app/bootstrap_builder/worker.spl:53-78` and
+`grouped_native_run.spl:157-174` are separate build orchestration routes and
+do not launch this canonical native-build worker; no broad allowlist was
+changed. End-to-end propagation through a qualified CLI/runtime remains
+unexecuted.
