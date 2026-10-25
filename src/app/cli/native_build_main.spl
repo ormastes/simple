@@ -57,7 +57,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_object_path_v1, file_worker_overlap_proven_v1,
-    NATIVE_MONO_MODULE_SCOPED_ENV_V1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, mono_module_scoped_selected_v1,
+    NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1, mono_module_scoped_selected_v1,
     native_file_worker_deps_read_v1, native_file_worker_deps_ready_v1, native_file_worker_mir_done_read_v1,
     native_file_worker_mono_pending_path_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
@@ -1376,7 +1376,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         eprint "[file-worker] invalid role spec={spec} or ledger/self path missing"
         return 1
     val batch = native_file_worker_batch_from_env_v1()
-    if mono_module_scoped_selected_v1(env_get(NATIVE_MONO_MODULE_SCOPED_ENV_V1) ?? "", true):
+    if mono_module_scoped_selected_v1(env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", true):
         return run_native_file_worker_scoped_v1(args, spec, owner, mir_queue, hir_queue, simple_bin, batch)
     var round: i64 = 0
     # Phase A: HIR, one claim batch per child, until the HIR ledger is drained.
@@ -2151,13 +2151,13 @@ pub fn run_native_build_entry_v1(raw_args: [text]) -> i64:
 fn main() -> i64:
     run_native_build_entry_v1(native_build_entry_args())
 
-# P4 worker loop (SIMPLE_MONO_MODULE_SCOPED=1): no whole-ledger wait. After
+# P4/P-G3 worker loop (default in the per-file lane): no whole-ledger wait. After
 # every HIR round the worker admits MIR for each module it HIR-claimed whose
 # own HIR and whose direct imports' HIR are PASS (deps record written by the
 # HIR child; native_file_worker_deps_ready_v1). The MIR child gets exactly
 # those paths in SIMPLE_MIR_SHARD_ONLY_PATHS and runs module-scoped mono for
-# them. A module without a deps record (a HIR lane that does not write one)
-# falls back to the old gate: MIR waits until the whole HIR ledger is PASS.
+# them. A module without a deps record fails closed (P-G3): MIR never waits
+# on the whole HIR ledger for mono.
 fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_queue: text,
         hir_queue: text, simple_bin: text, batch: i64) -> i64:
     var pending: [text] = []
@@ -2222,7 +2222,8 @@ fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_q
                     states[dep] = native_file_worker_terminal_state_v1(hir_queue, dep)
                 verdict = native_file_worker_deps_ready_v1(path, deps.unwrap(), states)
             else:
-                verdict = native_file_worker_hir_ledger_state_v1(hir_queue)
+                eprint "[file-worker] owner={owner} module={path} has no deps record; MIR not admitted (no whole-ledger wait)"
+                verdict = -1
             if verdict < 0:
                 val _published = native_file_worker_receipt_publish_v1(hir_queue, NativeFileWorkerReceiptV1(
                     module: path, hir_start_ms: pending_hir_start[index], hir_done_ms: pending_hir_done[index],
