@@ -1,0 +1,102 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Reader-driven concrete generic instances (per-file P-G1)
+
+A file job's reader registers a loaded module's generic TLDR section and asks
+for the concrete instances it uses by template id + type arguments. A hit by
+ConcreteTldrKey returns the stored instance; a miss instantiates it once and
+stores it. Hit and fresh instantiation are the same value; a changed type
+argument is a different key. Only Concrete views are instances.
+
+Interpreter-lane evidence only: the persistent cache blob and HIR/MIR
+consumer are P-G2/P-G3.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.mono.model.generic_subst_model.*
+use compiler.driver.cache.generic_tldr_view_table_v1.*
+use compiler.driver.cache.reader.concrete_instance_reader_v1.*
+
+fn field_in(name: text, type_text: text) -> GenericFieldInputV1:
+    GenericFieldInputV1(name: name, type_text: type_text)
+
+fn pair_section() -> GenericTemplateSectionV1:
+    val d = GenericDeclInputV1(module_path: "pkg_a", name: "Pair", params: ["First", "Second"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [field_in("first", "First"), field_in("second", "Second")], visibility_root: "vis:pub",
+        active_guard_root: active_guard_root_empty_v1("").root_digest, source_digest: "src:pkg_a.Pair")
+    build_generic_template_section_v1([project_generic_template_v1(d).unwrap()])
+
+fn new_reader() -> ConcreteInstanceReaderV1:
+    var r = concrete_instance_reader_new_v1(generic_tldr_view_table_new(), "snap:1", "profile:default",
+        active_guard_root_empty_v1("profile:default"))
+    r.register_module("pkg_a", pair_section())
+    r
+
+fn i64t() -> MType:
+    mt_con("i64")
+
+fn f64t() -> MType:
+    mt_con("f64")
+
+describe "concrete instance reader: hit vs instantiate":
+    it "instantiates on miss and returns the same instance on hit":
+        val r = new_reader()
+        val a = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        val b = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        expect(a.found).to_equal(true)
+        expect(b.found).to_equal(true)
+        expect(a.instance[0].source).to_equal(CONCRETE_INSTANCE_SOURCE_INSTANTIATED_V1)
+        expect(b.instance[0].source).to_equal(CONCRETE_INSTANCE_SOURCE_CACHE_V1)
+        expect(b.instance[0].instance_key).to_equal(a.instance[0].instance_key)
+        expect(b.instance[0].view.view_id).to_equal(a.instance[0].view.view_id)
+        expect(mt_render(concrete_tldr_field_type(b.instance[0].view, 1))).to_equal("f64")
+        expect(r.instantiations).to_equal(1)
+        expect(r.hits).to_equal(1)
+
+    it "hit equals a fresh instantiation in another reader":
+        val r1 = new_reader()
+        val r2 = new_reader()
+        val _warm = reader_concrete_instance_v1(r1, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        val hit = reader_concrete_instance_v1(r1, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        val fresh = reader_concrete_instance_v1(r2, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        expect(hit.instance[0].instance_key).to_equal(fresh.instance[0].instance_key)
+        expect(hit.instance[0].view.overrides.len()).to_equal(fresh.instance[0].view.overrides.len())
+        expect(mt_render(concrete_tldr_field_type(hit.instance[0].view, 0))).to_equal(
+            mt_render(concrete_tldr_field_type(fresh.instance[0].view, 0)))
+
+    it "gives a changed type argument a different key and a miss":
+        val r = new_reader()
+        val a = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [i64t(), f64t()])
+        val b = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [i64t(), i64t()])
+        expect(a.instance[0].instance_key == b.instance[0].instance_key).to_equal(false)
+        expect(b.instance[0].source).to_equal(CONCRETE_INSTANCE_SOURCE_INSTANTIATED_V1)
+        expect(r.instantiations).to_equal(2)
+
+describe "concrete instance reader: misses fail closed":
+    it "misses for an unloaded module, unknown symbol and open argument":
+        val r = new_reader()
+        expect(reader_concrete_instance_v1(r, "pkg_z", "pkg_a.Pair", [i64t(), f64t()]).miss_reason).to_equal("module-not-loaded")
+        expect(reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Nope", [i64t()]).miss_reason).to_equal("unknown-symbol")
+        val open = reader_concrete_instance_v1(r, "pkg_a", "pkg_a.Pair", [mt_var("U"), f64t()])
+        expect(open.found).to_equal(false)
+        expect(open.miss_reason).to_equal("not-concrete")
+
+describe "concrete instance reader: generic-use detection":
+    it "requests only usage refs naming a template with matching arity":
+        val r = new_reader()
+        val refs = [GenericUseRefV1(generic_decl_id: "pkg_a.Pair", type_arg_keys: [mt_key_type(i64t()), mt_key_type(f64t())]),
+            GenericUseRefV1(generic_decl_id: "pkg_a.Pair", type_arg_keys: [mt_key_type(i64t())]),
+            GenericUseRefV1(generic_decl_id: "pkg_a.Other", type_arg_keys: [mt_key_type(i64t())])]
+        expect(reader_detect_generic_uses_v1(pair_section(), refs).len()).to_equal(1)
+        val got = reader_request_generic_instances_v1(r, "pkg_a", refs)
+        expect(got.len()).to_equal(1)
+        expect(got[0].found).to_equal(true)
