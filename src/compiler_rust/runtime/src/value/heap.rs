@@ -327,6 +327,7 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
             validated_remember(ptr as usize, epoch);
             // Caller just allocated the object; header is valid by contract.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            super::dict_scope_read::registered(ptr as usize, kind, bytes as u32);
             note_heap_alloc(kind, bytes);
             note_attr_alloc(ptr as usize, bytes);
         }
@@ -350,6 +351,7 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
             // Presence in the registry means not yet freed (the erasing call
             // is the one allowed to free), so this read is not use-after-free.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            super::dict_scope_read::unregistered(ptr as usize, kind);
             note_heap_free(kind, bytes);
             note_attr_free(ptr as usize, bytes);
             super::collections::transient_promote_share_forget(ptr as usize);
@@ -381,6 +383,7 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         .unwrap_or(false);
     if removed {
         let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+        super::dict_scope_read::unregistered(ptr as usize, kind);
         note_heap_free(kind, bytes);
         note_attr_free(ptr as usize, bytes);
         super::collections::transient_promote_share_forget(ptr as usize);
@@ -421,6 +424,7 @@ pub fn clear_heap_allocation_registry() {
     if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
         let _ = registry.lock().map(|mut registry| {
             registry.clear();
+            super::dict_scope_read::cleared();
             heap_free_epoch_bump();
         });
     }
