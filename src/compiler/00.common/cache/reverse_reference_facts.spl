@@ -63,6 +63,21 @@ var _rr_module_batch_token_g_v1: i64 = 0
 var _rr_module_batch_generation_g_v1: i64 = 0
 var _rr_module_batch_sealed_g_v1: bool = false
 var _rr_module_batch_valid_g_v1: bool = true
+# @workaround bug=stage2_sanity_reverse_reference_publish_refused_2026_10_22 reason=array_limbs_dead_after_scope_end
+# The promoted batch's ARRAY limbs do not survive the transient scope end.
+# Seal promotes each limb (and its elements) while its handles are still
+# valid and mirrors the persistent handles here; publish merges from these.
+# Ported from release/1.0 ff1f69fd931 (3159810d701 already assigns them).
+var _rr_module_batch_facts_g_v1: [ReverseReferenceOwnerFactV1] = []
+var _rr_module_batch_known_g_v1: [text] = []
+var _rr_module_batch_incomplete_g_v1: [text] = []
+var _rr_module_batch_aliases_g_v1: [ReverseReferenceSourceAliasV1] = []
+
+fn _rr_reset_batch_mirrors_v1():
+    _rr_module_batch_facts_g_v1 = []
+    _rr_module_batch_known_g_v1 = []
+    _rr_module_batch_incomplete_g_v1 = []
+    _rr_module_batch_aliases_g_v1 = []
 
 fn reverse_reference_owner_clear_v1():
     _reverse_reference_owner_facts_v1 = []
@@ -75,6 +90,7 @@ fn reverse_reference_owner_clear_v1():
     _rr_module_batch_generation_g_v1 = 0
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
 
 # Begin only after the caller has acquired its allocation scope. A refusal
 # leaves the pre-existing owner untouched; zero means the collector is idle.
@@ -94,6 +110,7 @@ fn reverse_reference_module_begin_v1() -> i64:
     _rr_module_batch_generation_g_v1 = _reverse_reference_owner_generation_v1
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
     token
 
 # The caller must pause first. Promoting the module root never walks the
@@ -103,7 +120,7 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
         return _reverse_reference_module_batch_v1 == nil
     if _reverse_reference_module_batch_v1 == nil:
         return false
-    val batch = _reverse_reference_module_batch_v1.unwrap()
+    val batch: ReverseReferenceModuleBatchV1 = _reverse_reference_module_batch_v1.unwrap()
     if batch.token != token or batch.generation != _reverse_reference_owner_generation_v1 or
             not _reverse_reference_owner_active_v1 or batch.sealed or not batch.valid:
         return false
@@ -111,17 +128,113 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
     # Store the mutated batch back: where `unwrap()` yields a copy (the seed
     # interpreter), the seal would otherwise be lost and publish would refuse.
     _reverse_reference_module_batch_v1 = Some(batch)
-    # The global Option carrier itself was created in the module scope too.
-    val owned = transient_promote(_reverse_reference_module_batch_v1)
+    # Promote the batch OBJECT and the arrays it owns, not only the Option
+    # carrier. MEASURED on the release/1.0.0 stage-2 candidate (Linux x86_64,
+    # cranelift), reading the class field back inside publish AFTER the parse
+    # scope ended:
+    #   carrier promote only : field_token=929415262  (mirror_token=1)
+    #   this promote set     : field_token=1          (mirror_token=1)
+    # So the carrier promote alone did not keep the batch block alive, and only
+    # its FIRST word was clobbered -- which is why the scalar mirrors added in
+    # d819cb542b9 were enough to get past validation, yet publish then iterated
+    # batch.facts/known_families/incomplete_families/aliases and pushed those
+    # handles into process-lifetime globals, surfacing as ICE phase=mir_lower,
+    # worker exit status -139.
+    #
+    # The exact rt_transient_heap_promote exit that neutered the carrier promote
+    # is NOT established. Review traced that the "already-persistent root is a
+    # no-op" exit needs classify==0, while a registered array/enum classifies 1
+    # and IS walked into its payload; the remaining candidates are the generic-T
+    # extern receiving the Option as a by-value copy, and the Rust twin in
+    # collections.rs, which skips a non-scope-owned root without walking it.
+    # Do not restate a mechanism this comment has not proven.
+    # Bug: doc/08_tracking/bug/stage2_sanity_transient_hir_scope_publish_refused_p2_add_2026-10-23.md
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 mono cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val facts_v: [ReverseReferenceOwnerFactV1] = batch.facts
+    val known_v: [text] = batch.known_families
+    val incomplete_v: [text] = batch.incomplete_families
+    val aliases_v: [ReverseReferenceSourceAliasV1] = batch.aliases
+    val owned_carrier = transient_promote(_reverse_reference_module_batch_v1)
+    val owned_batch = transient_promote(batch)
+    val owned_facts = transient_promote(facts_v)
+    val owned_known = transient_promote(known_v)
+    val owned_incomplete = transient_promote(incomplete_v)
+    val owned_aliases = transient_promote(aliases_v)
+    val owned = owned_carrier and owned_batch and owned_facts and owned_known and
+        owned_incomplete and owned_aliases
     if not owned:
         batch.valid = false
         _reverse_reference_module_batch_v1 = Some(batch)
         _rr_module_batch_valid_g_v1 = false
     else:
-        # Mirror the seal in the scalar globals: the candidate corrupts the
-        # promoted class's scalar limbs across the scope end, so publish
-        # validates against these instead of the batch fields.
+        # Mirror in the scalar globals: the candidate corrupts the promoted
+        # class's scalar limbs across the scope end, so publish validates
+        # against these instead of the batch fields.
         _rr_module_batch_sealed_g_v1 = true
+        # Promote each ARRAY limb while its handles are still valid (the
+        # scope has not ended yet) and mirror the persistent handles.
+        # Publishing over the promoted batch's own array limbs deadlocks:
+        # rt_array_get on the reclaimed transient slot spins in the runtime
+        # heap registry mutex (gdb-verified 2026-10-23).
+        # (facts_v/known_v/incomplete_v/aliases_v are the typed locals above.)
+        val facts_owned = transient_promote(facts_v)
+        val known_owned = transient_promote(known_v)
+        val incomplete_owned = transient_promote(incomplete_v)
+        val aliases_owned = transient_promote(aliases_v)
+        # The array backings survive via the promotes above, but their ELEMENT
+        # handles (the strings inside) were allocated in the ending scope too:
+        # publish's contains/push dereferences them (string compare) and
+        # SIGSEGVs on reclaimed content. Promote every element while the scope
+        # is still paused; the runtime reclaim cure (owner lane) supersedes.
+        # Element/field arguments go through typed locals for the same
+        # mono workaround as above.
+        var elements_owned = facts_owned and known_owned and incomplete_owned and aliases_owned
+        var ki = 0
+        while ki < known_v.len() and elements_owned:
+            val known_e: text = known_v[ki]
+            elements_owned = transient_promote(known_e)
+            ki = ki + 1
+        var ii = 0
+        while ii < incomplete_v.len() and elements_owned:
+            val incomplete_e: text = incomplete_v[ii]
+            elements_owned = transient_promote(incomplete_e)
+            ii = ii + 1
+        var fi = 0
+        while fi < facts_v.len() and elements_owned:
+            val fact: ReverseReferenceOwnerFactV1 = facts_v[fi]
+            val fact_kind: text = fact.projection_kind
+            val fact_subject: text = fact.subject_identity
+            val fact_consumer: text = fact.consumer_identity
+            val fact_digest: text = fact.evidence_digest
+            elements_owned = transient_promote(fact_kind) and
+                transient_promote(fact_subject) and
+                transient_promote(fact_consumer) and
+                transient_promote(fact_digest) and
+                transient_promote(fact)
+            fi = fi + 1
+        var ai = 0
+        while ai < aliases_v.len() and elements_owned:
+            val alias: ReverseReferenceSourceAliasV1 = aliases_v[ai]
+            val alias_identity: text = alias.identity
+            val alias_source: text = alias.source
+            elements_owned = transient_promote(alias_identity) and
+                transient_promote(alias_source) and
+                transient_promote(alias)
+            ai = ai + 1
+        # Publish PUSHES into the phase-owner globals; their backings also
+        # grew inside transient scopes and are read/written after scope end.
+        # Promote them here too so the merge below touches immortal memory.
+        elements_owned = transient_promote(_reverse_reference_owner_facts_v1) and elements_owned
+        elements_owned = transient_promote(_reverse_reference_known_families_v1) and elements_owned
+        elements_owned = transient_promote(_reverse_reference_incomplete_families_v1) and elements_owned
+        elements_owned = transient_promote(_reverse_reference_source_aliases_v1) and elements_owned
+        if elements_owned:
+            _rr_module_batch_facts_g_v1 = facts_v
+            _rr_module_batch_known_g_v1 = known_v
+            _rr_module_batch_incomplete_g_v1 = incomplete_v
+            _rr_module_batch_aliases_g_v1 = aliases_v
+        else:
+            _rr_module_batch_valid_g_v1 = false
     _reverse_reference_module_index_v1 = nil
     owned
 
@@ -137,6 +250,7 @@ fn reverse_reference_module_abort_v1(token: i64) -> bool:
     _rr_module_batch_token_g_v1 = 0
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
     true
 
 # Call after the allocation scope ends. Capture already performed deduplication;
@@ -146,21 +260,20 @@ fn reverse_reference_module_publish_v1(token: i64) -> bool:
         return _reverse_reference_module_batch_v1 == nil
     if _reverse_reference_module_batch_v1 == nil:
         return false
-    val batch = _reverse_reference_module_batch_v1.unwrap()
     if _rr_module_batch_token_g_v1 != token or
             _rr_module_batch_generation_g_v1 != _reverse_reference_owner_generation_v1 or
             not _reverse_reference_owner_active_v1 or not _rr_module_batch_sealed_g_v1 or
             not _rr_module_batch_valid_g_v1:
         eprint("[rr-publish] publish refused token={token} g_token={_rr_module_batch_token_g_v1} g_gen={_rr_module_batch_generation_g_v1} owner_gen={_reverse_reference_owner_generation_v1} active={_reverse_reference_owner_active_v1} g_sealed={_rr_module_batch_sealed_g_v1} g_valid={_rr_module_batch_valid_g_v1}\n")
         return false
-    for family in batch.known_families:
+    for family in _rr_module_batch_known_g_v1:
         _reverse_reference_known_families_v1.push(family)
-    for family in batch.incomplete_families:
+    for family in _rr_module_batch_incomplete_g_v1:
         if not _reverse_reference_incomplete_families_v1.contains(family):
             _reverse_reference_incomplete_families_v1.push(family)
-    for fact in batch.facts:
+    for fact in _rr_module_batch_facts_g_v1:
         _reverse_reference_owner_facts_v1.push(fact)
-    for alias in batch.aliases:
+    for alias in _rr_module_batch_aliases_g_v1:
         var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(alias.identity):
             _reverse_reference_source_aliases_v1[alias.identity]
         else:

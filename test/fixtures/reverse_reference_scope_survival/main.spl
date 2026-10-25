@@ -1,0 +1,48 @@
+# Native regression for reverse-reference publication after transient teardown.
+# Dynamic strings, all four batch arrays, and two consecutive batches exercise
+# the lifetime boundary that crashed p2_add in release_phase3 Stage2.
+use compiler.common.cache.reverse_reference_facts.*
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end}
+
+fn main():
+    assert(reverse_reference_owner_begin_v1())
+    var index = 0
+    while index < 2:
+        assert(transient_scope_begin())
+        val token = reverse_reference_module_begin_v1()
+        assert(token > 0)
+        assert(reverse_reference_module_begin_v1() == -1)
+        reverse_reference_owner_register_v1("family-{index}", "subject-{index}",
+            "consumer-{index}", "evidence-{index}")
+        reverse_reference_owner_register_source_alias_v1("shared", "source-{index}")
+        reverse_reference_owner_mark_known_v1("incomplete-{index}")
+        reverse_reference_owner_mark_incomplete_v1("incomplete-{index}")
+        assert(transient_scope_pause())
+        assert(reverse_reference_module_seal_v1(token))
+        assert(not reverse_reference_module_seal_v1(token))
+        assert(transient_scope_end())
+        assert(not reverse_reference_module_publish_v1(token + 1))
+        assert(reverse_reference_module_publish_v1(token))
+        assert(not reverse_reference_module_publish_v1(token))
+
+        val snapshot = reverse_reference_owner_snapshot_v1()
+        assert(snapshot.facts.len() == index + 1)
+        assert(snapshot.known_families.len() == index + 1)
+        val aliases = reverse_reference_owner_source_aliases_v1("shared")
+        assert(aliases.len() == index + 1)
+        var retained = 0
+        while retained <= index:
+            val fact = snapshot.facts[retained]
+            assert(fact.projection_kind == "family-{retained}")
+            assert(fact.subject_identity == "subject-{retained}")
+            assert(fact.consumer_identity == "consumer-{retained}")
+            assert(fact.evidence_digest == reverse_reference_fact_digest_v1(
+                "family-{retained}", "subject-{retained}",
+                "consumer-{retained}", "evidence-{retained}"))
+            assert(snapshot.known_families[retained] == "family-{retained}")
+            assert(aliases[retained] == "source-{retained}")
+            retained = retained + 1
+        index = index + 1
+    reverse_reference_owner_end_v1()
+    print "PASS: reverse-reference scope survival"
