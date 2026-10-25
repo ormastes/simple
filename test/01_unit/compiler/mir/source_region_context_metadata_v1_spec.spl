@@ -1,0 +1,79 @@
+# Authored metadata contracts; these do not establish native SOURCE execution.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirLocal, LocalId, LocalKind}
+use compiler.mir.mir_instruction_support.{BlockId}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.source_region_context_transform_v1.{source_region_function_context_local_v1}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn source_region_metadata_fixture_v1() -> MirFunction:
+    val context = MirType(kind: MirTypeKind.Struct(SymbolId(id: 92)))
+    MirFunction(symbol: SymbolId(id: 7), name: "subject",
+        signature: MirSignature(params: [context], return_type: MirType.i64(),
+            is_variadic: false, params_known: true),
+        locals: [MirLocal(id: LocalId(id: 3), name: nil, type_: context,
+            kind: LocalKind.Arg(0), is_ghost: false)],
+        blocks: [], entry_block: BlockId(id: 0), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0,
+            device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0,
+        verification_contract: nil, source_region_context_local_v1: 3,
+        source_region_context_abi_v1: 1, source_region_closure_digest_v1: "producer-bound")
+
+fn source_region_metadata_rejected_v1(function: MirFunction) -> bool:
+    match source_region_function_context_local_v1(function, SymbolId(id: 92)):
+        case Err(_): true
+        case Ok(_): false
+
+describe "compiler-owned SOURCE context local metadata":
+    it "returns the actual typed trailing argument local":
+        match source_region_function_context_local_v1(source_region_metadata_fixture_v1(), SymbolId(id: 92)):
+            case Ok(local): expect((local ?? LocalId(id: -1)).id).to_equal(3)
+            case Err(message): expect(message).to_equal("")
+
+    it "rejects a same-shaped foreign declaration identity":
+        val function = source_region_metadata_fixture_v1()
+        match source_region_function_context_local_v1(function, SymbolId(id: 93)):
+            case Err(message): expect(message).to_contain("foreign identity")
+            case Ok(local): expect((local ?? LocalId(id: -1)).id).to_equal(-2)
+
+    it "rejects a local that is not the actual parameter":
+        var function = source_region_metadata_fixture_v1()
+        function.locals[0].kind = LocalKind.Temp
+        expect(source_region_metadata_rejected_v1(function)).to_equal(true)
+
+    it "rejects duplicate local identity":
+        var function = source_region_metadata_fixture_v1()
+        val duplicate = function.locals[0]
+        function.locals.push(duplicate)
+        expect(source_region_metadata_rejected_v1(function)).to_equal(true)
+
+    it "does not infer authority from a context-shaped ordinary parameter":
+        var function = source_region_metadata_fixture_v1()
+        function.source_region_context_abi_v1 = 0
+        function.source_region_context_local_v1 = -1
+        function.source_region_closure_digest_v1 = ""
+        match source_region_function_context_local_v1(function, SymbolId(id: 92)):
+            case Ok(local): expect(local).to_be_nil()
+            case Err(message): expect(message).to_equal("")
+
+    it "binds changed metadata into canonical MIR identity":
+        var function = source_region_metadata_fixture_v1()
+        val before = serialize_mir_function(function)
+        function.source_region_closure_digest_v1 = "different-producer"
+        expect(serialize_mir_function(function) == before).to_equal(false)
+
+    it "preserves metadata when replacing blocks":
+        val original = source_region_metadata_fixture_v1()
+        val copy = MirFunction.with_blocks(original, [])
+        expect(copy.source_region_context_local_v1).to_equal(3)
+        expect(copy.source_region_context_abi_v1).to_equal(1)
+        expect(copy.source_region_closure_digest_v1).to_equal("producer-bound")
