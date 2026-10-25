@@ -44,6 +44,23 @@ fn canonical_enum_expected_abi_name_v1(operation: CanonicalEnumBuiltinOperationV
         case CanonicalEnumBuiltinOperationV1.Discriminant: "rt_enum_discriminant"
         case CanonicalEnumBuiltinOperationV1.Panic: "rt_panic"
 
+# No hash-map allocation, key formatting or collision chain. Four units per
+# prior row cover two integer comparisons, the index step and loop control.
+pub fn canonical_enum_duplicate_site_work_v1(prior_count: i64) -> Result<i64, text>:
+    canonical_enum_product_v1(canonical_enum_sum_v1(prior_count, 1)?, 4)
+
+pub fn canonical_enum_unique_site_v1(sites: [CanonicalEnumBuiltinSiteV1],
+        index: i64, account: MirLoopResourceAccountV1) -> Result<(), text>:
+    if index < 0 or index >= sites.len(): return Err("ENUM-ORIGIN: invalid site cursor")
+    canonical_enum_charge_v1(account, canonical_enum_duplicate_site_work_v1(index)?)?
+    val current = sites[index]
+    var prior = 0
+    while prior < index:
+        if sites[prior].block.id == current.block.id and sites[prior].instruction_index == current.instruction_index:
+            return Err("ENUM-ORIGIN: duplicate primitive site")
+        prior = prior + 1
+    Ok(())
+
 pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFunction,
         sites: [CanonicalEnumBuiltinSiteV1], account: MirLoopResourceAccountV1
 ) -> Result<CanonicalEnumBuiltinManifestV1, text>:
@@ -69,7 +86,6 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
         if serialize_mir_function(declared) != serialize_mir_function(function):
             return Err("ENUM-ORIGIN: candidate function body differs")
     canonical_enum_charge_v1(account, 32, 16, 32)?
-    var seen: Dict<text, bool> = {}
     var rows: [text] = ["CanonicalEnumBuiltin-v1"]
     var uses: [CanonicalEnumBuiltinCfgUseV1] = []
     for index in 0..sites.len():
@@ -84,9 +100,7 @@ pub fn canonical_enum_builtin_finalize_v1(module: MirModule, function: MirFuncti
                 if name != canonical_enum_expected_abi_name_v1(site.operation):
                     return Err("ENUM-ORIGIN: operation and emitted primitive ABI differ")
             case _: return Err("ENUM-ORIGIN: canonical primitive call operand absent")
-        val key = "{site.block.id}:{site.instruction_index}"
-        if seen.has(key): return Err("ENUM-ORIGIN: duplicate primitive site")
-        seen[key] = true
+        canonical_enum_unique_site_v1(sites, index, account)?
         var block_index = -1
         for candidate in 0..function.blocks.len():
             canonical_enum_charge_v1(account, 1)?
