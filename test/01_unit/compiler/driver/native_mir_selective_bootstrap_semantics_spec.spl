@@ -1,0 +1,108 @@
+# Source acceptance only until executed by a qualified self-hosted runner.
+# This recipe does not open bootstrap worker eligibility.
+use std.spec.*
+use compiler.driver.driver_build.native_mir_selective_bootstrap_context_v1.{
+    NativeMirSelectiveBootstrapContextV1, NativeMirSelectiveBootstrapOwnerReceiptV1}
+use compiler.driver.driver_mir_selective_bootstrap_semantics_v1.*
+
+fn bootstrap_semantics_owners_v1() -> [NativeMirSelectiveBootstrapOwnerReceiptV1]:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    [NativeMirSelectiveBootstrapOwnerReceiptV1(kind: "function_registry", digest: digest, bytes: 10, rows: 1),
+     NativeMirSelectiveBootstrapOwnerReceiptV1(kind: "callable_registry", digest: digest, bytes: 20, rows: 2),
+     NativeMirSelectiveBootstrapOwnerReceiptV1(kind: "enum_composite", digest: digest, bytes: 30, rows: 3)]
+
+fn bootstrap_semantics_context_v1(stage4: bool) -> NativeMirSelectiveBootstrapContextV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    NativeMirSelectiveBootstrapContextV1(source_identity: digest,
+        context_identity: digest, physical_manifest_identity: digest,
+        producer_identity: digest, backend: "cranelift", target: "x86_64-unknown-linux-gnu",
+        entry_owner: "app.cli.bootstrap_main", entry_source: "src/app/cli/bootstrap_main.spl",
+        stage4: stage4, skip_post_chain: not stage4, owners: bootstrap_semantics_owners_v1())
+
+fn bootstrap_semantics_binding_v1(stage4: bool = false) -> NativeMirSelectiveBootstrapBindingV1:
+    val context = bootstrap_semantics_context_v1(stage4)
+    NativeMirSelectiveBootstrapBindingV1(source_identity: context.source_identity,
+        context_identity: context.context_identity,
+        physical_manifest_identity: context.physical_manifest_identity,
+        producer_identity: context.producer_identity, backend: context.backend,
+        target: context.target, bootstrap_active: true, stage4: stage4)
+
+describe "explicit retained bootstrap worker semantic recipe":
+    it "refuses missing context before selecting bootstrap semantics":
+        val result = driver_mir_selective_bootstrap_semantics_v1(nil,
+            bootstrap_semantics_binding_v1(), bootstrap_semantics_owners_v1(), "dependency", false)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("missing")
+
+    it "refuses stale source context physical manifest and producer bindings":
+        val stale = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        for field in ["source", "context", "physical", "producer", "backend", "target", "stage4"]:
+            var expected = bootstrap_semantics_binding_v1()
+            if field == "source": expected.source_identity = stale
+            elif field == "context": expected.context_identity = stale
+            elif field == "physical": expected.physical_manifest_identity = stale
+            elif field == "producer": expected.producer_identity = stale
+            elif field == "backend": expected.backend = "llvm"
+            elif field == "target": expected.target = "aarch64-unknown-linux-gnu"
+            else: expected.stage4 = true
+            val result = driver_mir_selective_bootstrap_semantics_v1(
+                Some(bootstrap_semantics_context_v1(false)), expected,
+                bootstrap_semantics_owners_v1(), "dependency", false)
+            expect(result.is_err()).to_equal(true)
+
+    it "requires every reconstructed registry and its exact receipt":
+        val context = bootstrap_semantics_context_v1(false)
+        val missing = driver_mir_selective_bootstrap_semantics_v1(Some(context),
+            bootstrap_semantics_binding_v1(), [], "dependency", false)
+        expect(missing.is_err()).to_equal(true)
+        var owners = bootstrap_semantics_owners_v1()
+        owners[1] = owners[0]
+        val duplicate = driver_mir_selective_bootstrap_semantics_v1(Some(context),
+            bootstrap_semantics_binding_v1(), owners, "dependency", false)
+        expect(duplicate.is_err()).to_equal(true)
+        owners = bootstrap_semantics_owners_v1()
+        var changed: NativeMirSelectiveBootstrapOwnerReceiptV1 = owners[2]
+        changed.rows = changed.rows + 1
+        owners[2] = changed
+        val stale = driver_mir_selective_bootstrap_semantics_v1(Some(context),
+            bootstrap_semantics_binding_v1(), owners, "dependency", false)
+        expect(stale.is_err()).to_equal(true)
+
+    it "preserves closure entry and stage4 pass-chain choices explicitly":
+        for stage4 in [false, true]:
+            val context = bootstrap_semantics_context_v1(stage4)
+            val closure = driver_mir_selective_bootstrap_semantics_v1(Some(context),
+                bootstrap_semantics_binding_v1(stage4), bootstrap_semantics_owners_v1(), "dependency", false)
+            expect(closure.is_ok()).to_equal(true)
+            expect(closure.unwrap().mode).to_equal(NativeMirSelectiveBootstrapModuleModeV1.Closure)
+            expect(closure.unwrap().stage4).to_equal(stage4)
+            expect(closure.unwrap().skip_post_chain).to_equal(not stage4)
+            val entry = driver_mir_selective_bootstrap_semantics_v1(Some(context),
+                bootstrap_semantics_binding_v1(stage4), bootstrap_semantics_owners_v1(), "app.cli.bootstrap_main", true)
+            expect(entry.is_ok()).to_equal(true)
+            expect(entry.unwrap().mode).to_equal(NativeMirSelectiveBootstrapModuleModeV1.Entry)
+
+    it "never skips the post chain for an inactive bootstrap request":
+        var expected = bootstrap_semantics_binding_v1()
+        expected.bootstrap_active = false
+        val result = driver_mir_selective_bootstrap_semantics_v1(
+            Some(bootstrap_semantics_context_v1(false)), expected,
+            bootstrap_semantics_owners_v1(), "dependency", false)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("actual bootstrap request")
+
+    it "rejects a physical row falsely claiming entry ownership":
+        val result = driver_mir_selective_bootstrap_semantics_v1(
+            Some(bootstrap_semantics_context_v1(false)), bootstrap_semantics_binding_v1(),
+            bootstrap_semantics_owners_v1(), "dependency", true)
+        expect(result.is_err()).to_equal(true)
+
+    it "keeps parent closure order and adopts entry last independent of completion":
+        val order = driver_mir_selective_bootstrap_entry_last_v1(
+            ["first", "app.cli.bootstrap_main", "last"], "app.cli.bootstrap_main")
+        expect(order.is_ok()).to_equal(true)
+        expect(order.unwrap()).to_equal(["first", "last", "app.cli.bootstrap_main"])
+        expect(driver_mir_selective_bootstrap_entry_last_v1(
+            ["first"], "app.cli.bootstrap_main").is_err()).to_equal(true)
+        expect(driver_mir_selective_bootstrap_entry_last_v1(
+            ["app.cli.bootstrap_main", "app.cli.bootstrap_main"], "app.cli.bootstrap_main").is_err()).to_equal(true)

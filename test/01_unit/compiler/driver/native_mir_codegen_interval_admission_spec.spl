@@ -1,0 +1,65 @@
+"""Timing-frame validation only; these inputs do not establish real overlap."""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_mir_codegen_interval_admission_v1.*
+
+fn interval_frame_for_test() -> NativeMirCodegenIntervalV1:
+    NativeMirCodegenIntervalV1(invocation_identity: sha256_text("invocation"),
+        source_identity: sha256_text("sources"), context_identity: sha256_text("config"),
+        physical_manifest_identity: sha256_text("manifest"),
+        producer_identity: sha256_text("producer"), job_identity: sha256_text("job"),
+        worker_owner: "0/12@0", module: "app.한글", pid: 123,
+        birth_identity: "456", started_ms: 110, ended_ms: 120, status: "PASS")
+
+fn interval_expected_for_test() -> NativeMirCodegenIntervalExpectedV1:
+    NativeMirCodegenIntervalExpectedV1(frame: interval_frame_for_test(),
+        spawned_ms: 100, reaped_ms: 130)
+
+describe "Parent admission of actual object-codegen timing frame":
+    it "retains exact canonical frame within independently observed lifetime":
+        val expected = interval_expected_for_test()
+        val encoded = native_mir_codegen_interval_encode_v1(expected.frame)
+        expect(encoded.is_ok()).to_equal(true)
+        val admitted = native_mir_codegen_interval_admit_v1(encoded.unwrap(), expected)
+        expect(admitted.is_ok()).to_equal(true)
+        expect(admitted.unwrap().module).to_equal("app.한글")
+        expect(admitted.unwrap().started_ms).to_equal(110)
+
+    it "rejects wrong PID birth producer and source generation":
+        val expected = interval_expected_for_test()
+        var frame = interval_frame_for_test()
+        frame.pid = 124
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+        frame = interval_frame_for_test()
+        frame.birth_identity = "457"
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+        frame = interval_frame_for_test()
+        frame.producer_identity = sha256_text("wrong producer")
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+        frame = interval_frame_for_test()
+        frame.source_identity = sha256_text("wrong source")
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+
+    it "rejects pre-spawn post-reap and mismatched outcome intervals":
+        val expected = interval_expected_for_test()
+        var frame = interval_frame_for_test()
+        frame.started_ms = 99
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+        frame = interval_frame_for_test()
+        frame.ended_ms = 131
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+        frame = interval_frame_for_test()
+        frame.status = "FAIL"
+        expect(native_mir_codegen_interval_admit_v1(native_mir_codegen_interval_encode_v1(frame).unwrap(), expected).is_err()).to_equal(true)
+
+    it "rejects trailing bytes and duplicate jobs in the ordered aggregate":
+        val expected = interval_expected_for_test()
+        val blob = native_mir_codegen_interval_encode_v1(expected.frame).unwrap()
+        expect(native_mir_codegen_interval_admit_v1(blob + " ", expected).is_err()).to_equal(true)
+        expect(native_mir_codegen_intervals_admit_ordered_v1([blob, blob],
+            [expected, expected], sha256_text("ledger"), 10).is_err()).to_equal(true)
+        val admitted = native_mir_codegen_intervals_admit_ordered_v1([blob],
+            [expected], sha256_text("ledger"), 10)
+        expect(admitted.is_ok()).to_equal(true)
+        expect(admitted.unwrap().frame_digests).to_equal([sha256_text(blob)])
+        expect(admitted.unwrap().configured_workers).to_equal(10)

@@ -1,0 +1,58 @@
+# Overlap accounting for an independently parent-admitted interval batch.
+# This function grants no authenticity: callers must obtain the batch through
+# native_mir_codegen_intervals_admit_ordered_v1 with actual owned-child facts.
+use compiler.driver.driver_build.native_mir_codegen_interval_admission_v1.{
+    NativeMirAdmittedCodegenIntervalsV1, native_mir_codegen_interval_encode_v1}
+use std.common.algorithm_utils.{merge_sort}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub fn native_mir_codegen_admitted_peak_v1(batch: NativeMirAdmittedCodegenIntervalsV1) -> Result<i64, text>:
+    if not sha256_lower_hex_valid(batch.ledger_digest) or batch.configured_workers <= 0 or
+            batch.intervals.len() <= 0 or batch.intervals.len() > 65536 or
+            batch.frame_digests.len() != batch.intervals.len():
+        return Err("codegen overlap batch bound refused")
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var jobs: Dict<text, bool> = {}
+    var children: Dict<text, bool> = {}
+    var index = 0
+    while index < batch.intervals.len():
+        val frame = batch.intervals[index]
+        val encoded = native_mir_codegen_interval_encode_v1(frame)
+        if encoded.is_err(): return Err(encoded.unwrap_err())
+        if sha256_text(encoded.unwrap()) != batch.frame_digests[index]:
+            return Err("codegen overlap admitted frame digest differs")
+        if jobs.contains_key(frame.job_identity): return Err("codegen overlap job repeats")
+        jobs[frame.job_identity] = true
+        val child = "{frame.pid}:{frame.birth_identity}"
+        if children.contains_key(child): return Err("codegen overlap physical jobs share a child")
+        children[child] = true
+        if index > 0:
+            val first = batch.intervals[0]
+            if frame.invocation_identity != first.invocation_identity or frame.source_identity != first.source_identity or
+                    frame.context_identity != first.context_identity or frame.physical_manifest_identity != first.physical_manifest_identity or
+                    frame.producer_identity != first.producer_identity:
+                return Err("codegen overlap mixed invocation")
+        # A zero-duration sample proves no measurable overlap. Endpoints are
+        # half-open so one ending exactly when another starts does not overlap.
+        if frame.ended_ms > frame.started_ms:
+            starts.push(frame.started_ms)
+            ends.push(frame.ended_ms)
+        index = index + 1
+    val ordered_starts = merge_sort(starts)
+    val ordered_ends = merge_sort(ends)
+    var started = 0
+    var ended = 0
+    var active: i64 = 0
+    var peak: i64 = 0
+    while started < ordered_starts.len():
+        if ordered_starts[started] < ordered_ends[ended]:
+            active = active + 1
+            if active > peak: peak = active
+            if peak > batch.configured_workers: return Err("codegen overlap exceeds configured worker limit")
+            started = started + 1
+        else:
+            active = active - 1
+            ended = ended + 1
+    Ok(peak)

@@ -1,0 +1,66 @@
+"""Real worker artifact acceptance, UNRUN until a qualified campaign supplies it.
+
+SIMPLE_MIR_ADOPTION_QUALIFIED_FIXTURE names a parent-owned immutable directory
+containing parent-expected.sdn, produced from the actual launch/job ledger. Its
+private_root points at the worker's genuine emitted object/result/capsule files.
+Synthetic object magic or child-reported expectations are not valid fixtures.
+"""
+use std.spec.*
+use app.io.env_ops.{env_get}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.driver.driver_build.native_mir_worker_object_fragment_v1.*
+
+fn adoption_fixture_text(fields: Dict<text, SdnValue>, key: text) -> text:
+    expect(fields.has(key)).to_equal(true)
+    fields[key].as_str() ?? ""
+
+fn adoption_fixture_expected(root: text) -> NativeMirWorkerObjectExpectedV1:
+    val read = file_read_regular_no_follow_bounded("{root}/parent-expected.sdn", 65536)
+    expect(read.is_ok()).to_equal(true)
+    val parsed = parse_untrusted(read.unwrap())
+    expect(parsed.is_ok()).to_equal(true)
+    val fields = parsed.unwrap().as_dict()
+    expect(fields != nil).to_equal(true)
+    val d = fields.unwrap()
+    NativeMirWorkerObjectExpectedV1(
+        invocation: adoption_fixture_text(d, "invocation"), owner: adoption_fixture_text(d, "owner"),
+        private_root: adoption_fixture_text(d, "private_root"), source: adoption_fixture_text(d, "source"),
+        context: adoption_fixture_text(d, "context"), manifest: adoption_fixture_text(d, "manifest"),
+        module: adoption_fixture_text(d, "module"), module_source: adoption_fixture_text(d, "module_source"),
+        backend: adoption_fixture_text(d, "backend"), target: adoption_fixture_text(d, "target"),
+        provider: adoption_fixture_text(d, "provider"), producer: adoption_fixture_text(d, "producer"),
+        job: adoption_fixture_text(d, "job"),
+        child_pid: adoption_fixture_text(d, "child_pid").to_i64() ?? -1,
+        child_birth: adoption_fixture_text(d, "child_birth"))
+
+describe "Retain actual independent objects after an unlaunched HIR failure":
+    it "keeps the genuine later capsule result while the original verdict forbids link":
+        val fixture = env_get("SIMPLE_MIR_ADOPTION_QUALIFIED_FIXTURE") ?? ""
+        # Missing real evidence fails this acceptance; it never skips or passes.
+        expect(fixture != "").to_equal(true)
+        val success = adoption_fixture_expected(fixture)
+        expect(native_mir_worker_expected_valid_v1(success)).to_equal(true)
+        var failed = success
+        failed.module = "failed.original.source"
+        failed.child_pid = 0
+        failed.child_birth = ""
+        failed.owner = ""
+        failed.private_root = ""
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val cache = secure_temp_dir_raw(temporary, "mir-adoption-acceptance")
+        expect(cache != "").to_equal(true)
+        val result = native_mir_worker_objects_adopt_ordered_v1(cache,
+            [failed, success], [false, true], false, true, true)
+        expect(result.is_ok()).to_equal(true)
+        val retained = result.unwrap()
+        expect(retained.modules).to_equal(["failed.original.source", success.module])
+        expect(retained.digests[0]).to_equal("")
+        expect(retained.errors[0]).to_equal("original source is not READY")
+        expect(retained.digests[1].len()).to_equal(64)
+        expect(retained.errors[1]).to_equal("")
+        expect(retained.may_link).to_equal(false)
+        expect(dir_remove(cache, true)).to_equal(true)

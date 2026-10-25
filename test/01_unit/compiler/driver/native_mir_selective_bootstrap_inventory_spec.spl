@@ -1,0 +1,77 @@
+# @req REQ-BOOTSTRAP-OBJECT-PROCESS-PARTIAL-INVENTORY
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_mir_selective_bootstrap_inventory_v1.*
+
+fn bootstrap_inventory_row_v1(name: text, state: text, dependencies: [text] = [],
+        emission: text = "") -> NativeMirSelectiveBootstrapInventoryRowV1:
+    NativeMirSelectiveBootstrapInventoryRowV1(lookup_name: name,
+        emission_name: if emission == "": name else: emission,
+        source_digest: sha256_text(name), state: state,
+        reason: if state == "READY": "" else: "original HIR failure/exclusion",
+        dependencies: dependencies)
+
+# Test fixture convenience only; production must pass the retained ORIGINAL
+# source inventory, never derive it from the subset under validation.
+fn bootstrap_inventory_names_v1(rows: [NativeMirSelectiveBootstrapInventoryRowV1]) -> [text]:
+    var names: [text] = []
+    for row in rows: names.push(row.lookup_name)
+    names
+
+describe "complete failed HIR inventory before parallel object scheduling":
+    it "retains original failures while independently ready emissions can run":
+        val rows = [bootstrap_inventory_row_v1("bad", "HIR_FAILED"),
+            bootstrap_inventory_row_v1("dependent", "BLOCKED", ["bad"]),
+            bootstrap_inventory_row_v1("independent", "READY")]
+        expect(native_mir_selective_bootstrap_inventory_validate_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal("")
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["independent"]).unwrap()).to_equal(["independent"])
+        expect(native_mir_selective_bootstrap_inventory_link_allowed_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal(false)
+        expect(rows.len()).to_equal(3)
+
+    it "refuses READY rows with missing failed excluded or blocked providers":
+        for state in ["HIR_FAILED", "EXCLUDED", "BLOCKED"]:
+            val rows = [bootstrap_inventory_row_v1("provider", state),
+                bootstrap_inventory_row_v1("consumer", "READY", ["provider"])]
+            expect(native_mir_selective_bootstrap_inventory_validate_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal("bootstrap READY row depends on non-ready provider")
+        val absent = [bootstrap_inventory_row_v1("consumer", "READY", ["absent"])]
+        expect(native_mir_selective_bootstrap_inventory_validate_v1(absent, ["consumer"])).to_equal("bootstrap dependency absent from original inventory")
+
+    it "keeps actual physical manifest order and refuses dropped or invented emissions":
+        val rows = [bootstrap_inventory_row_v1("first", "READY"), bootstrap_inventory_row_v1("second", "READY")]
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["second", "first"]).unwrap()).to_equal(["second", "first"])
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["first"]).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["first", "second", "other"]).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["first", "first"]).is_err()).to_equal(true)
+        expect(native_mir_selective_bootstrap_inventory_link_allowed_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal(true)
+
+    it "deduplicates physical aliases without dropping logical source rows":
+        var alias = bootstrap_inventory_row_v1("alias", "READY", [], "physical")
+        alias.source_digest = sha256_text("origin")
+        val rows = [bootstrap_inventory_row_v1("origin", "READY", [], "physical"), alias]
+        expect(native_mir_selective_bootstrap_inventory_validate_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal("")
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), ["physical"]).unwrap()).to_equal(["physical"])
+        expect(rows.len()).to_equal(2)
+        var conflicting = alias
+        conflicting.source_digest = sha256_text("different source")
+        expect(native_mir_selective_bootstrap_inventory_validate_v1([rows[0], conflicting], bootstrap_inventory_names_v1([rows[0], conflicting]))).to_equal("bootstrap physical emission has conflicting source identity")
+
+    it "requires original row identity explicit failure reason and a finite nonempty inventory":
+        expect(native_mir_selective_bootstrap_inventory_validate_v1([], bootstrap_inventory_names_v1([]))).to_equal("bootstrap original inventory bound refused")
+        val row = bootstrap_inventory_row_v1("source", "READY")
+        expect(native_mir_selective_bootstrap_inventory_validate_v1([row, row], bootstrap_inventory_names_v1([row, row]))).to_equal("bootstrap original logical row repeats")
+        var invalid = bootstrap_inventory_row_v1("failed", "HIR_FAILED")
+        invalid.reason = ""
+        expect(native_mir_selective_bootstrap_inventory_validate_v1([invalid], bootstrap_inventory_names_v1([invalid]))).to_equal("bootstrap failed row lacks original diagnostic")
+        expect(native_mir_selective_bootstrap_inventory_validate_v1([bootstrap_inventory_row_v1("source", "UNKNOWN")], bootstrap_inventory_names_v1([bootstrap_inventory_row_v1("source", "UNKNOWN")]))).to_equal("bootstrap inventory state unsupported")
+
+    it "permits a finite all-failed inventory but never starts or links an object":
+        val rows = [bootstrap_inventory_row_v1("failed", "HIR_FAILED")]
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(rows, bootstrap_inventory_names_v1(rows), []).unwrap()).to_equal([])
+        expect(native_mir_selective_bootstrap_inventory_link_allowed_v1(rows, bootstrap_inventory_names_v1(rows))).to_equal(false)
+
+    it "refuses deleting an unrelated original failed row before link admission":
+        val original = ["failed", "independent"]
+        val retained_subset = [bootstrap_inventory_row_v1("independent", "READY")]
+        expect(native_mir_selective_bootstrap_inventory_validate_v1(retained_subset, original)).to_equal("bootstrap original inventory coverage differs")
+        expect(native_mir_selective_bootstrap_inventory_link_allowed_v1(retained_subset, original)).to_equal(false)
+        expect(native_mir_selective_bootstrap_ready_emissions_v1(retained_subset, original, ["independent"]).is_err()).to_equal(true)

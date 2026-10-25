@@ -1,0 +1,165 @@
+# Raw child timing is evidence only after independent parent launch admission.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.crypto.sha256.{sha256_text}
+
+pub const NATIVE_MIR_CODEGEN_INTERVAL_BYTES_V1: i64 = 16384
+pub const NATIVE_MIR_CODEGEN_AGGREGATE_BYTES_V1: i64 = 32 * 1024 * 1024
+
+pub struct NativeMirCodegenIntervalV1:
+    invocation_identity: text
+    source_identity: text
+    context_identity: text
+    physical_manifest_identity: text
+    producer_identity: text
+    job_identity: text
+    worker_owner: text
+    module: text
+    birth_identity: text
+    status: text
+    pid: i64
+    started_ms: i64
+    ended_ms: i64
+
+# Captured from admitted immutable job and actual owned spawned process, not
+# decoded from a worker file. Birth comes from process_start_identity_checked.
+pub struct NativeMirCodegenIntervalExpectedV1:
+    frame: NativeMirCodegenIntervalV1
+    spawned_ms: i64
+    reaped_ms: i64
+
+pub fn native_mir_codegen_interval_encode_v1(f: NativeMirCodegenIntervalV1) -> Result<text, text>:
+    if not sha256_lower_hex_valid(f.invocation_identity): return Err("codegen interval invocation_identity refused")
+    if not sha256_lower_hex_valid(f.source_identity): return Err("codegen interval source_identity refused")
+    if not sha256_lower_hex_valid(f.context_identity): return Err("codegen interval context_identity refused")
+    if not sha256_lower_hex_valid(f.physical_manifest_identity): return Err("codegen interval physical_manifest_identity refused")
+    if not sha256_lower_hex_valid(f.producer_identity): return Err("codegen interval producer_identity refused")
+    if not sha256_lower_hex_valid(f.job_identity): return Err("codegen interval job_identity refused")
+    if f.worker_owner == "" or f.worker_owner.len() > 128 or f.module == "" or f.module.len() > 4096 or
+            f.pid <= 0 or f.started_ms <= 0 or f.ended_ms < f.started_ms or
+            (f.status != "PASS" and f.status != "FAIL"):
+        return Err("codegen interval values refused")
+    val birth = f.birth_identity.to_i64() ?? -1
+    if birth <= 0 or "{birth}" != f.birth_identity:
+        return Err("codegen interval child birth refused")
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple/native-object-codegen-interval/v1")
+    fields["invocation_identity"] = SdnValue.String(f.invocation_identity)
+    fields["source_identity"] = SdnValue.String(f.source_identity)
+    fields["context_identity"] = SdnValue.String(f.context_identity)
+    fields["physical_manifest_identity"] = SdnValue.String(f.physical_manifest_identity)
+    fields["producer_identity"] = SdnValue.String(f.producer_identity)
+    fields["job_identity"] = SdnValue.String(f.job_identity)
+    fields["worker_owner"] = SdnValue.String(f.worker_owner)
+    fields["module"] = SdnValue.String(f.module)
+    fields["birth_identity"] = SdnValue.String(f.birth_identity)
+    fields["status"] = SdnValue.String(f.status)
+    fields["pid"] = SdnValue.Int(f.pid)
+    fields["started_ms"] = SdnValue.Int(f.started_ms)
+    fields["ended_ms"] = SdnValue.Int(f.ended_ms)
+    val blob = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if blob.len() > NATIVE_MIR_CODEGEN_INTERVAL_BYTES_V1:
+        return Err("codegen interval byte budget exceeded")
+    Ok(blob)
+
+fn native_mir_interval_text_field_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.has(name): return Err("codegen interval field missing")
+    match fields[name]:
+        case String(value): Ok(value)
+        case _: Err("codegen interval text field malformed")
+
+fn native_mir_interval_int_field_v1(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    if not fields.has(name): return Err("codegen interval field missing")
+    match fields[name]:
+        case Int(value): Ok(value)
+        case _: Err("codegen interval integer field malformed")
+
+pub fn native_mir_codegen_interval_admit_v1(blob: text,
+        expected: NativeMirCodegenIntervalExpectedV1) -> Result<NativeMirCodegenIntervalV1, text>:
+    if blob.len() > NATIVE_MIR_CODEGEN_INTERVAL_BYTES_V1 or expected.spawned_ms <= 0 or
+            expected.reaped_ms < expected.spawned_ms:
+        return Err("codegen interval observation bounds refused")
+    val parsed = parse_untrusted(blob)?
+    var fields: Dict<text, SdnValue> = {}
+    match parsed:
+        case Dict(value): fields = value
+        case _: return Err("codegen interval record refused")
+    if fields.keys().len() != 14 or native_mir_interval_text_field_v1(fields, "schema")? !=
+            "simple/native-object-codegen-interval/v1":
+        return Err("codegen interval schema refused")
+    val frame = NativeMirCodegenIntervalV1(
+        invocation_identity: native_mir_interval_text_field_v1(fields, "invocation_identity")?,
+        source_identity: native_mir_interval_text_field_v1(fields, "source_identity")?,
+        context_identity: native_mir_interval_text_field_v1(fields, "context_identity")?,
+        physical_manifest_identity: native_mir_interval_text_field_v1(fields, "physical_manifest_identity")?,
+        producer_identity: native_mir_interval_text_field_v1(fields, "producer_identity")?,
+        job_identity: native_mir_interval_text_field_v1(fields, "job_identity")?,
+        worker_owner: native_mir_interval_text_field_v1(fields, "worker_owner")?,
+        module: native_mir_interval_text_field_v1(fields, "module")?,
+        birth_identity: native_mir_interval_text_field_v1(fields, "birth_identity")?,
+        status: native_mir_interval_text_field_v1(fields, "status")?,
+        pid: native_mir_interval_int_field_v1(fields, "pid")?,
+        started_ms: native_mir_interval_int_field_v1(fields, "started_ms")?,
+        ended_ms: native_mir_interval_int_field_v1(fields, "ended_ms")?)
+    val canonical = native_mir_codegen_interval_encode_v1(frame)?
+    if canonical != blob: return Err("codegen interval noncanonical")
+    val e = expected.frame
+    if frame.invocation_identity != e.invocation_identity: return Err("codegen interval invocation_identity differs from parent authority")
+    if frame.source_identity != e.source_identity: return Err("codegen interval source_identity differs from parent authority")
+    if frame.context_identity != e.context_identity: return Err("codegen interval context_identity differs from parent authority")
+    if frame.physical_manifest_identity != e.physical_manifest_identity: return Err("codegen interval physical_manifest_identity differs from parent authority")
+    if frame.producer_identity != e.producer_identity: return Err("codegen interval producer_identity differs from parent authority")
+    if frame.job_identity != e.job_identity: return Err("codegen interval job_identity differs from parent authority")
+    if frame.worker_owner != e.worker_owner: return Err("codegen interval worker_owner differs from parent authority")
+    if frame.module != e.module: return Err("codegen interval module differs from parent authority")
+    if frame.birth_identity != e.birth_identity: return Err("codegen interval birth_identity differs from parent authority")
+    if frame.pid != e.pid or frame.status != e.status or
+            frame.started_ms < expected.spawned_ms or frame.ended_ms > expected.reaped_ms:
+        return Err("codegen interval process outcome or monotonic bounds differ")
+    Ok(frame)
+
+pub struct NativeMirAdmittedCodegenIntervalsV1:
+    intervals: [NativeMirCodegenIntervalV1]
+    frame_digests: [text]
+    ledger_digest: text
+    configured_workers: i64
+
+# Parent supplies frames in original physical manifest order. No raw child
+# interval is accepted by the consumer until every frame has been admitted.
+pub fn native_mir_codegen_intervals_admit_ordered_v1(blobs: [text],
+        expected: [NativeMirCodegenIntervalExpectedV1], ledger_digest: text,
+        configured_workers: i64) -> Result<NativeMirAdmittedCodegenIntervalsV1, text>:
+    if not sha256_lower_hex_valid(ledger_digest) or configured_workers <= 0 or
+            configured_workers > 65536 or blobs.len() == 0 or blobs.len() > 65536 or
+            blobs.len() != expected.len():
+        return Err("codegen interval aggregate bounds refused")
+    var intervals: [NativeMirCodegenIntervalV1] = []
+    var digests: [text] = []
+    var jobs: Dict<text, bool> = {}
+    var covered_bytes: i64 = 0
+    for index in 0..blobs.len():
+        if blobs[index].len() > NATIVE_MIR_CODEGEN_AGGREGATE_BYTES_V1 - covered_bytes:
+            return Err("codegen interval aggregate byte budget exceeded")
+        covered_bytes = covered_bytes + blobs[index].len()
+        val frame = native_mir_codegen_interval_admit_v1(blobs[index], expected[index])?
+        if jobs.has(frame.job_identity): return Err("codegen interval duplicate job")
+        jobs[frame.job_identity] = true
+        if index > 0:
+            val first = intervals[0]
+            if frame.invocation_identity != first.invocation_identity or
+                    frame.source_identity != first.source_identity or
+                    frame.context_identity != first.context_identity or
+                    frame.physical_manifest_identity != first.physical_manifest_identity or
+                    frame.producer_identity != first.producer_identity:
+                return Err("codegen interval aggregate mixed generation")
+        intervals.push(frame)
+        digests.push(sha256_text(blobs[index]))
+    Ok(NativeMirAdmittedCodegenIntervalsV1(intervals: intervals,
+        frame_digests: digests, ledger_digest: ledger_digest,
+        configured_workers: configured_workers))
+
+pub fn native_mir_codegen_job_identity_v1(manifest_identity: text, module: text) -> text:
+    if not sha256_lower_hex_valid(manifest_identity) or module == "": return ""
+    sha256_text("native-mir-physical-job-v1\n{manifest_identity}\n{sha256_text(module)}\n")

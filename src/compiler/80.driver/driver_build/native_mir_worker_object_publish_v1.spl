@@ -1,0 +1,46 @@
+# Worker-side publication requires the actual frozen native capsule.
+# Its MIR never leaves the process; only the validated compact receipt does.
+use std.io_runtime.{getpid}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_start_identity_checked}
+use compiler.driver.driver_types.{FrozenNativeModuleCapsuleV1}
+use compiler.driver.driver_aot_native_output.{driver_native_capsule_result_bytes_v1}
+use compiler.driver.driver_build.native_mir_worker_object_fragment_v1.{
+    NativeMirWorkerObjectExpectedV1, NativeMirWorkerObjectFragmentV1,
+    NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1, native_mir_worker_fragment_encode_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_write, file_publish_noreplace_raw}
+
+pub fn native_mir_worker_object_publish_v1(capsule: FrozenNativeModuleCapsuleV1,
+        expected: NativeMirWorkerObjectExpectedV1) -> Result<text, text>:
+    val pid = getpid()
+    val birth = process_start_identity_checked(pid)?
+    if expected.child_pid != pid or expected.child_birth != "{birth}":
+        return Err("MIR worker capsule process identity differs")
+    if capsule.module_name != expected.module or
+            capsule.source_identity != expected.module_source or
+            capsule.backend_name != expected.backend or capsule.target != expected.target or
+            capsule.provider_receipt_hash != expected.provider or
+            not capsule.object_path.starts_with("{expected.private_root}/native/"):
+        return Err("MIR worker capsule differs from admitted job")
+    # Bound the receipt before entering the existing actual capsule owner.
+    val bounded_receipt = file_read_regular_no_follow_bounded(
+        "{capsule.object_path}.capsule-receipt", NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1)?
+    val admitted = driver_native_capsule_result_bytes_v1(capsule)?
+    val fragment = NativeMirWorkerObjectFragmentV1(expected: expected,
+        object_path: capsule.object_path, object_digest: admitted.0,
+        object_bytes: admitted.1, capsule_identity: capsule.capsule_identity)
+    val wanted = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{admitted.1}\n{admitted.0}\n"
+    if bounded_receipt != wanted: return Err("MIR worker capsule receipt changed during validation")
+    val blob = native_mir_worker_fragment_encode_v1(fragment)?
+    val staged = "{expected.private_root}/result.sdn.staged"
+    val destination = "{expected.private_root}/result.sdn"
+    if not file_write(staged, blob): return Err("MIR worker fragment staging failed")
+    val readback = file_read_regular_no_follow_bounded(staged,
+        NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1)?
+    if readback != blob: return Err("MIR worker fragment staging readback differs")
+    if file_publish_noreplace_raw(staged, destination) != 1:
+        return Err("MIR worker fragment already exists or publication failed")
+    val published = file_read_regular_no_follow_bounded(destination,
+        NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1)?
+    if published != blob: return Err("MIR worker fragment publication readback differs")
+    Ok(destination)
