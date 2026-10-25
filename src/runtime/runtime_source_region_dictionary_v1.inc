@@ -302,13 +302,14 @@ int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,int64_t 
     int ok=d && (uintptr_t)d<=INT64_MAX && !((uintptr_t)d&7) && b && registration &&
         !((uintptr_t)registration&7) && next>=0 &&
         (!next || rt_core_immortal_registry_resize((size_t)next));
-    if (ok) ok=rt_core_track_transient_immortal(d);
+    RtCoreScopedAllocationKey module_key = {0};
+    if (ok) ok=rt_core_track_module_immortal_locked(d, &module_key);
     if (ok) {
         d->kind=RT_VALUE_HEAP_DICT; d->flags=RT_CORE_DICT_SOURCE_REGION_V1;
-        d->transient_scope_id=rt_core_transient_array_scope_id;
+        d->transient_scope_id=module_key.owner;
         d->cap=8; d->entries=b->entries;
         ok=rt_core_immortal_registry_insert_raw((uintptr_t)registration|RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1);
-        if (!ok) --rt_core_transient_heap_scope_object_len;
+        if (!ok) rt_core_rollback_module_immortal_locked(module_key);
     }
     if (ok) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count,1,memory_order_relaxed);
