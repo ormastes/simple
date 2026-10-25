@@ -16,17 +16,22 @@ use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 fn unit_parity_hir_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
 
-fn unit_parity_check_local(expression_kind: HirExprKind, expected: HirType,
-        remembered: HirType?, source: HirType?, storage: MirType) -> bool:
+fn unit_parity_check_expression(expression: HirExpr, expected: HirType,
+        remembered: HirType?, storage: MirType, unsafe_depth: i64 = 0) -> bool:
     var lowering = MirLowering.new(SymbolTable.new())
+    lowering.unsafe_depth = unsafe_depth
     var builder = lowering.builder
     val local = builder.new_temp(storage)
     lowering.builder = builder
     if val remembered_type = remembered:
         lowering.remember_local_hir_type(local.id, remembered_type, 0, 0)
+    lowering.enum_payload_local_compatible(expected, expression, local)
+
+fn unit_parity_check_local(expression_kind: HirExprKind, expected: HirType,
+        remembered: HirType?, source: HirType?, storage: MirType, unsafe_depth: i64 = 0) -> bool:
     val expression = HirExpr(kind: expression_kind, has_type_: source.?,
         type_: source ?? unit_parity_hir_type(HirTypeKind.Error), span: Span.empty())
-    lowering.enum_payload_local_compatible(expected, expression, local)
+    unit_parity_check_expression(expression, expected, remembered, storage, unsafe_depth)
 
 describe "unit and empty tuple payload parity":
     it "treats unit and only the empty tuple as symmetric HIR aliases recursively":
@@ -85,6 +90,58 @@ describe "unit and empty tuple payload parity":
             MirType(kind: MirTypeKind.Tuple([])))).to_be(true)
         expect(unit_parity_check_local(HirExprKind.Error, unit, nil, nil,
             MirType(kind: MirTypeKind.Tuple([MirType.i64()])))).to_be(false)
+
+    it "vetoes nested nil under whole-tuple unit metadata without widening acceptance":
+        val int_type = unit_parity_hir_type(HirTypeKind.Int(64, true))
+        val unit_type = unit_parity_hir_type(HirTypeKind.Unit)
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+            type_: unit_parity_hir_type(HirTypeKind.Error), span: Span.empty())
+        val int_expr = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: int_type, span: Span.empty())
+
+        val tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([unit_type, int_type]))
+        val tuple_nil = HirExpr(kind: HirExprKind.TupleLit([nil_expr, int_expr]),
+            has_type_: true, type_: tuple_type, span: Span.empty())
+        val tuple_storage = MirType(kind: MirTypeKind.Tuple([MirType.unit(), MirType.i64()]))
+        # Synthetic whole-tuple remembered and source types would otherwise
+        # provide positive evidence despite the nested source NilLit.
+        expect(unit_parity_check_expression(tuple_nil, tuple_type, Some(tuple_type), tuple_storage)).to_be(false)
+
+        val inner_tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([unit_type, int_type]))
+        val nested_type = unit_parity_hir_type(HirTypeKind.Tuple([inner_tuple_type, int_type]))
+        val nested_nil = HirExpr(kind: HirExprKind.TupleLit([
+            HirExpr(kind: HirExprKind.TupleLit([nil_expr, int_expr]), has_type_: true,
+                type_: inner_tuple_type, span: Span.empty()),
+            int_expr]), has_type_: true, type_: nested_type, span: Span.empty())
+        val nested_storage = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Tuple([MirType.unit(), MirType.i64()])), MirType.i64()]))
+        expect(unit_parity_check_expression(nested_nil, nested_type, Some(nested_type), nested_storage)).to_be(false)
+
+        val empty_tuple_type = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val nested_empty_type = unit_parity_hir_type(HirTypeKind.Tuple([empty_tuple_type, int_type]))
+        val nested_empty = HirExpr(kind: HirExprKind.TupleLit([
+            HirExpr(kind: HirExprKind.TupleLit([]), has_type_: true,
+                type_: empty_tuple_type, span: Span.empty()),
+            int_expr]), has_type_: true, type_: nested_empty_type, span: Span.empty())
+        val nested_empty_storage = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Tuple([])), MirType.i64()]))
+        expect(unit_parity_check_expression(nested_empty, nested_empty_type,
+            Some(nested_empty_type), nested_empty_storage)).to_be(true)
+        # A declared Unit slot may use the actual empty-tuple source carrier.
+        expect(unit_parity_check_expression(nested_empty, tuple_type, Some(tuple_type),
+            nested_empty_storage)).to_be(true)
+
+        val tuple0 = unit_parity_hir_type(HirTypeKind.Tuple([]))
+        val nil_as_tuple0 = HirExpr(kind: HirExprKind.NilLit, has_type_: true,
+            type_: tuple0, span: Span.empty())
+        expect(unit_parity_check_expression(nil_as_tuple0, tuple0, Some(tuple0),
+            MirType(kind: MirTypeKind.Tuple([])))).to_be(false)
+
+        val optional_unit = unit_parity_hir_type(HirTypeKind.Optional(unit_type))
+        expect(unit_parity_check_local(HirExprKind.NilLit, optional_unit, Some(optional_unit),
+            Some(optional_unit), MirType.unit())).to_be(false)
+        expect(unit_parity_check_local(HirExprKind.NilLit, optional_unit, Some(optional_unit),
+            Some(optional_unit), MirType.unit(), 1)).to_be(true)
 
     it "lowers synthetic while-val conditions as boolean literals":
         val source = "enum LoopValue:\n    Some(i64)\n    None\n\nfn read(input: LoopValue) -> i64:\n    while val Some(value) = input:\n        return value\n    return 0\n"
