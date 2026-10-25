@@ -2924,23 +2924,17 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    // Rust twin of the C fix 3d407765f1e (runtime_native.c
-    // rt_transient_heap_promote): a registered heap object that is NOT owned
-    // by the current transient scope is already persistent, so promotion is
-    // a no-op success, not a failure. Without this, the stage-2 candidate's
-    // retained parse promotes the process-immortal parse-metadata arrays
-    // (UNSAFE_ANNOTATIONS / ENUM_ATTRIBUTES / ENUM_OPEN_REGIONS) and aborts
-    // the whole parse with "transient retained parser ownership failed"
-    // (0xC0000409 fail-fast). Implemented against the Rust heap registry:
-    // the C immortal registry is not linkable from this crate
-    // (runtime_native.c is not compiled into the Rust runtime).
-    // Only a root the current scope does NOT own may take this exit (the C
-    // twin gates it on rt_core_transient_classify == 0). Every heap object is
-    // registered, scope-owned ones included, so without the ownership check
-    // a scope-owned root (the retained parse Result<ParserModule>) skipped
-    // promotion, was freed at scope end with its raw payload, and stage 2
-    // crashed reading the dangling module in surface_build.
-    if value.is_heap() {
+    // Only persistent leaves can skip traversal. Persistent containers may
+    // acquire current-scope children without a write barrier. In particular,
+    // MIR builds its temporary owner-root arrays AFTER pausing the scope;
+    // skipping those roots frees their transient MirError records and turns a
+    // nonfatal warning into a corrupted fatal diagnostic (f07 Result/?).
+    // Keep the no-op contract for already-persistent immutable leaves, but
+    // always walk registered arrays/dicts/objects/enums/closures below.
+    if matches!(
+        value.heap_type(),
+        Some(HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt)
+    ) {
         let root_ptr = value.as_heap_ptr();
         // Scope-owned registered roots are walked, never treated as persistent:
         // doc/08_tracking/bug/stage2_hir_worker_layer_eq_registry_segv_2026-10-23.md
@@ -8301,6 +8295,213 @@ mod string_free_contract_tests {
         assert_eq!(rt_string_free(literal), 0, "interned literal remains protected");
         assert_eq!(rt_string_free(direct), 1);
         assert_eq!(rt_string_free(post_pause), 1);
+    }
+
+    #[test]
+    fn persistent_container_root_rewalks_new_transient_children() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(2);
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let bytes = format!("new child appended to persistent owner, round {round}");
+            let child = mkstr(&bytes);
+            assert!(rt_array_push(owner, child));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(child), bytes.len() as i64);
+        }
+        for index in 0..2 {
+            assert_eq!(rt_string_free(super::rt_array_get(owner, index)), 1);
+        }
+        rt_array_free(owner);
+    }
+
+    #[test]
+    fn persistent_dict_cycle_retains_new_children_across_scopes() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        let dict = rt_dict_new(8);
+        let back_key = mkstr("persistent cycle back edge");
+        assert!(rt_array_push(owner, dict));
+        assert!(rt_dict_set(dict, back_key, owner));
+        let mut retained = Vec::new();
+        for round in 0..2 {
+            assert!(rt_transient_array_scope_begin());
+            let key = mkstr(&format!("persistent cycle key {round}"));
+            let value_bytes = format!("persistent cycle value {round}");
+            let value = mkstr(&value_bytes);
+            let discarded = mkstr("unreachable scope sibling");
+            assert!(rt_dict_set(dict, key, value));
+            assert!(rt_transient_array_scope_pause());
+            assert!(rt_transient_heap_promote(owner));
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_string_len(value), value_bytes.len() as i64);
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_dict_get(dict, back_key), owner);
+            assert_eq!(rt_dict_len(dict), round + 2);
+            assert_eq!(rt_string_len(discarded), -1);
+            retained.push((key, value));
+        }
+        for (key, value) in retained {
+            assert_eq!(rt_dict_get(dict, key), value);
+            assert_eq!(rt_string_free(key), 1);
+            assert_eq!(rt_string_free(value), 1);
+        }
+        rt_array_free(owner);
+        crate::value::dict::rt_dict_free(dict);
+        assert_eq!(rt_string_free(back_key), 1);
+    }
+
+    #[test]
+    fn persistent_root_does_not_retain_children_when_scope_aborts_without_promotion() {
+        let _g = GUARD.lock().unwrap();
+        let owner = rt_array_new(1);
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("unpromoted child of a persistent root");
+        assert!(rt_array_push(owner, child));
+        assert!(!rt_transient_heap_promote(owner), "promotion requires a paused scope");
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), -1, "abort reclaims the unpromoted child");
+        assert_eq!(rt_array_len(owner), 1, "the pre-scope owner itself remains live");
+        // Do not dereference the stale element. Array free is shallow.
+        rt_array_free(owner);
+        assert!(!rt_transient_array_scope_end(), "the aborted scope is closed");
+    }
+
+    #[test]
+    fn persistent_root_growth_reports_bounded_promotion_work() {
+        let _g = GUARD.lock().unwrap();
+        // A measurement, not a timing threshold or a linear-growth claim.
+        // With no write barrier, the retained graph must be rewalked each round.
+        for rounds in [8usize, 16, 32] {
+            let owner = rt_array_new(32);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..32 {
+                    let bytes = format!("growth rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+                assert_eq!(rt_array_len(owner), ((round + 1) * 32) as i64);
+            }
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_growth rounds={rounds} batch=32 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 32, 32 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
+    }
+
+    #[test]
+    fn paused_container_root_retains_mir_error_message_span_and_severity() {
+        unsafe extern "C" {
+            fn rt_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        // Reproduce MirLowering.errors: persistent array, transient raw
+        // MirError(message, optional span, fatal), post-pause wrapper array.
+        for fatal in [0u64, 1] {
+            let errors = rt_array_new(1);
+            assert!(rt_transient_array_scope_begin());
+            let message_bytes = if fatal == 0 {
+                "non-exhaustive enum match on 'Result': Arms cover: Ok, Err."
+            } else {
+                "enum match: missing declaration owner"
+            };
+            let message = mkstr(message_bytes);
+            let file_bytes = "src/app/_cg/f07/main.spl";
+            let file = mkstr(file_bytes);
+            let span = unsafe { rt_alloc(24) } as *mut u64;
+            let error = unsafe { rt_alloc(24) } as *mut u64;
+            assert!(!span.is_null() && !error.is_null());
+            let span_value = crate::value::RuntimeValue((span as u64) | crate::value::tags::TAG_HEAP);
+            let error_value = crate::value::RuntimeValue((error as u64) | crate::value::tags::TAG_HEAP);
+            unsafe {
+                span.write(file.0);
+                span.add(1).write(8);
+                span.add(2).write(5);
+                error.write(message.0);
+                error.add(1).write(span_value.0);
+                error.add(2).write(fatal);
+            }
+            assert!(rt_array_push(errors, error_value));
+            assert!(rt_transient_array_scope_pause());
+            let roots = rt_array_new(1);
+            assert!(rt_array_push(roots, errors));
+            assert!(super::rt_transient_heap_promote_share_begin());
+            assert!(rt_transient_heap_promote(roots));
+            rt_array_free(roots);
+            assert!(super::rt_transient_heap_promote_share_end());
+            assert!(rt_transient_array_scope_end());
+            // Check managed children before dereferencing raw records: the
+            // pre-fix failure is a safe assertion, never a use-after-free.
+            assert_eq!(rt_string_len(message), message_bytes.len() as i64);
+            assert_eq!(rt_string_len(file), file_bytes.len() as i64);
+            assert_eq!(super::rt_array_get(errors, 0), error_value);
+            unsafe {
+                assert_eq!(error.read(), message.0);
+                assert_eq!(error.add(1).read(), span_value.0);
+                assert_eq!(error.add(2).read(), fatal);
+                assert_eq!(span.read(), file.0);
+                assert_eq!(span.add(1).read(), 8);
+                assert_eq!(span.add(2).read(), 5);
+                rt_free(error as *mut u8);
+                rt_free(span as *mut u8);
+            }
+            assert_eq!(rt_string_free(message), 1);
+            assert_eq!(rt_string_free(file), 1);
+            rt_array_free(errors);
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded accumulated-graph time/RSS measurement; run explicitly"]
+    fn persistent_root_accumulated_graph_benchmark() {
+        let _g = GUARD.lock().unwrap();
+        for rounds in [64usize, 128, 256] {
+            let owner = rt_array_new(64);
+            let mut children = Vec::new();
+            let mut promotion_time = std::time::Duration::ZERO;
+            for round in 0..rounds {
+                assert!(rt_transient_array_scope_begin());
+                for item in 0..64 {
+                    let bytes = format!("accumulated rounds={rounds} round={round} item={item}");
+                    let child = mkstr(&bytes);
+                    assert!(rt_array_push(owner, child));
+                    children.push((child, bytes.len() as i64));
+                }
+                assert!(rt_transient_array_scope_pause());
+                let started = std::time::Instant::now();
+                assert!(rt_transient_heap_promote(owner));
+                promotion_time += started.elapsed();
+                assert!(rt_transient_array_scope_end());
+            }
+            assert_eq!(rt_array_len(owner), (rounds * 64) as i64);
+            for (child, expected_len) in children {
+                assert_eq!(rt_string_len(child), expected_len);
+                assert_eq!(rt_string_free(child), 1);
+            }
+            rt_array_free(owner);
+            eprintln!(
+                "persistent_root_accumulated rounds={rounds} batch=64 final_children={} expected_rewalk_slots={} promotion_ns={}",
+                rounds * 64, 64 * rounds * (rounds + 1) / 2, promotion_time.as_nanos()
+            );
+        }
     }
 
     #[test]

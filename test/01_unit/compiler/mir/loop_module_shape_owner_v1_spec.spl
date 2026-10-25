@@ -1,0 +1,363 @@
+use std.spec
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1}
+use compiler.mir.loop_module_shape_owner_v1.{MirLoopShapeOwnerV1, MirLoopNodeWriterV1}
+
+fn shape_owner() -> MirLoopShapeOwnerV1:
+    val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+    val owner = MirLoopShapeOwnerV1.create(account).unwrap()
+    val permit = owner.reserve_text(7).unwrap()
+    owner.publish_namespace(permit.publish("EeModel").unwrap()).unwrap()
+    owner
+
+fn shape_unit(owner: MirLoopShapeOwnerV1) -> i64:
+    owner.begin(MirLoopShapeTagV1.TypeUnit).unwrap().finish().unwrap()
+
+fn shape_span(owner: MirLoopShapeOwnerV1, start: i64, end: i64, line: i64, col: i64, length: i64, file: text) -> i64:
+    val span = owner.begin(MirLoopShapeTagV1.Span).unwrap()
+    span.scalar(0, start).unwrap()
+    span.scalar(1, end).unwrap()
+    span.scalar(2, line).unwrap()
+    span.scalar(3, col).unwrap()
+    span.scalar(4, length).unwrap()
+    span.text_id(0, owner.reserve_text(file.len()).unwrap().publish(file).unwrap()).unwrap()
+    span.finish().unwrap()
+
+fn shape_aggregate(owner: MirLoopShapeOwnerV1) -> MirLoopNodeWriterV1:
+    val unit = shape_unit(owner)
+    val site = owner.begin(MirLoopShapeTagV1.AggregateSite).unwrap()
+    for index in 0..5: site.scalar(index, index + 10).unwrap()
+    site.child(unit).unwrap()
+    site.child(unit).unwrap()
+    site
+
+fn shape_function(owner: MirLoopShapeOwnerV1) -> i64:
+    val unit_type = shape_unit(owner)
+    val signature = owner.begin(MirLoopShapeTagV1.Signature).unwrap()
+    signature.scalar(0, 0).unwrap()
+    signature.scalar(1, 1).unwrap()
+    signature.scalar(2, 0).unwrap()
+    signature.scalar(3, 0).unwrap()
+    signature.child(unit_type).unwrap()
+    val signature_id = signature.finish().unwrap()
+    val ret = owner.begin(MirLoopShapeTagV1.TermRet).unwrap().finish().unwrap()
+    val block = owner.begin(MirLoopShapeTagV1.Block).unwrap()
+    block.scalar(0, 0).unwrap()
+    block.text_id(0, -1).unwrap()
+    block.child(ret).unwrap()
+    val block_id = block.finish().unwrap()
+    val name = owner.reserve_text(4).unwrap().publish("main").unwrap()
+    val function = owner.begin(MirLoopShapeTagV1.Function).unwrap()
+    function.scalar(0, 17).unwrap()
+    function.scalar(1, 0).unwrap()
+    function.text_id(0, name).unwrap()
+    function.child(signature_id).unwrap()
+    function.child(block_id).unwrap()
+    val function_id = function.finish().unwrap()
+    owner.publish_function(function_id, nil).unwrap()
+    function_id
+
+describe "Producer-owned scalar MIR storage":
+    it "seals an actual function construction and reads scalar identity without a rich module":
+        val owner = shape_owner()
+        val function = shape_function(owner)
+        val view = owner.seal().unwrap()
+        expect(view.function_count().unwrap()).to_equal(1)
+        expect(view.function_at(0).unwrap()).to_equal(function)
+        expect(view.scalar(function, 0).unwrap()).to_equal(17)
+        expect(view.child_count(function).unwrap()).to_equal(2)
+        expect(view.text_length(view.namespace_text_id().unwrap()).unwrap()).to_equal(7)
+
+    it "admits zero only when the scalar was actually written":
+        val owner = shape_owner()
+        val value = owner.begin(MirLoopShapeTagV1.ConstInt).unwrap()
+        value.scalar(0, 0).unwrap()
+        val identity = value.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.scalar(identity, 0).unwrap()).to_equal(0)
+        val missing = shape_owner()
+        expect(missing.begin(MirLoopShapeTagV1.ConstInt).unwrap().finish().is_err()).to_equal(true)
+        expect(missing.seal().is_err()).to_equal(true)
+
+    it "refuses owner allocation before any arena when the account has no remaining fields":
+        val limits = MirLoopResourceLimitsV1(max_state_fields: 20)
+        val account = MirLoopResourceAccountV1.create(limits).unwrap()
+        expect(MirLoopShapeOwnerV1.create(account).is_err()).to_equal(true)
+        expect(account.snapshot().state_fields).to_equal(20)
+
+    it "reserves text before publishing and a permit cannot publish twice":
+        val owner = shape_owner()
+        val permit = owner.reserve_text(3).unwrap()
+        val text_id = permit.publish("a\0b").unwrap()
+        expect(permit.publish("a\0b").is_err()).to_equal(true)
+        expect(owner.seal().is_err()).to_equal(true)
+        expect(text_id).to_be_greater_than(0)
+
+    it "keeps a permit bound to its issuing owner":
+        val first = shape_owner()
+        val second = shape_owner()
+        val permit = first.reserve_text(1).unwrap()
+        permit.publish("x").unwrap()
+        expect(first.observation().texts).to_equal(2)
+        expect(second.observation().texts).to_equal(1)
+        expect(second.seal().unwrap().text_length(0).unwrap()).to_equal(7)
+
+    it "preserves a stable node identity across a checked revision":
+        val owner = shape_owner()
+        val value = owner.begin(MirLoopShapeTagV1.ConstInt).unwrap()
+        value.scalar(0, 1).unwrap()
+        val identity = value.finish().unwrap()
+        val revision = owner.revise(identity, 0, false).unwrap()
+        revision.scalar(0, 2).unwrap()
+        expect(revision.finish().unwrap()).to_equal(identity)
+        val view = owner.seal().unwrap()
+        expect(view.revision(identity).unwrap()).to_equal(1)
+        expect(view.scalar(identity, 0).unwrap()).to_equal(2)
+
+    it "rejects a stale revision before allocating replacement storage":
+        val owner = shape_owner()
+        val identity = shape_unit(owner)
+        val before = owner.observation().nodes
+        expect(owner.revise(identity, 1, false).is_err()).to_equal(true)
+        expect(owner.observation().nodes).to_equal(before)
+
+    it "requires namespace publication exactly once":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val owner = MirLoopShapeOwnerV1.create(account).unwrap()
+        expect(owner.seal().is_err()).to_equal(true)
+        val duplicate = shape_owner()
+        expect(duplicate.publish_namespace(0).is_err()).to_equal(true)
+
+    it "closing a shared owner invalidates previously sealed readers":
+        val owner = shape_owner()
+        shape_function(owner)
+        val view = owner.seal().unwrap()
+        owner.close()
+        expect(view.function_count().is_err()).to_equal(true)
+
+    it "keeps nominal references finite instead of unfolding a recursive declaration":
+        val owner = shape_owner()
+        val nominal = owner.begin(MirLoopShapeTagV1.TypeStruct).unwrap()
+        nominal.scalar(0, 23).unwrap()
+        val nominal_id = nominal.finish().unwrap()
+        val slice = owner.begin(MirLoopShapeTagV1.TypeSlice).unwrap()
+        slice.child(nominal_id).unwrap()
+        val slice_id = slice.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.scalar(nominal_id, 0).unwrap()).to_equal(23)
+        expect(view.child(slice_id, 0).unwrap()).to_equal(nominal_id)
+
+    it "retains pointer mutability and both actual and declared signature lists":
+        val owner = shape_owner()
+        val byte_type = owner.begin(MirLoopShapeTagV1.TypeU8).unwrap().finish().unwrap()
+        val pointer = owner.begin(MirLoopShapeTagV1.TypePtr).unwrap()
+        pointer.scalar(0, 0).unwrap()
+        pointer.child(byte_type).unwrap()
+        val pointer_id = pointer.finish().unwrap()
+        val signature = owner.begin(MirLoopShapeTagV1.Signature).unwrap()
+        signature.scalar(0, 0).unwrap()
+        signature.scalar(1, 0).unwrap()
+        signature.scalar(2, 0).unwrap()
+        signature.scalar(3, 1).unwrap()
+        signature.child(shape_unit(owner)).unwrap()
+        signature.child(pointer_id).unwrap()
+        val identity = signature.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.scalar(identity, 1).unwrap()).to_equal(0)
+        expect(view.scalar(identity, 2).unwrap()).to_equal(0)
+        expect(view.scalar(identity, 3).unwrap()).to_equal(1)
+        expect(view.child(identity, 1).unwrap()).to_equal(pointer_id)
+        expect(view.scalar(pointer_id, 0).unwrap()).to_equal(0)
+
+    it "preserves HIR cast target identity separately from the lowered MIR type":
+        val owner = shape_owner()
+        val hir = owner.begin(MirLoopShapeTagV1.HirInt).unwrap()
+        hir.scalar(0, 8).unwrap()
+        hir.scalar(1, 0).unwrap()
+        val hir_type = hir.finish().unwrap()
+        val literal = owner.begin(MirLoopShapeTagV1.PredicateInt).unwrap()
+        literal.scalar(0, 0).unwrap()
+        literal.scalar(1, 0).unwrap()
+        literal.scalar(2, 0).unwrap()
+        literal.text_id(0, -1).unwrap()
+        literal.child(-1).unwrap()
+        val literal_id = literal.finish().unwrap()
+        val cast = owner.begin(MirLoopShapeTagV1.PredicateCast).unwrap()
+        cast.scalar(0, 1).unwrap()
+        cast.child(hir_type).unwrap()
+        cast.child(literal_id).unwrap()
+        cast.child(hir_type).unwrap()
+        val identity = cast.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.tag(view.child(identity, 2).unwrap()).unwrap()).to_equal(MirLoopShapeTagV1.HirInt)
+        expect(view.scalar(hir_type, 0).unwrap()).to_equal(8)
+
+    it "keeps the first capacity failure through later failures and seal":
+        val owner = shape_owner()
+        val account = owner.inspect().unwrap().account()
+        val before = account.snapshot()
+        val nodes = owner.observation().nodes
+        val texts = owner.observation().texts
+        match owner.reserve_text(262145):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): expect(false).to_equal(true)
+        match owner.publish_namespace(-1):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): expect(false).to_equal(true)
+        expect(owner.begin(MirLoopShapeTagV1.TypeUnit).is_err()).to_equal(true)
+        expect(owner.observation().nodes).to_equal(nodes)
+        expect(owner.observation().texts).to_equal(texts)
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+        expect(account.snapshot().state_fields).to_equal(before.state_fields)
+        expect(account.snapshot().output_bytes).to_equal(before.output_bytes)
+        match owner.seal():
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): expect(false).to_equal(true)
+
+    it "makes an invalid writer mutation sticky without poisoning an already sealed view":
+        val owner = shape_owner()
+        val pending = owner.begin(MirLoopShapeTagV1.ConstInt).unwrap()
+        match pending.scalar(1, 9):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidField)
+            case Ok(_): expect(false).to_equal(true)
+        match pending.scalar(0, 9):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidField)
+            case Ok(_): expect(false).to_equal(true)
+        match owner.seal():
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidField)
+            case Ok(_): expect(false).to_equal(true)
+        val invalid_cursor = shape_owner()
+        val slice = invalid_cursor.begin(MirLoopShapeTagV1.TypeSlice).unwrap()
+        match slice.child(-1):
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidCursor)
+            case Ok(_): expect(false).to_equal(true)
+        match invalid_cursor.seal():
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidCursor)
+            case Ok(_): expect(false).to_equal(true)
+        val completed = shape_owner()
+        val writer = completed.begin(MirLoopShapeTagV1.TypeUnit).unwrap()
+        val identity = writer.finish().unwrap()
+        val view = completed.seal().unwrap()
+        expect(writer.scalar(0, 1).is_err()).to_equal(true)
+        expect(view.tag(identity).unwrap()).to_equal(MirLoopShapeTagV1.TypeUnit)
+
+    it "retains independent literal and emission spans before aggregate locals":
+        val owner = shape_owner()
+        val literal = shape_span(owner, 3, 9, 2, 4, 99, "a.spl")
+        val emission = shape_span(owner, 20, 23, 7, 8, 42, "b.spl")
+        val local = owner.begin(MirLoopShapeTagV1.LocalReference).unwrap()
+        local.scalar(0, 31).unwrap()
+        val local_id = local.finish().unwrap()
+        val site = shape_aggregate(owner)
+        site.span(literal).unwrap()
+        site.child(emission).unwrap()
+        site.child(local_id).unwrap()
+        val identity = site.finish().unwrap()
+        owner.publish_aggregate_site(identity).unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.span(identity).unwrap()).to_equal(literal)
+        expect(view.child(identity, 2).unwrap()).to_equal(emission)
+        expect(view.child(identity, 3).unwrap()).to_equal(local_id)
+        expect(view.scalar(local_id, 0).unwrap()).to_equal(31)
+        val literal_fields = [3, 9, 2, 4, 99]
+        val emission_fields = [20, 23, 7, 8, 42]
+        for index in 0..5:
+            expect(view.scalar(literal, index).unwrap()).to_equal(literal_fields[index])
+            expect(view.scalar(emission, index).unwrap()).to_equal(emission_fields[index])
+        expect(view.text_length(view.text_id(literal, 0).unwrap()).unwrap()).to_equal(5)
+        expect(view.text_byte(view.text_id(literal, 0).unwrap(), 0).unwrap()).to_equal(97)
+        expect(view.text_length(view.text_id(emission, 0).unwrap()).unwrap()).to_equal(5)
+        expect(view.text_byte(view.text_id(emission, 0).unwrap(), 0).unwrap()).to_equal(98)
+        expect(view.reserve_text_export(view.text_id(literal, 0).unwrap()).unwrap().copy_text().unwrap()).to_equal("a.spl")
+        expect(view.reserve_text_export(view.text_id(emission, 0).unwrap()).unwrap().copy_text().unwrap()).to_equal("b.spl")
+
+    it "refuses missing or wrong-kind aggregate emission spans and missing literal spans":
+        val missing_emission = shape_owner()
+        val literal = shape_span(missing_emission, 1, 2, 3, 4, 5, "x")
+        val first = shape_aggregate(missing_emission)
+        first.span(literal).unwrap()
+        expect(first.finish().is_err()).to_equal(true)
+        expect(missing_emission.seal().is_err()).to_equal(true)
+        val wrong_emission = shape_owner()
+        val second_literal = shape_span(wrong_emission, 1, 2, 3, 4, 5, "x")
+        val wrong = shape_unit(wrong_emission)
+        val second = shape_aggregate(wrong_emission)
+        second.span(second_literal).unwrap()
+        second.child(wrong).unwrap()
+        expect(second.finish().is_err()).to_equal(true)
+        expect(wrong_emission.seal().is_err()).to_equal(true)
+        val missing_literal = shape_owner()
+        val emission = shape_span(missing_literal, 1, 2, 3, 4, 5, "x")
+        val third = shape_aggregate(missing_literal)
+        third.child(emission).unwrap()
+        expect(third.finish().is_err()).to_equal(true)
+        expect(missing_literal.seal().is_err()).to_equal(true)
+
+    it "refuses a structural child cycle introduced by a valid row revision":
+        val owner = shape_owner()
+        val first = owner.begin(MirLoopShapeTagV1.TypeTuple).unwrap().finish().unwrap()
+        val second = owner.begin(MirLoopShapeTagV1.TypeTuple).unwrap()
+        second.child(first).unwrap()
+        val second_id = second.finish().unwrap()
+        val revision = owner.revise(first, 0, true).unwrap()
+        revision.child(second_id).unwrap()
+        revision.finish().unwrap()
+        match owner.seal():
+            case Err(error): expect(error).to_equal(MirLoopShapeErrorV1.InvalidField)
+            case Ok(_): expect(false).to_equal(true)
+        expect(owner.observation().state).to_equal(2)
+
+    it "retains the real floating scalar without integer conversion":
+        val owner = shape_owner()
+        val value = owner.begin(MirLoopShapeTagV1.ConstFloat).unwrap()
+        value.real(1.5).unwrap()
+        val identity = value.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.real(identity).unwrap()).to_equal(1.5)
+
+    it "exposes a common reader without granting sealed authority during construction":
+        val owner = shape_owner()
+        val pending = owner.begin(MirLoopShapeTagV1.ConstInt).unwrap()
+        val reader = owner.inspect().unwrap().read().unwrap()
+        expect(reader.finished(pending.cursor()).unwrap()).to_equal(false)
+        expect(reader.scalar(pending.cursor(), 0).is_err()).to_equal(true)
+        pending.scalar(0, 9).unwrap()
+        val identity = pending.finish().unwrap()
+        expect(reader.finished(identity).unwrap()).to_equal(true)
+        expect(reader.scalar(identity, 0).unwrap()).to_equal(9)
+        val sealed = owner.seal().unwrap()
+        expect(reader.tag(identity).is_err()).to_equal(true)
+        expect(sealed.read().unwrap().scalar(identity, 0).unwrap()).to_equal(9)
+
+    it "resolves actual nominal remaps and refuses a remap cycle at seal":
+        val owner = shape_owner()
+        owner.remap_nominal(7, 77).unwrap()
+        owner.remap_nominal(77, 777).unwrap()
+        expect(owner.seal().unwrap().canonical_nominal(7).unwrap()).to_equal(777)
+        val cyclic = shape_owner()
+        cyclic.remap_nominal(1, 2).unwrap()
+        cyclic.remap_nominal(2, 1).unwrap()
+        expect(cyclic.seal().is_err()).to_equal(true)
+
+    it "retains suffix and NamedVar text presence rather than guessing from type":
+        val owner = shape_owner()
+        val value = owner.begin(MirLoopShapeTagV1.PredicateInt).unwrap()
+        value.scalar(0, 1).unwrap()
+        value.scalar(1, 1).unwrap()
+        value.scalar(2, 0).unwrap()
+        value.text_id(0, owner.reserve_text(2).unwrap().publish("u8").unwrap()).unwrap()
+        value.child(-1).unwrap()
+        val identity = value.finish().unwrap()
+        val named = owner.begin(MirLoopShapeTagV1.PredicateVar).unwrap()
+        named.scalar(0, 9).unwrap()
+        named.scalar(1, 1).unwrap()
+        named.scalar(2, 0).unwrap()
+        named.text_id(0, owner.reserve_text(1).unwrap().publish("x").unwrap()).unwrap()
+        named.child(-1).unwrap()
+        val named_id = named.finish().unwrap()
+        val view = owner.seal().unwrap()
+        expect(view.scalar(named_id, 1).unwrap()).to_equal(1)
+        expect(view.text_byte(view.text_id(named_id, 0).unwrap(), 0).unwrap()).to_equal(120)
+        expect(view.scalar(identity, 1).unwrap()).to_equal(1)
+        expect(view.child(identity, 0).unwrap()).to_equal(-1)
+        expect(view.text_length(view.text_id(identity, 0).unwrap()).unwrap()).to_equal(2)
