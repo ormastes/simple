@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+
+Purpose: pin that a generic callable's own type binders are never walked as
+owner-module dependencies. Audience: HIR import-registration maintainers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/callable_generic_binder_not_owner_dependency_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Source-level pin of the dependency walk routing; the end-to-end oracle is the
+stage-2 `test_runner_build` gate (no `[hir-reexport-chase-unresolved] ... item=T`).
+"""
+
+# @manual: primary
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+#
+# Regression: `fn mutex_new<T>(initial: T)` in lib.nogc_sync_mut.concurrent.mutex
+# and generic methods in compiler.frontend.core._Ast.decl_nodes had their binder
+# `T` materialized as if it were an owner symbol, producing
+# `[hir-reexport-chase-unresolved] facade=... item=T` and later
+# `unresolved type: T` against every importer (281/281 stage-2 units).
+use std.spec.{describe, it, expect}
+
+val SRC = "src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
+
+fn source_text() -> text:
+    rt_file_read_text(SRC) ?? ""
+
+fn wrapper_body() -> text:
+    val parts = source_text().split("    me materialize_imported_callable_type_dependencies(")
+    if parts.len() < 2:
+        return ""
+    parts[1].split("    me materialize_imported_callable_type_dependencies_inner(")[0]
+
+describe "generic callable binders are signature-scoped, not owner symbols":
+    it "routes generic callables through the binder-aware walk":
+        step("Verify: the wrapper passes callable.type_params as binders")
+        val body = wrapper_body()
+        expect(body != "").to_be_true()
+        expect(body.contains("callable.type_params.len() > 0")).to_be_true()
+        expect(body.contains("materialize_imported_callable_type_dependencies_inner_with_owner(")).to_be_true()
+
+    it "merges method binders with owner binders for generic owners":
+        step("Verify: generic-owner methods also skip their own binders")
+        expect(source_text().contains("for method_binder in method.type_params:")).to_be_true()
+
+    it "binder-aware walk still skips a dependency named like a binder":
+        step("Verify: _with_owner returns early on a binder name")
+        val text_ = source_text()
+        expect(text_.contains("if parameter.name == binder_name:")).to_be_true()
+
+describe "phase-2 failures never print an empty diagnostic":
+    it "mirrors the first recorded error while its owner frame holds it":
+        step("Verify: add_error mirrors the root error once")
+        val types_src = rt_file_read_text("src/compiler/80.driver/driver_types.spl") ?? ""
+        expect(types_src.contains("eprint(\"[first-compile-error] ")).to_be_true()
+
+    it "names a lost message instead of printing a blank line":
+        step("Verify: the phase-2 report substitutes an explicit lost-message line")
+        val orch_src = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
+        expect(orch_src.contains("message lost in CompileContext transport")).to_be_true()
