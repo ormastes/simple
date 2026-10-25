@@ -168,3 +168,21 @@ executable specs. Generic tool-parameter key scoping remains a separate concern.
 STATUS: FAIL for landing admission. Focused MCP wire checks PASS; mandatory
 compiler, suite, and full-tool functionality gates have not passed. Do not merge
 over these missing gates or describe authored SSpec examples as executed.
+
+## Remaining envelope checks and concrete JSONL defect
+
+Continuation of candidate-six verification (no rebuild): eight additional wire
+cases passed: duplicate escaped ID, duplicate method, fractional/boolean/object
+IDs, trailing JSON token, scalar params, and a quoted/backslash string ID.
+Evidence: `build/tooling-check/mcp-envelope-extra-results.sdn` and associated
+captures. These are direct native checks, not executed SSpec examples.
+
+One additional case FAILED: JSONL `[]` followed by EOF returns exit 0 with no
+reply instead of Invalid Request. `_mcp_read_message` at main.spl's JSONL branch
+recognizes only lines starting with an opening brace; it consumes other JSON
+values as if they were headers. The same `[]` sent with Content-Length framing
+returns -32600 correctly, isolating the defect before envelope parsing.
+Removal criterion: real native JSONL invalid-root array/scalar inputs receive
+the appropriate error and a subsequent valid request still dispatches; framed
+traffic remains intact. The exhausted six-cycle MCP budget prohibits another
+repair/build retry without the requested explicit extension. Keep the PR draft.
