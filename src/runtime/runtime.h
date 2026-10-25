@@ -975,6 +975,7 @@ void     rt_gui_end_session(void);
  * receiver or an out-of-range index; a negative index is out of range here,
  * it does NOT count from the end. */
 int64_t  rt_array_remove(int64_t array_value, int64_t index);
+int8_t   rt_array_insert(int64_t array_value, int64_t index, int64_t value);
 /* Tagged array index or dictionary key; returns the removed element/value. */
 int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);

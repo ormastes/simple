@@ -3395,3 +3395,22 @@ mod typed_i64_lane_tests {
         crate::value::collections::reset_user_threads_started_for_test();
     }
 }
+
+#[test]
+fn test_array_insert_in_place() {
+    use super::rt_array_insert;
+    let array = rt_array_new(0);
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(3));
+    assert!(rt_array_insert(array, 1, RuntimeValue::from_int(2)));
+    assert!(rt_array_insert(array, 0, RuntimeValue::from_int(0)));
+    assert!(rt_array_insert(array, 4, RuntimeValue::from_int(4)));
+    assert_eq!(rt_array_len(array), 5);
+    for i in 0..5 {
+        assert_eq!(rt_array_get(array, i).as_int(), i);
+    }
+    assert!(!rt_array_insert(array, 6, RuntimeValue::from_int(9)));
+    assert!(!rt_array_insert(array, -1, RuntimeValue::from_int(9)));
+    assert_eq!(rt_array_len(array), 5);
+    assert!(!rt_array_insert(RuntimeValue::NIL, 0, RuntimeValue::from_int(9)));
+}
