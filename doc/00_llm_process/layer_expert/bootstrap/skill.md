@@ -67,7 +67,31 @@ native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
 files on Windows; retain strict policy/PATH checks. A successful focused
 resolver probe does not admit the seed generation or prove Stage 4 readiness.
 
-## Windows MSVC host: install, antivirus, traps (2026-09-24)
+## Windows default lane: MinGW clang (2026-10-25)
+
+**Default Windows build = llvm-mingw clang + ld.lld + compiler-rt/libunwind,
+Rust `x86_64-pc-windows-gnullvm`. Do not reach for MSVC** unless the user asks
+for `--msvc`. Setup and the full command are in
+`doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`
+§ "Default lane".
+
+- Install: `sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw`, then
+  `rustup set default-host x86_64-pc-windows-gnullvm` and install the pinned
+  channel. The bootstrap runs Cargo under `env -i`, so `RUSTUP_TOOLCHAIN` is
+  dropped; only rustup's `default_host_tuple` selects the host.
+- Entry: `bash scripts/bootstrap/bootstrap-windows.sh --full-bootstrap
+  --stop-after-stage2 --backend=cranelift`. Cranelift is needed unless a MinGW
+  LLVM 23 prefix with `lib/libLLVM-23.dll.a` exists.
+- What each failure means:
+  - `unable to find library -lgcc_eh`: the rustup host is still windows-gnu.
+  - `unable to find library -lunwind`: llvm-mingw is not installed.
+  - `bootstrap-cache-error ... producer_sha256`: the seed changed, so rerun
+    with `--invalidate-cache=stage2`.
+  - `disk-space(8GiB<20)`: C: is full, so move `SIMPLE_USER_STORAGE_ROOT`,
+    `TMPDIR`, `TMP` and `TEMP` to another drive.
+- Never fix `-lgcc` by putting a GCC (scoop `mingw-winlibs`) on PATH.
+
+## Windows MSVC host (opt-in `--msvc` lane): install, antivirus, traps (2026-09-24)
 
 The guide is
 `doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`.
