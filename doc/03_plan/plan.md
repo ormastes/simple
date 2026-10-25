@@ -1,5 +1,12 @@
 # Phase 3 acceptance execution plan
 
+## Current coding inventory — 2026-10-25
+
+A separate [source-backed82-scope coding inventory](../09_report/releasephase3_coding_inventory_2026_10_25.md) audits `release_phase3` at `f5c0f468556`: **15 coded-complete but unverified,53 partial,5 selected behaviors absent on this branch,9 requiring authority/requirement decisions**. Partial does not mean wholly uncoded. External reviewed partial packets exist for Reference/FLS and heap provenance; reuse them. The report includes exact source/test evidence, release-side donor comparisons and missing-behavior task boundaries.
+
+This is implementation classification only. All selected acceptance remains **UNRUN**; no PASS/FAIL, compiler qualification or release readiness is added. Historical implementation labels and provenance below remain a frozen snapshot.
+
+
 **Status:** frozen handoff; selected acceptance remains not started (all 82 scopes / 378 SSpecs UNRUN). GEN9/GEN10 add bounded native evidence only; full Phase3 is not PASS. This document is an operator-ready test matrix after Phase 3 qualifies the current compiler producer, ordinary full-source CLI, and existing SSpec runner. It adds no source changes, tests, builds, runtime claims, or new runner.
 
 ## Current selector reconciliation — 2026-10-25
