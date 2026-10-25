@@ -1,0 +1,115 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/generic_instance_object_producer_v1.spl 0%
+"""
+# Generic instance-object producer + link wiring (P-G7)
+
+MIR children stage one COMDAT instance object per ConcreteTldrKey (first
+writer wins); the coordinator's single-flight job publishes the staged object
+into the producer-keyed, header-verified cache, and the link step links the
+extracted body once. Two consumers -> one instance object linked once;
+unchanged -> reuse, nothing rebuilt; a template change -> exactly that
+instance rebuilt. COMDAT copies become retirable only after a run in which
+every needed key passed.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use std.io_runtime.{dir_create_all, file_exists, file_read}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
+use compiler.driver.driver_build.native_file_worker_instances_v1.*
+use compiler.driver.driver_build.generic_instance_object_producer_v1.*
+
+val PRODUCER = "producer-pg7"
+
+fn spec_of(key: text) -> RequiredSpecializationV1:
+    RequiredSpecializationV1(template_symbol: "pkg_a.id", template_id: "t:id", args_id: "a:" + key,
+        arg_keys: [key], concrete_key: key)
+
+fn list_of(keys: [text]) -> GenericSpecializationListV1?:
+    var specs: [RequiredSpecializationV1] = []
+    for k in keys:
+        specs.push(spec_of(k))
+    Some(GenericSpecializationListV1(complete: true, specs: specs))
+
+fn fresh_root(tag: text) -> text:
+    val root = "build/test_tmp/pg7_" + tag + "_" + "{time_now_unix_micros()}"
+    val _ok = dir_create_all(root)
+    root
+
+fn run_round(root: text, round: text, lists: [GenericSpecializationListV1?]) -> FileWorkerInstanceRunV1:
+    val stage = root + "/stage-" + round
+    val plan = file_worker_instances_plan_v1(lists, root + "/cache", PRODUCER)
+    file_worker_instances_run_v1(plan, root + "/cache", PRODUCER, root + "/jobs-" + round,
+        "owner-" + round, true, generic_instance_object_from_stage_v1(stage, _1))
+
+describe "generic instance-object producer (P-G7)":
+    it "two consumers stage one instance object, built once and linked once":
+        val root = fresh_root("two")
+        val stage = root + "/stage-0"
+        # Two MIR children (consumer A, consumer B) stage the same key.
+        expect(generic_instance_stage_publish_v1(stage, "k:id_i64", "OBJ-A")).to_equal(true)
+        expect(generic_instance_stage_publish_v1(stage, "k:id_i64", "OBJ-B")).to_equal(true)
+        expect(file_read(generic_instance_stage_path_v1(stage, "k:id_i64"))).to_equal("OBJ-A")
+        val r = run_round(root, "0", [list_of(["k:id_i64"]), list_of(["k:id_i64"])])
+        expect(r.built).to_equal(["k:id_i64"])
+        expect(r.failed.len()).to_equal(0)
+        expect(r.retire_comdat).to_equal(true)
+        val (objects, ok) = generic_instance_link_objects_v1(root + "/cache", PRODUCER, ["k:id_i64"],
+            root + "/link")
+        expect(ok).to_equal(true)
+        expect(objects.len()).to_equal(1)
+        expect(file_read(objects[0])).to_equal("OBJ-A")
+
+    it "unchanged lists reuse the cached instance object and build nothing":
+        val root = fresh_root("same")
+        val _staged = generic_instance_stage_publish_v1(root + "/stage-0", "k:id_i64", "OBJ-1")
+        val _first = run_round(root, "0", [list_of(["k:id_i64"])])
+        # Round 1 stages nothing: a build attempt would fail closed.
+        val again = run_round(root, "1", [list_of(["k:id_i64"])])
+        expect(again.built.len()).to_equal(0)
+        expect(again.failed.len()).to_equal(0)
+        expect(again.reused).to_equal(["k:id_i64"])
+        expect(again.relink).to_equal(false)
+
+    it "a template change rebuilds exactly that instance":
+        val root = fresh_root("change")
+        val _s1 = generic_instance_stage_publish_v1(root + "/stage-0", "k:id_i64@v1", "ID-V1")
+        val _s2 = generic_instance_stage_publish_v1(root + "/stage-0", "k:pair_i64_f64", "PAIR")
+        val _first = run_round(root, "0", [list_of(["k:id_i64@v1", "k:pair_i64_f64"])])
+        # The template of `id` changed: its key changes, `pair` does not.
+        val _s3 = generic_instance_stage_publish_v1(root + "/stage-1", "k:id_i64@v2", "ID-V2")
+        val r = run_round(root, "1", [list_of(["k:id_i64@v2", "k:pair_i64_f64"])])
+        expect(r.built).to_equal(["k:id_i64@v2"])
+        expect(r.reused).to_equal(["k:pair_i64_f64"])
+        expect(r.dropped).to_equal(["k:id_i64@v1"])
+        expect(r.relink).to_equal(true)
+
+    it "a key with no staged object fails closed and nothing is retirable":
+        val root = fresh_root("missing")
+        val r = run_round(root, "0", [list_of(["k:none"])])
+        expect(r.failed).to_equal(["k:none"])
+        expect(r.retire_comdat).to_equal(false)
+        expect(r.link_objects.len()).to_equal(0)
+        val (_objects, ok) = generic_instance_link_objects_v1(root + "/cache", PRODUCER, ["k:none"],
+            root + "/link")
+        expect(ok).to_equal(false)
+
+    it "retirement is recorded only after every key passed and only for verified objects":
+        val root = fresh_root("retire")
+        val cache = root + "/cache"
+        val _staged = generic_instance_stage_publish_v1(root + "/stage-0", "k:a", "A")
+        val r = run_round(root, "0", [list_of(["k:a"])])
+        expect(generic_instance_retire_record_v1(cache, PRODUCER, ["k:a"], r.retire_comdat)).to_equal(true)
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER)).to_equal(["k:a"])
+        expect(generic_instance_retire_record_v1(cache, PRODUCER, ["k:a"], false)).to_equal(true)
+        expect(generic_instance_retire_snapshot_v1(cache, PRODUCER).len()).to_equal(0)
+
+    it "maps a placed instance symbol to its key":
+        generic_instance_key_record_v1("id$i64", "k:id_i64")
+        expect(generic_instance_key_of_v1("id$i64")).to_equal("k:id_i64")
+        expect(generic_instance_key_of_v1("other$i64")).to_equal("")

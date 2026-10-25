@@ -17,6 +17,9 @@ use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{dir_create, dir_list, file_copy, file_exists, hash_text,
     file_size_raw, file_delete, getpid,
     file_write_exact, file_read_nullable}
+use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
+    generic_instance_keyed_functions_v1, generic_instance_stage_path_v1,
+    generic_instance_mir_module_of_v1, generic_instance_stage_publish_v1}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
     file_read_regular_no_follow_bounded,
     file_read_regular_no_follow_bounded_bytes, file_write_bytes,
@@ -3577,6 +3580,35 @@ fn _driver_group_pair_eligible_v1(
         return false
     true
 
+# P-G7 producer: codegen each keyed, extractable COMDAT instance of `name`
+# alone, with the using module's backend/target/CPU/storage snapshot (same
+# COMDAT/weak linkage), and stage it under its ConcreteTldrKey (first writer
+# wins). Best effort: a failure stages nothing and the key fails closed.
+fn _stage_generic_instance_objects_v1(backend_name: text, is_release: bool, opt_level: i64,
+        name: text, mir_module: MirModule, storage_snapshot: FrozenStorageModuleSnapshotV1,
+        target_cpu: text, backend_session: BackendSessionOwnedLeaseV2?):
+    val stage = env_get_nullable(GENERIC_INSTANCE_STAGE_ENV_V1) ?? ""
+    if stage == "" or not dir_create(stage, true):
+        return
+    for pair in generic_instance_keyed_functions_v1(mir_module):
+        val (fn_name, key) = pair
+        val staged = generic_instance_stage_path_v1(stage, key)
+        if staged == "" or file_exists(staged):
+            continue
+        val only = generic_instance_mir_module_of_v1(mir_module, fn_name)
+        if only == nil:
+            print "[file-worker] instance not extractable symbol={fn_name}"
+            continue
+        val base = stage + "/build-" + sha256_text(key) + "-{getpid()}"
+        match _compile_selected_module(backend_name, is_release, opt_level, base, name,
+                only!, storage_snapshot, target_cpu, backend_session):
+            case Ok(obj):
+                if generic_instance_stage_publish_v1(stage, key, file_read_nullable(obj) ?? ""):
+                    print "[file-worker] instance staged symbol={fn_name}"
+                val _cleanup = file_delete(obj)
+            case Err(reason):
+                print "[file-worker] instance codegen failed symbol={fn_name}: {reason}"
+
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
@@ -3658,6 +3690,8 @@ fn _compile_frozen_module_capsule(
             return Err(error)
         case Ok(object_path):
             ice_boundary_module_done(name, "codegen")
+            _stage_generic_instance_objects_v1(backend_name, is_release, opt_level, name,
+                capsule.mir_module, capsule.storage_snapshot, capsule.target_cpu, backend_session)
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
             if not capsule.identity_valid():
