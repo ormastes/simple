@@ -40,3 +40,9 @@ For serialized crash diagnosis, host CUDA policy, RAM cache-parent staging and
 terminal consumer authority, apply [native staging and terminal evidence](../../../doc/07_guide/tooling/bootstrap_native_staging.md).
 Keep campaign Phase 3 priority and full-CLI test ownership explicit; source review
 and a linked bootstrap binary do not admit suite execution.
+
+## Current state (2026-10-25)
+
+Shard knobs, frozen-Stage-2 Stage 3, `.spab`/DigestV1 cache protocol and Lean
+cache gates: [bootstrap options](../../../doc/07_guide/tooling/bootstrap_options.md).
+Per-file src to obj is in progress, not default. Never `git stash`.

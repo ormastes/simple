@@ -50,11 +50,7 @@ fn cli_env_get(key: text) -> text:
     env_get(key)
 
 fn _cli_is_windows_platform() -> bool:
-    val os_env = cli_env_get("OS")
-    if os_env == nil:
-        false
-    else:
-        os_env.lower().contains("windows")
+    host_os() == "windows"
 
 pub struct _CliProcessResult:
     stdout: text
@@ -237,7 +233,9 @@ pub fn cli_kernel_executable_path() -> text:
         match windows_image_path():
             case Ok(path):
                 if path == "" or not _cli_file_exists_impl(path): return ""
-                return _cli_resolve_symlink(path)
+                val resolved = _cli_resolve_symlink(path)
+                if resolved == "" or not _cli_file_exists_impl(resolved): return ""
+                return resolved
             case Err(_): return ""
     if host_os() != "windows":
         val proc_path = _cli_resolve_symlink("/proc/self/exe")
@@ -249,6 +247,11 @@ pub fn cli_kernel_executable_path() -> text:
     _cli_resolve_symlink(reported)
 
 fn _cli_current_exe_path() -> text:
+    # The running image belongs to the kernel, independently of OS, argv0 or
+    # SIMPLE_BINARY. In particular, Windows _fullpath("/proc/self/exe") is
+    # lexical and can return a nonexistent path when OS is absent.
+    if _cli_is_windows_platform():
+        return cli_kernel_executable_path()
     # Prefer the kernel's record of the real executable: argv0-based
     # resolution breaks under the bin/simple symlink (relative argv0 +
     # empty cwd in spawned runners yields an empty seed-sibling path, so
@@ -289,8 +292,8 @@ fn _cli_current_exe_path() -> text:
         return entry
     _cli_self_exe_via_pid_query()
 
-# Process-lifetime cache: the executable never changes, and on Windows the
-# lookup spawns PowerShell (~0.5-1.5s), so pay it at most once per process.
+# Process-lifetime cache: the executable never changes. Retain the validated
+# kernel image path so repeated Windows lookups need no query or allocation.
 var _cli_current_exe_cache = ""
 
 pub fn cli_current_exe_path() -> text:

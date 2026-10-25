@@ -122,8 +122,8 @@ admission must never deadlock.
 
 ## 7. Open points
 
-- Lock-free deque needs `rt_atomic_cas_i64`/fences visible to Simple; confirm
-  `src/lib/nogc_async_mut/atomic.spl` covers CAS on shared memory under native.
+- Resolved: raw-address CAS is `rt_par_atomic_*` (C + Rust), used by the lock-free
+  queue (`fiber/work_queue.spl`).
 - Per-stage memory coefficients are unmeasured.
 - Stackful backend deferred; revisit only if stage-granular yield proves too
   coarse.
@@ -165,3 +165,59 @@ These need a binary that can run HIR lowering; the Rust seed fails with `rt_enum
 **Open (for the scheduler):**
 - How `AwaitInstances` parks on the instance cache's single-flight future.
 - Whether a fiber whose `await` flight completes with nil re-plans (becoming the producer) inside the same `Mono` step.
+
+## 9. Native-build integration: `--parse-fibers=i/n` (2026-10-24)
+
+The coordinator keeps the #4387 frozen entry-closure request and the K-child
+claim-queue split (default 8: measured 1 worker 459 s, 8 -> 103 s, 16 -> 114 s,
+40 -> 211 s on the 1441-file stage3 capsule). Each child
+(`parse_shard_main.spl --parse-fibers=i/n`, entry
+`driver_run_parse_fibers_with_environment_variant_policy_v1` in
+`driver_parse_shard_entry.spl`) builds the driver exactly like a parse shard,
+loads the frozen sources, and runs one FileFiber per claimed file:
+pre-read content (no second read), the HOST does the one parse through the
+driver's own `parse_full_frontend_selected_v1` (identical parse-cache keys to
+the real build), the TLDR is rendered from the just-parsed module, and a fiber
+parks only on imports produced in the same child (other children's modules
+are skipped, not filled: cross-child waits need the cache daemon's
+single-flight). The child exits, which frees the ASTs.
+`SIMPLE_FILE_FIBERS=0` keeps `--parse-shard`. The focused-capsule route
+(`bootstrap_main` children via `run_parse_shards_with_base`) stays on
+`--parse-shard` until `bootstrap_main`/`compile_targets` accept the flag.
+
+### 9.1 Why not one in-process fiber pool (the real blocker)
+
+Fibers in one process cannot parse in parallel: the frontend's parse state is
+process-global, so it is not thread-safe, and the seed interpreter runs thread
+closures inline anyway. The parse path's module-level mutable state
+(`var` at module scope; 603 such globals under `src/compiler/10.frontend`):
+
+- `core/types.spl` — the flat AST pools and their reset: `span_pool_*` (99-102),
+  `tok_pool_*` (149-151), `sym_names/sym_types/sym_depths/sym_decl_ids/sym_mutable`
+  (173-177), `scope_starts`/`current_scope_depth` (216-217), `named_type_*`
+  (758-762), `custom_primitive_*` (767-769), `newunit_*` (923-925), `fn_sig_*`
+  (1057-1061), `generic_param_*` (1102-1104), the composite type tables
+  (1134-1562), `_flat_pool_reset_count` (1651); `reset_all_pools()` (1662)
+  clears them all.
+- `core/lexer.spl` — `lex_state` and cursor slots (61-99), `lex_all_kinds/texts/lines/cols` (940-943).
+- `core/parser.spl` — `par_lexical_bindings` (105), `par_warnings` (123),
+  `par_had_error` (125), import/diagnostic state (130-150),
+  `par_initialization_generation_v1` (151), cached env flags (174, 417).
+- `core/_Ast/module_state.spl` — lexer-state slots (27 onward) through `ast_persistent_owner_prepared_v1` (468).
+- `core/_AstExpr/nodes.spl`, `core/_Ast/decl_nodes.spl`, `core/ast_stmt.spl`,
+  `core/_ParserDecls/enum_module_body.spl` — AST node arenas (15, 15, 12, 14 globals).
+- `_FlatAstBridge/module_assembly.spl` — the flat-pool capture arm/record/take
+  globals: `_fab_capture_pools` (1416), `_fab_captured_blob` (1417), `_fab_captured_trace` (1419), `_fab_captured_paths` (1431), `_fab_capture_arm_tag` (1440), plus `_fab_capture_write_level_noted` (137).
+- `frontend_parse_cache.spl` — cache-scope memo (60-61), hit/miss/store counters (72-78, 208).
+
+Making these per-context (a `ParseContext` owned by the fiber) is the
+prerequisite for in-process parallel parsing; it is being assigned separately.
+
+### 9.2 Follow-up: in-process variant once the packed AST is used in place
+
+Once the codec agent's packed binary AST is consumed in place (mmap, no
+rebuild — `packed_binary_ast_v1.md`), ASTs stop being heap-resident: a fiber
+holds a mapped view, not a pooled tree, and releasing it is an unmap. Combined
+with per-context parse state (§9.1), the single-process variant (fibers on
+pinned worker threads, no child processes) becomes viable and removes the
+per-child driver construction and source-load cost.

@@ -497,6 +497,18 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
         out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        # A Dict<_, bool> value is read through a typed LOCAL, never straight
+        # off the field projection: staged-native types that projection temp
+        # as i64, so `d[k]` decoded the bool word with the integer `>>3` arm
+        # (11 -> 1, 0 -> 0), put_bool rendered "1"/"0" rather than
+        # "true"/"false" and wrote the nil token N, and the decoder refused
+        # every module carrying an impl (HirImpl.method_return_is_array /
+        # method_return_is_optional). A typed local resolves Dict(_, bool).
+        # doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md
+        if u.classify(s.b).cat == "prim_bool":
+            out = out + indent + "    val dm{k}: Dict<" + s.a + ", bool> = " + v + "\n"
+            out = out + _emit_enc(u, s.b, "dm{k}[dk{k}]", indent + "    ", c, required_node)
+            return out
         out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c, required_node)
         return out
     _codec_fail("hir codec generator: unhandled shape {s.cat}")

@@ -637,8 +637,12 @@ sub install_session_helper {
     defined($source) or die "missing session helper source";
     open(my $source_fh, '<', $source) or die "cannot read session helper source";
     $helper_source_sha = hash_handle($source_fh);
-    my $directory = defined($opt{receipt}) ?
-        tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($opt{receipt}), CLEANUP => 0) :
+    # File::Basename under MSYS/Cygwin otherwise treats a native receipt's
+    # backslashes as filename characters and puts session files in cwd.
+    my $receipt_path = $opt{receipt};
+    $receipt_path =~ s{\\}{/}g if $windows && defined($receipt_path);
+    my $directory = defined($receipt_path) ?
+        tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($receipt_path), CLEANUP => 0) :
         tempdir('simple-rss-session-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
     $directory = abs_path($directory);
     $session_dir = $directory;
