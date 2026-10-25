@@ -110,11 +110,20 @@ jobs:
       # A pure-Simple compiler building the compiler peaks above the 16 GB
       # runner after HIR (runs 40091812567, 40098331925: runner shutdown);
       # darwin-arm64 (7 GB) got through on macOS swap. Give Linux swap too.
+      # 24 GB was not enough (run 40136579984: shutdown at MIR start); the
+      # measured peak before the first MIR module is 36-40 GB at 1471 modules
+      # (doc/08_tracking/bug/native_build_per_worker_baseline_rss_2026_10_24.md),
+      # so use the /mnt temp disk, keeping 8 GB free, capped at 64 GB.
       - name: Swap for pure-Simple builds (linux)
         if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'linux-')
         run: |
           sudo swapoff -a || :
-          sudo fallocate -l 24G /mnt/ladder.swap
+          sudo rm -f /mnt/swapfile
+          df -h / /mnt
+          avail=$(df -BG --output=avail /mnt | tail -1 | tr -dc 0-9)
+          size=$((avail - 8)); [ "$size" -gt 64 ] && size=64
+          [ "$size" -ge 24 ] || size=24
+          sudo fallocate -l "${size}G" /mnt/ladder.swap
           sudo chmod 600 /mnt/ladder.swap
           sudo mkswap /mnt/ladder.swap
           sudo swapon /mnt/ladder.swap
