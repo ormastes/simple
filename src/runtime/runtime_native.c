@@ -15891,15 +15891,16 @@ int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
 
-int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
+/* LLVM-lane tuple facades. Since the pure-Simple MIR registers the process
+ * owners in text_arg_indices (text_extern_abi.spl), cmd reaches every backend
+ * already split into (ptr, len) -- the same words the C owners take -- so the
+ * facades only re-pack the result into the rt_alloc'd 3-word block the LLVM
+ * Tuple destructure loads. */
+int64_t* rt_process_run_tuple(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return rt_process_result_to_tuple(rt_process_run_array(cmd, cmd_len, args));
 }
 
-int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_timeout_tuple(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
     // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
     // rt_process_run{,_timeout}"); it still returns an SplArray* handle
@@ -15909,7 +15910,7 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // compile -- which broke the LLVM native-link step of EVERY native-build,
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd, cmd_len, args, timeout_ms));
 }
 
 /* Same (ptr, len) vs single-text-value ABI split as the facades above, for
@@ -15925,11 +15926,9 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
  * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
  * here so both backends keep their own destructure contract. */
-int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                                    int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+int64_t* rt_process_run_owned_observed_bounded_text(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                    int64_t timeout_ms, int64_t max_output_bytes) {
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd, cmd_len, args,
                                                                   timeout_ms, max_output_bytes);
     if (!handle) return NULL;
     int64_t tuple_value = (int64_t)(uintptr_t)handle;
@@ -15942,12 +15941,20 @@ int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args,
     return block;
 }
 
-int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                      int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                      int64_t timeout_ms, int64_t max_output_bytes) {
     return rt_process_result_to_tuple(rt_process_run_bounded(
-        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
@@ -18317,6 +18324,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     rt_tuple_set(tuple, 2, rt_value_int((int64_t)regs.c));
     rt_tuple_set(tuple, 3, rt_value_int((int64_t)regs.d));
     return tuple;
+}
+
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
 }
 
 int64_t rt_xgetbv(int32_t index) {

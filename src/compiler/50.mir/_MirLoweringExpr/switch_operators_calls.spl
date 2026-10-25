@@ -49,7 +49,7 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
-use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, file_write_bytes_array_alias_target}
+use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, tagged_text_value_arg_indices, file_write_bytes_array_alias_target}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_profile_is_critical, match_coverage_critical_missing_ids, match_coverage_requires_hard_error}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
@@ -1153,16 +1153,14 @@ impl MirLowering:
         if val expected = text_extern_semantic_arity(callee_name):
             if args.len() != expected:
                 return args
-        val indices = maybe_indices ?? []
+        # Out-of-range indices are skipped, exactly like the seed's
+        # expand_text_args: rt_dir_glob lists [0, 1] for its (dir, pattern)
+        # facade but the one-text (pattern) facade must still split index 0.
+        var indices: [i64] = []
+        for idx in maybe_indices ?? []:
+            if idx < args.len():
+                indices = indices.push(idx)
         if indices.len() == 0:
-            return args
-        # Defensive for entries without an exact semantic arity: leave any
-        # call whose arg count does not reach every listed index untouched.
-        var max_index = -1
-        for idx in indices:
-            if idx > max_index:
-                max_index = idx
-        if max_index >= args.len():
             return args
         var result: [MirOperand] = []
         var i = 0
@@ -8238,15 +8236,19 @@ impl MirLowering:
             # text value at emit_resolved_direct_call. Do not strip it first.
             direct_pair_text_indices = text_arg_indices(text_boundary_name) ?? []
             direct_boxed_text_indices = boxed_text_arg_indices(text_boundary_name) ?? []
+            # Tagged-value consumers take the text handle as-is; skipping
+            # the pointer bridge is the whole adaptation.
+            for tagged_index in tagged_text_value_arg_indices(text_boundary_name) ?? []:
+                direct_boxed_text_indices = direct_boxed_text_indices.push(tagged_index)
             # Match the pair expander's applicability guards, including raw
             # machine-word overloads with a different semantic arity.
             if val pair_arity = text_extern_semantic_arity(text_boundary_name):
                 if args.len() != pair_arity:
                     direct_pair_text_indices = []
-            var pair_indices_valid = true
+            var in_range_pair_indices: [i64] = []
             for pair_index in direct_pair_text_indices:
-                if pair_index >= args.len(): pair_indices_valid = false
-            if not pair_indices_valid: direct_pair_text_indices = []
+                if pair_index < args.len(): in_range_pair_indices = in_range_pair_indices.push(pair_index)
+            direct_pair_text_indices = in_range_pair_indices
             direct_text_pointer_bridge = true
         var direct_arg_index = 0
         for arg in args:
