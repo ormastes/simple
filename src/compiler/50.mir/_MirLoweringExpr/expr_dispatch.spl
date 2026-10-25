@@ -32,6 +32,7 @@ use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{mir_hir_type_is_sy
 # - Method calls (instance, trait, static, free function / UFCS)
 # - Array, tuple, set, and constant expression lowering
 # - Field access
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_underlying_type_tag_by_name}
 
 use compiler.mir.mir_data.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
@@ -1908,6 +1909,38 @@ impl MirLowering:
         acc = self.emit_raw_strcat(acc, close_paren)
         acc
 
+    me box_runtime_value_local_is_record(local: LocalId) -> bool:
+        """True when `local` is known to hold a struct/class value although
+        its MIR type may be the erased I64: a struct-name provenance entry, or
+        a remembered HIR type naming a Struct/Class symbol. Enums are left
+        out on purpose (unit variants may be immediates), and so are bitfield
+        values, which are plain integer words."""
+        if self.bitfield_value_syms.contains(local.id):
+            return false
+        if self.struct_value_syms.contains(local.id):
+            val record_name = self.struct_value_syms[local.id]
+            # Only a name with a registered record layout: struct_value_syms
+            # also carries sentinels (`__runtime_array__`, a bare generic
+            # parameter name such as `T`), and a newtype over a primitive is
+            # an integer word.
+            if record_name != "" and self.struct_field_order.contains(record_name) and
+                    custom_primitive_underlying_type_tag_by_name(record_name) < 0:
+                return true
+        if val record_hir_type = self.find_local_hir_type(local.id):
+            match record_hir_type.kind:
+                case HirTypeKind.Named(record_owner, _):
+                    # Bitfields are declared as SymbolKind.Struct, and so are
+                    # newtypes over a primitive (lower_type maps those to
+                    # their I64/F64/Bool word).
+                    if self.bitfield_map.contains(record_owner.id):
+                        return false
+                    if custom_primitive_underlying_type_tag_by_symbol(record_owner.id) >= 0:
+                        return false
+                    val record_kind = enum_payload_nominal_kind(record_owner, self.symbols)
+                    return record_kind == 1 or record_kind == 2
+                case _: ()
+        false
+
     me box_runtime_value(local: LocalId) -> LocalId:
         if self.nil_locals.contains(local.id):
             var nil_builder = self.builder
@@ -1974,6 +2007,16 @@ impl MirLowering:
         if type_ == nil:
             return local
         var b = self.builder
+        # An erased I64 MIR type is not evidence of an integer. A local whose
+        # nominal provenance says struct/class (an untyped `val k = if c:
+        # f() else: K(..)` merge, an `if val p = opt` binding, a struct
+        # pushed into `[HirExpr]`) is a record handle; int-boxing it turned
+        # the pointer into `ptr << 3` before rt_dict_set / rt_array_push
+        # (doc/08_tracking/bug/record_local_int_boxed_as_wide_int_2026-10-25.md).
+        # A Struct-typed local already passes through via `case _` below.
+        if self.box_runtime_value_local_is_record(local):
+            self.builder = b
+            return local
         val boxed = match type_.kind:
             case MirTypeKind.I64 | MirTypeKind.U64:
                 # 64-bit-wide integers are the ONLY kinds that can overflow the
