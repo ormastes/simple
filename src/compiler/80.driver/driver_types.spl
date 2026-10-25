@@ -1402,7 +1402,20 @@ class CompileContext:
     # alongside its dict entry, mirroring `evict_hir` above which already
     # clears its `bootstrap_entry_hir` twin.
     me evict_mir_module(name: text):
-        self.mir_modules.remove(name)
+        self.evict_mir_modules([name])
+
+    # Batch form: one pass over the storage rows for the whole batch, so
+    # evicting N modules costs O(rows) instead of O(N * rows).
+    me evict_mir_modules(names: [text]):
+        if names.len() == 0:
+            return
+        var evicted: Dict<text, bool> = {}
+        for name in names:
+            evicted[name] = true
+            self.mir_modules.remove(name)
+            if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
+                self.bootstrap_entry_mir = nil
+                self.bootstrap_entry_mir_name = ""
         var kept_names: [text] = []
         var kept_bindings: [MirStorageViewSiteBindingV1] = []
         var kept_evidence_names: [text] = []
@@ -1410,7 +1423,7 @@ class CompileContext:
         if not self.storage_registry_frozen and self.storage_binding_rows_well_formed():
             var index = 0
             while index < self.storage_binding_module_names.len():
-                if self.storage_binding_module_names[index] != name:
+                if not evicted.contains_key(self.storage_binding_module_names[index]):
                     kept_names.push(self.storage_binding_module_names[index])
                     kept_bindings.push(self.storage_view_site_bindings[index])
                 index = index + 1
@@ -1420,7 +1433,7 @@ class CompileContext:
         if not self.storage_registry_frozen and self.storage_evidence_rows_well_formed():
             var evidence_index = 0
             while evidence_index < self.storage_evidence_module_names.len():
-                if self.storage_evidence_module_names[evidence_index] != name:
+                if not evicted.contains_key(self.storage_evidence_module_names[evidence_index]):
                     kept_evidence_names.push(self.storage_evidence_module_names[evidence_index])
                     kept_evidence.push(self.storage_view_evidence_rows[evidence_index])
                 evidence_index = evidence_index + 1
@@ -1429,9 +1442,6 @@ class CompileContext:
             self.storage_view_evidence_rows = kept_evidence
         # Frozen site/evidence rows remain the immutable build receipt/cache
         # authority; MIR eviction may reclaim payloads but not identity.
-        if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
-            self.bootstrap_entry_mir = nil
-            self.bootstrap_entry_mir_name = ""
 
 # ============================================================================
 # Compile Options Hash Helper
