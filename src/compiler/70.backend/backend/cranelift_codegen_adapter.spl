@@ -831,7 +831,25 @@ fn cl_translate_instruction(
                     cranelift_store(ctx, result, dest_addr, 0)
 
         case Intrinsic(dest, name, args):
-            if name == "source_region_struct_descriptor_v1":
+            if name == "source_region_struct_identity_v1":
+                if val target = dest:
+                    if args.len() != 1 or local_type(target.id, func).kind != MirTypeKind.I64:
+                        panic("C4 identity requires one Struct operand and an i64 destination")
+                    var exact_struct = false
+                    match operand_type(args[0], func).kind:
+                        case Struct(_): exact_struct = true
+                        case _: ()
+                    if not exact_struct: panic("C4 identity source lacks Struct provenance")
+                    val tagged = cl_translate_operand(ctx, cl_module, args[0], value_map, slot_map, func)
+                    val mask = cranelift_iconst(ctx, CL_TYPE_I64, -8)
+                    val identity = cranelift_band(ctx, tagged, mask)
+                    value_map[target.id] = identity
+                    if slot_map.has(target.id):
+                        val storage = cranelift_stack_addr(ctx, slot_map[target.id], 0)
+                        cranelift_store(ctx, identity, storage, 0)
+                else:
+                    panic("C4 identity requires a destination")
+            elif name == "source_region_struct_descriptor_v1":
                 if val target = dest:
                     if local_type(target.id, func).kind != MirTypeKind.I64:
                         panic("C4 descriptor requires an i64 address destination")

@@ -594,6 +594,26 @@ impl MirToLlvm:
         # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
         # Falls back to __simple_intrinsic_<name> for unknown names.
         match name:
+            case "source_region_struct_identity_v1":
+                if val target = dest:
+                    if args.len() != 1 or self.get_local_type(target.id) != "i64":
+                        self.codegen_error("C4 identity requires one Struct operand and an i64 destination")
+                        return
+                    var exact_struct = false
+                    match args[0].kind:
+                        case Copy(source) | Move(source): exact_struct = self.source_region_struct_locals_v1.has(source.id)
+                        case _: ()
+                    if not exact_struct or self.native_int() != "i64":
+                        self.codegen_error("C4 identity source lacks qualified Struct provenance")
+                        return
+                    val raw = self.translate_operand(args[0])
+                    val pointer = self.value_as_type(raw, self.get_operand_type(args[0]), "ptr")
+                    val identity = self.untag_aggregate_base_ptr(pointer)
+                    val target_name = self.get_local(target.id)
+                    self.builder.emit("  {target_name} = ptrtoint ptr {identity} to i64")
+                    self.value_types[target_name] = "i64"
+                else:
+                    self.codegen_error("C4 identity requires a destination")
             case "source_region_publish_struct_v1":
                 if val target = dest:
                     if args.len() != 1 or not self.source_region_struct_locals_v1.has(target.id):
