@@ -4,6 +4,7 @@
 use compiler.mir.mir_instructions.*
 use compiler.mir.source_region_context_transform_v1.{source_region_module_function_context_local_v1}
 use compiler.backend.common.source_region_descriptor_v1.*
+use compiler.backend.common.source_region_typed_struct_descriptor_v1.{source_region_struct_descriptor_typed_v1}
 use compiler.backend.linker.source_region_link_types_v1.*
 use compiler.backend.linker.source_region_elf_protection_v1.{source_region_elf_field_v1}
 use compiler.backend.linker.elf_parser.{ElfObject, ElfSymbol, elf_parse_object}
@@ -55,7 +56,8 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
             for instruction in block.instructions:
                 match instruction.kind:
                     case Intrinsic(destination, descriptor_kind, args):
-                        if descriptor_kind != "source_region_struct_descriptor_v1" and descriptor_kind != "source_region_dictionary_descriptor_v1":
+                        if (descriptor_kind != "source_region_struct_descriptor_v1" and descriptor_kind != "source_region_dictionary_descriptor_v1" and
+                            descriptor_kind != "source_region_struct_descriptor_typed_v1"):
                             if descriptor_kind.starts_with("source_region_") and descriptor_kind.ends_with("_descriptor_v1"):
                                 return Err("SOURCE-EMIT-UNSUPPORTED-DESCRIPTOR-SHAPE")
                             continue
@@ -65,7 +67,17 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
                             var slots: [SourceRegionSlotV1] = []
                             var extent = 0
                             var shape = 1
-                            if descriptor_kind == "source_region_dictionary_descriptor_v1":
+                            var recipe_digest = ""
+                            if descriptor_kind == "source_region_struct_descriptor_typed_v1":
+                                match source_region_struct_descriptor_typed_v1(module.types, args, ordinary_struct_representation):
+                                    case Ok(recipe):
+                                        slots = recipe.slots
+                                        recipe_digest = recipe.recipe_digest
+                                    case Err(_): return Err("SOURCE-EMIT-TYPED-STRUCT-RECIPE")
+                                match source_region_descriptor_extent_v1(slots.len()):
+                                    case Ok(actual): extent = actual
+                                    case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-EXTENT")
+                            elif descriptor_kind == "source_region_dictionary_descriptor_v1":
                                 shape = 4
                                 extent = 64
                                 match source_region_dictionary_descriptor_slots_v1(args, ordinary_struct_representation):
@@ -114,7 +126,7 @@ fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
                                 header_section: header_symbol.st_shndx, header_offset: header_symbol.st_value as u64,
                                 table_section: table_symbol.st_shndx, table_offset: table_symbol.st_value as u64,
                                 allocation_bytes: extent as u64, slot_count: slots.len(), table_bytes: table_extent as u64,
-                                table_digest: sha256_u8_fast_hex(table), shape: shape))
+                                table_digest: sha256_u8_fast_hex(table), shape: shape, type_recipe_digest: recipe_digest))
                             for offset in 0..6:
                                 val key = "{header_symbol.st_shndx}:{header_symbol.st_value + offset * 8}"
                                 if protected_words.has(key): return Err("SOURCE-EMIT-OVERLAPPING-DESCRIPTORS")

@@ -28,6 +28,9 @@ use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 use compiler.backend.common.source_region_descriptor_v1.{source_region_descriptor_slots_v1, source_region_descriptor_extent_v1, source_region_descriptor_slot_words_v1, source_region_resolve_struct_slots_v1}
 use compiler.backend.source_region_emission_seal_v1.{source_region_emission_seal_v1}
 use compiler.backend.common.source_region_descriptor_v1.{source_region_dictionary_descriptor_slots_v1}
+use compiler.backend.common.source_region_typed_struct_descriptor_v1.{source_region_struct_descriptor_typed_v1}
+use compiler.mir.mir_types.{MirTypeDef}
+use compiler.hir.hir_types.{SymbolId}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -187,7 +190,7 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
 
     for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
-        val result = compile_function(cl_module, func, func_handles, global_handles)
+        val result = compile_function(cl_module, func, func_handles, global_handles, module.types)
         if not result:
             cranelift_free_module(cl_module)
             return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -251,7 +254,7 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # Second pass: compile each function
         for func in module.functions.values():
-            val result = compile_function(cl_module, func, func_handles, global_handles)
+            val result = compile_function(cl_module, func, func_handles, global_handles, module.types)
             if not result:
                 cranelift_free_module(cl_module)
                 return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -438,7 +441,7 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, Cranel
 # Function Compilation
 # ============================================================================
 
-fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>) -> bool:
+fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>, types: Dict<SymbolId, MirTypeDef>) -> bool:
     val emit_name = cl_function_emit_name(func.name)
     val sig = build_signature(func.signature, func.name == "main")
     val ctx = cranelift_begin_function(cl_module, emit_name, sig)
@@ -543,7 +546,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                         cranelift_store(ctx, result, addr, 0)
                     inst_index = inst_index + 2
                     continue
-            cl_translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, global_handles, func)
+            cl_translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, global_handles, func, types)
             inst_index = inst_index + 1
 
         for inst in block.instructions:
@@ -586,7 +589,8 @@ fn cl_translate_instruction(
     cl_module: i64,
     func_handles: Dict<text, i64>,
     global_handles: Dict<i64, CraneliftGlobalBinding>,
-    func: MirFunction
+    func: MirFunction,
+    types: Dict<SymbolId, MirTypeDef>
 ):
     val inst_kind = inst.kind
     val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
@@ -858,6 +862,30 @@ fn cl_translate_instruction(
                         cranelift_store(ctx, identity, storage, 0)
                 else:
                     panic("C4 identity requires a destination")
+            elif name == "source_region_struct_descriptor_typed_v1":
+                if val target = dest:
+                    if local_type(target.id, func).kind != MirTypeKind.I64: panic("C4 typed descriptor requires an i64 address")
+                    match source_region_struct_descriptor_typed_v1(types, args, 2):
+                        case Ok(recipe):
+                            var extent = 0
+                            match source_region_descriptor_extent_v1(recipe.slots.len()):
+                                case Ok(actual): extent = actual
+                                case Err(_): panic("C4 typed descriptor extent is invalid")
+                            match source_region_descriptor_slot_words_v1(recipe.slots):
+                                case Ok(words):
+                                    val name = ".c4.{func.source_region_closure_digest_v1}.{func.symbol.id}.{target.id}"
+                                    val table = cranelift_declare_readonly_words_v1(cl_module, name + ".slots", words, 8, -1, 0, 0)
+                                    if table <= 0: panic("C4 typed descriptor table declaration failed")
+                                    val header = cranelift_declare_readonly_words_v1(cl_module, name, [1, 1, extent, recipe.slots.len(), 0, 1], 8, 4, table, 0)
+                                    if header <= 0: panic("C4 typed descriptor header relocation failed")
+                                    val address = cranelift_data_addr_in_func(ctx, header)
+                                    value_map[target.id] = address
+                                    if slot_map.has(target.id):
+                                        val storage = cranelift_stack_addr(ctx, slot_map[target.id], 0)
+                                        cranelift_store(ctx, address, storage, 0)
+                                case Err(_): panic("C4 typed descriptor physical rows are invalid")
+                        case Err(_): panic("C4 typed descriptor nominal field layout is invalid")
+                else: panic("C4 typed descriptor requires a destination")
             elif name == "source_region_dictionary_descriptor_v1":
                 if val target = dest:
                     if local_type(target.id, func).kind != MirTypeKind.I64:
