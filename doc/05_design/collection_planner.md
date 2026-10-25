@@ -247,3 +247,18 @@ exercise the block API; they do not establish production admission.
 
 The lost reuse opportunity and required performance follow-up are tracked in
 `doc/08_tracking/bug/collection_query_cse_authority_performance_2026-10-03.md`.
+
+## Status 2026-10-25 (verified against origin/release/1.0.0 @ 52ecd8b7725)
+
+| Area | Status | Evidence |
+|---|---|---|
+| Typed registry, checked `typed_series` adapters, guarded advisory planning | DONE (merged) | PR #2285 (`6c905c710c6`), follow-up PR #2304 (`ae932d53f79`), evidence PR #2309 (`abdebaa4360`) |
+| CLI policy/budget transport and argument validation | DONE (merged) | `93bc526ff95`, `e1c2cce4157` |
+| Builtin collection dispatch identity (`BuiltinCollection` in HIR/codec/type infer) | DONE in source | `src/compiler/20.hir/hir_types.spl`, `generated/hir_codec.spl` on release/1.0.0 |
+| MIR consumption of plans | PARTIAL — only guarded literal-membership plans | `97b13f9eb09` (`test/.../mir/collection_literal_membership_spec.spl`) |
+| Driver archive/current-body gate preservation | PARTIAL (analysis-only) | `a7b8b4cdcef`, `ba0a687f9e6` (2026-10-12); driver still publishes "analysis snapshots, never lowered/executed receipts" |
+| General filter/projection/group/aggregate/join lowering | OPEN | no lowering path beyond literal membership |
+| Five-engine semantic equivalence, NFR-001–007 measurements, per-host done gate | OPEN | no executed receipts in `doc/03_plan/evidence/seven_plans/` for item 3 except the 2026-09-29 Windows builtin-identity note |
+
+Host completion for item 3 remains NOT DONE on every host; the advisory
+selector is not completion.

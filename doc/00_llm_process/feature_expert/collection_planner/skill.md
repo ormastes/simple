@@ -27,3 +27,11 @@ tracked in `doc/04_architecture/compiler/profile_switchable_container_algorithms
 § Status reconciliation (2026-10-25). Only the literal-membership MIR consumer
 landed (`97b13f9eb09`, `bb7d5313b2f`); general typed lowering and two-run
 host execution evidence remain OPEN.
+
+Superseded 2026-10-25: the BuiltinCollection identity is no longer only an
+in-progress candidate — it is present in `hir_types.spl`, the generated HIR
+codec and type inference on release/1.0.0. MIR now consumes guarded
+literal-membership plans (`97b13f9eb09`); general lowering, cross-engine
+execution and NFR certification remain unfinished. Re-verify the
+"integration spec" blockers above before quoting them; they were not
+re-run on 2026-10-25.
