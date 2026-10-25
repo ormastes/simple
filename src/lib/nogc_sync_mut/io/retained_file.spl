@@ -149,7 +149,14 @@ fn _retained_path(path: text) -> i64:
     ptr
 
 @unsafe(reason: "observes size and identity on exact retained regular-file handle", capabilities: [ffi, raw_ptr])
-fn _retained_metadata(handle: i64) -> Result<(u64, [u8]), text>:
+# @workaround doc/08_tracking/bug/convnodes_retained_file_result_tuple_u64_2026-10-25.md:
+# MIR Result<(..)> tuple slots admit only i64/bool/f64/text/tuple/record (no u64,
+# no [u8]; result_try_tuple_field_type), so the pair is a record instead.
+struct RetainedMeta:
+    size: u64
+    identity: [u8]
+
+fn _retained_metadata(handle: i64) -> Result<RetainedMeta, text>:
     val ptr = _retained_alloc(256u64)
     if ptr == 0: return Err("SCVDB_FILE_MEMORY")
     var size = 0u64
@@ -182,7 +189,7 @@ fn _retained_metadata(handle: i64) -> Result<(u64, [u8]), text>:
     @end
     _retained_free(ptr)
     if not valid: return Err("SCVDB_FILE_METADATA_UNSUPPORTED")
-    Ok((size, identity))
+    Ok(RetainedMeta(size: size, identity: identity))
 
 @unsafe(reason: "opens nofollow regular file or exclusively creates private output", capabilities: [ffi, raw_ptr])
 fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<RetainedFile, text>:
@@ -220,7 +227,9 @@ fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<
         Err(error):
             val closed = file.close()
             return Err(error)
-        Ok((size, identity)):
+        Ok(meta):
+            val size = meta.size
+            val identity = meta.identity
             if size > maximum:
                 val closed = file.close()
                 return Err("SCVDB_FILE_QUOTA")
@@ -278,7 +287,9 @@ fn retained_directory_is_real_no_follow(path: text) -> bool:
 
 fn retained_file_identity_unchanged(file: RetainedFile) -> Result<bool, text>:
     if file.closed or file.writable: return Err("SCVDB_FILE_STATE")
-    val (size, identity) = _retained_metadata(file.handle)?
+    val meta = _retained_metadata(file.handle)?
+    val size = meta.size
+    val identity = meta.identity
     if size != file.size or identity != file.identity: return Err("SCVDB_FILE_CHANGED")
     Ok(true)
 
