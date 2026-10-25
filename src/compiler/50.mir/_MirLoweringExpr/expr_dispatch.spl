@@ -6408,6 +6408,7 @@ impl MirLowering:
                 # lower_result_unwrap/emit_resolved_direct_call register
                 # struct_value_syms for their own freshly-produced locals.
                 var result_struct_name = ""
+                var exists_nominal_payload = false
                 if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
                     match exists_inner_type.kind:
                         case HirTypeKind.Tuple(_):
@@ -6416,6 +6417,13 @@ impl MirLowering:
                             # Only the authored present edge may recover it.
                             result_type = MirType.i64()
                         case HirTypeKind.Named(exists_struct_symbol, _):
+                            val exists_nominal_kind = enum_payload_nominal_kind(exists_struct_symbol, self.symbols)
+                            if exists_nominal_kind >= 1 and exists_nominal_kind <= 3:
+                                # #3016: the absent edge stores the raw nil word,
+                                # never an integer constant typed as a pointer.
+                                # Preserve the semantic owner separately below.
+                                result_type = MirType.i64()
+                                exists_nominal_payload = true
                             if val present_exists_type_symbol = self.symbols.get_symbol_raw(exists_struct_symbol.id):
                                 val exists_type_symbol: HirSymbol = present_exists_type_symbol
                                 match exists_type_symbol.kind:
@@ -6470,7 +6478,12 @@ impl MirLowering:
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
                 var some_value = self.option_payload_or_self(base_local)
-                if self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
+                if exists_nominal_payload:
+                    # Native records/classes/enums stored in runtime containers
+                    # retain their handle bits. The i64 merge carrier is not a
+                    # scalar payload: integer unboxing would destroy that handle.
+                    ()
+                elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.decode_runtime_value(base_local, result_type)
                 else:
                     some_value = self.enum_payload_value(some_value, result_type)
