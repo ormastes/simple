@@ -3094,10 +3094,88 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     let Some(scope) = scope else {
         return false;
     };
-    for object in scope.objects {
-        free_transient_heap(object);
+    // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
+    // the old per-object `free_transient_heap` took the registry mutex twice
+    // per object, and each erase bumped the free epoch, so the next object's
+    // validation always missed its cache and probed the process-wide set cold.
+    // Exactly the objects `free_transient_heap` would free are erased here;
+    // shared strings stay registered, as `rt_string_free` leaves them, and
+    // closures take the per-object path below so a pinned one is orphaned
+    // (`closure_pin_defer_free`) rather than freed.
+    let mut erased = Vec::with_capacity(scope.objects.len());
+    let mut closures = Vec::new();
+    super::heap::unregister_heap_ptrs_batch(
+        &scope.objects,
+        |value, ptr| unsafe {
+            match (*ptr).object_type {
+                HeapObjectType::String => (*ptr).reserved & RT_STRING_FLAG_SHARED == 0,
+                HeapObjectType::Array | HeapObjectType::Tuple | HeapObjectType::Dict => true,
+                HeapObjectType::Object
+                | HeapObjectType::Enum
+                | HeapObjectType::Float
+                | HeapObjectType::UInt
+                | HeapObjectType::Int => std::alloc::Layout::from_size_align((*ptr).size as usize, 8).is_ok(),
+                HeapObjectType::Closure => {
+                    closures.push(value);
+                    false
+                }
+                _ => false,
+            }
+        },
+        &mut erased,
+    );
+    // Every erase is complete (all chunks) before the first free below.
+    for (ptr, kind) in erased {
+        unsafe { dealloc_erased_transient(ptr, kind) };
+    }
+    for closure in closures {
+        free_transient_heap(closure);
     }
     unsafe { rt_transient_raw_scope_end() != 0 }
+}
+
+/// Release the memory of a heap object this thread just erased from the
+/// registry. Mirrors the deallocation half of `rt_string_free`,
+/// `rt_array_free`, `rt_tuple_free`, `rt_dict_free` and the generic arm of
+/// `free_transient_heap`; keep them in step.
+unsafe fn dealloc_erased_transient(ptr: *mut HeapHeader, kind: HeapObjectType) {
+    match kind {
+        HeapObjectType::String => {
+            let len = (*(ptr as *mut RuntimeString)).len;
+            let size = std::mem::size_of::<RuntimeString>() + len as usize;
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Array => {
+            let array = ptr as *mut RuntimeArray;
+            if !(*array).data.is_null() {
+                let data_layout = if (*array).is_byte_packed() {
+                    byte_array_data_layout((*array).capacity)
+                } else {
+                    array_data_layout((*array).capacity)
+                };
+                note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+                std::alloc::dealloc((*array).data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        HeapObjectType::Tuple => {
+            let len = (*(ptr as *mut RuntimeTuple)).len;
+            let size = std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+            std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align(size, 8).unwrap());
+        }
+        HeapObjectType::Dict => {
+            let dict = ptr as *mut RuntimeDict;
+            super::dict::dict_free_slots((*dict).data, (*dict).capacity);
+            let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+        _ => {
+            // Object/Enum/Float/UInt/Int: layout validity was checked before erasing.
+            let layout = std::alloc::Layout::from_size_align((*ptr).size as usize, 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
 }
 
 /// Create an array from a slice of RuntimeValues

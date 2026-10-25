@@ -481,9 +481,14 @@ fn heap_registry_shards() -> &'static [HeapRegistryShard] {
 }
 
 #[inline]
-fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+pub(crate) fn heap_registry_shard_index(addr: usize) -> usize {
     let mixed = ((addr >> 3) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    &heap_registry_shards()[(mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)]
+    (mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)
+}
+
+#[inline]
+fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+    &heap_registry_shards()[heap_registry_shard_index(addr)]
 }
 
 /// A pointer that a locked probe found registered at its shard's epoch E is
@@ -593,6 +598,106 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         super::collections::transient_promote_share_forget(ptr as usize);
     }
     removed
+}
+
+/// Candidates erased per registry lock hold in `unregister_heap_ptrs_batch`.
+/// Bounds how long other threads' registrations and validations wait
+/// (~50 ns/candidate measured => a few ms per chunk).
+pub(crate) const HEAP_UNREGISTER_BATCH_CHUNK: usize = 1 << 16;
+
+/// Batch `unregister_heap_ptr_checked` for a transient scope end: one shard
+/// lock and one shard epoch bump per `HEAP_UNREGISTER_BATCH_CHUNK` of that
+/// shard's candidates, instead of a lock round-trip (plus a validation probe
+/// that always misses, because every per-object erase bumps the shard epoch)
+/// per object.
+///
+/// For each candidate that passes the same address checks as
+/// `RuntimeValue::heap_type` and is registered, `select` is asked, under the
+/// lock, whether to erase it; `select` sees a live header (registered ==
+/// live, and every free erases under this lock first) and must not take any
+/// lock. Erased pointers are pushed to `out` with their kind; exactly one
+/// caller ever erases a given pointer, so each is the caller's to free.
+///
+/// The caller must free `out` only after this returns, never between
+/// chunks: an erased-but-unfreed address cannot be recycled by another
+/// thread, so a stale duplicate of it later in `candidates` (an object freed
+/// and its address reused mid-scope) finds it unregistered and is skipped.
+/// Accounting and the share-window erase run after the last lock release, as
+/// in the single-pointer path.
+pub(crate) fn unregister_heap_ptrs_batch(
+    candidates: &[super::core::RuntimeValue],
+    mut select: impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    let start = out.len();
+    // The registry is sharded by address, so candidates are bucketed by shard
+    // (scope order kept within a bucket) and each shard is locked once per
+    // chunk of its own bucket, bumping only that shard's epoch. Every copy of
+    // an address lands in the same bucket, so the stale-duplicate argument
+    // above holds per shard.
+    let mut buckets: Vec<Vec<super::core::RuntimeValue>> = vec![Vec::new(); HEAP_REGISTRY_SHARDS];
+    for value in candidates {
+        if value.is_heap() {
+            buckets[heap_registry_shard_index(value.as_heap_ptr() as usize)].push(*value);
+        }
+    }
+    let shards = heap_registry_shards();
+    for (index, bucket) in buckets.iter().enumerate() {
+        let shard = &shards[index];
+        for chunk in bucket.chunks(HEAP_UNREGISTER_BATCH_CHUNK) {
+            let chunk_start = out.len();
+            // Poisoned: keep the rest of this shard registered (leaked, never
+            // freed), as the single-pointer path does; what earlier chunks
+            // erased is still ours.
+            let Ok(mut registry) = shard.set.lock() else {
+                break;
+            };
+            erase_selected(&mut registry, chunk, &mut select, out);
+            if out.len() != chunk_start {
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+    for &(ptr, kind) in &out[start..] {
+        // Erased by this call and not yet freed, so the header is readable.
+        let bytes = unsafe { (*ptr).size as u64 };
+        note_heap_free(kind as u8, bytes);
+        note_attr_free(ptr as usize, bytes);
+        super::collections::transient_promote_share_forget(ptr as usize);
+    }
+}
+
+/// One locked chunk of `unregister_heap_ptrs_batch`, over the registry it is
+/// given (the live one, or a test's frozen fork-child registry).
+fn erase_selected(
+    registry: &mut HeapRegistry,
+    chunk: &[super::core::RuntimeValue],
+    select: &mut impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    for value in chunk {
+        if !value.is_heap() {
+            continue;
+        }
+        let ptr = value.as_heap_ptr();
+        let addr = ptr as usize;
+        if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+            continue;
+        }
+        // Erase first (one probe for the common case); a declined object
+        // goes straight back. Nobody can observe the gap: the caller holds
+        // the lock. In a fork child an inherited erase is an erased-set
+        // insert and the put-back its removal, so the frozen table is never
+        // written.
+        if !registry.remove(&addr) {
+            continue;
+        }
+        if !select(*value, ptr) {
+            registry.insert(addr);
+            continue;
+        }
+        out.push((ptr, unsafe { (*ptr).object_type }));
+    }
 }
 
 #[inline]
@@ -1212,5 +1317,48 @@ mod fork_registry_tests {
         registry.clear();
         assert_eq!(registry.len(), 0);
         assert!(!registry.contains(&16));
+    }
+
+    /// The scope-end batch over a fork child's frozen registry: inherited and
+    /// child-owned objects are erased exactly once, a declined inherited
+    /// object stays a member, and the inherited table is never written.
+    #[test]
+    fn batch_erase_over_frozen_registry_never_writes_inherited_table() {
+        use super::{erase_selected, HeapHeader, HeapObjectType};
+        use crate::value::core::RuntimeValue;
+        // 8-aligned storage, as every real heap object has.
+        let headers: Vec<*mut HeapHeader> = (0..4)
+            .map(|_| {
+                let slot = Box::into_raw(Box::new([0u64; 2])) as *mut HeapHeader;
+                unsafe { slot.write(HeapHeader::new(HeapObjectType::Tuple, 16)) };
+                slot
+            })
+            .collect();
+        let addr = |i: usize| headers[i] as usize;
+        let value = |i: usize| RuntimeValue(addr(i) as u64 | crate::value::tags::TAG_HEAP);
+        let mut registry = HeapRegistry::default();
+        for i in 0..3 {
+            assert!(registry.insert(addr(i)));
+        }
+        registry.freeze_for_fork_child();
+        let frozen_cap = registry.frozen.as_ref().unwrap().capacity();
+        assert!(registry.insert(addr(3)), "child-owned object");
+
+        // 0 inherited + erased (listed twice: second is a stale duplicate),
+        // 1 inherited + declined, 2 inherited + not listed, 3 child + erased.
+        let candidates = [value(0), value(1), value(3), value(0)];
+        let mut out = Vec::new();
+        erase_selected(&mut registry, &candidates, &mut |_, ptr| ptr as usize != addr(1), &mut out);
+        let erased: Vec<usize> = out.iter().map(|(ptr, _)| *ptr as usize).collect();
+        assert_eq!(erased, vec![addr(0), addr(3)]);
+        assert!(out.iter().all(|(_, kind)| *kind == HeapObjectType::Tuple));
+        assert!(!registry.contains(&addr(0)) && !registry.contains(&addr(3)));
+        assert!(registry.contains(&addr(1)) && registry.contains(&addr(2)));
+        assert_eq!(registry.len(), 2);
+        let frozen = registry.frozen.as_ref().unwrap();
+        assert_eq!((frozen.len(), frozen.capacity()), (3, frozen_cap), "inherited table untouched");
+        for header in headers {
+            drop(unsafe { Box::from_raw(header as *mut [u64; 2]) });
+        }
     }
 }
