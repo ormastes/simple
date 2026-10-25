@@ -18,6 +18,7 @@
 # Lock-free: the table is owned by one scheduler/daemon loop; there is no
 # shared mutation across threads.
 use std.async.future.{Future}
+use std.async.poll.{Poll}
 use compiler.driver.cache.id_scope_v1.{IdScopeV1, id_scope_global_v1}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
 
@@ -58,13 +59,16 @@ class TldrTableV1:
 
     # Dereference: the module's TLDR text, or pending plus one queued fill.
     me deref(h: TldrHandleV1) -> Future<text?>:
-        # @workaround bug=tldr_future_static_owner_typeparam_2026_10_25 reason=bind_factory_owner_until_static_generic_inference_is_fixed
+        # @workaround bug=tldr_future_static_owner_typeparam_2026_10_25 reason=construct_concrete_poll_and_future_until_static_factory_substitution_is_fixed
         if self.entries.contains_key(h.module_key):
-            return Future<text?>.from_value(Some(self.entries[h.module_key]))
+            val payload: text? = Some(self.entries[h.module_key])
+            val ready: Poll<text?> = Poll.Ready(payload)
+            return Future<text?>(state: [], poll_result: ready)
         if not self.requested.contains_key(h.module_key):
             self.requested[h.module_key] = true
             self.fill_queue.push(h.module_key)
-        Future<text?>.pending()
+        val pending: Poll<text?> = Poll.Pending
+        Future<text?>(state: [], poll_result: pending)
 
     # Modules whose fill was requested since the last call, each once.
     me take_fill_requests() -> [text]:
