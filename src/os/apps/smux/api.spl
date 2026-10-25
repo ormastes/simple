@@ -15,13 +15,31 @@
 # Each pub fn writes `_svc` exactly once, at the end: a helper that writes
 # `_svc` and is then followed by a read of `_svc` in the same frame loses the
 # helper's write on older bootstrap interpreters whose call frame cached the
-# module binding. Helpers below are therefore pure (state in, value out).
+# module binding. Helpers receive explicit snapshots; only this API commits
+# the returned state. Native effects remain in their Sosix-backed owners.
 
 use os.apps.smux.contract.{
     MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
+    pane_poll_state,
+    pane_spawn_state,
+    pane_spawn_pty_state,
+    pane_is_pty_state,
+    pane_alive_state,
+    pane_close_pty_state,
+    pane_send_state,
+    pane_input_status_state,
+    pane_command_state,
+    pane_capture_state,
+    pane_capture_styled_state,
+    pane_bracketed_paste_state,
+    pane_paste_state,
+    pane_capture_cells_state,
+    pane_capture_history_state,
+    pane_capture_frame_state}
 use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, remove_window_state}
 use os.apps.smux.child_lifecycle.{close_owned_children}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
@@ -32,34 +50,12 @@ use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new,
 use std.nogc_sync_mut.sosix.entropy.{sosix_random_hex}
 use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
 use os.apps.smux.client_notifications.{smux_notifications_clear_recipient, smux_notifications_clear_all}
-use os.apps.smux.frame_snapshot.{smux_frame_validate, smux_frame_from_state}
-use os.apps.smux.vt_screen.{vt_new, vt_feed}
-use os.apps.smux.layout.{smux_plan_split}
-use os.apps.smux.mux_rects.{MuxRect, mux_layout_known, mux_layout_rects}
+use os.apps.smux.mux_rects.{MuxRect, mux_layout_known}
 use os.apps.smux.window_layout_service.{
-    window_layout_name, window_layout_rects, window_plan_rects, window_rects_valid,
-    resize_layout_children as _resize_layout_children
+    window_layout_name, window_layout_rects, arrange_window_state as _arrange_window,
+    split_window_state, resize_pane_state
 }
-use std.nogc_sync_mut.sosix.pty.{
-    sosix_pty_open as pty_open,
-    sosix_pty_spawn as pty_spawn,
-    sosix_pty_write_some as pty_write_some,
-    sosix_pty_input_pending as pty_input_pending,
-    sosix_pty_read as pty_read,
-    sosix_pty_close as pty_close,
-    sosix_pty_is_running as pty_is_running,
-    sosix_pty_can_resize as pty_can_resize,
-    sosix_pty_resize as pty_resize
-}
-use std.nogc_sync_mut.sosix.process.{
-    sosix_process_spawn_piped as process_spawn_piped,
-    sosix_process_write_stdin_some as process_write_stdin_some,
-    sosix_process_read_stdout as process_read_stdout,
-    sosix_process_is_piped_alive as process_is_piped_alive,
-    sosix_process_close_piped as process_close_piped}
 use std.nogc_sync_mut.sosix.time.{sosix_time_now_unix_micros as time_now_unix_micros}
-use os.apps.smux.input_queue.{pane_input_enqueue, pane_input_remaining,
-    pane_input_advance, pane_input_fail}
 
 # =========================================================================
 # Global service state
@@ -129,157 +125,10 @@ fn _window_idx(st: ServiceState, session_id: text, window_id: text) -> int:
         return -1
     return idx
 
-fn _has_child(pr: PaneRecord) -> bool:
-    return pr.child_pid > 0
-
-fn _is_pty(pr: PaneRecord) -> bool:
-    return pr.pty_fd >= 0
-
-fn _release_child(pr: PaneRecord):
-    if _is_pty(pr):
-        val _c = pty_close(pr.pty_fd as i32)
-    elif _has_child(pr):
-        val _p = process_close_piped(pr.child_pid)
-
-fn _child_alive(pr: PaneRecord) -> bool:
-    if _is_pty(pr):
-        return pty_is_running(pr.pty_fd as i32)
-    if _has_child(pr):
-        return process_is_piped_alive(pr.child_pid)
-    return false
-
-# Terminal output -> plain lines. CSI sequences are dropped, except a cursor
-# position (`ESC[row;colH`) which a ConPTY uses instead of a newline, so it
-# becomes one, and a cursor-forward (`ESC[nC`) which full-screen TUIs use
-# instead of spaces, so it becomes n spaces. OSC titles (`ESC]...BEL`) are
-# dropped. `\r` is dropped.
-fn _clean_output(raw: text) -> text:
-    val esc = "\x1b"
-    val bel = "\x07"
-    var out = ""
-    var params = ""
-    var mode = 0  # 0 text, 1 after ESC, 2 CSI, 3 OSC
-    for ch in raw.chars():
-        if mode == 0:
-            if ch == esc:
-                mode = 1
-            elif ch != "\r":
-                out = out + ch
-        elif mode == 1:
-            if ch == "[":
-                mode = 2
-                params = ""
-            elif ch == "]":
-                mode = 3
-            else:
-                mode = 0
-        elif mode == 2:
-            if ch >= "@" and ch <= "~":
-                if ch == "H" and out != "" and not out.ends_with("\n"):
-                    out = out + "\n"
-                if ch == "C":
-                    var n = params.to_int() ?? 1
-                    if n < 1:
-                        n = 1
-                    while n > 0:
-                        out = out + " "
-                        n = n - 1
-                mode = 0
-            else:
-                params = params + ch
-        else:
-            if ch == bel:
-                mode = 0
-            elif ch == esc:
-                mode = 1
-    return out
-
-# Pulls whatever the child printed since the last drain into the pane tail.
-# Reads are chunked (a PTY read returns at most one buffer), so keep reading
-# until the child has nothing pending. Bounded so a child that prints forever
-# cannot stall the caller.
-#
-# A PTY chunk is applied to the screen as soon as it is read. Replies to startup
-# queries share the bounded input queue; one provider write follows each drain.
-# A child waiting on that answer can resume after the provider delivers it.
-fn _flush_input(pr0: PaneRecord) -> PaneRecord:
-    if smux_window_closing(pr0.pane.session_id, pr0.pane.window_id):
-        return pr0
-    if pr0.input.error != "" or not _has_child(pr0):
-        return pr0
-    if _is_pty(pr0):
-        val pending = pty_input_pending(pr0.pty_fd as i32)
-        if pending.is_err():
-            return pr0.with_input(pane_input_fail(pr0.input, pending.unwrap_err()))
-        if pending.unwrap():
-            return pr0
-    val bytes = pane_input_remaining(pr0.input)
-    if bytes.len() == 0:
-        return pr0
-    val accepted = if _is_pty(pr0): pty_write_some(pr0.pty_fd as i32, bytes) else: process_write_stdin_some(pr0.child_pid, pr0.input.original, pr0.input.offset, 4096)
-    if accepted < 0:
-        return pr0.with_input(pane_input_fail(pr0.input, "write failed: " + pr0.pane.id))
-    val advanced = pane_input_advance(pr0.input, accepted)
-    if advanced.is_err():
-        return pr0.with_input(pane_input_fail(pr0.input, advanced.unwrap_err()))
-    return pr0.with_input(advanced.unwrap())
-
-fn _drain(pr0: PaneRecord) -> PaneRecord:
-    return _drain_bounded(pr0, 256)
-
-fn _drain_bounded(pr0: PaneRecord, limit: int) -> PaneRecord:
-    return _flush_input(_drain_bounded_no_flush(pr0, limit))
-
-fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int) -> PaneRecord:
-    # Pending close owns the native token. Captures may inspect the retained
-    # snapshot but must not query, write to, or resurrect that closing owner.
-    if smux_window_closing(pr0.pane.session_id, pr0.pane.window_id):
-        return pr0
-    var pr = pr0
-    var raw = ""
-    var reads = 0
-    var more = _has_child(pr)
-    while more and reads < limit:
-        var chunk = ""
-        if _is_pty(pr):
-            chunk = pty_read(pr.pty_fd as i32, 0)
-            if chunk != "":
-                pr = pr.feed_screen(chunk)
-        else:
-            chunk = process_read_stdout(pr.child_pid)
-            raw = raw + chunk
-        more = chunk != ""
-        reads = reads + 1
-    # Query replies share the ordered input queue. Overflow is a typed input
-    # failure; clear the reply accumulator instead of retaining an unbounded
-    # second queue outside the pane input limit.
-    val owed = pr.replies()
-    if owed != "":
-        val queued = pane_input_enqueue(pr.input, owed)
-        if queued.is_ok():
-            pr = pr.with_input(queued.unwrap()).without_replies()
-        else:
-            pr = pr.with_input(pane_input_fail(pr.input, queued.unwrap_err())).without_replies()
-    if raw != "":
-        pr = pr.feed(_clean_output(raw))
-    return pr
-
-# The independent service owner calls this on every event-loop turn, even
-# without attached clients. A noisy pane gets eight read chunks per turn.
-# Each pane gets at most one input write of 4096 bytes per turn. Fairness also
-# requires the selected PTY/process provider's real nonblocking write surface.
 pub fn smux_poll_output() -> int:
-    var st = _svc
-    var live = 0
-    var i = 0
-    while i < st.pane_count:
-        val pane = st.get_pane(i)
-        if _has_child(pane):
-            st = st.replace_pane(i, _drain_bounded(pane, 8))
-            live = live + 1
-        i = i + 1
-    _svc = st
-    return live
+    val updated = pane_poll_state(_svc, _closing_sessions, _closing_windows)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 fn _closed_record() -> PaneRecord:
     return PaneRecord.create(MuxPane(
@@ -629,58 +478,20 @@ pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    if _svc.pane_count >= SMUX_CAPACITY:
-        return Err("pane capacity reached")
-    val original = _svc.get_pane(idx)
-    val planned = smux_plan_split(original.pane.cols as i32, original.pane.rows as i32, direction)
-    if planned.is_err():
-        return Err(planned.unwrap_err())
-    val plan = planned.unwrap()
-    val wi = _window_idx(_svc, session_id, window_id)
-    if wi < 0:
-        return Err("unknown window: " + window_id)
-    val window = _svc.get_window(wi)
-    val previous = window_layout_rects(_svc, session_id, window_id)
-    if previous.len() == 0:
-        return Err("window has no valid pane geometry")
-    val n = _svc.next_id
-    var rects: [MuxRect] = []
-    var sibling: [MuxRect] = []
-    for rect in previous:
-        if rect.pane_id == pane_id:
-            rects.push(MuxRect(pane_id: pane_id, col: rect.col, row: rect.row,
-                cols: plan.old_cols as i64, rows: plan.old_rows as i64))
-            val horizontal = direction == "horizontal" or direction == "h"
-            sibling.push(MuxRect(pane_id: id_text(n),
-                col: if horizontal: rect.col else: rect.col + (plan.old_cols as i64) + 1,
-                row: if horizontal: rect.row + (plan.old_rows as i64) + 1 else: rect.row,
-                cols: plan.new_cols as i64, rows: plan.new_rows as i64))
-        else:
-            rects.push(rect)
-    if sibling.len() != 1:
-        return Err("split pane geometry missing")
-    rects.push(sibling[0])
-    if not window_rects_valid(rects, window.canvas_cols, window.canvas_rows):
-        return Err("split cannot fit panes in canvas")
-    if _is_pty(original) and pty_can_resize():
-        if not pty_resize(original.pty_fd as i32, plan.old_rows, plan.old_cols):
-            return Err("terminal resize failed: " + pane_id)
-    val added = PaneRecord.create(MuxPane.create(id_text(n), window_id, session_id)).resize(plan.new_cols as int, plan.new_rows as int)
-    val resized = original.resize(plan.old_cols as int, plan.old_rows as int)
-    val changed = _svc.replace_pane(idx, resized).add_pane(added).with_next_id(n + 1)
-    val committed = changed.replace_window(wi, window.with_geometry(rects, window.canvas_cols, window.canvas_rows))
-    val checkpoint = split_checkpoint_capture(_svc, committed, session_id, window_id, added.pane.id)
+    val before = _svc
+    val added_id = id_text(before.next_id)
+    val result = split_window_state(before, added_id, session_id, window_id, pane_id, direction)
+    if result.is_err(): return Err(result.unwrap_err())
+    val committed = result.unwrap()
+    val checkpoint = split_checkpoint_capture(before, committed, session_id, window_id, added_id)
     var checkpoints: [SplitCheckpoint] = []
     for saved in _split_checkpoints:
-        if saved.before.id != window_id and _svc.find_window_idx(saved.before.id) >= 0:
+        if saved.before.id != window_id and before.find_window_idx(saved.before.id) >= 0:
             checkpoints.push(saved)
     checkpoints.push(checkpoint)
+    val new_pane = committed.get_pane(committed.find_pane_idx(added_id)).pane
     _split_checkpoints = checkpoints
     _svc = committed
-    val new_pane = added.pane
     return Ok(new_pane)
 
 # Only the most recent split in this window can be rolled back. The opaque
@@ -757,49 +568,12 @@ pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, t
 # Providers without a resize capability retain their documented grid-only path.
 pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<MuxPane, text>:
     if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    if cols <= 0 or rows <= 0:
-        return Err("pane dimensions must be positive")
-    if cols > 32767 or rows > 32767:
-        return Err("pane dimensions exceed service limit")
-    if cols * rows > 262144:
-        return Err("pane dimensions exceed service limit")
-    val wi = _window_idx(_svc, session_id, window_id)
-    if wi < 0:
-        return Err("unknown window: " + window_id)
-    val window = _svc.get_window(wi)
-    val previous = window_layout_rects(_svc, session_id, window_id)
-    if previous.len() == 0:
-        return Err("window has no valid pane geometry")
-    val canvas_cols = if previous.len() == 1: cols else: window.canvas_cols
-    val canvas_rows = if previous.len() == 1: rows else: window.canvas_rows
-    var rects: [MuxRect] = []
-    for rect in previous:
-        if rect.pane_id == pane_id:
-            rects.push(MuxRect(pane_id: pane_id,
-                col: if previous.len() == 1: 0 else: rect.col,
-                row: if previous.len() == 1: 0 else: rect.row,
-                cols: cols as i64, rows: rows as i64))
-        else:
-            rects.push(rect)
-    if not window_rects_valid(rects, canvas_cols, canvas_rows):
-        return Err("pane resize would overlap or exceed window canvas")
-    val original = _svc.get_pane(idx)
-    if _is_pty(original) and pty_can_resize():
-        if not pty_resize(original.pty_fd as i32, rows as i32, cols as i32):
-            return Err("terminal resize failed: " + pane_id)
-    val updated = original.resize(cols, rows)
-    val m = _svc.metrics
-    val changed = _svc.replace_pane(idx, updated).with_metrics(SmuxMetrics(
-        startup_count: m.startup_count,
-        last_startup_ns: m.last_startup_ns,
-        resize_count: m.resize_count + 1,
-        capture_count: m.capture_count
-    ))
-    _svc = changed.replace_window(wi, window.with_geometry(rects, canvas_cols, canvas_rows))
-    return Ok(updated.pane)
+    val result = resize_pane_state(_svc, session_id, window_id, pane_id, cols, rows)
+    if result.is_err(): return Err(result.unwrap_err())
+    val updated = result.unwrap()
+    val pane = updated.get_pane(updated.find_pane_idx(pane_id)).pane
+    _svc = updated
+    return Ok(pane)
 
 # =========================================================================
 # Child processes
@@ -807,70 +581,33 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
 
 # Attaches a piped child (no controlling terminal). Returns its pid.
 pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> Result<i64, text>:
-    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val pr = _svc.get_pane(idx)
-    if _has_child(pr):
-        return Err("pane already has a child: " + pane_id)
-    if cmd == "":
-        return Err("empty command")
-    val pid = process_spawn_piped(cmd, args)
-    if pid <= 0:
-        return Err("spawn failed: " + cmd)
-    _svc = _svc.replace_pane(idx, pr.with_child(pid))
-    return Ok(pid)
+    val updated = pane_spawn_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, cmd, args)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # Attaches a child on a real pseudo-terminal sized to the pane geometry.
 # `command_line` is handed to the platform launcher as one line (a shell path
 # on POSIX, a CreateProcess command line on Windows). Returns its pid.
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
-    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val pr = _svc.get_pane(idx)
-    if _has_child(pr):
-        return Err("pane already has a child: " + pane_id)
-    if command_line == "":
-        return Err("empty command")
-    val handle = pty_open(pr.pane.rows as i32, pr.pane.cols as i32)
-    if handle < 0:
-        return Err("pty open failed")
-    val pid = pty_spawn(handle, command_line)
-    if pid <= 0:
-        val _c = pty_close(handle)
-        return Err("pty spawn failed: " + command_line)
-    _svc = _svc.replace_pane(idx, pr.with_pty(pid, handle as i64))
-    return Ok(pid)
+    val updated = pane_spawn_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command_line)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 pub fn smux_pane_is_pty(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    return Ok(_is_pty(_svc.get_pane(idx)))
+    val updated = pane_is_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 pub fn smux_pane_alive(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    return Ok(_child_alive(_svc.get_pane(idx)))
+    val updated = pane_alive_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # Ends the PTY child but keeps the pane (and its captured output).
 pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> bool:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return false
-    val pr = _svc.get_pane(idx)
-    if not _is_pty(pr):
-        return false
-    if not pty_close(pr.pty_fd as i32):
-        # Keep this exact token so a caller can retry deferred teardown. Native
-        # close never reopens a PID and never frees pending OVERLAPPED memory.
-        return false
-    _svc = _svc.replace_pane(idx, pr.with_pty(-1, -1))
-    return true
+    val updated = pane_close_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # =========================================================================
 # Input / Output
@@ -880,117 +617,48 @@ pub fn smux_pane_close_pty(session_id: text, window_id: text, pane_id: text) -> 
 # prefix to its provider. A pane without a child refuses input. Delivery may
 # remain pending after acceptance; smux_input_status reports progress/errors.
 pub fn smux_send_text(session_id: text, window_id: text, pane_id: text, text_input: text) -> Result<text, text>:
-    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val pr = _svc.get_pane(idx)
-    if not _has_child(pr):
-        return Err("pane has no child: " + pane_id)
-    val queued = pane_input_enqueue(pr.input, text_input)
-    if queued.is_err():
-        return Err(queued.unwrap_err())
-    val updated = _flush_input(pr.with_input(queued.unwrap()))
-    _svc = _svc.replace_pane(idx, updated)
-    if updated.input.error != "":
-        return Err(updated.input.error)
-    # Acceptance into a bounded owner/provider queue is not child delivery.
-    return Ok("accepted")
+    val updated = pane_send_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, text_input)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 pub fn smux_input_status(session_id: text, window_id: text, pane_id: text) -> Result<text, text>:
-    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val pr = _svc.get_pane(idx)
-    if pr.input.error != "":
-        return Err(pr.input.error)
-    if _is_pty(pr):
-        val pending = pty_input_pending(pr.pty_fd as i32)
-        if pending.is_err():
-            _svc = _svc.replace_pane(idx, pr.with_input(pane_input_fail(pr.input, pending.unwrap_err())))
-            return Err(pending.unwrap_err())
-        if pending.unwrap():
-            return Ok("pending")
-    val remaining = pr.input.bytes.len() - pr.input.offset
-    if remaining > 0:
-        return Ok("queued:" + remaining.to_text())
-    return Ok("idle")
+    val updated = pane_input_status_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # Types `command` and submits it: Enter is `\r` on a terminal (what a key
 # press sends) and `\n` on a pipe.
 pub fn smux_send_command(session_id: text, window_id: text, pane_id: text, command: text) -> Result<text, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val enter = if _is_pty(_svc.get_pane(idx)): "\r" else: "\n"
-    return smux_send_text(session_id, window_id, pane_id, command + enter)
+    val updated = pane_command_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<MuxCapture, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val drained = _drain(_svc.get_pane(idx))
-    val m = _svc.metrics
-    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
-        startup_count: m.startup_count,
-        last_startup_ns: m.last_startup_ns,
-        resize_count: m.resize_count,
-        capture_count: m.capture_count + 1
-    ))
-    return Ok(drained.capture(history_lines))
+    val updated = pane_capture_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, history_lines)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # Like smux_capture, but each row keeps its styling as ANSI SGR runs
 # (`ESC[0;<params>m` where attributes change, `ESC[0m` at a styled row's end).
 pub fn smux_capture_styled(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<text, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val drained = _drain(_svc.get_pane(idx))
-    val m = _svc.metrics
-    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
-        startup_count: m.startup_count,
-        last_startup_ns: m.last_startup_ns,
-        resize_count: m.resize_count,
-        capture_count: m.capture_count + 1
-    ))
-    return Ok(drained.styled_capture(history_lines))
+    val updated = pane_capture_styled_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, history_lines)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # True when the pane's child has bracketed paste (?2004) enabled. Drains first:
 # the mode is set by what the child printed.
 pub fn smux_pane_bracketed_paste(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val drained = _drain(_svc.get_pane(idx))
-    _svc = _svc.replace_pane(idx, drained)
-    return Ok(drained.bracketed_paste())
+    val updated = pane_bracketed_paste_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # Pastes `body` into the pane: wrapped in ESC[200~ ... ESC[201~ when the child
 # enabled bracketed paste, so it is taken as one paste (newlines included)
 # rather than typed keys; sent as-is otherwise. Does not submit.
 pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: text) -> Result<text, text>:
-    if smux_window_closing(session_id, window_id): return Err("window or session is closing: " + window_id)
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    # Read/queue terminal replies without a write, then flush the complete
-    # input stream once after appending the paste below.
-    val drained = _drain_bounded_no_flush(_svc.get_pane(idx), 256)
-    if not _has_child(drained):
-        return Err("pane has no child: " + pane_id)
-    var payload = body
-    if drained.bracketed_paste():
-        payload = "\x1b[200~" + body + "\x1b[201~"
-    val queued = pane_input_enqueue(drained.input, payload)
-    if queued.is_err():
-        _svc = _svc.replace_pane(idx, drained)
-        return Err(queued.unwrap_err())
-    val updated = _flush_input(drained.with_input(queued.unwrap()))
-    _svc = _svc.replace_pane(idx, updated)
-    if updated.input.error != "":
-        return Err(updated.input.error)
-    return Ok("accepted")
+    val updated = pane_paste_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, body)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # =========================================================================
 # Backend contract
@@ -1026,17 +694,9 @@ pub fn smux_metrics() -> SmuxMetrics:
 # A cell-preserving snapshot for composite frames. Wide glyph continuations
 # remain empty cells; reconstructing columns from a flattened text loses them.
 pub fn smux_capture_cells(session_id: text, window_id: text, pane_id: text) -> Result<[[text]], text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    val drained = _drain(_svc.get_pane(idx))
-    val screen = if _is_pty(drained): drained.screen else: vt_feed(vt_new(drained.pane.rows, drained.pane.cols), drained.tail)
-    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
-    val m = _svc.metrics
-    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
-        startup_count: m.startup_count, last_startup_ns: m.last_startup_ns,
-        resize_count: m.resize_count, capture_count: m.capture_count + 1))
-    return Ok(shown)
+    val updated = pane_capture_cells_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # A directional split, pane removal or explicit pane resize replaces the named
 # plan with persisted manual coordinates. Named selection remains explicit.
@@ -1077,75 +737,15 @@ pub fn smux_arrange_window(session_id: text, window_id: text, cols: int, rows: i
     _svc = changed
     return Ok(rects)
 
-fn _arrange_window(before: ServiceState, session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<ServiceState, text>:
-    val wi = _window_idx(before, session_id, window_id)
-    if wi < 0:
-        return Err("unknown window: " + window_id)
-    if cols <= 0 or rows <= 0:
-        return Err("layout canvas dimensions must be positive")
-    if cols > 32767 or rows > 32767:
-        return Err("layout canvas dimensions exceed service limit")
-    if cols * rows > 262144:
-        return Err("layout canvas dimensions exceed service limit")
-    var ids: [text] = []
-    var indices: [int] = []
-    var i = 0
-    while i < before.pane_count:
-        val pane = before.get_pane(i).pane
-        if pane.session_id == session_id and pane.window_id == window_id:
-            ids.push(pane.id)
-            indices.push(i)
-        i = i + 1
-    if ids.len() == 0:
-        return Err("no panes in window: " + window_id)
-    val rects = if name == "": window_plan_rects(before, session_id, window_id, cols, rows) else: mux_layout_rects(ids, cols as i64, rows as i64, name)
-    if rects.len() != ids.len() or not window_rects_valid(rects, cols, rows):
-        return Err("layout cannot fit panes in canvas")
-    val backend = _resize_layout_children(before, indices, rects)
-    if backend.is_err():
-        return Err(backend.unwrap_err())
-    var st = before
-    i = 0
-    while i < rects.len():
-        val rect = rects[i]
-        val pane = st.get_pane(indices[i])
-        st = st.replace_pane(indices[i], pane.resize(rect.cols as int, rect.rows as int))
-        i = i + 1
-    val window = st.get_window(wi)
-    val resized = if name == "": window.with_canvas(cols, rows) else: window.with_layout(name, cols, rows)
-    return Ok(st.replace_window(wi, resized))
-
 # Capture retained terminal history plus the visible frame in one snapshot.
 # Limit validation and full pane ownership precede any drain or state change.
 pub fn smux_capture_history(session_id: text, window_id: text, pane_id: text, max_lines: int) -> Result<MuxCapture, text>:
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return Err("unknown pane: " + pane_id)
-    if max_lines <= 0 or max_lines > 10000:
-        return Err("history line limit must be between 1 and 10000")
-    val drained = _drain(_svc.get_pane(idx))
-    val capture = drained.capture_history(max_lines)
-    val metrics = _svc.metrics
-    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
-        startup_count: metrics.startup_count, last_startup_ns: metrics.last_startup_ns,
-        resize_count: metrics.resize_count, capture_count: metrics.capture_count + 1))
-    return Ok(capture)
+    val updated = pane_capture_history_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, max_lines)
+    if updated.commit: _svc = updated.state
+    return updated.result
 
 # One bounded drain per pane and one authoritative commit for a complete frame.
 pub fn smux_capture_frame(session_id: text, window_id: text, cursor_pane: text = "") -> Result<text, text>:
-    val reason = smux_frame_validate(_svc, session_id, window_id, cursor_pane)
-    if reason != "": return Err(reason)
-    var st = _svc
-    var i = 0
-    while i < st.pane_count:
-        val pane = st.get_pane(i)
-        if pane.pane.session_id == session_id and pane.pane.window_id == window_id:
-            st = st.replace_pane(i, _drain_bounded(pane, 8))
-        i = i + 1
-    val metrics = st.metrics
-    st = st.with_metrics(SmuxMetrics(startup_count: metrics.startup_count,
-        last_startup_ns: metrics.last_startup_ns, resize_count: metrics.resize_count,
-        capture_count: metrics.capture_count + 1))
-    val frame = smux_frame_from_state(st, session_id, window_id, cursor_pane)
-    _svc = st
-    return frame
+    val updated = pane_capture_frame_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, cursor_pane)
+    if updated.commit: _svc = updated.state
+    return updated.result

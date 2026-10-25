@@ -1,6 +1,8 @@
 # Window layout projections and backend resize transaction. The API remains
 # the sole writer of authoritative service state; helpers consume snapshots.
-use os.apps.smux.service.{ServiceState}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxPane, SmuxMetrics}
+use os.apps.smux.layout.{smux_plan_split}
 use os.apps.smux.mux_rects.{MuxRect, mux_full_rect, mux_layout_known, mux_layout_rects}
 use std.nogc_sync_mut.sosix.pty.{sosix_pty_can_resize as pty_can_resize,
     sosix_pty_resize as pty_resize}
@@ -130,3 +132,140 @@ pub fn resize_layout_children(st: ServiceState, indices: [int], rects: [MuxRect]
             changed.push(indices[i])
         i = i + 1
     return Ok(true)
+
+pub fn arrange_window_state(before: ServiceState, session_id: text, window_id: text, name: text, cols: int, rows: int) -> Result<ServiceState, text>:
+    val wi = window_index(before, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    if cols <= 0 or rows <= 0:
+        return Err("layout canvas dimensions must be positive")
+    if cols > 32767 or rows > 32767:
+        return Err("layout canvas dimensions exceed service limit")
+    if cols * rows > 262144:
+        return Err("layout canvas dimensions exceed service limit")
+    var ids: [text] = []
+    var indices: [int] = []
+    var i = 0
+    while i < before.pane_count:
+        val pane = before.get_pane(i).pane
+        if pane.session_id == session_id and pane.window_id == window_id:
+            ids.push(pane.id)
+            indices.push(i)
+        i = i + 1
+    if ids.len() == 0:
+        return Err("no panes in window: " + window_id)
+    val rects = if name == "": window_plan_rects(before, session_id, window_id, cols, rows) else: mux_layout_rects(ids, cols as i64, rows as i64, name)
+    if rects.len() != ids.len() or not window_rects_valid(rects, cols, rows):
+        return Err("layout cannot fit panes in canvas")
+    val backend = resize_layout_children(before, indices, rects)
+    if backend.is_err():
+        return Err(backend.unwrap_err())
+    var st = before
+    i = 0
+    while i < rects.len():
+        val rect = rects[i]
+        val pane = st.get_pane(indices[i])
+        st = st.replace_pane(indices[i], pane.resize(rect.cols as int, rect.rows as int))
+        i = i + 1
+    val window = st.get_window(wi)
+    val resized = if name == "": window.with_canvas(cols, rows) else: window.with_layout(name, cols, rows)
+    return Ok(st.replace_window(wi, resized))
+
+fn pane_index(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
+    val idx = st.find_pane_idx(pane_id)
+    if idx < 0:
+        return -1
+    val p = st.get_pane(idx).pane
+    if p.session_id != session_id or p.window_id != window_id:
+        return -1
+    return idx
+
+pub fn split_window_state(before: ServiceState, new_pane_id: text, session_id: text, window_id: text, pane_id: text, direction: text) -> Result<ServiceState, text>:
+    val idx = pane_index(before, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    if before.pane_count >= 8:
+        return Err("pane capacity reached")
+    val original = before.get_pane(idx)
+    val planned = smux_plan_split(original.pane.cols as i32, original.pane.rows as i32, direction)
+    if planned.is_err():
+        return Err(planned.unwrap_err())
+    val plan = planned.unwrap()
+    val wi = window_index(before, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    val window = before.get_window(wi)
+    val previous = window_layout_rects(before, session_id, window_id)
+    if previous.len() == 0:
+        return Err("window has no valid pane geometry")
+    val n = before.next_id
+    var rects: [MuxRect] = []
+    var sibling: [MuxRect] = []
+    for rect in previous:
+        if rect.pane_id == pane_id:
+            rects.push(MuxRect(pane_id: pane_id, col: rect.col, row: rect.row,
+                cols: plan.old_cols as i64, rows: plan.old_rows as i64))
+            val horizontal = direction == "horizontal" or direction == "h"
+            sibling.push(MuxRect(pane_id: new_pane_id,
+                col: if horizontal: rect.col else: rect.col + (plan.old_cols as i64) + 1,
+                row: if horizontal: rect.row + (plan.old_rows as i64) + 1 else: rect.row,
+                cols: plan.new_cols as i64, rows: plan.new_rows as i64))
+        else:
+            rects.push(rect)
+    if sibling.len() != 1:
+        return Err("split pane geometry missing")
+    rects.push(sibling[0])
+    if not window_rects_valid(rects, window.canvas_cols, window.canvas_rows):
+        return Err("split cannot fit panes in canvas")
+    if original.pty_fd >= 0 and pty_can_resize():
+        if not pty_resize(original.pty_fd as i32, plan.old_rows, plan.old_cols):
+            return Err("terminal resize failed: " + pane_id)
+    val added = PaneRecord.create(MuxPane.create(new_pane_id, window_id, session_id)).resize(plan.new_cols as int, plan.new_rows as int)
+    val resized = original.resize(plan.old_cols as int, plan.old_rows as int)
+    val changed = before.replace_pane(idx, resized).add_pane(added).with_next_id(n + 1)
+    val committed = changed.replace_window(wi, window.with_geometry(rects, window.canvas_cols, window.canvas_rows))
+    return Ok(committed)
+
+pub fn resize_pane_state(before: ServiceState, session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> Result<ServiceState, text>:
+    val idx = pane_index(before, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    if cols <= 0 or rows <= 0:
+        return Err("pane dimensions must be positive")
+    if cols > 32767 or rows > 32767:
+        return Err("pane dimensions exceed service limit")
+    if cols * rows > 262144:
+        return Err("pane dimensions exceed service limit")
+    val wi = window_index(before, session_id, window_id)
+    if wi < 0:
+        return Err("unknown window: " + window_id)
+    val window = before.get_window(wi)
+    val previous = window_layout_rects(before, session_id, window_id)
+    if previous.len() == 0:
+        return Err("window has no valid pane geometry")
+    val canvas_cols = if previous.len() == 1: cols else: window.canvas_cols
+    val canvas_rows = if previous.len() == 1: rows else: window.canvas_rows
+    var rects: [MuxRect] = []
+    for rect in previous:
+        if rect.pane_id == pane_id:
+            rects.push(MuxRect(pane_id: pane_id,
+                col: if previous.len() == 1: 0 else: rect.col,
+                row: if previous.len() == 1: 0 else: rect.row,
+                cols: cols as i64, rows: rows as i64))
+        else:
+            rects.push(rect)
+    if not window_rects_valid(rects, canvas_cols, canvas_rows):
+        return Err("pane resize would overlap or exceed window canvas")
+    val original = before.get_pane(idx)
+    if original.pty_fd >= 0 and pty_can_resize():
+        if not pty_resize(original.pty_fd as i32, rows as i32, cols as i32):
+            return Err("terminal resize failed: " + pane_id)
+    val updated = original.resize(cols, rows)
+    val m = before.metrics
+    val changed = before.replace_pane(idx, updated).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count,
+        last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count + 1,
+        capture_count: m.capture_count
+    ))
+    return Ok(changed.replace_window(wi, window.with_geometry(rects, canvas_cols, canvas_rows)))

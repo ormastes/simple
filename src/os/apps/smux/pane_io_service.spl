@@ -1,0 +1,461 @@
+# Explicit-state pane I/O. Native effects occur here, but this module never
+# reads/writes the API globals or calls API functions. Every public operation
+# returns the exact state and result, including committed failure-side updates.
+use os.apps.smux.contract.{MuxCapture, SmuxMetrics}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.frame_snapshot.{smux_frame_validate, smux_frame_from_state}
+use os.apps.smux.vt_screen.{vt_new, vt_feed}
+use os.apps.smux.input_queue.{pane_input_enqueue, pane_input_remaining,
+    pane_input_advance, pane_input_fail}
+use std.nogc_sync_mut.sosix.pty.{sosix_pty_open as pty_open,
+    sosix_pty_spawn as pty_spawn, sosix_pty_write_some as pty_write_some,
+    sosix_pty_input_pending as pty_input_pending, sosix_pty_read as pty_read,
+    sosix_pty_close as pty_close, sosix_pty_is_running as pty_is_running}
+use std.nogc_sync_mut.sosix.process.{sosix_process_spawn_piped as process_spawn_piped,
+    sosix_process_write_stdin_some as process_write_stdin_some,
+    sosix_process_read_stdout as process_read_stdout,
+    sosix_process_is_piped_alive as process_is_piped_alive,
+    sosix_process_close_piped as process_close_piped}
+
+pub struct PanePidUpdate:
+    state: ServiceState
+    commit: bool
+    result: Result<i64, text>
+
+pub struct PaneBoolUpdate:
+    state: ServiceState
+    commit: bool
+    result: Result<bool, text>
+
+pub struct PaneCloseUpdate:
+    state: ServiceState
+    commit: bool
+    result: bool
+
+pub struct PaneTextUpdate:
+    state: ServiceState
+    commit: bool
+    result: Result<text, text>
+
+pub struct PaneCaptureUpdate:
+    state: ServiceState
+    commit: bool
+    result: Result<MuxCapture, text>
+
+pub struct PaneCellsUpdate:
+    state: ServiceState
+    commit: bool
+    result: Result<[[text]], text>
+
+pub struct PanePollUpdate:
+    state: ServiceState
+    commit: bool
+    result: int
+
+fn pane_closing(session: text, window: text, sessions: [text], windows: [text]) -> bool:
+    for closing in sessions:
+        if closing == session: return true
+    for closing in windows:
+        if closing == window: return true
+    return false
+
+fn _pane_idx(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
+    val idx = st.find_pane_idx(pane_id)
+    if idx < 0:
+        return -1
+    val p = st.get_pane(idx).pane
+    if p.session_id != session_id or p.window_id != window_id:
+        return -1
+    return idx
+
+fn _has_child(pr: PaneRecord) -> bool:
+    return pr.child_pid > 0
+
+fn _is_pty(pr: PaneRecord) -> bool:
+    return pr.pty_fd >= 0
+
+pub fn pane_release_best_effort(pr: PaneRecord):
+    if _is_pty(pr):
+        val _c = pty_close(pr.pty_fd as i32)
+    elif _has_child(pr):
+        val _p = process_close_piped(pr.child_pid)
+
+fn _child_alive(pr: PaneRecord) -> bool:
+    if _is_pty(pr):
+        return pty_is_running(pr.pty_fd as i32)
+    if _has_child(pr):
+        return process_is_piped_alive(pr.child_pid)
+    return false
+
+fn _clean_output(raw: text) -> text:
+    val esc = "\x1b"
+    val bel = "\x07"
+    var out = ""
+    var params = ""
+    var mode = 0  # 0 text, 1 after ESC, 2 CSI, 3 OSC
+    for ch in raw.chars():
+        if mode == 0:
+            if ch == esc:
+                mode = 1
+            elif ch != "\r":
+                out = out + ch
+        elif mode == 1:
+            if ch == "[":
+                mode = 2
+                params = ""
+            elif ch == "]":
+                mode = 3
+            else:
+                mode = 0
+        elif mode == 2:
+            if ch >= "@" and ch <= "~":
+                if ch == "H" and out != "" and not out.ends_with("\n"):
+                    out = out + "\n"
+                if ch == "C":
+                    var n = params.to_int() ?? 1
+                    if n < 1:
+                        n = 1
+                    while n > 0:
+                        out = out + " "
+                        n = n - 1
+                mode = 0
+            else:
+                params = params + ch
+        else:
+            if ch == bel:
+                mode = 0
+            elif ch == esc:
+                mode = 1
+    return out
+
+fn _flush_input(pr0: PaneRecord, closing: bool) -> PaneRecord:
+    if closing:
+        return pr0
+    if pr0.input.error != "" or not _has_child(pr0):
+        return pr0
+    if _is_pty(pr0):
+        val pending = pty_input_pending(pr0.pty_fd as i32)
+        if pending.is_err():
+            return pr0.with_input(pane_input_fail(pr0.input, pending.unwrap_err()))
+        if pending.unwrap():
+            return pr0
+    val bytes = pane_input_remaining(pr0.input)
+    if bytes.len() == 0:
+        return pr0
+    val accepted = if _is_pty(pr0): pty_write_some(pr0.pty_fd as i32, bytes) else: process_write_stdin_some(pr0.child_pid, pr0.input.original, pr0.input.offset, 4096)
+    if accepted < 0:
+        return pr0.with_input(pane_input_fail(pr0.input, "write failed: " + pr0.pane.id))
+    val advanced = pane_input_advance(pr0.input, accepted)
+    if advanced.is_err():
+        return pr0.with_input(pane_input_fail(pr0.input, advanced.unwrap_err()))
+    return pr0.with_input(advanced.unwrap())
+
+fn _drain(pr0: PaneRecord, closing: bool) -> PaneRecord:
+    return _drain_bounded(pr0, 256, closing)
+
+fn _drain_bounded(pr0: PaneRecord, limit: int, closing: bool) -> PaneRecord:
+    return _flush_input(_drain_bounded_no_flush(pr0, limit, closing), closing)
+
+fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int, closing: bool) -> PaneRecord:
+    # Pending close owns the native token. Captures may inspect the retained
+    # snapshot but must not query, write to, or resurrect that closing owner.
+    if closing:
+        return pr0
+    var pr = pr0
+    var raw = ""
+    var reads = 0
+    var more = _has_child(pr)
+    while more and reads < limit:
+        var chunk = ""
+        if _is_pty(pr):
+            chunk = pty_read(pr.pty_fd as i32, 0)
+            if chunk != "":
+                pr = pr.feed_screen(chunk)
+        else:
+            chunk = process_read_stdout(pr.child_pid)
+            raw = raw + chunk
+        more = chunk != ""
+        reads = reads + 1
+    # Query replies share the ordered input queue. Overflow is a typed input
+    # failure; clear the reply accumulator instead of retaining an unbounded
+    # second queue outside the pane input limit.
+    val owed = pr.replies()
+    if owed != "":
+        val queued = pane_input_enqueue(pr.input, owed)
+        if queued.is_ok():
+            pr = pr.with_input(queued.unwrap()).without_replies()
+        else:
+            pr = pr.with_input(pane_input_fail(pr.input, queued.unwrap_err())).without_replies()
+    if raw != "":
+        pr = pr.feed(_clean_output(raw))
+    return pr
+
+pub fn pane_poll_state(before: ServiceState, closing_sessions: [text], closing_windows: [text]) -> PanePollUpdate:
+    var state = before
+    var commit = false
+    var st = state
+    var live = 0
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if _has_child(pane):
+            st = st.replace_pane(i, _drain_bounded(pane, 8, pane_closing(pane.pane.session_id, pane.pane.window_id, closing_sessions, closing_windows)))
+            live = live + 1
+        i = i + 1
+    commit = true
+    state = st
+    return PanePollUpdate(state: state, commit: commit, result: live)
+
+pub fn pane_spawn_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, cmd: text, args: [text]) -> PanePidUpdate:
+    var state = before
+    var commit = false
+    if closing: return PanePidUpdate(state: state, commit: commit, result: Err("window or session is closing: " + window_id))
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PanePidUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val pr = state.get_pane(idx)
+    if _has_child(pr):
+        return PanePidUpdate(state: state, commit: commit, result: Err("pane already has a child: " + pane_id))
+    if cmd == "":
+        return PanePidUpdate(state: state, commit: commit, result: Err("empty command"))
+    val pid = process_spawn_piped(cmd, args)
+    if pid <= 0:
+        return PanePidUpdate(state: state, commit: commit, result: Err("spawn failed: " + cmd))
+    commit = true
+    state = state.replace_pane(idx, pr.with_child(pid))
+    return PanePidUpdate(state: state, commit: commit, result: Ok(pid))
+
+pub fn pane_spawn_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, command_line: text) -> PanePidUpdate:
+    var state = before
+    var commit = false
+    if closing: return PanePidUpdate(state: state, commit: commit, result: Err("window or session is closing: " + window_id))
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PanePidUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val pr = state.get_pane(idx)
+    if _has_child(pr):
+        return PanePidUpdate(state: state, commit: commit, result: Err("pane already has a child: " + pane_id))
+    if command_line == "":
+        return PanePidUpdate(state: state, commit: commit, result: Err("empty command"))
+    val handle = pty_open(pr.pane.rows as i32, pr.pane.cols as i32)
+    if handle < 0:
+        return PanePidUpdate(state: state, commit: commit, result: Err("pty open failed"))
+    val pid = pty_spawn(handle, command_line)
+    if pid <= 0:
+        val _c = pty_close(handle)
+        return PanePidUpdate(state: state, commit: commit, result: Err("pty spawn failed: " + command_line))
+    commit = true
+    state = state.replace_pane(idx, pr.with_pty(pid, handle as i64))
+    return PanePidUpdate(state: state, commit: commit, result: Ok(pid))
+
+pub fn pane_is_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneBoolUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneBoolUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    return PaneBoolUpdate(state: state, commit: commit, result: Ok(_is_pty(state.get_pane(idx))))
+
+pub fn pane_alive_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneBoolUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneBoolUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    return PaneBoolUpdate(state: state, commit: commit, result: Ok(_child_alive(state.get_pane(idx))))
+
+pub fn pane_close_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneCloseUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneCloseUpdate(state: state, commit: commit, result: false)
+    val pr = state.get_pane(idx)
+    if not _is_pty(pr):
+        return PaneCloseUpdate(state: state, commit: commit, result: false)
+    if not pty_close(pr.pty_fd as i32):
+        # Keep this exact token so a caller can retry deferred teardown. Native
+        # close never reopens a PID and never frees pending OVERLAPPED memory.
+        return PaneCloseUpdate(state: state, commit: commit, result: false)
+    commit = true
+    state = state.replace_pane(idx, pr.with_pty(-1, -1))
+    return PaneCloseUpdate(state: state, commit: commit, result: true)
+
+pub fn pane_send_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, text_input: text) -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    if closing: return PaneTextUpdate(state: state, commit: commit, result: Err("window or session is closing: " + window_id))
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val pr = state.get_pane(idx)
+    if not _has_child(pr):
+        return PaneTextUpdate(state: state, commit: commit, result: Err("pane has no child: " + pane_id))
+    val queued = pane_input_enqueue(pr.input, text_input)
+    if queued.is_err():
+        return PaneTextUpdate(state: state, commit: commit, result: Err(queued.unwrap_err()))
+    val updated = _flush_input(pr.with_input(queued.unwrap()), closing)
+    commit = true
+    state = state.replace_pane(idx, updated)
+    if updated.input.error != "":
+        return PaneTextUpdate(state: state, commit: commit, result: Err(updated.input.error))
+    # Acceptance into a bounded owner/provider queue is not child delivery.
+    return PaneTextUpdate(state: state, commit: commit, result: Ok("accepted"))
+
+pub fn pane_input_status_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    if closing: return PaneTextUpdate(state: state, commit: commit, result: Err("window or session is closing: " + window_id))
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val pr = state.get_pane(idx)
+    if pr.input.error != "":
+        return PaneTextUpdate(state: state, commit: commit, result: Err(pr.input.error))
+    if _is_pty(pr):
+        val pending = pty_input_pending(pr.pty_fd as i32)
+        if pending.is_err():
+            commit = true
+            state = state.replace_pane(idx, pr.with_input(pane_input_fail(pr.input, pending.unwrap_err())))
+            return PaneTextUpdate(state: state, commit: commit, result: Err(pending.unwrap_err()))
+        if pending.unwrap():
+            return PaneTextUpdate(state: state, commit: commit, result: Ok("pending"))
+    val remaining = pr.input.bytes.len() - pr.input.offset
+    if remaining > 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Ok("queued:" + remaining.to_text()))
+    return PaneTextUpdate(state: state, commit: commit, result: Ok("idle"))
+
+pub fn pane_command_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, command: text) -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val enter = if _is_pty(state.get_pane(idx)): "\r" else: "\n"
+    return pane_send_state(state, closing, session_id, window_id, pane_id, command + enter)
+
+pub fn pane_capture_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, history_lines: int) -> PaneCaptureUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneCaptureUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val drained = _drain(state.get_pane(idx), closing)
+    val m = state.metrics
+    commit = true
+    state = state.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count,
+        last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count,
+        capture_count: m.capture_count + 1
+    ))
+    return PaneCaptureUpdate(state: state, commit: commit, result: Ok(drained.capture(history_lines)))
+
+pub fn pane_capture_styled_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, history_lines: int) -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val drained = _drain(state.get_pane(idx), closing)
+    val m = state.metrics
+    commit = true
+    state = state.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count,
+        last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count,
+        capture_count: m.capture_count + 1
+    ))
+    return PaneTextUpdate(state: state, commit: commit, result: Ok(drained.styled_capture(history_lines)))
+
+pub fn pane_bracketed_paste_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneBoolUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneBoolUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val drained = _drain(state.get_pane(idx), closing)
+    commit = true
+    state = state.replace_pane(idx, drained)
+    return PaneBoolUpdate(state: state, commit: commit, result: Ok(drained.bracketed_paste()))
+
+pub fn pane_paste_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, body: text) -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    if closing: return PaneTextUpdate(state: state, commit: commit, result: Err("window or session is closing: " + window_id))
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    # Read/queue terminal replies without a write, then flush the complete
+    # input stream once after appending the paste below.
+    val drained = _drain_bounded_no_flush(state.get_pane(idx), 256, closing)
+    if not _has_child(drained):
+        return PaneTextUpdate(state: state, commit: commit, result: Err("pane has no child: " + pane_id))
+    var payload = body
+    if drained.bracketed_paste():
+        payload = "\x1b[200~" + body + "\x1b[201~"
+    val queued = pane_input_enqueue(drained.input, payload)
+    if queued.is_err():
+        commit = true
+        state = state.replace_pane(idx, drained)
+        return PaneTextUpdate(state: state, commit: commit, result: Err(queued.unwrap_err()))
+    val updated = _flush_input(drained.with_input(queued.unwrap()), closing)
+    commit = true
+    state = state.replace_pane(idx, updated)
+    if updated.input.error != "":
+        return PaneTextUpdate(state: state, commit: commit, result: Err(updated.input.error))
+    return PaneTextUpdate(state: state, commit: commit, result: Ok("accepted"))
+
+pub fn pane_capture_cells_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneCellsUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneCellsUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    val drained = _drain(state.get_pane(idx), closing)
+    val screen = if _is_pty(drained): drained.screen else: vt_feed(vt_new(drained.pane.rows, drained.pane.cols), drained.tail)
+    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
+    val m = state.metrics
+    commit = true
+    state = state.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count, last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count, capture_count: m.capture_count + 1))
+    return PaneCellsUpdate(state: state, commit: commit, result: Ok(shown))
+
+pub fn pane_capture_history_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, max_lines: int) -> PaneCaptureUpdate:
+    var state = before
+    var commit = false
+    val idx = _pane_idx(state, session_id, window_id, pane_id)
+    if idx < 0:
+        return PaneCaptureUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    if max_lines <= 0 or max_lines > 10000:
+        return PaneCaptureUpdate(state: state, commit: commit, result: Err("history line limit must be between 1 and 10000"))
+    val drained = _drain(state.get_pane(idx), closing)
+    val capture = drained.capture_history(max_lines)
+    val metrics = state.metrics
+    commit = true
+    state = state.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: metrics.startup_count, last_startup_ns: metrics.last_startup_ns,
+        resize_count: metrics.resize_count, capture_count: metrics.capture_count + 1))
+    return PaneCaptureUpdate(state: state, commit: commit, result: Ok(capture))
+
+pub fn pane_capture_frame_state(before: ServiceState, closing: bool, session_id: text, window_id: text, cursor_pane: text = "") -> PaneTextUpdate:
+    var state = before
+    var commit = false
+    val reason = smux_frame_validate(state, session_id, window_id, cursor_pane)
+    if reason != "": return PaneTextUpdate(state: state, commit: commit, result: Err(reason))
+    var st = state
+    var i = 0
+    while i < st.pane_count:
+        val pane = st.get_pane(i)
+        if pane.pane.session_id == session_id and pane.pane.window_id == window_id:
+            st = st.replace_pane(i, _drain_bounded(pane, 8, closing))
+        i = i + 1
+    val metrics = st.metrics
+    st = st.with_metrics(SmuxMetrics(startup_count: metrics.startup_count,
+        last_startup_ns: metrics.last_startup_ns, resize_count: metrics.resize_count,
+        capture_count: metrics.capture_count + 1))
+    val frame = smux_frame_from_state(st, session_id, window_id, cursor_pane)
+    commit = true
+    state = st
+    return PaneTextUpdate(state: state, commit: commit, result: frame)
