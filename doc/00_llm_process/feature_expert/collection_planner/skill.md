@@ -21,3 +21,9 @@ and an unresolved filter interpreter result mismatch; the quiet resolver is
 still opt-in. Production registry, typed extraction, physical planning,
 cross-engine execution, and performance certification remain unfinished.
 Do not advertise this candidate as complete or production verified.
+
+Superseded 2026-10-25: profile-switchable containers (seven-plan item 7) are
+tracked in `doc/04_architecture/compiler/profile_switchable_container_algorithms.md`
+§ Status reconciliation (2026-10-25). Only the literal-membership MIR consumer
+landed (`97b13f9eb09`, `bb7d5313b2f`); general typed lowering and two-run
+host execution evidence remain OPEN.
