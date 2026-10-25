@@ -421,6 +421,21 @@ if ($command eq 'owner-snapshot') {
     exit 0;
 }
 
+# Exact process identity only: unlike a cache claim, no surviving group may
+# keep a completed scheduler child active after its numeric PID is recycled.
+if ($command eq 'process-state') {
+    @ARGV == 2 or fail_usage();
+    my ($pid, $expected_start) = @ARGV;
+    $pid =~ /\A[1-9][0-9]*\z/ && $expected_start =~ /\A[0-9a-f]+\z/ or exit 2;
+    my ($actual_start) = process_snapshot($pid);
+    if (defined($actual_start)) {
+        print $actual_start eq $expected_start ? "live\n" : "gone\n";
+    } else {
+        print pid_absent($pid) ? "gone\n" : "unknown\n";
+    }
+    exit 0;
+}
+
 if ($command eq 'claim-state') {
     @ARGV == 3 or fail_usage();
     my ($pid, $expected_start, $pgid) = @ARGV;
