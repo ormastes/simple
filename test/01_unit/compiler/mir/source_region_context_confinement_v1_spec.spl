@@ -16,6 +16,7 @@ use compiler.mir.source_region_request_wrapper_v1.*
 use compiler.mir.source_region_request_flow_v1.*
 use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
 use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
 use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
 use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
 use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
@@ -23,6 +24,15 @@ use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
 use compiler.mir.mir_json.{serialize_mir_function}
 
 extern fn rt_file_read_text(path: text) -> text
+
+fn source_request_test_account_v1(tiny: bool = false) -> MirLoopResourceAccountV1:
+    var limits = MirLoopResourceLimitsV1()
+    if tiny:
+        limits.max_work = 20
+        limits.max_state_fields = 20
+    match MirLoopResourceAccountV1.create(limits):
+        case Ok(account): account
+        case Err(_): fail("actual invocation resource account could not be created")
 
 fn source_actual_replay_hir_v1(extra: text = "", request: bool = false) -> HirModule:
     # Compile the actual account and private facade bodies, never fake facade
@@ -176,9 +186,18 @@ describe "actual emitted SOURCE hidden-context confinement":
                                         var candidate = specialized.module
                                         candidate.functions[wrapper.symbol] = wrapper
                                         match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
-                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                source_request_test_account_v1()):
                                             case Err(message): fail(message)
                                             case Ok(_): ()
+                                        val exhausted_account = source_request_test_account_v1(true)
+                                        val before = exhausted_account.snapshot()
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, wrapper,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                exhausted_account):
+                                            case Err(message): expect(message).to_contain("CAPACITY")
+                                            case Ok(_): fail("exhausted owning account authorized state exploration")
+                                        expect(exhausted_account.snapshot().work_used).to_equal(before.work_used)
                                         # Both release outcomes are analyzed by the checker. This
                                         # deliberately confers no caller-retention/pin receipt.
                                         expect(wrapper.source_region_context_abi_v1).to_equal(0)
@@ -198,6 +217,58 @@ describe "actual emitted SOURCE hidden-context confinement":
                                                             case _: ()
                                                     case _: ()
                                         expect(context_local.id).to_be_greater_than(-1)
+                                        var consumer_result = LocalId(id: -1)
+                                        for capture in owner.verification_call_captures:
+                                            if capture.resolved_callee_v1 == Some(direct_consumer):
+                                                for block in wrapper.blocks:
+                                                    if block.id.id == capture.block_id:
+                                                        match block.instructions[capture.instruction_index].kind:
+                                                            case MirInstKind.Call(Some(local), _, _): consumer_result = local
+                                                            case _: fail("actual consumer capture is not its emitted call")
+                                        var scalar_payload = LocalId(id: -1)
+                                        var scalar_payload_block = BlockId(id: -1)
+                                        for site in owner.builder.canonical_enum_builtin_sites_v1:
+                                            if site.operation == CanonicalEnumBuiltinOperationV1.Payload:
+                                                match site.operands[0].kind:
+                                                    case MirOperandKind.Copy(local):
+                                                        if local.id == consumer_result.id:
+                                                            scalar_payload = site.result ?? LocalId(id: -1)
+                                                            scalar_payload_block = site.block
+                                                    case _: ()
+                                        expect(scalar_payload.id).to_be_greater_than(-1)
+                                        var next_local = 0
+                                        for local in wrapper.locals:
+                                            if local.id.id >= next_local: next_local = local.id.id + 1
+                                        val as_bool = LocalId(id: next_local)
+                                        val as_integer = LocalId(id: next_local + 1)
+                                        var casted = MirFunction.with_blocks(wrapper, [])
+                                        var cast_locals: [MirLocal] = []
+                                        for local in wrapper.locals: cast_locals.push(local)
+                                        cast_locals.push(MirLocal(id: as_bool, name: nil, type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false))
+                                        cast_locals.push(MirLocal(id: as_integer, name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false))
+                                        casted.locals = cast_locals
+                                        var cast_blocks: [MirBlock] = []
+                                        for block in wrapper.blocks:
+                                            var copied = block
+                                            var items: [MirInst] = []
+                                            for instruction in block.instructions: items.push(instruction)
+                                            if block.id.id == scalar_payload_block.id:
+                                                # A value-changing 7 -> true -> 1 sequence cannot
+                                                # inherit a payload witness. Existing actual call
+                                                # sites remain at their emitted indexes.
+                                                items.push(MirInst(kind: MirInstKind.Cast(as_bool,
+                                                    mir_operand_copy(scalar_payload), MirType.bool()), span: nil))
+                                                items.push(MirInst(kind: MirInstKind.Cast(as_integer,
+                                                    mir_operand_copy(as_bool), MirType.i64()), span: nil))
+                                            copied.instructions = items
+                                            cast_blocks.push(copied)
+                                        casted.blocks = cast_blocks
+                                        candidate.functions[wrapper.symbol] = casted
+                                        match owner.verify_source_region_request_wrapper_v1(candidate, casted,
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                source_request_test_account_v1()):
+                                            case Err(message): expect(message).to_contain("CODEC")
+                                            case Ok(_): fail("value-changing casts inherited consumer payload provenance")
                                         var escaped = MirFunction.with_blocks(wrapper, [])
                                         var escape_blocks: [MirBlock] = []
                                         for block in wrapper.blocks:
@@ -216,7 +287,8 @@ describe "actual emitted SOURCE hidden-context confinement":
                                         escaped.blocks = escape_blocks
                                         candidate.functions[wrapper.symbol] = escaped
                                         match owner.verify_source_region_request_wrapper_v1(candidate, escaped,
-                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                source_request_test_account_v1()):
                                             case Err(_): ()
                                             case Ok(_): fail("use after final release was accepted")
 
@@ -241,7 +313,8 @@ describe "actual emitted SOURCE hidden-context confinement":
                                             altered.blocks = altered_blocks
                                             candidate.functions[wrapper.symbol] = altered
                                             match owner.verify_source_region_request_wrapper_v1(candidate, altered,
-                                                    direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                                    direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                    source_request_test_account_v1()):
                                                 case Err(_): ()
                                                 case Ok(_): fail("actual wrapper context copy/unknown call was accepted")
 
@@ -287,7 +360,8 @@ describe "actual emitted SOURCE hidden-context confinement":
                                         concealed.blocks = concealed_blocks
                                         candidate.functions[wrapper.symbol] = concealed
                                         match owner.verify_source_region_request_wrapper_v1(candidate, concealed,
-                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle):
+                                                direct_producer, direct_consumer, slot_type, plan.context_type, lifecycle,
+                                                source_request_test_account_v1()):
                                             case Err(_): ()
                                             case Ok(_): fail("failed release was permitted to hide retained ownership in outer Ok")
 

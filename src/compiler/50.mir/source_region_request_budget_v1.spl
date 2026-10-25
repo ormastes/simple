@@ -1,0 +1,34 @@
+# Uses the owning invocation's cumulative account, never a reset/local quota.
+# Slot/byte charges bound retained verifier data; this is not an RSS theorem
+# for the native/pure/hosted container implementations.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+
+pub class SourceRegionRequestBudgetV1:
+    account: MirLoopResourceAccountV1
+
+    static fn begin(account: MirLoopResourceAccountV1) -> Result<SourceRegionRequestBudgetV1, text>:
+        if account == nil or account.is_closed():
+            return Err("SOURCE-PIN-CAPACITY: owning invocation account is absent or closed")
+        match account.reserve(13, state_fields: 1, output_bytes: 8):
+            case Err(_): return Err("SOURCE-PIN-CAPACITY: budget owner cannot be prepaid")
+            case Ok(_): ()
+        Ok(SourceRegionRequestBudgetV1(account: account))
+
+    me charge(work: i64, state_fields: i64 = 0, output_bytes: i64 = 0) -> Result<(), text>:
+        if work < 0 or state_fields < 0 or output_bytes < 0:
+            return Err("SOURCE-PIN-CAPACITY: invalid verifier reservation")
+        if work > 9223372036854775807 - state_fields:
+            return Err("SOURCE-PIN-CAPACITY: reservation overflow")
+        val partial = work + state_fields
+        if partial > 9223372036854775807 - output_bytes:
+            return Err("SOURCE-PIN-CAPACITY: reservation overflow")
+        match self.account.reserve(partial + output_bytes, state_fields: state_fields, output_bytes: output_bytes):
+            case Err(_): Err("SOURCE-PIN-CAPACITY: invocation verifier budget exhausted")
+            case Ok(_): Ok(())
+
+    me rows(count: i64, fields: i64, bytes: i64, work: i64 = 1) -> Result<(), text>:
+        if count < 0 or fields < 0 or bytes < 0 or work < 0:
+            return Err("SOURCE-PIN-CAPACITY: invalid bounded row count")
+        if (fields > 0 and count > 9223372036854775807 / fields) or (bytes > 0 and count > 9223372036854775807 / bytes) or (work > 0 and count > 9223372036854775807 / work):
+            return Err("SOURCE-PIN-CAPACITY: bounded row multiplication overflow")
+        self.charge(count * work, count * fields, count * bytes)

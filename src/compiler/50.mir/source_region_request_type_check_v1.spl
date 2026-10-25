@@ -1,0 +1,94 @@
+# Accounted structural equality for the admitted request ABI. No uncharged
+# recursive JSON/type rendering participates in pin verification.
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.source_region_request_budget_v1.{SourceRegionRequestBudgetV1}
+
+pub fn source_request_types_same_v1(left: MirType, right: MirType,
+        budget: SourceRegionRequestBudgetV1) -> Result<bool, text>:
+    budget.rows(1, 2, 16)?
+    var pending: [(MirType, MirType)] = [(left, right)]
+    var cursor = 0
+    while cursor < pending.len():
+        budget.charge(1)?
+        val (a, b) = pending[cursor]
+        cursor = cursor + 1
+        match a.kind:
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.Unit | MirTypeKind.Never:
+                if a.kind != b.kind: return Ok(false)
+            case MirTypeKind.Struct(owner):
+                match b.kind:
+                    case MirTypeKind.Struct(other):
+                        if owner.id < 0 or owner.id != other.id: return Ok(false)
+                    case _: return Ok(false)
+            case MirTypeKind.Enum(owner):
+                match b.kind:
+                    case MirTypeKind.Enum(other):
+                        if owner.id < 0 or owner.id != other.id: return Ok(false)
+                    case _: return Ok(false)
+            case MirTypeKind.Result(ok, err):
+                match b.kind:
+                    case MirTypeKind.Result(other_ok, other_err):
+                        budget.rows(pending.len() + 2, 2, 16)?
+                        pending.push((ok, other_ok))
+                        pending.push((err, other_err))
+                    case _: return Ok(false)
+            case MirTypeKind.Ptr(inner, mutable_):
+                match b.kind:
+                    case MirTypeKind.Ptr(other, other_mutable):
+                        if mutable_ != other_mutable: return Ok(false)
+                        budget.rows(pending.len() + 1, 2, 16)?
+                        pending.push((inner, other))
+                    case _: return Ok(false)
+            case MirTypeKind.Ref(inner, mutable_):
+                match b.kind:
+                    case MirTypeKind.Ref(other, other_mutable):
+                        if mutable_ != other_mutable: return Ok(false)
+                        budget.rows(pending.len() + 1, 2, 16)?
+                        pending.push((inner, other))
+                    case _: return Ok(false)
+            case MirTypeKind.Array(inner, size):
+                match b.kind:
+                    case MirTypeKind.Array(other, other_size):
+                        if size != other_size: return Ok(false)
+                        budget.rows(pending.len() + 1, 2, 16)?
+                        pending.push((inner, other))
+                    case _: return Ok(false)
+            case MirTypeKind.Slice(inner):
+                match b.kind:
+                    case MirTypeKind.Slice(other):
+                        budget.rows(pending.len() + 1, 2, 16)?
+                        pending.push((inner, other))
+                    case _: return Ok(false)
+            case MirTypeKind.Tuple(elements):
+                match b.kind:
+                    case MirTypeKind.Tuple(others):
+                        if elements.len() != others.len(): return Ok(false)
+                        for index in 0..elements.len():
+                            budget.rows(pending.len() + 1, 2, 16)?
+                            pending.push((elements[index], others[index]))
+                    case _: return Ok(false)
+            case MirTypeKind.Dict(key, value):
+                match b.kind:
+                    case MirTypeKind.Dict(other_key, other_value):
+                        budget.rows(pending.len() + 2, 2, 16)?
+                        pending.push((key, other_key))
+                        pending.push((value, other_value))
+                    case _: return Ok(false)
+            case _: return Err("SOURCE-PIN-TYPE: unsupported ABI type needs an accounted equality policy")
+    Ok(true)
+
+pub fn source_request_signatures_same_v1(left: MirSignature, right: MirSignature,
+        budget: SourceRegionRequestBudgetV1) -> Result<bool, text>:
+    budget.charge(1)?
+    if (left.is_variadic != right.is_variadic or left.params_known != right.params_known or
+            left.declared_params_known != right.declared_params_known or
+            left.params.len() != right.params.len() or left.declared_params.len() != right.declared_params.len()):
+        return Ok(false)
+    if not source_request_types_same_v1(left.return_type, right.return_type, budget)?: return Ok(false)
+    for index in 0..left.params.len():
+        budget.charge(1)?
+        if not source_request_types_same_v1(left.params[index], right.params[index], budget)?: return Ok(false)
+    for index in 0..left.declared_params.len():
+        budget.charge(1)?
+        if not source_request_types_same_v1(left.declared_params[index], right.declared_params[index], budget)?: return Ok(false)
+    Ok(true)

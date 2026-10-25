@@ -90,6 +90,18 @@ Unsupported instructions and calls fail closed. Neither helper alone is a pin
 receipt: actual caller retention, closed callee bodies, fixed-credit facade
 refinement and canonical builtin emitter-site capture remain composition gates.
 
+The CFG verifier takes the actual owning invocation account. It rejects absent
+or closed accounts, and prepays cumulative work/state/byte charges before scans,
+complete map/path copies, path forks and retained queue growth. Processed states
+remain charged; no quota is reset or refunded. The builtin finalizer must use
+that same account before its scans and digest allocations. Structural ABI
+comparison uses an accounted iterative type worklist instead of uncharged
+recursive JSON rendering. Capacity produces no receipt. Container allocation
+and RSS qualification remain separate obligations, not inferred from logical
+slot charges. All Cast and Bitcast instructions are rejected until an exact
+lossless codec conversion policy exists; preserving a source ID cannot certify
+that an i64-to-Bool-to-i64 conversion preserves its value.
+
 Result codec primitives require lowerer-origin typed site captures distinct
 from resolved source calls; no invented builtin SymbolId or textual name can
 replace them. That capture producer and the actual caller integration are owned

@@ -4,16 +4,18 @@
 # mandatory gate. An Ok here is deliberately not a request admission receipt.
 use compiler.hir.hir_types.{SymbolId}
 use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirTypeKind}
-use compiler.mir.mir_json.{serialize_mir_type, serialize_mir_signature}
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir.source_region_request_lifecycle_symbols_v1.{SourceRegionRequestLifecycleSymbolsV1}
 use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
 use compiler.mir.canonical_enum_builtin_finalizer_v1.{canonical_enum_builtin_finalize_v1}
+use compiler.mir.source_region_request_budget_v1.{SourceRegionRequestBudgetV1}
+use compiler.mir.source_region_request_type_check_v1.{source_request_types_same_v1, source_request_signatures_same_v1}
 
 struct SourceRequestConditionV1:
     result: i64
@@ -60,7 +62,21 @@ fn source_request_integer_v1(state: SourceRequestFlowV1, operand: MirOperand) ->
             Err("SOURCE-PIN-CONSTANT: actual scalar constant provenance is absent")
         case _: Err("SOURCE-PIN-CONSTANT: exact integer required")
 
-fn source_request_fork_v1(state: SourceRequestFlowV1, block: i64) -> SourceRequestFlowV1:
+fn source_request_fork_v1(state: SourceRequestFlowV1, block: i64,
+        budget: SourceRegionRequestBudgetV1) -> Result<SourceRequestFlowV1, text>:
+    # Reserve the complete record, dictionary entry/key copies and path copy
+    # before creating any destination collection. Charges are never refunded;
+    # the pending queue retains processed states and their storage is counted.
+    budget.charge(10, state_fields: 20, output_bytes: 160)?
+    budget.rows(state.aliases.len(), 4, 32, 2)?
+    budget.rows(state.constants.len(), 4, 32, 2)?
+    budget.rows(state.statuses.len(), 4, 32, 2)?
+    budget.rows(state.payloads.len(), 4, 32, 2)?
+    budget.rows(state.tags.len(), 4, 32, 2)?
+    budget.rows(state.constructed_payloads.len(), 4, 32, 2)?
+    budget.rows(state.conditions.len(), 4, 32, 2)?
+    budget.rows(state.handled_errors.len(), 4, 32, 2)?
+    budget.rows(state.visited.len(), 1, 8)?
     var aliases: Dict<i64, i64> = {}
     var constants: Dict<i64, i64> = {}
     var statuses: Dict<i64, i64> = {}
@@ -79,12 +95,12 @@ fn source_request_fork_v1(state: SourceRequestFlowV1, block: i64) -> SourceReque
     for key in state.conditions.keys(): conditions[key] = state.conditions[key]
     for key in state.handled_errors.keys(): handled[key] = state.handled_errors[key]
     for value in state.visited: visited.push(value)
-    SourceRequestFlowV1(block: block, phase: state.phase, slot: state.slot, context: state.context,
+    Ok(SourceRequestFlowV1(block: block, phase: state.phase, slot: state.slot, context: state.context,
         producer_result: state.producer_result, consumer_result: state.consumer_result,
         previous_cleanup: state.previous_cleanup, release_result: state.release_result,
         first_error: state.first_error, first_cleanup: state.first_cleanup,
         aliases: aliases, constants: constants, statuses: statuses, payloads: payloads, tags: tags,
-        constructed_payloads: constructed, conditions: conditions, handled_errors: handled, visited: visited)
+        constructed_payloads: constructed, conditions: conditions, handled_errors: handled, visited: visited))
 
 fn source_request_reject_protected_v1(state: SourceRequestFlowV1, operand: MirOperand) -> Result<(), text>:
     val root = source_request_operand_root_v1(state, operand)
@@ -118,15 +134,19 @@ fn source_request_provenance_defined_v1(state: SourceRequestFlowV1, local: i64) 
 
 impl MirLowering:
     me source_request_captured_target_v1(function: MirFunction, block: i64,
-            index: i64, callee: MirOperand) -> Result<SymbolId, text>:
+            index: i64, callee: MirOperand, budget: SourceRegionRequestBudgetV1) -> Result<SymbolId, text>:
+        budget.charge(20, output_bytes: 19)?
+        val owner_id = function.symbol.id.to_string()
         var matches = 0
         var target = SymbolId(id: -1)
         for capture in self.verification_call_captures:
-            if (capture.owner_symbol_id == function.symbol.id.to_string() and
+            budget.charge(22)?
+            if (capture.owner_symbol_id == owner_id and
                     capture.block_id == block and capture.instruction_index == index):
                 matches = matches + 1
                 match capture.resolved_callee_v1:
                     case Some(symbol):
+                        budget.charge(20, output_bytes: 19)?
                         if symbol.id < 0 or capture.callee_symbol_id != symbol.id.to_string():
                             return Err("SOURCE-PIN-CAPTURE: canonical SymbolId disagrees")
                         target = symbol
@@ -137,6 +157,7 @@ impl MirLowering:
             case _: return Err("SOURCE-PIN-CAPTURE: canonical declaration absent from owning resolver")
         match callee.kind:
             case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                budget.charge(declaration.name.len() + 1)?
                 if name != declaration.name:
                     return Err("SOURCE-PIN-CAPTURE: call changed after canonical emission")
                 match type_.kind:
@@ -147,14 +168,17 @@ impl MirLowering:
 
     me verify_source_region_request_wrapper_v1(module: MirModule, function: MirFunction,
             producer: SymbolId, consumer: SymbolId, slot_type: MirType,
-            context_type: MirType, lifecycle: SourceRegionRequestLifecycleSymbolsV1) -> Result<(), text>:
+            context_type: MirType, lifecycle: SourceRegionRequestLifecycleSymbolsV1,
+            account: MirLoopResourceAccountV1) -> Result<(), text>:
+        val budget = SourceRegionRequestBudgetV1.begin(account)?
+        budget.charge(1)?
         if self.builder.canonical_enum_builtin_error_v1 != "":
             return Err("SOURCE-PIN-BUILTIN: actual builtin emission reported an error")
         val builtin_manifest = canonical_enum_builtin_finalize_v1(module, function,
-            self.builder.canonical_enum_builtin_sites_v1)?
+            self.builder.canonical_enum_builtin_sites_v1, account)?
         if function.blocks.len() == 0 or function.signature.params.len() == 0 or function.signature.is_variadic:
             return Err("SOURCE-PIN-WRAPPER: actual executable fixed-signature wrapper required")
-        if serialize_mir_type(function.signature.params[0]) != serialize_mir_type(slot_type):
+        if not source_request_types_same_v1(function.signature.params[0], slot_type, budget)?:
             return Err("SOURCE-PIN-SIGNATURE: exact slot borrow parameter required")
         match function.signature.return_type.kind:
             case MirTypeKind.Result(inner, cleanup_error):
@@ -163,7 +187,7 @@ impl MirLowering:
                         match value.kind:
                             case MirTypeKind.I64: ()
                             case _: return Err("SOURCE-PIN-SIGNATURE: rich consumer output may not escape")
-                        if serialize_mir_type(semantic_error) != serialize_mir_type(cleanup_error):
+                        if not source_request_types_same_v1(semantic_error, cleanup_error, budget)?:
                             return Err("SOURCE-PIN-SIGNATURE: canonical nested error identities differ")
                         match cleanup_error.kind:
                             case MirTypeKind.Enum(owner):
@@ -173,25 +197,31 @@ impl MirLowering:
             case _: return Err("SOURCE-PIN-SIGNATURE: actual nested retained/released outcome required")
         var slot = -1
         for local in function.locals:
+            budget.charge(1)?
             match local.kind:
                 case LocalKind.Arg(0):
-                    if slot >= 0 or serialize_mir_type(local.type_) != serialize_mir_type(slot_type):
+                    if slot >= 0 or not source_request_types_same_v1(local.type_, slot_type, budget)?:
                         return Err("SOURCE-PIN-SLOT: unique typed retained-slot borrow required")
                     slot = local.id.id
                 case _: ()
         if slot < 0: return Err("SOURCE-PIN-SLOT: retained-slot argument is absent")
+        budget.charge(1, state_fields: 1, output_bytes: 8)?
         var blocks: Dict<i64, i64> = {}
         for index in 0..function.blocks.len():
+            budget.charge(1, state_fields: 2, output_bytes: 16)?
             val id = function.blocks[index].id.id
             if id < 0 or blocks.has(id): return Err("SOURCE-PIN-CFG: duplicate or invalid block")
             blocks[id] = index
+        budget.charge(1, state_fields: 8, output_bytes: 64)?
         var identities: Dict<i64, bool> = {}
         for symbol in [producer, consumer, lifecycle.read_end_pinned, lifecycle.revoke_pinned,
                 lifecycle.release_pinned, lifecycle.retain_first_error, lifecycle.retain_cleanup_error]:
+            budget.charge(1, state_fields: 2, output_bytes: 16)?
             if symbol.id < 0 or identities.has(symbol.id):
                 return Err("SOURCE-PIN-IDENTITY: absent or colliding canonical operation")
             identities[symbol.id] = true
         val result_runtime_id = self.enum_runtime_id("Result")
+        budget.charge(1, state_fields: 20, output_bytes: 160)?
         var pending: [SourceRequestFlowV1] = [SourceRequestFlowV1(block: function.entry_block.id,
             phase: 0, slot: slot, context: -1, producer_result: -1, consumer_result: -1,
             previous_cleanup: -1, release_result: -1, first_error: -1, first_cleanup: -1,
@@ -200,13 +230,19 @@ impl MirLowering:
         var cursor = 0
         var returns = 0
         while cursor < pending.len():
+            budget.charge(1)?
             var state = pending[cursor]
             cursor = cursor + 1
+            budget.charge(state.visited.len())?
             if state.visited.contains(state.block) or not blocks.has(state.block):
                 return Err("SOURCE-PIN-CFG: cycle or missing edge in finite wrapper")
+            budget.charge(1, state_fields: 1, output_bytes: 8)?
             state.visited.push(state.block)
             val block = function.blocks[blocks[state.block]]
             for index in 0..block.instructions.len():
+                # A classified instruction can introduce at most three map
+                # rows, each holding a key and at most two scalar value slots.
+                budget.charge(4, state_fields: 9, output_bytes: 72)?
                 match block.instructions[index].kind:
                     case MirInstKind.Const(dest, value, _):
                         if dest.id == state.slot or dest.id == state.context or source_request_provenance_defined_v1(state, dest.id):
@@ -220,11 +256,11 @@ impl MirLowering:
                             return Err("SOURCE-PIN-FORGE: retained owner overwritten")
                         source_request_reject_protected_v1(state, MirOperand(kind: MirOperandKind.Copy(source)))?
                         state.aliases[dest.id] = source_request_root_v1(state, source.id)
-                    case MirInstKind.Cast(dest, operand, _) | MirInstKind.Bitcast(dest, operand, _):
-                        source_request_reject_protected_v1(state, operand)?
-                        if dest.id == state.slot or dest.id == state.context or source_request_provenance_defined_v1(state, dest.id):
-                            return Err("SOURCE-PIN-FORGE: cast reconstructs protected owner")
-                        state.aliases[dest.id] = source_request_operand_root_v1(state, operand)
+                    case MirInstKind.Cast(_, _, _) | MirInstKind.Bitcast(_, _, _):
+                        # Equal provenance is not equal scalar value: i64 ->
+                        # Bool -> i64 changes 7 into 1. No lossless codec cast
+                        # policy has been proved for this request subset.
+                        return Err("SOURCE-PIN-CODEC: unproved cast cannot preserve payload provenance")
                     case MirInstKind.GetField(dest, base, field):
                         if (state.phase != 0 or state.context >= 0 or field != 0 or
                                 source_request_operand_root_v1(state, base) != state.slot or source_request_provenance_defined_v1(state, dest.id)):
@@ -232,18 +268,21 @@ impl MirLowering:
                         source_request_expect_borrow_v1(state, base, state.slot)?
                         var typed = 0
                         for local in function.locals:
-                            if local.id.id == dest.id and serialize_mir_type(local.type_) == serialize_mir_type(context_type): typed = typed + 1
+                            budget.charge(1)?
+                            if local.id.id == dest.id:
+                                if source_request_types_same_v1(local.type_, context_type, budget)?: typed = typed + 1
                         if typed != 1: return Err("SOURCE-PIN-FIELD: actual context borrow type differs")
                         state.context = dest.id
                     case MirInstKind.Call(destination, callee, args):
                         var builtin: CanonicalEnumBuiltinOperationV1? = nil
                         for site in builtin_manifest.sites:
+                            budget.charge(1)?
                             if site.owner.id == function.symbol.id and site.block.id == block.id.id and site.instruction_index == index:
                                 if builtin != nil: return Err("SOURCE-PIN-BUILTIN: duplicate actual primitive site")
                                 builtin = Some(site.operation)
                         var target = SymbolId(id: -1)
                         if builtin == nil:
-                            target = self.source_request_captured_target_v1(function, block.id.id, index, callee)?
+                            target = self.source_request_captured_target_v1(function, block.id.id, index, callee, budget)?
                         if (target.id == producer.id or target.id == consumer.id or
                                 target.id == lifecycle.read_end_pinned.id or target.id == lifecycle.revoke_pinned.id or
                                 target.id == lifecycle.release_pinned.id or target.id == lifecycle.retain_first_error.id or
@@ -254,7 +293,7 @@ impl MirLowering:
                                 case MirOperandKind.Const(_, type_):
                                     match type_.kind:
                                         case MirTypeKind.FuncPtr(signature):
-                                            if serialize_mir_signature(signature) != serialize_mir_signature(module.functions[target].signature):
+                                            if not source_request_signatures_same_v1(signature, module.functions[target].signature, budget)?:
                                                 return Err("SOURCE-PIN-SIGNATURE: actual call differs from canonical declaration")
                                         case _: return Err("SOURCE-PIN-SIGNATURE: typed direct call required")
                                 case _: return Err("SOURCE-PIN-SIGNATURE: typed direct call required")
@@ -267,7 +306,9 @@ impl MirLowering:
                             if state.context < 0 or args.len() == 0 or source_request_operand_root_v1(state, args[args.len() - 1]) != state.context:
                                 return Err("SOURCE-PIN-BORROW: direct producer/consumer lacks exact context")
                             source_request_expect_borrow_v1(state, args[args.len() - 1], state.context)?
-                            for arg_index in 0..args.len() - 1: source_request_reject_protected_v1(state, args[arg_index])?
+                            for arg_index in 0..args.len() - 1:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, args[arg_index])?
                             if target.id == producer.id:
                                 if state.phase != 0: return Err("SOURCE-PIN-ORDER: producer invoked more than once or after cleanup")
                                 state.phase = 1
@@ -319,21 +360,27 @@ impl MirLowering:
                                 if state.first_cleanup < 0: state.first_cleanup = error_source
                             state.handled_errors[error_source] = true
                         elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.CheckVariant):
-                            for argument in args: source_request_reject_protected_v1(state, argument)?
+                            for argument in args:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, argument)?
                             if args.len() != 3 or source_request_integer_v1(state, args[1])? != result_runtime_id:
                                 return Err("SOURCE-PIN-RESULT: actual canonical Result identity differs")
                             val tag = source_request_integer_v1(state, args[2])?
                             if tag != 0 and tag != 1: return Err("SOURCE-PIN-RESULT: canonical Ok/Err discriminant required")
                             state.conditions[result] = SourceRequestConditionV1(result: source_request_operand_root_v1(state, args[0]), tag: tag)
                         elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.Payload):
-                            for argument in args: source_request_reject_protected_v1(state, argument)?
+                            for argument in args:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, argument)?
                             if args.len() != 1: return Err("SOURCE-PIN-PAYLOAD: canonical single payload operation required")
                             val source = source_request_operand_root_v1(state, args[0])
                             if (state.statuses.get(source) ?? 0) == 0:
                                 return Err("SOURCE-PIN-PAYLOAD: payload read before actual Result arm discrimination")
                             state.payloads[result] = source
                         elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.New):
-                            for argument in args: source_request_reject_protected_v1(state, argument)?
+                            for argument in args:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, argument)?
                             if args.len() != 3 or source_request_integer_v1(state, args[0])? != result_runtime_id:
                                 return Err("SOURCE-PIN-RESULT: constructor canonical Result identity differs")
                             val tag = source_request_integer_v1(state, args[1])?
@@ -342,15 +389,20 @@ impl MirLowering:
                             state.statuses[result] = tag + 1
                             state.constructed_payloads[result] = source_request_operand_root_v1(state, args[2])
                         elif source_request_builtin_is_v1(builtin, CanonicalEnumBuiltinOperationV1.Discriminant):
-                            for argument in args: source_request_reject_protected_v1(state, argument)?
+                            for argument in args:
+                                budget.charge(1)?
+                                source_request_reject_protected_v1(state, argument)?
                             if args.len() != 1:
                                 return Err("SOURCE-PIN-RESULT: canonical discriminant arity differs")
                         else:
                             return Err("SOURCE-PIN-CALL: unknown call or unclassified lifetime effect")
                     case MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _) | MirInstKind.Nop: ()
                     case _: return Err("SOURCE-PIN-INCOMPLETE: actual instruction has no complete owner classification")
+            budget.charge(1)?
             match block.terminator:
-                case MirTerminator.Goto(target): pending.push(source_request_fork_v1(state, target.id))
+                case MirTerminator.Goto(target):
+                    budget.rows(pending.len() + 1, 1, 8)?
+                    pending.push(source_request_fork_v1(state, target.id, budget)?)
                 case MirTerminator.If(condition, yes, no):
                     val root = source_request_operand_root_v1(state, condition)
                     val predicate = match state.conditions.get(root):
@@ -359,11 +411,13 @@ impl MirLowering:
                     val known = state.statuses.get(predicate.result) ?? 0
                     val expected = predicate.tag + 1
                     if known == 0 or known == expected:
-                        var success = source_request_fork_v1(state, yes.id)
+                        budget.rows(pending.len() + 1, 1, 8)?
+                        var success = source_request_fork_v1(state, yes.id, budget)?
                         success.statuses[predicate.result] = expected
                         pending.push(success)
                     if known == 0 or known != expected:
-                        var failure = source_request_fork_v1(state, no.id)
+                        budget.rows(pending.len() + 1, 1, 8)?
+                        var failure = source_request_fork_v1(state, no.id, budget)?
                         failure.statuses[predicate.result] = if expected == 1: 2 else: 1
                         pending.push(failure)
                 case MirTerminator.Ret(value):
