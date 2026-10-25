@@ -1,0 +1,194 @@
+# Compiler-owned instruction replacement plans. The context transform must
+# execute every step through canonical Result CFG before continuing/publication.
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.{MirTypeDefKind, MirFieldDef}
+use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
+use compiler.hir.hir_types.{SymbolId}
+
+struct SourceRegionOperationPlanV1:
+    prelude: [MirInst]
+    facade: MirOperand
+    args: [MirOperand]
+    result_type: MirType
+    destination: LocalId?
+    success: [MirInst]
+
+struct SourceRegionInstructionPlanV1:
+    steps: [SourceRegionOperationPlanV1]
+    locals: [MirLocal]
+    next_local: i64
+
+fn source_region_plan_local_v1(id: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+
+fn source_region_plan_operand_type_v1(func: MirFunction, operand: MirOperand) -> Result<MirType, text>:
+    match operand.kind:
+        case Const(_, type_): return Ok(type_)
+        case Copy(local) | Move(local):
+            for actual in func.locals:
+                if actual.id.id == local.id: return Ok(actual.type_)
+    Err("SOURCE-STORE: operand has no exact local type")
+
+fn source_region_plan_scalar_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case I64 | U64 | Bool: true
+        case _: false
+
+fn source_region_plan_facade_v1(module: MirModule, symbol: SymbolId, arity: i64, context_type: MirType) -> Result<MirOperand, text>:
+    for key in module.functions.keys():
+        if key.id == symbol.id:
+            val facade = module.functions[key]
+            if facade.signature.is_variadic or facade.signature.params.len() != arity:
+                return Err("SOURCE-STORE: facade signature arity is unavailable")
+            if facade.signature.params[0] != context_type:
+                return Err("SOURCE-STORE: facade context identity differs")
+            var parameter = 1
+            while parameter < arity:
+                if facade.signature.params[parameter].kind != MirTypeKind.I64:
+                    return Err("SOURCE-STORE: facade scalar parameter type differs")
+                parameter = parameter + 1
+            match facade.signature.return_type.kind:
+                case Result(ok, error_type):
+                    if ok.kind != MirTypeKind.I64:
+                        return Err("SOURCE-STORE: facade must return Result<i64,E>")
+                    match error_type.kind:
+                        case Struct(symbol) | Enum(symbol):
+                            if symbol.id < 0: return Err("SOURCE-STORE: unresolved facade error identity")
+                        case _: return Err("SOURCE-STORE: unresolved facade error type")
+                case _: return Err("SOURCE-STORE: facade lacks typed Result return")
+            return Ok(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(facade.name), MirType(kind: MirTypeKind.FuncPtr(facade.signature)))))
+    Err("SOURCE-STORE: resolved facade declaration unavailable")
+
+fn source_region_plan_result_v1(facade: MirOperand) -> MirType:
+    match facade.kind:
+        case Const(_, type_):
+            match type_.kind:
+                case FuncPtr(signature): return signature.return_type
+                case _: return MirType.i64()
+        case _: return MirType.i64()
+
+fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
+    inst: MirInst, context: LocalId, facades: SourceRegionFacadeSymbolsV1,
+    first_local: i64) -> Result<SourceRegionInstructionPlanV1?, text>:
+    if first_local < 0 or first_local > 9223372036854775799:
+        return Err("SOURCE-STORE: local identity capacity")
+    for local in func.locals:
+        if local.id.id >= first_local:
+            return Err("SOURCE-STORE: fresh local collides with function storage")
+    var context_type: MirType
+    match source_region_plan_operand_type_v1(func, mir_operand_copy(context)):
+        case Ok(type_):
+            match type_.kind:
+                case Struct(_): context_type = type_
+                case _: return Err("SOURCE-STORE: context is not an exact struct identity")
+        case Err(error): return Err(error)
+    var alloc_facade: MirOperand
+    match source_region_plan_facade_v1(module, facades.alloc, 3, context_type):
+        case Ok(value): alloc_facade = value
+        case Err(error): return Err(error)
+    var alias_facade: MirOperand
+    match source_region_plan_facade_v1(module, facades.alias_write, 4, context_type):
+        case Ok(value): alias_facade = value
+        case Err(error): return Err(error)
+    val alloc_result = source_region_plan_result_v1(alloc_facade)
+    val alias_result = source_region_plan_result_v1(alias_facade)
+    if alloc_result != alias_result:
+        return Err("SOURCE-STORE: facade error types differ")
+    match inst.kind:
+        case SetField(base, field, value):
+            var base_type: MirType
+            match source_region_plan_operand_type_v1(func, base):
+                case Ok(type_): base_type = type_
+                case Err(error): return Err(error)
+            var fields: [MirFieldDef] = []
+            match base_type.kind:
+                case Struct(symbol):
+                    for key in module.types.keys():
+                        if key.id == symbol.id:
+                            match module.types[key].kind:
+                                case Struct(actual): fields = actual
+                                case _: return Err("SOURCE-STORE: destination is not a struct layout")
+                case _: return Err("SOURCE-STORE: unknown destination storage")
+            if field < 0 or field >= fields.len():
+                return Err("SOURCE-STORE: destination slot is not declared")
+            val layout = fields[field]
+            if layout.offset != field * 8 or layout.has_bits_attr or not source_region_plan_scalar_v1(layout.type_):
+                return Err("SOURCE-STORE: unsupported exact field layout")
+            match source_region_plan_operand_type_v1(func, value):
+                case Ok(type_):
+                    if type_ != layout.type_: return Err("SOURCE-STORE: incoming edge type differs")
+                case Err(error): return Err(error)
+            val base_bits = LocalId(id: first_local)
+            val value_bits = LocalId(id: first_local + 1)
+            val epoch = LocalId(id: first_local + 2)
+            val step = SourceRegionOperationPlanV1(
+                prelude: [MirInst(kind: MirInstKind.Cast(base_bits, base, MirType.i64()), span: inst.span),
+                    MirInst(kind: MirInstKind.Cast(value_bits, value, MirType.i64()), span: inst.span)],
+                facade: alias_facade,
+                args: [mir_operand_copy(context), mir_operand_copy(base_bits), mir_operand_const_int(field), mir_operand_copy(value_bits)],
+                result_type: alias_result, destination: Some(epoch), success: [])
+            return Ok(Some(SourceRegionInstructionPlanV1(steps: [step], locals: [source_region_plan_local_v1(first_local), source_region_plan_local_v1(first_local + 1), source_region_plan_local_v1(first_local + 2)], next_local: first_local + 3)))
+        case Aggregate(destination, kind, operands):
+            var fields: [MirFieldDef] = []
+            var destination_symbol = -1
+            match kind:
+                case Struct(symbol):
+                    destination_symbol = symbol.id
+                    for key in module.types.keys():
+                        if key.id == symbol.id:
+                            match module.types[key].kind:
+                                case Struct(actual): fields = actual
+                                case _: return Err("SOURCE-STORE: constructor lacks struct layout")
+                case _: return Err("SOURCE-STORE: unsupported array/tuple/variant birth")
+            if fields.len() == 0 or fields.len() != operands.len():
+                return Err("SOURCE-STORE: constructor does not initialize every physical field")
+            var destination_exact = false
+            for local in func.locals:
+                if local.id.id == destination.id:
+                    match local.type_.kind:
+                        case Struct(symbol): destination_exact = symbol.id == destination_symbol
+                        case _: return Err("SOURCE-STORE: constructor destination type differs")
+            if not destination_exact:
+                return Err("SOURCE-STORE: constructor destination lacks exact type")
+            if fields.len() > (9223372036854775807 - first_local - 2) / 2:
+                return Err("SOURCE-STORE: constructor local identity capacity")
+            var descriptor_args: [MirOperand] = []
+            var field_index = 0
+            for field in fields:
+                if field.has_bits_attr or field.offset != field_index * 8 or not source_region_plan_scalar_v1(field.type_):
+                    return Err("SOURCE-STORE: unclassified constructor slot")
+                match source_region_plan_operand_type_v1(func, operands[field_index]):
+                    case Ok(type_):
+                        if type_ != field.type_: return Err("SOURCE-STORE: constructor incoming edge type differs")
+                    case Err(error): return Err(error)
+                descriptor_args = descriptor_args.push(mir_operand_const_int(1))
+                descriptor_args = descriptor_args.push(mir_operand_const_int(0))
+                field_index = field_index + 1
+            val descriptor = LocalId(id: first_local)
+            val allocation = LocalId(id: first_local + 1)
+            var locals = [source_region_plan_local_v1(first_local), source_region_plan_local_v1(first_local + 1)]
+            var steps = [SourceRegionOperationPlanV1(
+                prelude: [MirInst(kind: MirInstKind.Intrinsic(Some(descriptor), "source_region_struct_descriptor_v1", descriptor_args), span: inst.span)],
+                facade: alloc_facade,
+                args: [mir_operand_copy(context), mir_operand_copy(descriptor), mir_operand_const_int(1)],
+                result_type: alloc_result, destination: Some(allocation), success: [])]
+            field_index = 0
+            for field in fields:
+                val value_bits = LocalId(id: first_local + 2 + field_index * 2)
+                val epoch = LocalId(id: value_bits.id + 1)
+                locals = locals.push(source_region_plan_local_v1(value_bits.id))
+                locals = locals.push(source_region_plan_local_v1(epoch.id))
+                var success: [MirInst] = []
+                if field_index == fields.len() - 1:
+                    success = [MirInst(kind: MirInstKind.Intrinsic(Some(destination), "source_region_publish_struct_v1", [mir_operand_copy(allocation)]), span: inst.span)]
+                steps = steps.push(SourceRegionOperationPlanV1(
+                    prelude: [MirInst(kind: MirInstKind.Cast(value_bits, operands[field_index], MirType.i64()), span: inst.span)],
+                    facade: alias_facade,
+                    args: [mir_operand_copy(context), mir_operand_copy(allocation), mir_operand_const_int(field_index), mir_operand_copy(value_bits)],
+                    result_type: alias_result, destination: Some(epoch), success: success))
+                field_index = field_index + 1
+            return Ok(Some(SourceRegionInstructionPlanV1(steps: steps, locals: locals, next_local: first_local + 2 + fields.len() * 2)))
+        case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | GetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Load(_, _) | GetElementPtr(_, _, _):
+            return Ok(nil)
+        case _:
+            return Err("SOURCE-STORE: unclassified allocation/store/call effect")

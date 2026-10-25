@@ -1,0 +1,77 @@
+use std.spec.{describe, it, expect}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.{MirFieldDef, MirTypeDefKind}
+use compiler.mir.source_region_instruction_plan_v1.*
+use compiler.mir.source_region_facade_symbols_v1.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+
+fn source_region_plan_fixture_function_v1(id: i64, params: [MirType], result: MirType, locals: [MirLocal]) -> MirFunction:
+    MirFunction(symbol: SymbolId(id: id), name: "fixture_{id}",
+        signature: MirSignature(params: params, return_type: result, is_variadic: false, params_known: true),
+        locals: locals, blocks: [], entry_block: BlockId(id: 0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn source_region_plan_fixture_symbols_v1() -> SourceRegionFacadeSymbolsV1:
+    SourceRegionFacadeSymbolsV1(create: SymbolId(id: 3), alloc: SymbolId(id: 1),
+        write_begin: SymbolId(id: 4), write_commit: SymbolId(id: 5), alias_write: SymbolId(id: 2),
+        stamp: SymbolId(id: 6), read_begin: SymbolId(id: 7), read_end: SymbolId(id: 8), close: SymbolId(id: 9))
+
+fn source_region_plan_fixture_module_v1() -> MirModule:
+    val context = MirType(kind: MirTypeKind.Struct(SymbolId(id: 200)))
+    val structure = MirType(kind: MirTypeKind.Struct(SymbolId(id: 100)))
+    val result = MirType(kind: MirTypeKind.Result(MirType.i64(), MirType(kind: MirTypeKind.Enum(SymbolId(id: 300)))))
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId(id: 0)] = source_region_plan_fixture_function_v1(0, [context], result, [
+        MirLocal(id: LocalId(id: 0), name: nil, type_: context, kind: LocalKind.Arg(0), is_ghost: false),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: structure, kind: LocalKind.Temp, is_ghost: false)])
+    functions[SymbolId(id: 1)] = source_region_plan_fixture_function_v1(1, [context, MirType.i64(), MirType.i64()], result, [])
+    functions[SymbolId(id: 2)] = source_region_plan_fixture_function_v1(2, [context, MirType.i64(), MirType.i64(), MirType.i64()], result, [])
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[SymbolId(id: 100)] = MirTypeDef(symbol: SymbolId(id: 100), name: "Subject",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "count", type_: MirType.i64(), offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    MirModule(name: "source_region_plan_fixture", functions: functions, statics: {}, constants: {}, types: types)
+
+describe "SOURCE allocation/store instruction replacement plans":
+    it "allocates one instance then initializes every field before publication":
+        val module = source_region_plan_fixture_module_v1()
+        val subject = module.functions[SymbolId(id: 0)]
+        val inst = MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Struct(SymbolId(id: 100)), [mir_operand_const_int(7)]), span: nil)
+        match source_region_instruction_plan_v1(module, subject, inst, LocalId(id: 0), source_region_plan_fixture_symbols_v1(), 10):
+            case Ok(Some(plan)):
+                expect(plan.steps.len()).to_equal(2)
+                expect(plan.steps[0].success.len()).to_equal(0)
+                expect(plan.steps[1].success.len()).to_equal(1)
+                match plan.steps[0].args[2].kind:
+                    case Const(Int(capacity), _): expect(capacity).to_equal(1)
+                    case _: assert(false)
+                match plan.steps[1].success[0].kind:
+                    case Intrinsic(_, name, _): expect(name).to_equal("source_region_publish_struct_v1")
+                    case _: assert(false)
+            case _: assert(false)
+
+    it "replaces alias field mutation without refreshing any saved stamp":
+        val module = source_region_plan_fixture_module_v1()
+        val inst = MirInst(kind: MirInstKind.SetField(mir_operand_copy(LocalId(id: 1)), 0, mir_operand_const_int(7)), span: nil)
+        match source_region_instruction_plan_v1(module, module.functions[SymbolId(id: 0)], inst, LocalId(id: 0), source_region_plan_fixture_symbols_v1(), 10):
+            case Ok(Some(plan)):
+                expect(plan.steps.len()).to_equal(1)
+                expect(plan.steps[0].success.len()).to_equal(0)
+                expect(plan.steps[0].args.len()).to_equal(4)
+            case _: assert(false)
+
+    it "rejects undeclared alias slots before producing a write plan":
+        val module = source_region_plan_fixture_module_v1()
+        val inst = MirInst(kind: MirInstKind.SetField(mir_operand_copy(LocalId(id: 1)), 1, mir_operand_const_int(7)), span: nil)
+        match source_region_instruction_plan_v1(module, module.functions[SymbolId(id: 0)], inst, LocalId(id: 0), source_region_plan_fixture_symbols_v1(), 10):
+            case Err(message): expect(message).to_contain("slot is not declared")
+            case _: assert(false)
+
+    it "rejects a raw pointer store rather than leaving it uninstrumented":
+        val module = source_region_plan_fixture_module_v1()
+        val inst = MirInst(kind: MirInstKind.Store(mir_operand_copy(LocalId(id: 1)), mir_operand_const_int(7)), span: nil)
+        match source_region_instruction_plan_v1(module, module.functions[SymbolId(id: 0)], inst, LocalId(id: 0), source_region_plan_fixture_symbols_v1(), 10):
+            case Err(message): expect(message).to_contain("unclassified")
+            case _: assert(false)

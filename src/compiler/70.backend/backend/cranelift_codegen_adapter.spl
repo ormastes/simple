@@ -830,7 +830,29 @@ fn cl_translate_instruction(
                     cranelift_store(ctx, result, dest_addr, 0)
 
         case Intrinsic(dest, name, args):
-            if name == "bounds_check" and args.len() >= 2:
+            if name == "source_region_publish_struct_v1":
+                if val target = dest:
+                    var exact_struct = false
+                    match local_type(target.id, func).kind:
+                        case Struct(_): exact_struct = true
+                        case _: ()
+                    if args.len() != 1 or not exact_struct:
+                        panic("C4 publication requires an exact declared Struct destination")
+                        return
+                    if operand_type(args[0], func).kind != MirTypeKind.I64:
+                        panic("C4 publication requires a native allocation identity")
+                        return
+                    val raw = cl_translate_operand(ctx, cl_module, args[0], value_map, slot_map, func)
+                    # Same heap-tag publication path as Aggregate.Struct.
+                    val tag = cranelift_iconst(ctx, CL_TYPE_I64, 1)
+                    val published = cranelift_bor(ctx, raw, tag)
+                    value_map[target.id] = published
+                    if slot_map.has(target.id):
+                        val addr = cranelift_stack_addr(ctx, slot_map[target.id], 0)
+                        cranelift_store(ctx, published, addr, 0)
+                else:
+                    panic("C4 publication requires a destination")
+            elif name == "bounds_check" and args.len() >= 2:
                 val index = cl_translate_operand(ctx, cl_module, args[0], value_map, slot_map, func)
                 val len = cl_translate_operand(ctx, cl_module, args[1], value_map, slot_map, func)
                 translate_runtime_import_call_i64(ctx, cl_module, "__simple_intrinsic_bounds_check", [index, len])
