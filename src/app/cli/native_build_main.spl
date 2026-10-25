@@ -48,7 +48,8 @@ use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory, hir_shard_recovery_replacements_dispatchable}
-use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
+    native_mir_shard_has_unsupported_fallback_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -866,6 +867,13 @@ struct LedgerShardRunV1:
     total_claims: i64
     blocked_reason: text
     all_stopped: bool
+    # Every started owner published its own .done receipt and was reaped. The
+    # full configured set ran, or the explicit typed unsupported-lane result
+    # short-circuited the remaining pending owners.
+    protocol_complete: bool
+    # Every started MIR worker explicitly identified the same recoverable
+    # unsupported-lane case; never inferred from exit text or BLOCKED.
+    recoverable_no_claim: bool
 
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
@@ -874,7 +882,8 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val old_owner = env_get(owner_env) ?? ""
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-            blocked_reason: "worker queue environment could not be installed", all_stopped: true)
+            blocked_reason: "worker queue environment could not be installed", all_stopped: true,
+            protocol_complete: false, recoverable_no_claim: false)
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
     var pending: [i64] = []
@@ -886,6 +895,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var failed_workers: i64 = 0
     var done: i64 = 0
     var all_stopped = true
+    var workers_started: i64 = 0
+    var workers_finished: i64 = 0
+    var recoverable_fallback_receipts: i64 = 0
     var total_claims: i64 = 0
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
@@ -908,6 +920,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
                 pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
+                workers_started = workers_started + 1
                 owners = owners.push(owner)
                 indices = indices.push(index)
                 started_ms = started_ms.push(time_now_monotonic_ms())
@@ -963,6 +976,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             val progress = hir_shard_recovery_progress(queue_dir, owner)
             total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
+            if finished:
+                workers_finished = workers_finished + 1
+                if label == "mir-shard" and
+                        native_mir_shard_has_unsupported_fallback_v1(queue_dir, owner):
+                    recoverable_fallback_receipts = recoverable_fallback_receipts + 1
             val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
             val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
             if code != 0 or sealed != 0 or not finished:
@@ -1005,9 +1023,17 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val blocked = hir_shard_recovery_blocked(queue_dir)
     val blocked_reason = if blocked: file_read("{queue_dir}/BLOCKED") else: ""
     val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
+    val all_started_finished = workers_started > 0 and workers_finished == workers_started
+    val unsupported_short_circuit = hir_shard_recovery_blocked(queue_dir) and
+        recoverable_fallback_receipts == workers_started
+    val protocol_complete = all_stopped and all_started_finished and
+        (workers_started == count or unsupported_short_circuit)
+    val recoverable_no_claim = protocol_complete and
+        recoverable_fallback_receipts == workers_started
     LedgerShardRunV1(code: code, failed_modules: failed_modules,
         total_claims: total_claims, blocked_reason: blocked_reason,
-        all_stopped: all_stopped)
+        all_stopped: all_stopped, protocol_complete: protocol_complete,
+        recoverable_no_claim: recoverable_no_claim)
 
 # ===== MIR sharding =========================================================
 #
@@ -1093,8 +1119,9 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     val queue_dir = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if queue_dir == "":
         eprint "[mir-shard] cannot establish invocation ledger"
-        # No worker ran: nothing claimed, nothing left running.
-        return (native_mir_shard_outcome_v1(1, 0, 0, true), "")
+        # Without an invocation ledger there is no complete worker protocol
+        # receipt authorizing the ordinary zero-claim fallback.
+        return (native_mir_shard_outcome_v1(1, 0, 0, true, false, false), "")
     val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
@@ -1118,9 +1145,10 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         simple_bin, timeout_ms)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules,
-        run.total_claims, run.all_stopped)
+        run.total_claims, run.all_stopped, run.protocol_complete,
+        run.recoverable_no_claim)
     if outcome != "link":
-        eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} blocked={run.blocked_reason}"
+        eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} protocol_complete={run.protocol_complete} recoverable_no_claim={run.recoverable_no_claim} blocked={run.blocked_reason}"
         if selective: return ("fail", "")
     if outcome == "link": (outcome, queue_dir) else: (outcome, "")
 
@@ -1414,6 +1442,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
+    var hir_shard_result: i64 = 0
     val hir_shard_count = native_build_hir_shard_count(args)
     if hir_shard_count > 0:
         # Explicit HIR-only warming may bypass the parse-publication phase,
@@ -1428,18 +1457,18 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                 env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 eprint "SCV-E-HIR-ADMISSION: " + authority.reason
                 return 1
-        val hir_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
-        if hir_result != 0 and args.contains("--go-to-end"):
+        hir_shard_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+        if hir_shard_result != 0 and args.contains("--go-to-end"):
             # go-to-end (compiler/80.driver/driver_build/go_to_end.spl): the
             # shards only warm the HIR cache. The final worker redoes HIR for
             # the failed modules in process, drops them and their importers,
             # and continues; it never links and always exits non-zero then.
             eprint "[go-to-end] HIR shard aggregate failure; continuing to the final worker"
-        elif hir_result != 0:
+        elif hir_shard_result != 0:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
             eprint "error: HIR aggregate failure; final worker and artifact publication blocked"
-            return hir_result
+            return hir_shard_result
     # MIR + codegen in bounded worker processes (opt-in SIMPLE_MIR_SHARDING=1).
     # On aggregate PASS the final worker links from the ledger and lowers
     # nothing; any failed module blocks the final worker entirely.
