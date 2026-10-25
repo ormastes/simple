@@ -20,3 +20,12 @@ it. Put new declarations ABOVE the decorator.
 
 Also swept every `else: nil` into an `Expr?` slot and `defer_return_replay(nil, ...)`
 in convert_nodes.spl to `None`.
+
+## Native proof (2026-10-25, Stage 2 p2shard-17, aarch64 cranelift)
+- Tiny entry importing `convert_flat_pattern`: native-build rc=0; object exports
+  `convert_flat_pattern`, `defer_return_replay` (42 T symbols).
+- Tiny entry running `retained_file_open` (missing path -> Err, quota 0 ->
+  `SCVDB_FILE_QUOTA`, `/etc/hostname` -> size 11, identity 56 bytes) and
+  `retained_file_identity_unchanged` -> `Ok(true)`: native-build rc=0, binary rc=0.
+  This needed a second workaround, see
+  `native_u8_array_ne_compares_reference_2026-10-25.md`.
