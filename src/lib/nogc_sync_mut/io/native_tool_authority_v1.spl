@@ -26,6 +26,12 @@ pub struct NativePinnedArtifactV1:
     digest: text
     metadata: DescriptorFileStatV1
 
+pub struct NativeToolAdmissionReceiptV1:
+    authority_identity: text
+    role: text
+    artifact: NativePinnedArtifactV1
+    policy: text
+
 struct NativeToolBindingV1:
     role: text
     artifact: NativePinnedArtifactV1
@@ -297,3 +303,16 @@ pub fn native_tool_strict_child_environment_v1() -> Result<[(text, text)], text>
             "SIMPLE_LINK_OBJECTS", "CCC_OVERRIDE_OPTIONS", "CL", "_CL_"]:
         assignments = assignments.push((name, ""))
     Ok(assignments)
+
+# This projects the actual admitted owner after revalidation. A requested-mode
+# boolean, executable basename or caller-supplied digest is not a receipt.
+pub fn native_tool_admission_receipt_v1(role: text, executed_path: text) -> Result<NativeToolAdmissionReceiptV1, text>:
+    val admitted = native_tool_strict_resolve_v1(role)?
+    if admitted != executed_path or not native_tool_strict_owner_ready_v1():
+        return Err("executed tool does not match admitted owner")
+    for binding in _native_tool_authority_bindings_v1:
+        if binding.role == role:
+            native_pinned_artifact_revalidate_v1(binding.artifact, true)?
+            return Ok(NativeToolAdmissionReceiptV1(authority_identity: _native_tool_authority_identity_v1,
+                role: role, artifact: binding.artifact, policy: "frozen-installation-owner-v1"))
+    Err("executed tool role has no admitted binding")

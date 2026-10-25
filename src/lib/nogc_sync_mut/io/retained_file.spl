@@ -282,6 +282,69 @@ fn retained_file_identity_unchanged(file: RetainedFile) -> Result<bool, text>:
     if size != file.size or identity != file.identity: return Err("SCVDB_FILE_CHANGED")
     Ok(true)
 
+fn _retained_same_object_identity_v1(left: [u8], right: [u8]) -> bool:
+    @when(os="windows"):
+    left.len() == 40 and right.len() == 40 and left[0:24] == right[0:24]
+    @else:
+    @when(os="linux"):
+    # statx inode plus device major/minor; size and timestamps may legitimately
+    # change while the exclusive output is written by the admitted tool.
+    left.len() == 56 and right.len() == 56 and left[0:8] == right[0:8] and left[48:56] == right[48:56]
+    @else:
+    false
+    @end
+    @end
+
+fn retained_file_same_object_v1(left: RetainedFile, right: RetainedFile) -> Result<bool, text>:
+    if left.closed or right.closed: return Err("SCVDB_FILE_STATE")
+    val (left_size, left_identity) = _retained_metadata(left.handle)?
+    val (right_size, right_identity) = _retained_metadata(right.handle)?
+    Ok(_retained_same_object_identity_v1(left_identity, right_identity))
+
+@unsafe(reason: "seals exact exclusively created tool-output inode through derived native fd path", capabilities: [ffi, raw_ptr])
+fn retained_file_external_output_read_v1(writer: RetainedFile) -> Result<RetainedFile, text>:
+    if writer.closed or not writer.writable: return Err("SCVDB_FILE_STATE")
+    @when(os="linux"):
+    val (before_size, before_identity) = _retained_metadata(writer.handle)?
+    if not _retained_same_object_identity_v1(writer.identity, before_identity):
+        return Err("SCVDB_FILE_OUTPUT_IDENTITY")
+    # This path is derived from an already-owned live descriptor. Only this
+    # exact kernel fd symlink may be followed; arbitrary paths remain NOFOLLOW.
+    val ptr = _retained_path("/proc/self/fd/{writer.handle}")
+    if ptr == 0: return Err("SCVDB_FILE_PATH")
+    val handle = open(ptr, 526336, 0u32) as i64
+    _retained_free(ptr)
+    if handle < 0: return Err("SCVDB_FILE_OUTPUT_READ_OPEN")
+    var reader = RetainedFile(handle: handle, size: 0, identity: [], writable: false,
+        closed: false, position: 0, maximum: writer.maximum)
+    match _retained_metadata(handle):
+        case Err(reason):
+            val _closed = reader.close()
+            return Err(reason)
+        case Ok((size, identity)):
+            if size > writer.maximum or not _retained_same_object_identity_v1(before_identity, identity):
+                val _closed = reader.close()
+                return Err("SCVDB_FILE_OUTPUT_IDENTITY")
+            reader.size = size
+            reader.identity = identity
+    match retained_file_same_object_v1(writer, reader):
+        case Ok(true): ()
+        case _:
+            val _closed = reader.close()
+            return Err("SCVDB_FILE_OUTPUT_IDENTITY")
+    if not writer.close():
+        val _closed = reader.close()
+        return Err("SCVDB_FILE_OUTPUT_CLOSE")
+    match retained_file_identity_unchanged(reader):
+        case Err(reason):
+            val _closed = reader.close()
+            return Err(reason)
+        case Ok(_): ()
+    Ok(reader)
+    @else:
+    Err("SCVDB_FILE_OUTPUT_PROVIDER_UNSUPPORTED")
+    @end
+
 fn retained_file_unchanged(file: RetainedFile) -> Result<bool, text>:
     retained_file_identity_unchanged(file)?
     if file.position != file.size: return Err("SCVDB_FILE_CHANGED")
@@ -334,4 +397,5 @@ fn retained_file_sync(file: RetainedFile) -> bool:
 export RetainedFile, retained_file_open
 export retained_file_unchanged, retained_file_sync
 export retained_file_read_at, retained_file_identity_unchanged
+export retained_file_same_object_v1, retained_file_external_output_read_v1
 export retained_directory_is_real_no_follow

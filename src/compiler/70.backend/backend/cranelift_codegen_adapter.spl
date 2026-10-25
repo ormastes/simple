@@ -26,6 +26,7 @@ use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 use compiler.backend.common.source_region_descriptor_v1.{source_region_descriptor_slots_v1, source_region_descriptor_extent_v1, source_region_descriptor_slot_words_v1, source_region_resolve_struct_slots_v1}
+use compiler.backend.source_region_emission_seal_v1.{source_region_emission_seal_v1}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -205,6 +206,9 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Emitted object file was empty or unreadable: {output_path}"))
     val cg_out = CodegenOutput.object(module.name, object_bytes)
+    match source_region_emission_seal_v1(module, object_bytes, 2):
+        case Ok(seal): cg_out.attach_source_region_emission_v1(seal)
+        case Err(reason): return Err(compileerror_backend_error(BackendKind.Cranelift, reason))
     Ok(cg_out)
 
 impl Codegen for CraneliftCodegenAdapter:
@@ -265,7 +269,11 @@ impl Codegen for CraneliftCodegenAdapter:
         if object_bytes.len() == 0:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Emitted object file was empty or unreadable: {output_path}"))
-        Ok(CodegenOutput.object(module.name, object_bytes))
+        val cg_out = CodegenOutput.object(module.name, object_bytes)
+        match source_region_emission_seal_v1(module, object_bytes, 2):
+            case Ok(seal): cg_out.attach_source_region_emission_v1(seal)
+            case Err(reason): return Err(compileerror_backend_error(BackendKind.Cranelift, reason))
+        Ok(cg_out)
 
 # ============================================================================
 # Target Mapping
@@ -865,7 +873,7 @@ fn cl_translate_instruction(
                                 case Err(_): panic("C4 descriptor has empty or overflowing storage")
                             match source_region_descriptor_slot_words_v1(slots):
                                 case Ok(words):
-                                    val data_name = ".c4.{func.symbol.id}.{target.id}"
+                                    val data_name = ".c4.{func.source_region_closure_digest_v1}.{func.symbol.id}.{target.id}"
                                     val slot_data = cranelift_declare_readonly_words_v1(cl_module, data_name + ".slots", words, 8, -1, 0, 0)
                                     if slot_data <= 0: panic("C4 readonly slot table declaration failed")
                                     val header_data = cranelift_declare_readonly_words_v1(cl_module, data_name, [1, 1, extent, slots.len(), 0, 1], 8, 4, slot_data, 0)

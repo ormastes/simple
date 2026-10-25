@@ -1,0 +1,152 @@
+use compiler.backend.linker.source_region_link_types_v1.*
+use compiler.backend.linker.source_region_elf_protection_v1.*
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_linked_view_v1}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open, retained_file_identity_unchanged, retained_file_same_object_v1}
+use std.io_runtime.{host_arch, host_os, getpid}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_fast_hex}
+
+@unsafe(reason: "existing native host page-size provider; no target-granule guess", capabilities: [ffi])
+extern fn rt_page_size() -> i64
+
+fn source_region_link_input_digest_v1(seals: [SourceRegionObjectSealV1]) -> text:
+    var rows: [text] = ["SourceRegionFinalLink-v1"]
+    for seal in seals:
+        rows.push("{seal.emission.instrumentation_abi}:{seal.emission.closure_digest}:{seal.emission.object_digest}:{seal.identity_digest}")
+        for record in seal.emission.descriptors:
+            rows.push("{record.binding}:{record.header_section}:{record.header_offset}:{record.table_section}:{record.table_offset}:{record.table_digest}")
+    sha256_text(rows.join("\n"))
+
+fn source_region_link_argument_digest_v1(arguments: [text]) -> text:
+    var rows: [text] = []
+    for argument in arguments: rows.push("{argument.len()}:{argument}")
+    sha256_text(rows.join(""))
+
+fn source_region_native_page_size_v1(machine: i64) -> Result<u64, text>:
+    # The first admitted route is native Linux ELF64. Cross-target loader
+    # granules and other loaders need their actual platform/toolchain receipt.
+    if host_os().lower() != "linux": return Err("SOURCE-LINK-NATIVE-LOADER-INCOMPLETE")
+    val arch = host_arch().lower()
+    if not ((machine == 62 and (arch == "x86_64" or arch == "amd64")) or
+            (machine == 183 and (arch == "aarch64" or arch == "arm64"))):
+        return Err("SOURCE-LINK-CROSS-TARGET-LOADER-INCOMPLETE")
+    var size = 0i64
+    unsafe(capabilities: [ffi]): size = rt_page_size()
+    if size <= 0 or (size & (size - 1)) != 0: return Err("SOURCE-LINK-PAGE-PROVIDER")
+    Ok(size as u64)
+
+fn source_region_admit_emitted_object_v1(path: text, file: RetainedFile, emission: SourceRegionEmissionSealV1,
+    account: MirLoopResourceAccountV1) -> Result<SourceRegionAdmittedObjectV1, text>:
+    if emission.instrumentation_abi != 1 or emission.closure_digest == "" or emission.descriptors.len() == 0:
+        val _closed = file.close()
+        return Err("SOURCE-OBJECT-EMISSION-PROVENANCE")
+    val digest = source_region_retained_digest_v1(file, account)
+    match digest:
+        case Ok(actual):
+            if actual == emission.object_digest:
+                return Ok(SourceRegionAdmittedObjectV1(path: path,
+                    seal: SourceRegionObjectSealV1(path: path, file: file, emission: emission,
+                        identity_digest: sha256_u8_fast_hex(file.identity))))
+            val _closed = file.close()
+            Err("SOURCE-OBJECT-EMITTED-BYTES-CHANGED")
+        case Err(reason):
+            val _closed = file.close()
+            Err(reason)
+
+fn source_region_begin_output_v1(output: text, inputs: [SourceRegionObjectSealV1],
+    account: MirLoopResourceAccountV1) -> Result<RetainedFile, text>:
+    source_region_link_charge_v1(account, 64, fields: 16)?
+    # O_EXCL refuses every preexisting pathname, including hard links/symlinks
+    # to any input, before the linker may truncate or write anything.
+    val writer = retained_file_open(output, 1099511627776u64, true)?
+    for input in inputs:
+        match retained_file_same_object_v1(writer, input.file):
+            case Ok(false): ()
+            case _:
+                val _closed = writer.close()
+                return Err("SOURCE-LINK-OUTPUT-ALIASES-INPUT")
+    Ok(writer)
+
+fn source_region_link_inputs_v1(paths: [text], seals: [SourceRegionObjectSealV1],
+    account: MirLoopResourceAccountV1) -> Result<[text], text>:
+    if host_os().lower() != "linux" or seals.len() == 0 or paths.len() != seals.len():
+        return Err("SOURCE-LINK-INPUT-SEAL-LOST")
+    source_region_link_charge_v1(account, seals.len() * 4, fields: seals.len())?
+    var retained_paths: [text] = []
+    var index = 0
+    for seal in seals:
+        if seal.path != paths[index] or seal.emission.instrumentation_abi != 1 or seal.emission.closure_digest == "":
+            return Err("SOURCE-LINK-INPUT-OWNERSHIP")
+        retained_file_identity_unchanged(seal.file)?
+        if source_region_retained_digest_v1(seal.file, account)? != seal.emission.object_digest:
+            return Err("SOURCE-LINK-INPUT-CONTENT-CHANGED")
+        # The external linker opens the retained parent handle, not a mutable
+        # original pathname. CLOEXEC need not be disabled or duplicated.
+        val descriptor_path = "/proc/{getpid()}/fd/{seal.file.handle}"
+        retained_paths.push(descriptor_path)
+        index = index + 1
+    Ok(retained_paths)
+
+fn _source_region_finish_link_open_v1(output: text, file: RetainedFile,
+    seals: [SourceRegionObjectSealV1], execution: SourceRegionLinkExecutionV1,
+    account: MirLoopResourceAccountV1) -> Result<SourceRegionFinalLinkSealV1, text>:
+    if execution.policy != "source-native-direct-link-v1" or execution.tool.role != "linker" or execution.tool.authority_identity == "" or execution.runtime.authority_identities.len() == 0:
+        return Err("SOURCE-LINK-ACTUAL-TOOL-RUNTIME-RECEIPT-REQUIRED")
+    val header = source_region_elf_exact_v1(file, 0u64, 64, account)?
+    val machine = source_region_elf_field_v1(header, 18, 2) as i64
+    val page_size = source_region_native_page_size_v1(machine)?
+    val loads = source_region_elf_loads_v1(file, account)?
+    val section_count = source_region_elf_field_v1(header, 60, 2)
+    if section_count == 0u64 or section_count == 65535u64: return Err("SOURCE-LINK-SECTION-COUNT")
+    source_region_link_charge_v1(account, section_count as i64 * 72)?
+    val view = elf_file_linked_view_v1(file, section_count * 64u64, 1048576)?
+    var names: [text] = []
+    for seal in seals:
+        for record in seal.emission.descriptors:
+            source_region_link_charge_v1(account, 2, fields: 2)?
+            names.push(record.binding)
+            names.push(record.table_binding)
+    val symbols = source_region_elf_symbol_index_v1(view, names, account)?
+    var spans: [SourceRegionElfSpanV1] = []
+    var descriptor_count = 0
+    var closure = ""
+    for seal in seals:
+        retained_file_identity_unchanged(seal.file)?
+        if source_region_retained_digest_v1(seal.file, account)? != seal.emission.object_digest:
+            return Err("SOURCE-LINK-INPUT-CHANGED-DURING-LINK")
+        if closure == "": closure = seal.emission.closure_digest
+        elif closure != seal.emission.closure_digest: return Err("SOURCE-LINK-CLOSURE-MISMATCH")
+        for record in seal.emission.descriptors:
+            source_region_link_charge_v1(account, 4, fields: 4)?
+            val actual = source_region_elf_descriptor_spans_v1(view, loads, symbols, record, page_size, account)?
+            for span in actual:
+                for prior in spans:
+                    if span.address < prior.address + prior.bytes and prior.address < span.address + span.bytes:
+                        return Err("SOURCE-LINK-OVERLAPPING-DESCRIPTOR-RECORDS")
+                spans.push(span)
+            descriptor_count = descriptor_count + 1
+    if descriptor_count == 0 or closure == "": return Err("SOURCE-LINK-EMPTY-PROVENANCE")
+    val input_digest = source_region_link_input_digest_v1(seals)
+    if execution.input_digest != input_digest: return Err("SOURCE-LINK-EXECUTED-INPUT-SET-CHANGED")
+    source_region_elf_dynamic_v1(file, loads, machine, spans, account)?
+    val digest = source_region_retained_digest_v1(file, account)?
+    retained_file_identity_unchanged(file)?
+    # The request path is only checked for continued ownership. All inspected
+    # bytes came from the original output inode, never from this pathname.
+    val named = retained_file_open(output, file.size)?
+    val same = retained_file_same_object_v1(file, named)
+    val closed = named.close()
+    if same.is_err() or not closed: return Err("SOURCE-LINK-OUTPUT-NAME-IDENTITY")
+    if not same.unwrap(): return Err("SOURCE-LINK-OUTPUT-NAME-REPLACED")
+    retained_file_identity_unchanged(file)?
+    Ok(SourceRegionFinalLinkSealV1(output: output, file: file,
+        instrumentation_abi: 1, closure_digest: closure, input_digest: input_digest,
+        content_digest: digest, descriptor_count: descriptor_count, native_page_size: page_size,
+        execution: execution))
+
+fn source_region_finish_link_v1(output: text, file: RetainedFile, seals: [SourceRegionObjectSealV1],
+    execution: SourceRegionLinkExecutionV1, account: MirLoopResourceAccountV1) -> Result<SourceRegionFinalLinkSealV1, text>:
+    val result = _source_region_finish_link_open_v1(output, file, seals, execution, account)
+    if result.is_err():
+        val _closed = file.close()
+    result

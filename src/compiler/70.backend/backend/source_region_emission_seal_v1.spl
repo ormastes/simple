@@ -1,0 +1,140 @@
+# Called by actual object emission owners, not by the link request reader.
+# The manifest records bytes actually emitted for producer-validated SOURCE
+# functions. Binding names are locators; object bytes/digest are authoritative.
+use compiler.mir.mir_instructions.*
+use compiler.mir.source_region_context_transform_v1.{source_region_module_function_context_local_v1}
+use compiler.backend.common.source_region_descriptor_v1.*
+use compiler.backend.linker.source_region_link_types_v1.*
+use compiler.backend.linker.source_region_elf_protection_v1.{source_region_elf_field_v1}
+use compiler.backend.linker.elf_parser.{ElfObject, ElfSymbol, elf_parse_object}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+
+fn source_region_descriptor_binding_v1(digest: text, function_symbol: i64, destination: i64) -> text:
+    ".c4.{digest}.{function_symbol}.{destination}"
+
+fn _source_region_object_span_v1(object: ElfObject, section: i64, offset: i64, count: i64) -> Result<[u8], text>:
+    if section <= 0 or section >= object.sections.len() or offset < 0 or count <= 0:
+        return Err("SOURCE-EMIT-SECTION")
+    val actual = object.sections[section]
+    if (actual.sh_flags & 2) == 0 or offset > actual.sh_size or count > actual.sh_size - offset:
+        return Err("SOURCE-EMIT-ALLOCATED-SPAN")
+    val header = object.header.e_shoff + section * 64
+    val start = source_region_elf_field_v1(object.raw, header + 24, 8)
+    if start > object.raw.len() as u64 or offset as u64 > object.raw.len() as u64 - start or count as u64 > object.raw.len() as u64 - start - offset as u64:
+        return Err("SOURCE-EMIT-FILE-SPAN")
+    val base = start as i64 + offset
+    Ok(object.raw[base:base + count])
+
+fn _source_region_object_symbol_v1(object: ElfObject, names: Dict<text, i64>, name: text) -> Result<ElfSymbol, text>:
+    if val index = names.get(name):
+        if index < 0: return Err("SOURCE-EMIT-AMBIGUOUS-BINDING")
+        return Ok(object.symbols[index])
+    Err("SOURCE-EMIT-BINDING-NOT-RETAINED")
+
+fn source_region_emission_seal_v1(module: MirModule, bytes: [u8],
+    ordinary_struct_representation: i64) -> Result<SourceRegionEmissionSealV1?, text>:
+    if module.source_region_closure_digest_v1 == "": return Ok(nil)
+    if bytes.len() < 64 or bytes[4] != 2u8 or bytes[5] != 1u8:
+        return Err("SOURCE-EMIT-ELF64-LE-REQUIRED")
+    val object = elf_parse_object(bytes)?
+    if object.header.e_type != 1 or (object.header.e_machine != 62 and object.header.e_machine != 183):
+        return Err("SOURCE-EMIT-OBJECT-ABI")
+    var names: Dict<text, i64> = {}
+    var symbol_index = 0
+    for symbol in object.symbols:
+        if symbol.name != "":
+            if names.has(symbol.name): names[symbol.name] = -1
+            else: names[symbol.name] = symbol_index
+        symbol_index = symbol_index + 1
+    var records: [SourceRegionDescriptorObjectV1] = []
+    var protected_words: Dict<text, i64> = {}
+    var header_relocations: Dict<text, i64> = {}
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Intrinsic(destination, "source_region_struct_descriptor_v1", args):
+                        val context = source_region_module_function_context_local_v1(module, function)?
+                        if not context.?: return Err("SOURCE-EMIT-DESCRIPTOR-OUTSIDE-ADMITTED-CLOSURE")
+                        if val local = destination:
+                            var slots: [SourceRegionSlotV1] = []
+                            match source_region_descriptor_slots_v1(args):
+                                case Ok(value):
+                                    match source_region_resolve_struct_slots_v1(value, ordinary_struct_representation):
+                                        case Ok(actual): slots = actual
+                                        case Err(_): return Err("SOURCE-EMIT-STRUCT-REPRESENTATION")
+                                case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-INPUT")
+                            var extent = 0
+                            match source_region_descriptor_extent_v1(slots.len()):
+                                case Ok(value): extent = value
+                                case Err(_): return Err("SOURCE-EMIT-DESCRIPTOR-EXTENT")
+                            match source_region_descriptor_slot_words_v1(slots):
+                                case Err(_): return Err("SOURCE-EMIT-SLOT-CLASSIFICATION")
+                                case Ok(_): ()
+                            if slots.len() > 288230376151711743: return Err("SOURCE-EMIT-TABLE-EXTENT")
+                            val binding = source_region_descriptor_binding_v1(module.source_region_closure_digest_v1, function.symbol.id, local.id)
+                            val header_symbol = _source_region_object_symbol_v1(object, names, binding)?
+                            val table_symbol = _source_region_object_symbol_v1(object, names, binding + ".slots")?
+                            val table_extent = slots.len() * 32
+                            if header_symbol.st_size != 48 or table_symbol.st_size != table_extent:
+                                return Err("SOURCE-EMIT-SYMBOL-EXTENT")
+                            val header = _source_region_object_span_v1(object, header_symbol.st_shndx, header_symbol.st_value, 48)?
+                            val table = _source_region_object_span_v1(object, table_symbol.st_shndx, table_symbol.st_value, table_extent)?
+                            if (source_region_elf_field_v1(header, 0, 8) != 1u64 or source_region_elf_field_v1(header, 8, 8) != 1u64 or
+                                source_region_elf_field_v1(header, 16, 8) != extent as u64 or source_region_elf_field_v1(header, 24, 8) != slots.len() as u64 or
+                                source_region_elf_field_v1(header, 32, 8) != 0u64 or source_region_elf_field_v1(header, 40, 8) != 1u64):
+                                return Err("SOURCE-EMIT-HEADER-CONTENT")
+                            for index in 0..slots.len():
+                                if (source_region_elf_field_v1(table, index * 32, 8) != index as u64 * 8u64 or
+                                    source_region_elf_field_v1(table, index * 32 + 8, 8) != 8u64 or
+                                    source_region_elf_field_v1(table, index * 32 + 16, 8) != slots[index].kind as u64 or
+                                    source_region_elf_field_v1(table, index * 32 + 24, 8) != slots[index].representation as u64):
+                                    return Err("SOURCE-EMIT-SLOT-CONTENT")
+                            val record_index = records.len()
+                            records.push(SourceRegionDescriptorObjectV1(binding: binding, table_binding: binding + ".slots",
+                                header_section: header_symbol.st_shndx, header_offset: header_symbol.st_value as u64,
+                                table_section: table_symbol.st_shndx, table_offset: table_symbol.st_value as u64,
+                                allocation_bytes: extent as u64, slot_count: slots.len(), table_bytes: table_extent as u64,
+                                table_digest: sha256_u8_fast_hex(table)))
+                            for offset in 0..6:
+                                val key = "{header_symbol.st_shndx}:{header_symbol.st_value + offset * 8}"
+                                if protected_words.has(key): return Err("SOURCE-EMIT-OVERLAPPING-DESCRIPTORS")
+                                protected_words[key] = record_index
+                            for offset in 0..(table_extent / 8):
+                                val key = "{table_symbol.st_shndx}:{table_symbol.st_value + offset * 8}"
+                                if protected_words.has(key): return Err("SOURCE-EMIT-OVERLAPPING-DESCRIPTORS")
+                                protected_words[key] = record_index
+                        else: return Err("SOURCE-EMIT-DESCRIPTOR-DESTINATION")
+                    case _: ()
+    for relocation in object.relocations:
+        if relocation.r_offset < 0 or relocation.r_offset > 9223372036854775799 or relocation.r_info < 0:
+            return Err("SOURCE-EMIT-RELOCATION-BOUNDS")
+        val word = relocation.r_offset - relocation.r_offset % 8
+        val first = "{relocation.target_section_idx}:{word}"
+        val last = "{relocation.target_section_idx}:{word + 8}"
+        var record_index = protected_words.get(first) ?? -1
+        if relocation.r_offset % 8 != 0 and protected_words.has(last):
+            return Err("SOURCE-EMIT-UNALIGNED-DESCRIPTOR-RELOCATION")
+        if record_index < 0: continue
+        val record = records[record_index]
+        val key = "{record.header_section}:{record.header_offset + 32u64}"
+        if first != key or relocation.r_offset % 8 != 0 or header_relocations.has(key):
+            return Err("SOURCE-EMIT-UNEXPECTED-DESCRIPTOR-RELOCATION")
+        val kind = relocation.r_info & 4294967295
+        if (object.header.e_machine == 62 and kind != 1) or (object.header.e_machine == 183 and kind != 257):
+            return Err("SOURCE-EMIT-POINTER-RELOCATION-KIND")
+        val target_index = relocation.r_info >> 32
+        if target_index < 0 or target_index >= object.symbols.len() or relocation.r_addend < 0:
+            return Err("SOURCE-EMIT-POINTER-RELOCATION-TARGET")
+        val target = object.symbols[target_index]
+        if (target.st_shndx != record.table_section or target.st_value < 0 or target.st_value as u64 > record.table_offset or
+            relocation.r_addend as u64 != record.table_offset - target.st_value as u64):
+            return Err("SOURCE-EMIT-POINTER-RELOCATION-BINDING")
+        header_relocations[key] = 1
+    for record in records:
+        if not header_relocations.has("{record.header_section}:{record.header_offset + 32u64}"):
+            return Err("SOURCE-EMIT-POINTER-RELOCATION-MISSING")
+    if records.len() == 0: return Err("SOURCE-EMIT-NO-DESCRIPTOR-PROVENANCE")
+    Ok(Some(SourceRegionEmissionSealV1(instrumentation_abi: 1,
+        closure_digest: module.source_region_closure_digest_v1,
+        object_digest: sha256_u8_fast_hex(bytes), descriptors: records)))
