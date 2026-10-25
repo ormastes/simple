@@ -48,3 +48,20 @@ explicit-compare sites: `10.frontend/core/interpreter/module_loader_core.spl`
 :239, :643, :927, :934 (`d[k] == true`) and
 `90.tools/leak_check/static_runner.spl:221` (array, not dict). ~609 bool-valued
 dict declarations exist in `src/compiler`; not audited individually. Open.
+
+## Follow-up: duplicate struct layouts and wrong-enum match arms (2026-10-25)
+
+- **Field-layout collision** (`JoinPoint`, `CostEstimate`, `Diagnostic`, `CompileError`,
+  `TextSpan`, `ElfSymbol`, `CollectionPlanFacts`): `struct_field_order` is keyed by bare
+  name and first-registration wins. `resolve_field_index`
+  (`50.mir/_MirLowering/function_lowering.spl`) already tries the module-qualified
+  `composite_layout_key` first; now the bare tiers fail closed — a bare name flagged in
+  `struct_field_order_conflict_warned` is skipped in the value-provenance tier and is a
+  fatal error (not first-pick) in the final name tier.
+- **`AsmConstraintKind` has no variant `Tuple`/`Struct`**: in
+  `40.mono/monomorphize_integration.spl` (`rewrite_enum_payload`,
+  `mono_relevant_expr_v1`) the `Some(p)` binding of a `HirEnumPayload?` gets a wrong
+  recorded scrutinee type (cross-module SymbolId collision, same class as this bug), and
+  the bare `case Tuple/Struct` arms were resolved by global owner search. Arms are now
+  qualified as `HirEnumPayload.Tuple/Struct`. The payload-binding type inference itself
+  remains the open root cause above.
