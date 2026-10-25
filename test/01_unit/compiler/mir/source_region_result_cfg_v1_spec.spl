@@ -1,0 +1,78 @@
+use std.spec.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.source_region_result_cfg_v1.*
+
+fn cfg_error_type() -> MirType:
+    MirType(kind: MirTypeKind.Enum(SymbolId(id: 51)))
+
+fn cfg_callable(name: text, params: [MirType], returns: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType(kind:
+        MirTypeKind.FuncPtr(MirSignature(params: params, return_type: returns,
+            is_variadic: false, params_known: true)))))
+
+fn cfg_build(result_type: MirType, supplied_arg: MirType = MirType.i64()) -> Result<SourceRegionResultCfgV1, text>:
+    source_region_result_cfg_v1(result_type, cfg_error_type(),
+        cfg_callable("resolved_facade", [MirType.i64()], result_type),
+        [mir_operand_copy(LocalId(id: 2))], [supplied_arg],
+        SourceRegionResultFailureRoutesV1(err: BlockId(id: 11), malformed: BlockId(id: 12)),
+        20, BlockId(id: 10), nil)
+
+describe "source region scalar Result CFG":
+    it "routes canonical Ok to payload and Err or malformed tags to typed caller continuations":
+        val built = cfg_build(MirType(kind: MirTypeKind.Result(MirType.i64(), cfg_error_type())))
+        expect(built.is_ok()).to_equal(true)
+        match built:
+            case Ok(cfg):
+                expect(cfg.locals.len()).to_equal(3)
+                expect(cfg.locals[0].id.id).to_equal(20)
+                expect(cfg.payload.id).to_equal(22)
+                expect(cfg.next_local).to_equal(23)
+                expect(cfg.original_result.id).to_equal(20)
+                expect(cfg.check_instructions.len()).to_equal(2)
+                expect(cfg.ok_instructions.len()).to_equal(1)
+                match cfg.check_instructions[0].kind:
+                    case MirInstKind.Call(Some(dest), _, args):
+                        expect(dest.id).to_equal(20)
+                        expect(args.len()).to_equal(1)
+                    case _: fail("facade must define the typed Result local")
+                match cfg.ok_instructions[0].kind:
+                    case MirInstKind.Call(Some(dest), func, args):
+                        expect(dest.id).to_equal(22)
+                        match func.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _): expect(name).to_equal("rt_enum_payload")
+                            case _: fail("success must use canonical payload helper")
+                        match args[0].kind:
+                            case MirOperandKind.Copy(local): expect(local.id).to_equal(20)
+                            case _: fail("payload must decode actual facade result")
+                    case _: fail("success must define actual payload")
+                match cfg.check_terminator:
+                    case MirTerminator.Switch(_, targets, default):
+                        expect(targets.len()).to_equal(2)
+                        expect(targets[0].value).to_equal(0)
+                        expect(targets[0].target.id).to_equal(10)
+                        expect(targets[1].value).to_equal(1)
+                        expect(targets[1].target.id).to_equal(11)
+                        expect(default.id).to_equal(12)
+                    case _: fail("expected canonical Result switch")
+                expect(cfg.failure_blocks.len()).to_equal(0)
+                # No helper cleanup or abort: the original Result local reaches
+                # the caller's typed propagation block unchanged.
+                expect(cfg.original_result.id).to_equal(cfg.locals[0].id.id)
+            case Err(message): fail(message)
+
+    it "rejects erased handles and mismatched nominal errors":
+        expect(cfg_build(MirType.i64()).is_err()).to_equal(true)
+        val wrong = MirType(kind: MirTypeKind.Enum(SymbolId(id: 52)))
+        expect(cfg_build(MirType(kind: MirTypeKind.Result(MirType.i64(), wrong))).is_err()).to_equal(true)
+        expect(cfg_build(MirType(kind: MirTypeKind.Result(MirType.bool(), cfg_error_type()))).is_err()).to_equal(true)
+
+    it "fails closed on mismatched argument types and erased Result types":
+        expect(source_region_cfg_params_same_v1([MirType.i64()], [MirType.bool()])).to_equal(false)
+        expect(source_region_cfg_params_same_v1([MirType.i64()], [])).to_equal(false)
+        val result = MirType(kind: MirTypeKind.Result(MirType.i64(), cfg_error_type()))
+        expect(cfg_build(result, MirType.bool()).is_err()).to_equal(true)
+        expect(source_region_cfg_type_same_v1(result, MirType.i64())).to_equal(false)
+        expect(source_region_cfg_type_same_v1(MirType(kind: MirTypeKind.Ptr(MirType.i64(), true)), MirType(kind: MirTypeKind.Ptr(MirType.i64(), false)))).to_equal(false)

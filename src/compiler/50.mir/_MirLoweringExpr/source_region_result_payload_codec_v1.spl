@@ -1,0 +1,48 @@
+# Adapter for the ACTUAL owning lowering session. The builder, declaration
+# tables and local-provenance maps are intentionally not copied or recreated.
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_lowering_stmts.*
+
+impl MirLowering:
+    me decode_source_region_result_payload_v1(raw: LocalId, expected: HirType) -> Result<LocalId, text>:
+        # Caller proves the outer Result arm first. In particular, nested
+        # Result payloads remain the original inner handle; no flattening.
+        if self.local_mir_type_of(raw) == nil:
+            return Err("SOURCE-RESULT-CODEC: payload local is not owned by this lowering")
+        match expected.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _):
+                return Err("SOURCE-RESULT-CODEC: unresolved payload type")
+            case HirTypeKind.Tuple(_):
+                # Admission reads this owner's declaration-qualified layout.
+                # Unsupported layouts fail before the canonical decoder emits
+                # its error sentinel, never as an invented aggregate cast.
+                if self.result_try_tuple_payload_type(expected) == nil:
+                    return Err("SOURCE-RESULT-CODEC: unsupported canonical Result tuple layout")
+                Ok(self.decode_result_tuple_payload(raw, expected))
+            case _: Ok(self.decode_declared_enum_payload_slot(raw, expected))
+
+    me encode_source_region_result_payload_v1(value: LocalId, expected: HirType) -> Result<LocalId, text>:
+        if self.local_mir_type_of(value) == nil:
+            return Err("SOURCE-RESULT-CODEC: value local is not owned by this lowering")
+        if val actual = self.find_local_hir_type(value.id):
+            if not enum_payload_types_compatible(expected, actual):
+                return Err("SOURCE-RESULT-CODEC: value payload type mismatch")
+        else:
+            return Err("SOURCE-RESULT-CODEC: missing owning HIR payload provenance")
+        match expected.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _):
+                return Err("SOURCE-RESULT-CODEC: unresolved payload type")
+            case HirTypeKind.Tuple(_):
+                if self.result_try_tuple_payload_type(expected) == nil:
+                    return Err("SOURCE-RESULT-CODEC: unsupported canonical Result tuple layout")
+            case _: ()
+        # Exactly the canonical one-slot constructor path: numeric adaptation,
+        # Any boxing, u64 boxing and float bit preservation stay in their
+        # established owners. A tuple remains its native heap pointer carrier.
+        val adapted = self.adapt_declared_enum_payload(expected, value)
+        Ok(self.encode_declared_enum_payload_slot(adapted))
