@@ -1,7 +1,8 @@
 # C4 prepaid cleanup integration boundary v1
 
-Status: contract SOURCE_GO for private native implementation; candidate source
-and new cleanup-specific regression await independent review/execution.
+Status: exact native source 73d4ee09fd7 received conditional UNSAFE/private
+SOURCE_GO; one root-authorized new cleanup regression passed ASan/UBSan. Safe
+compiler pin/account admission remains UNRUN and the safe facade stays disabled.
 The merged native primitive's six-attempt budget remains exhausted. This is a
 new request-lifetime integration obligation, not a retry of those green checks.
 
@@ -114,13 +115,40 @@ explicit root scheduling and records its separate obligations: account closed
 or exhausted, unrelated owner rehash, pending read lease end, one-use credits,
 retained original/cleanup errors, contention, and no stale live capability.
 
-Current status: implementation candidate only. No execution PASS; no whole
-SOURCE, container, pure/hosted or compiler-confinement admission follows.
+No whole SOURCE, container, pure/hosted or compiler-confinement admission
+follows from the conditional source review and private native execution.
 
-Candidate files are runtime_memory.c, runtime_source_region_v1.h/.inc and the
+Owned files are runtime_memory.c, runtime_source_region_v1.h/.inc and the
 new runtime_source_region_cleanup_credit_v1_test.c. No safe facade integration
 is enabled. The new fixture uses genuinely born retained C controls and checks
 fixed credits after actual unrelated registry rehash, lock-independent revoke/
 lease end, retained owner on trylock/lease/member conflicts and explicit distinct
-attempt credits. It is not an executed shared-Simple-account or compiler pin
+attempt credits. It supplies neither an executed shared-Simple-account nor compiler pin
 receipt and never calls the exhausted general primitive test.
+
+## Exact private native evidence (2026-10-25)
+
+Production and fixture revision: `73d4ee09fd7`. Independent reviewer found no
+P0/P1 under the explicitly UNSAFE genuine retained-pin/single-owner contract.
+Root authorized one new cleanup-specific compile/run; that attempt passed:
+
+```sh
+cc -std=gnu11 -O0 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -pthread test/01_unit/runtime/runtime_source_region_cleanup_credit_v1_test.c src/runtime/runtime_native.c -Wl,--gc-sections -ldl -lm -o /tmp/simple-c4-cleanup-native-test
+/tmp/simple-c4-cleanup-native-test
+```
+
+Exit 0: `C4 private live cleanup integration: PASS (safe pin/account admission UNRUN)`.
+No sanitizer findings. Observed peak RSS was 238596 KiB for compilation and
+10504 KiB for execution, below the authorized 1 GiB bound. Private timing/RSS
+receipts: `/tmp/c4-cleanup-native-compile.time` and
+`/tmp/c4-cleanup-native-run.time`.
+
+The fixture executed actual native transient scope ownership, unrelated ordinary
+registry growth/rehash before cleanup, live revoke/read-end while the existing
+owner lock was held, retained control after failed trylock/lease/member checks,
+distinct attempt allowances, and retirement of a revoked writer after its member
+was freed. It did not re-run the exhausted general primitive test. New cleanup
+attempt count is one; no repeat is needed. The earlier six-attempt primitive
+budget remains exhausted. This is not an actual Simple account-close/exhaustion,
+affine verifier receipt, safe facade admission, performance qualification or
+whole SOURCE acceptance.
