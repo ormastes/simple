@@ -454,7 +454,13 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         Value::UInt { value, .. } => {
             simple_runtime::value::rt_transient_heap_promote(simple_runtime::value::RuntimeValue::from_raw(*value))
         }
-        Value::Nil => false,
+        // A nil optional owns no transient heap state: promotion is a no-op
+        // success, exactly as in the C and Rust runtimes
+        // (value/collections.rs rt_transient_heap_promote). Returning false
+        // here made every seed retained parse of a file without an
+        // @representation block panic "transient retained parser ownership
+        // failed (declaration=false)".
+        Value::Nil => true,
         // Interpreter composites are Arc/owned Rust values, not allocations in
         // the runtime transient scope, so they are already retained. The
         // protocol still matches the C and Rust runtimes: promotion succeeds
@@ -2354,7 +2360,7 @@ mod tests {
         assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
         assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
-        assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
+        assert_eq!(promote(&Value::Nil), Value::Bool(true), "nil owns nothing: no-op success, as in the runtimes");
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
     }
@@ -2457,15 +2463,28 @@ mod tests {
         assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
+        // Integer carriers go straight to the runtime twin, which (since the
+        // 2026-10-22 scalar exemption in value/collections.rs) treats a
+        // non-heap scalar as a no-op success, outside any scope too.
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
-            Ok(Value::Bool(false))
+            Ok(Value::Bool(true))
         ));
         assert!(rt_transient_heap_promote(&[]).is_err());
+    }
+
+    #[test]
+    fn transient_heap_promote_nil_is_noop_success_in_any_scope_state() {
+        // Mirrors value/collections.rs: nil owns no transient state.
+        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
     }
 
     #[test]
