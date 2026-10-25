@@ -1,6 +1,9 @@
 /* Private canonical-owner regression. Compile this TU (runtime_native included)
  * with runtime_memory.c, function/data sections and --gc-sections. Deliberately
  * tiny: this is C owner evidence, never full compiler/capsule qualification. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <assert.h>
 #include <pthread.h>
 #include "../../../src/runtime/runtime_native.c"
