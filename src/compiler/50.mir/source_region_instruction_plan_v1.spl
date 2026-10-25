@@ -4,6 +4,7 @@ use compiler.mir.mir_instructions.*
 use compiler.mir.mir_types.{MirTypeDefKind, MirFieldDef}
 use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.source_region_descriptor_input_v1.{source_region_ordinary_struct_representation_v1}
 
 struct SourceRegionOperationPlanV1:
     prelude: [MirInst]
@@ -33,6 +34,19 @@ fn source_region_plan_scalar_v1(type_: MirType) -> bool:
     match type_.kind:
         case I64 | U64 | Bool: true
         case _: false
+
+fn source_region_plan_storage_v1(module: MirModule, type_: MirType) -> bool:
+    if source_region_plan_scalar_v1(type_): return true
+    match type_.kind:
+        case Struct(symbol):
+            if symbol.id < 0: return false
+            for key in module.types.keys():
+                if key.id == symbol.id:
+                    match module.types[key].kind:
+                        case Struct(_): return true
+                        case _: return false
+        case _: ()
+    false
 
 fn source_region_plan_facade_v1(module: MirModule, symbol: SymbolId, arity: i64, context_type: MirType) -> Result<MirOperand, text>:
     for key in module.functions.keys():
@@ -112,7 +126,7 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
             if field < 0 or field >= fields.len():
                 return Err("SOURCE-STORE: destination slot is not declared")
             val layout = fields[field]
-            if layout.offset != field * 8 or layout.has_bits_attr or not source_region_plan_scalar_v1(layout.type_):
+            if layout.offset != field * 8 or layout.has_bits_attr or not source_region_plan_storage_v1(module, layout.type_):
                 return Err("SOURCE-STORE: unsupported exact field layout")
             match source_region_plan_operand_type_v1(func, value):
                 case Ok(type_):
@@ -155,14 +169,18 @@ fn source_region_instruction_plan_v1(module: MirModule, func: MirFunction,
             var descriptor_args: [MirOperand] = []
             var field_index = 0
             for field in fields:
-                if field.has_bits_attr or field.offset != field_index * 8 or not source_region_plan_scalar_v1(field.type_):
+                if field.has_bits_attr or field.offset != field_index * 8 or not source_region_plan_storage_v1(module, field.type_):
                     return Err("SOURCE-STORE: unclassified constructor slot")
                 match source_region_plan_operand_type_v1(func, operands[field_index]):
                     case Ok(type_):
                         if type_ != field.type_: return Err("SOURCE-STORE: constructor incoming edge type differs")
                     case Err(error): return Err(error)
-                descriptor_args = descriptor_args.push(mir_operand_const_int(1))
-                descriptor_args = descriptor_args.push(mir_operand_const_int(0))
+                if source_region_plan_scalar_v1(field.type_):
+                    descriptor_args = descriptor_args.push(mir_operand_const_int(1))
+                    descriptor_args = descriptor_args.push(mir_operand_const_int(0))
+                else:
+                    descriptor_args = descriptor_args.push(mir_operand_const_int(2))
+                    descriptor_args = descriptor_args.push(mir_operand_const_int(source_region_ordinary_struct_representation_v1()))
                 field_index = field_index + 1
             val descriptor = LocalId(id: first_local)
             val allocation = LocalId(id: first_local + 1)

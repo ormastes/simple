@@ -35,6 +35,31 @@ fn source_region_plan_fixture_module_v1() -> MirModule:
     MirModule(name: "source_region_plan_fixture", functions: functions, statics: {}, constants: {}, types: types)
 
 describe "SOURCE allocation/store instruction replacement plans":
+    it "keeps a typed mutable child edge in the provider write path":
+        var module = source_region_plan_fixture_module_v1()
+        val parent_type = MirType(kind: MirTypeKind.Struct(SymbolId(id: 101)))
+        val child_type = MirType(kind: MirTypeKind.Struct(SymbolId(id: 100)))
+        var subject = module.functions[SymbolId(id: 0)]
+        subject.locals = subject.locals.push(MirLocal(id: LocalId(id: 2), name: nil, type_: parent_type, kind: LocalKind.Temp, is_ghost: false))
+        module.types[SymbolId(id: 101)] = MirTypeDef(symbol: SymbolId(id: 101), name: "Parent",
+            kind: MirTypeDefKind.Struct([MirFieldDef(name: "child", type_: child_type, offset: 0, has_bits_attr: false, bits_width: 0)]), is_export_c: false, export_name: "")
+        val inst = MirInst(kind: MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 101)), [mir_operand_copy(LocalId(id: 1))]), span: nil)
+        match source_region_instruction_plan_v1(module, subject, inst, LocalId(id: 0), source_region_plan_fixture_symbols_v1(), 10):
+            case Ok(Some(plan)):
+                expect(plan.steps.len()).to_equal(2)
+                match plan.steps[0].prelude[0].kind:
+                    case Intrinsic(_, _, args):
+                        match args[0].kind:
+                            case Const(Int(kind), _): expect(kind).to_equal(2)
+                            case _: assert(false)
+                        match args[1].kind:
+                            case Const(Int(representation), _): expect(representation).to_equal(3)
+                            case _: assert(false)
+                    case _: assert(false)
+                expect(plan.steps[1].args.len()).to_equal(4)
+                expect(plan.steps[0].success.len()).to_equal(0)
+            case _: assert(false)
+
     it "allocates one instance then initializes every field before publication":
         val module = source_region_plan_fixture_module_v1()
         val subject = module.functions[SymbolId(id: 0)]
