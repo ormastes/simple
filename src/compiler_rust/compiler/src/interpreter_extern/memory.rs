@@ -526,7 +526,7 @@ pub fn rt_session_heap_id(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Same carrier rules as `rt_transient_heap_promote`: raw handles adopt in the
-/// runtime; nil is a no-op success; interpreter composites own no runtime
+/// runtime; nil uses the same runtime prerequisites; interpreter composites own no runtime
 /// transient state, so they succeed exactly when adoption is possible at all.
 pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -541,7 +541,7 @@ pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
         Value::UInt { value, .. } => {
             simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*value))
         }
-        Value::Nil => true,
+        Value::Nil => simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::NIL),
         _ => {
             simple_runtime::value::rt_session_heap_id() != 0
                 && simple_runtime::value::transient_heap_scope_paused()
@@ -2843,5 +2843,24 @@ mod tests {
         );
         rt_volatile_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
         assert_eq!(value, 0x7654_3210);
+    }
+
+    #[test]
+    fn session_nil_adoption_matches_runtime_prerequisites() {
+        fn nil_adopts() -> bool {
+            matches!(rt_transient_heap_adopt(&[Value::Nil]).unwrap(), Value::Bool(true))
+        }
+        assert!(!nil_adopts(), "no live session");
+        let session = simple_runtime::value::rt_session_heap_begin();
+        assert_ne!(session, 0);
+        assert!(!nil_adopts(), "no paused module scope");
+        assert!(simple_runtime::value::rt_transient_array_scope_begin());
+        assert!(!nil_adopts(), "running module scope");
+        assert!(simple_runtime::value::rt_transient_array_scope_pause());
+        assert!(nil_adopts(), "live session and paused module");
+        assert!(simple_runtime::value::rt_transient_array_scope_end());
+        assert!(!nil_adopts(), "ended module scope");
+        assert!(simple_runtime::value::rt_session_heap_end(session));
+        assert!(!nil_adopts(), "ended session");
     }
 }
