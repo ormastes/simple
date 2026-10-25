@@ -1,39 +1,11 @@
-# Measured process / host commit memory, pure Simple over the OS boundary
-# (no new rt_* symbol: Win64 kernel32 directly, /proc on Linux).
-# Shard coordinators admit workers by these instead of a fixed estimate.
+# System commit headroom over registered probes only, so it answers in the
+# seed interpreter and in native code alike (no kernel32 binding needed).
+# Shard coordinators admit workers by it instead of a fixed estimate.
 
 @when(os="windows"):
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CloseHandle, rt_host_commit_headroom_bytes_v1}
-use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{rt_host_commit_headroom_bytes_v1}
 
-@unsafe(reason: "Win64 query-only handle to a child process for memory counters", capabilities: [ffi])
-extern fn OpenProcess(access: u32, inherit: i32, pid: u32) -> i64
-@unsafe(reason: "Win64 copied process memory counters", capabilities: [ffi, raw_ptr])
-extern fn K32GetProcessMemoryInfo(process: i64, counters: i64, size: u32) -> i32
-
-# PROCESS_QUERY_LIMITED_INFORMATION
-val PROCESS_MEMORY_QUERY_ACCESS: u32 = 4096u32
-# sizeof(PROCESS_MEMORY_COUNTERS_EX) on Win64; PrivateUsage at offset 72.
-val PROCESS_MEMORY_COUNTERS_EX_SIZE: u32 = 80u32
-
-# Committed private KiB (PrivateUsage) of a live process; -1 when unknown.
-pub fn process_private_kib(pid: i64) -> i64:
-    if pid <= 0: return -1
-    var kib: i64 = -1
-    unsafe(capabilities: [ffi, raw_ptr]):
-        val handle = OpenProcess(PROCESS_MEMORY_QUERY_ACCESS, 0, pid as u32)
-        if handle != 0:
-            val heap = GetProcessHeap()
-            val counters = if heap != 0: HeapAlloc(heap, 8u32, 80u64) else: 0
-            if counters != 0:
-                volatile_write_u32(counters, PROCESS_MEMORY_COUNTERS_EX_SIZE)
-                if K32GetProcessMemoryInfo(handle, counters, PROCESS_MEMORY_COUNTERS_EX_SIZE) != 0:
-                    kib = (volatile_read_u64(counters + 72) / 1024u64) as i64
-                val _freed = HeapFree(heap, 0u32, counters)
-            val _closed = CloseHandle(handle)
-    kib
-
-# System commit headroom KiB (CommitLimit - CommitTotal); -1 when unknown.
+# CommitLimit - CommitTotal, KiB; -1 when unknown.
 pub fn host_commit_avail_kib() -> i64:
     var bytes: i64 = 0
     unsafe(capabilities: [ffi]):
@@ -42,24 +14,16 @@ pub fn host_commit_avail_kib() -> i64:
 @else:
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
-# Value in KiB of a "<key> <n> kB" row of a /proc status-style table; -1 when absent.
+# Value of a "<key> <n> kB" row of a /proc table; -1 when absent.
 pub fn proc_status_kib(table: text, key: text) -> i64:
-    for line in table.split("\n"):
+    for line in table.split("
+"):
         if line.starts_with(key):
             val rest = line.substring(key.len()).trim()
             val space = rest.index_of(" ")
             val digits = if space > 0: rest.substring(0, space) else: rest
             return digits.to_i64() ?? -1
     -1
-
-# VmRSS + VmSwap KiB of a live process; -1 when unknown.
-pub fn process_private_kib(pid: i64) -> i64:
-    if pid <= 0: return -1
-    val table = file_read_nullable("/proc/{pid}/status") ?? ""
-    val rss = proc_status_kib(table, "VmRSS:")
-    if rss < 0: return -1
-    val swap = proc_status_kib(table, "VmSwap:")
-    rss + (if swap > 0: swap else: 0)
 
 # MemAvailable + SwapFree KiB; -1 when unknown.
 pub fn host_commit_avail_kib() -> i64:
