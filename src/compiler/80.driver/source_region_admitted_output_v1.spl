@@ -10,8 +10,7 @@ use compiler.backend.linker.native_config.{NativeLinkConfig}
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1}
 use compiler.backend.linker._LinkerWrapper.native_linking.{link_to_native_with_engine}
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
-use std.nogc_sync_mut.io.retained_file.{retained_file_open}
-use std.nogc_sync_mut.io.file_ops.{file_delete}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_external_output_read_v1}
 
 fn _finish_selected_module_compile_admitted_v1(compiled: Result<CompiledModule, CompileError>,
     path: text, account: MirLoopResourceAccountV1) -> Result<SourceRegionAdmittedObjectV1, text>:
@@ -28,15 +27,16 @@ fn _finish_selected_module_compile_admitted_v1(compiled: Result<CompiledModule, 
                     # Exclusive creation is the actual output-owner boundary.
                     val writer = retained_file_open(path, bytes.len() as u64, true)?
                     val written = writer.write(bytes)
-                    val closed = writer.close()
-                    if written.is_err() or not closed:
-                        file_delete(path)
+                    if written.is_err():
+                        val _closed = writer.close()
                         return Err("SOURCE-OBJECT-OUTPUT-WRITE")
-                    match source_region_admit_emitted_object_v1(path, emission, account):
+                    val sealed = retained_file_external_output_read_v1(writer)
+                    if sealed.is_err():
+                        val _closed = writer.close()
+                        return Err(sealed.unwrap_err())
+                    match source_region_admit_emitted_object_v1(path, sealed.unwrap(), emission, account):
                         case Ok(object): return Ok(object)
-                        case Err(reason):
-                            file_delete(path)
-                            return Err(reason)
+                        case Err(reason): return Err(reason)
                 return Err("SOURCE-OBJECT-EMISSION-WITHOUT-BYTES")
             return Err("SOURCE-OBJECT-BACKEND-EMISSION-SEAL-MISSING")
 

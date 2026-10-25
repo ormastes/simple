@@ -1,10 +1,11 @@
 # Native + SMF-bundle linking — link_to_native and cc/windows/msvc backends.
 use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
-use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1, native_link_attach_source_seal_v1, native_link_attach_source_execution_v1}
-use compiler.backend.linker.source_region_link_gate_v1.{source_region_link_inputs_v1, source_region_finish_link_v1, source_region_link_input_digest_v1, source_region_link_argument_digest_v1}
+use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1, native_link_attach_source_seal_v1, native_link_attach_source_execution_v1, native_link_source_output_v1}
+use compiler.backend.linker.source_region_link_gate_v1.{source_region_link_inputs_v1, source_region_begin_output_v1, source_region_finish_link_v1, source_region_link_input_digest_v1, source_region_link_argument_digest_v1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_same_object_v1, retained_file_external_output_read_v1}
 use compiler.backend.linker.source_region_link_types_v1.{SourceRegionLinkExecutionV1}
-use std.nogc_sync_mut.io.native_tool_authority_v1.{NativeToolAdmissionReceiptV1, native_tool_admission_receipt_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{NativePinnedArtifactV1, NativeToolAdmissionReceiptV1, native_tool_admission_receipt_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_admission_receipt_v1}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
 use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
@@ -232,7 +233,7 @@ fn link_to_native_with_engine(object_files: [text], output: text, config: Native
         if tools_checked.is_err() or runtime_checked.is_err():
             if val seal = result.unwrap().source_region_seal_v1:
                 val _closed = seal.file.close()
-            file_delete(output)
+            if config.source_region_objects_v1.len() == 0: file_delete(output)
             if tools_checked.is_err(): return Err(tools_checked.unwrap_err())
             return Err(runtime_checked.unwrap_err())
     result
@@ -247,15 +248,26 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
         val _admitted_linker = native_tool_strict_resolve_v1("linker")?
         if val account = config.source_region_account_v1:
             val retained_inputs = source_region_link_inputs_v1(object_files, config.source_region_objects_v1, account)?
-            val linked = native_link_execute_admitted_inputs_and_engine_v1(retained_inputs, output, config)
-            if linked.is_err(): return linked
+            val writer = source_region_begin_output_v1(output, config.source_region_objects_v1, account)?
+            var owned_config = config
+            owned_config.source_region_output_v1 = Some(writer)
+            val output_descriptor = "/proc/{getpid()}/fd/{writer.handle}"
+            val linked = native_link_execute_admitted_inputs_and_engine_v1(retained_inputs, output_descriptor, owned_config)
+            if linked.is_err():
+                val _closed = writer.close()
+                return linked
             if val execution = linked.unwrap().source_region_execution_v1:
-                match source_region_finish_link_v1(output, config.source_region_objects_v1, execution, account):
-                    case Ok(seal): return Ok(native_link_attach_source_seal_v1(linked.unwrap(), seal))
+                val read_owner = retained_file_external_output_read_v1(writer)
+                if read_owner.is_err():
+                    val _closed = writer.close()
+                    return Err(read_owner.unwrap_err())
+                match source_region_finish_link_v1(output, read_owner.unwrap(), config.source_region_objects_v1, execution, account):
+                    case Ok(seal):
+                        val named = native_link_source_output_v1(linked.unwrap(), output)
+                        return Ok(native_link_attach_source_seal_v1(named, seal))
                     case Err(reason):
-                        file_delete(output)
                         return Err(reason)
-            file_delete(output)
+            val _closed = writer.close()
             return Err("SOURCE-LINK-ACTUAL-EXECUTION-RECEIPT-MISSING")
         return Err("SOURCE-LINK-ACCOUNT-MISSING")
     native_link_execute_admitted_inputs_and_engine_v1(object_files, output, config)
@@ -601,7 +613,18 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
     var source_tool: NativeToolAdmissionReceiptV1? = nil
     if config.source_region_objects_v1.len() != 0:
         source_tool = Some(native_tool_admission_receipt_v1("linker", execution_linker_path)?)
-        val _admitted_runtime = native_runtime_admission_receipt_v1()?
+        val admitted_runtime = native_runtime_admission_receipt_v1()?
+        if val writer = config.source_region_output_v1:
+            var artifacts: [NativePinnedArtifactV1] = []
+            for file in admitted_runtime.files: artifacts.push(file)
+            for generated in admitted_runtime.generated: artifacts.push(generated)
+            for artifact in artifacts:
+                val input = retained_file_open(artifact.path, 1099511627776u64)?
+                val same = retained_file_same_object_v1(writer, input)
+                val closed = input.close()
+                if same.is_err() or not closed: return Err("SOURCE-LINK-INPUT-ALIAS-OBSERVATION")
+                if same.unwrap(): return Err("SOURCE-LINK-OUTPUT-ALIASES-RUNTIME-INPUT")
+        else: return Err("SOURCE-LINK-EXCLUSIVE-OUTPUT-OWNER-MISSING")
     record_link_command(output, execution_linker_path, args, config.verbose)
     val exec_result = execute_linker(execution_linker_path, args)
     if exec_result.is_err():

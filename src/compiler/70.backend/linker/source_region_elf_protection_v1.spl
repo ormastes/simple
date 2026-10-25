@@ -5,7 +5,7 @@ use compiler.backend.linker.source_region_link_types_v1.*
 use compiler.backend.linker.elf.elf_file_reader.{ElfFileObjectV1, ElfFileSymbolV1, elf_file_section_v1}
 use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_read_at, retained_file_identity_unchanged}
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
-use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text}
 use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_u8_fast_hex}
 
 struct SourceRegionElfLoadV1:
@@ -19,6 +19,10 @@ struct SourceRegionElfLoadV1:
 struct SourceRegionElfSpanV1:
     address: u64
     bytes: u64
+
+struct SourceRegionElfSymbolIndexV1:
+    names: [text]
+    symbols: [ElfFileSymbolV1?]
 
 fn source_region_link_charge_v1(account: MirLoopResourceAccountV1, work: i64,
     fields: i64 = 0, bytes: i64 = 0) -> Result<bool, text>:
@@ -56,11 +60,21 @@ fn source_region_retained_digest_v1(file: RetainedFile, account: MirLoopResource
     if val digest = hash.finish_hex(): return Ok(digest)
     Err("SOURCE-LINK-HASH-FINAL")
 
-fn source_region_elf_find_symbol_v1(view: ElfFileObjectV1, name: text,
-    account: MirLoopResourceAccountV1) -> Result<ElfFileSymbolV1, text>:
-    val wanted = base_encoding_text_to_bytes(name)
-    if wanted.len() == 0 or wanted.len() >= 1048576: return Err("SOURCE-LINK-BINDING")
-    var result: ElfFileSymbolV1? = nil
+fn source_region_elf_symbol_index_v1(view: ElfFileObjectV1, names: [text],
+    account: MirLoopResourceAccountV1) -> Result<SourceRegionElfSymbolIndexV1, text>:
+    var values: [ElfFileSymbolV1?] = []
+    var maximum_name = 0
+    var expected_index = 0
+    for name in names:
+        if name.len() < 4 or name.len() >= 1048576 or not name.starts_with(".c4."):
+            return Err("SOURCE-LINK-BINDING")
+        if expected_index > 9223372036854775807 / (name.len() + 1): return Err("SOURCE-LINK-INDEX-CAPACITY")
+        source_region_link_charge_v1(account, expected_index * (name.len() + 1) + 4, fields: 2)?
+        for prior in 0..expected_index:
+            if names[prior] == name: return Err("SOURCE-LINK-DUPLICATE-EXPECTED-BINDING")
+        values.push(nil)
+        expected_index = expected_index + 1
+        if name.len() > maximum_name: maximum_name = name.len()
     for index in 0..view.section_count:
         source_region_link_charge_v1(account, 72)?
         val table = elf_file_section_v1(view, index)?
@@ -72,23 +86,56 @@ fn source_region_elf_find_symbol_v1(view: ElfFileObjectV1, name: text,
         var ordinal = 0u64
         while ordinal < table.size / 24u64:
             val row = source_region_elf_exact_v1(view.file, table.file_offset + ordinal * 24u64, 24, account)?
+            ordinal = ordinal + 1u64
+            # Only retained compiler-local data symbols can locate descriptors.
+            if row[4] != 1u8: continue
             val name_offset = source_region_elf_field_v1(row, 0, 4)
             if name_offset > strings.size: return Err("SOURCE-LINK-SYMBOL-NAME")
-            if wanted.len() as u64 < strings.size - name_offset:
-                val actual = source_region_elf_exact_v1(view.file, strings.file_offset + name_offset, wanted.len() + 1, account)?
-                var same = actual[wanted.len()] == 0u8
-                for byte in 0..wanted.len():
-                    if actual[byte] != wanted[byte]: same = false
-                if same:
-                    if result.?: return Err("SOURCE-LINK-AMBIGUOUS-BINDING")
-                    val section = source_region_elf_field_v1(row, 6, 2) as i64
-                    if section <= 0 or section >= view.section_count: return Err("SOURCE-LINK-BINDING-SECTION")
-                    result = Some(ElfFileSymbolV1(name_bytes: wanted,
-                        binding: (row[4] >> 4) as i64, symbol_type: (row[4] & 15u8) as i64,
-                        visibility: (row[5] & 3u8) as i64, section_index: section,
-                        value: source_region_elf_field_v1(row, 8, 8), size: source_region_elf_field_v1(row, 16, 8)))
-            ordinal = ordinal + 1u64
-    if val symbol = result: return Ok(symbol)
+            val remaining = strings.size - name_offset
+            if remaining < 5u64: continue
+            val prefix = source_region_elf_exact_v1(view.file, strings.file_offset + name_offset, 4, account)?
+            if prefix != [46u8, 99u8, 52u8, 46u8]: continue
+            val count = if remaining > maximum_name as u64: maximum_name + 1 else: remaining as i64
+            val raw = source_region_elf_exact_v1(view.file, strings.file_offset + name_offset, count, account)?
+            var length = -1
+            var ascii = true
+            for byte in 0..raw.len():
+                if raw[byte] == 0u8:
+                    length = byte
+                    break
+                if raw[byte] > 127u8: ascii = false
+            if length < 0 or not ascii: continue
+            val name = base_encoding_bytes_to_text(raw[0:length])
+            # This compact index contains only requested markers, never the
+            # complete symbol population. Its linear name comparisons have
+            # an explicit bound; there is no unqualified hash-probe claim.
+            if names.len() > 9223372036854775807 / (maximum_name + 1): return Err("SOURCE-LINK-INDEX-CAPACITY")
+            source_region_link_charge_v1(account, names.len() * (maximum_name + 1) + 1)?
+            var selected = -1
+            for wanted_index in 0..names.len():
+                if names[wanted_index] == name: selected = wanted_index
+            if selected < 0: continue
+            if values[selected].?: return Err("SOURCE-LINK-AMBIGUOUS-BINDING")
+            val section = source_region_elf_field_v1(row, 6, 2) as i64
+            if section <= 0 or section >= view.section_count: return Err("SOURCE-LINK-BINDING-SECTION")
+            source_region_link_charge_v1(account, 8, fields: 8)?
+            values[selected] = Some(ElfFileSymbolV1(name_bytes: raw[0:length], binding: 0, symbol_type: 1,
+                visibility: (row[5] & 3u8) as i64, section_index: section,
+                value: source_region_elf_field_v1(row, 8, 8), size: source_region_elf_field_v1(row, 16, 8)))
+    for value in values:
+        if not value.?: return Err("SOURCE-LINK-BINDING-LOST-OR-STRIPPED")
+    Ok(SourceRegionElfSymbolIndexV1(names: names, symbols: values))
+
+fn source_region_elf_index_find_v1(index: SourceRegionElfSymbolIndexV1, name: text,
+    account: MirLoopResourceAccountV1) -> Result<ElfFileSymbolV1, text>:
+    if index.names.len() != index.symbols.len() or name.len() >= 1048576:
+        return Err("SOURCE-LINK-INDEX-SHAPE")
+    if index.names.len() > 9223372036854775807 / (name.len() + 1): return Err("SOURCE-LINK-INDEX-CAPACITY")
+    source_region_link_charge_v1(account, index.names.len() * (name.len() + 1) + 1)?
+    for ordinal in 0..index.names.len():
+        if index.names[ordinal] == name:
+            if val symbol = index.symbols[ordinal]: return Ok(symbol)
+            return Err("SOURCE-LINK-BINDING-LOST-OR-STRIPPED")
     Err("SOURCE-LINK-BINDING-LOST-OR-STRIPPED")
 
 fn source_region_span_contains_v1(start: u64, size: u64, address: u64, count: u64) -> bool:
@@ -247,12 +294,12 @@ fn source_region_elf_dynamic_v1(file: RetainedFile, loads: [SourceRegionElfLoadV
     Ok(true)
 
 fn source_region_elf_descriptor_spans_v1(view: ElfFileObjectV1,
-    loads: [SourceRegionElfLoadV1], record: SourceRegionDescriptorObjectV1,
+    loads: [SourceRegionElfLoadV1], symbols: SourceRegionElfSymbolIndexV1, record: SourceRegionDescriptorObjectV1,
     page_size: u64, account: MirLoopResourceAccountV1) -> Result<[SourceRegionElfSpanV1], text>:
     if record.slot_count <= 0 or record.slot_count > 288230376151711743 or record.table_bytes != record.slot_count as u64 * 32u64:
         return Err("SOURCE-LINK-EXPECTED-SLOT-BOUNDS")
-    val header_symbol = source_region_elf_find_symbol_v1(view, record.binding, account)?
-    val table_symbol = source_region_elf_find_symbol_v1(view, record.table_binding, account)?
+    val header_symbol = source_region_elf_index_find_v1(symbols, record.binding, account)?
+    val table_symbol = source_region_elf_index_find_v1(symbols, record.table_binding, account)?
     if header_symbol.size != 48u64 or table_symbol.size != record.table_bytes:
         return Err("SOURCE-LINK-BINDING-EXTENT")
     val header_offset = source_region_elf_protected_offset_v1(loads, header_symbol.value, 48u64, page_size)?

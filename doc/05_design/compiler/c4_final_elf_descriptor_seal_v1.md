@@ -17,6 +17,13 @@ The existing path-only capsule/cache/SFFI route rejects SOURCE input/seal loss.
 Ordinary artifacts retain their existing behavior. Source inputs travel to the
 Linux linker through the compiler's retained `/proc/<pid>/fd/<fd>` objects,
 not replaceable original paths. This does not weaken CLOEXEC or add a registry.
+The actual output is also exclusively created before linker effects, checked
+by native inode identity against admitted input owners, and passed to `-o` via
+its retained descriptor. The same inode becomes a readonly native handle for
+verification; no path reopen can substitute inspected bytes. The original
+request path is checked for continued inode ownership only. SOURCE failures
+never unlink that pathname, so a replacement/hard-link cannot delete an input.
+Linkers that replace the descriptor rather than write it are unsupported.
 
 The common link owner requires actual strict tool and runtime admission-owner
 projections. It binds the exact executed argument vector, tool artifact,
@@ -28,6 +35,9 @@ this patch does not turn that assumption into an adversarial executable lease.
 Before returning SOURCE link success, the same owner opens the actual output,
 checks ELF64 little-endian ET_EXEC, resolves unique retained marker bindings,
 and validates every 48-byte descriptor and complete table span and digest.
+One bounded symbol-table pass builds an index containing only requested local
+data markers. Subsequent descriptor checks do not rescan the file's symbols;
+compact-index comparisons are charged explicitly without a hash-probe claim.
 Each span must be file-backed and readable, with a unique page-rounded LOAD
 mapping, and either nonwritable or fully covered by loader-rounded GNU_RELRO.
 The granule comes from the existing native `rt_page_size` provider, never from
