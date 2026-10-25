@@ -51,13 +51,29 @@ nil_in_non_optional_scalar` lines; the encoder writes a nil token the generated
 decoder refuses, so entries are not stored and HIR shard work is recomputed.
 See `doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md`.
 
-## Direction: per-file src to obj (IN PROGRESS, not the default)
+## Per-file src to obj is the default (#4525)
 
-The target design is per-file source-to-object jobs
-(`doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`). Landed
-pieces: FileFiber v1 per-file async read with one parse and TLDR publish
-(#4453), single-flight leaders (#4441). The whole-program lane above is still
-what bootstrap uses.
+Target design: `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`.
+Landed pieces: FileFiber v1 per-file read + TLDR publish (#4453), single-flight
+leaders (#4441), and #4525, which makes per-module lowering the default.
+
+- `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` is the only way into the whole-program
+  bootstrap-fixed lane (one MirLowering over the closure, flat MIR passes
+  skipped, single-object context dispatch). Unset: each module's MIR feeds the
+  per-module witness-keyed object cache in `driver_aot_native_output.spl`, so
+  `aot-<hash>.o` objects appear in the build dir one per module during codegen.
+- #4525 is in compiler source, so it only applies once Stage 2 is rebuilt. With
+  the frozen Stage 2 today, the per-file lane is reached by running the Stage 3
+  native-build with `SIMPLE_BOOTSTRAP` and `SIMPLE_BOOTSTRAP_STAGE3` unset
+  (entry `src/app/cli/bootstrap_main.spl`, `--entry-closure`, `--threads 80`).
+- Measured 2026-10-25 (frozen Stage 2, 9-module closure, 8 threads): 9 objects,
+  first at 160 s, last at 174 s, binary runs correctly.
+- Under `SIMPLE_BOOTSTRAP=1` without `SIMPLE_BOOTSTRAP_STAGE3`, HIR sharding
+  blocks with "HIR cache identity unavailable for shard", and the unsharded
+  ambient-bootstrap HIR leaves cross-module imports unresolved. Use the unset
+  lane above until those are fixed.
+- Known WA: `WA-PERFILE-TRIPLE-QUOTE`
+  (`doc/08_tracking/bug/perfile_lane_triple_quote_interpolation_parse_2026-10-25.md`).
 
 ## Cache protocol (all landed 2026-10-24)
 

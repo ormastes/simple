@@ -65,11 +65,13 @@ Landed per-owner snapshots: `FlatPoolState` (#4505), `LexerState` (#4512),
 `DeclStoreState` (#4519), `FabCaptureState` (#4521), combined by
 `src/compiler/10.frontend/parse_context.spl`. Still outside the snapshot:
 
-- process env channels: `SIMPLE_PARSER_HAD_ERROR` and the `parser_env_i64`
-  line/col mirror in parser.spl, plus the expr/stmt/decl env-mirror
-  high-water slots. They need a per-context home before fibers interleave
-  parses that hit error paths.
-- `module_decl_slots` in `_Ast/decl_nodes.spl` (multi-line initializer).
+- per-index env node mirrors (`SIMPLE_BOOTSTRAP_MODULE_DECL_<i>` and the
+  per-expr/stmt/decl field keys), written only in env-mirror bootstrap
+  mode. Context swapping requires those mirror modes off. The fixed scalar
+  env channels (`SIMPLE_PARSER_HAD_ERROR`, `SIMPLE_PARSER_FIRST_ERROR`,
+  `SIMPLE_BOOTSTRAP_PAR_*`, lexer cursor and node-count keys) are in
+  `ParseEnvState` (`parse_env_state.spl`); the env-mirror high-water slots
+  and `module_decl_slots` are in their owners' snapshots.
 - the ~600 remaining module vars in other frontend files; audit each as
   per-parse (add an owner snapshot) or process-wide (leave).
 - arena generation/hardening (`ast_gen_*`, `ast_reset_seq`,
