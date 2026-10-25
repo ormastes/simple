@@ -24,7 +24,13 @@
 #      in (2) is a heuristic; (5) is what makes it safe.
 #
 # Default ON for HIR shard children; SIMPLE_HIR_WORKER_SKELETON=0 opts out.
-# Not used by MIR shard children: they run mono over the whole program's HIR.
+# MIR children under module-scoped mono (SIMPLE_MONO_MODULE_SCOPED=1 +
+# SIMPLE_MIR_SHARD_ONLY_PATHS, the file-worker P4 lane, which a file worker's
+# MIR child always is) seed the closure from their admitted target paths and
+# additionally load HIR only for the targets plus their FROZEN import closure
+# (worker_hir_*_v1 below). A target whose closure is not fully built fails
+# closed (MONO-PENDING). MIR shards that run GLOBAL mono are unchanged: they
+# still build every surface and load every HIR module.
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
@@ -34,6 +40,7 @@ use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1}
 use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
     module_tldr_companion_sections_v1}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_parse_v1}
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v1"
 
@@ -44,6 +51,10 @@ var _ws_restricted: bool = false
 var _ws_allowed: Dict<text, bool> = {}
 var _ws_table_ready: bool = false
 var _ws_table: TldrTableV1 = TldrTableV1.create()
+var _ws_hir_restricted: bool = false
+var _ws_hir_allowed: Dict<text, bool> = {}
+var _ws_hir_loaded: i64 = 0
+var _ws_hir_skipped: i64 = 0
 
 pub fn worker_surface_closure_selected_v1(hir_shard_spec: text, flag: text) -> bool:
     hir_shard_spec != "" and flag != "0"
@@ -168,6 +179,73 @@ pub fn worker_surface_restrict_claims_v1(paths: [text]):
 pub fn worker_surface_claim_allowed_v1(path: text) -> bool:
     not _ws_restricted or _ws_allowed.contains_key(path)
 
+# ===== MIR-child scoping (P-A) =====
+
+# Admitted targets of a module-scoped MIR child, or [] when this child must
+# keep the whole-closure behaviour (global mono, opt-out, or no targets).
+pub fn worker_mir_scoped_targets_v1(mono_scoped: text, only_paths: text, flag: text) -> [text]:
+    if mono_scoped != "1" or flag == "0":
+        return []
+    native_file_worker_only_paths_parse_v1(only_paths)
+
+# AOP advice is collected from EVERY loaded HIR module at weave time, and an
+# aspect module is normally not imported by its join points, so it is not in
+# the import closure. A module that may declare `on pc{...}` advice is loaded
+# too. Text superset of the parser's rule (current_ident_is_on_advice_decl:
+# `on`, inline ws, then `pc{`): every real advice decl contains "pc{".
+pub fn worker_source_may_declare_advice_v1(source: text) -> bool:
+    source.contains("pc{")
+
+# Source path for each canonical path (first wins), built once.
+pub fn source_path_by_canonical_map_v1(canonical_paths: [text], source_paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    var i = 0
+    while i < canonical_paths.len() and i < source_paths.len():
+        if not out.contains_key(canonical_paths[i]):
+            out[canonical_paths[i]] = source_paths[i]
+        i = i + 1
+    out
+
+# Transitive closure (targets included) over frozen surface edges.
+pub fn worker_surface_import_closure_v1(targets: [i64], edges: [[i64]]) -> [bool]:
+    var needed: [bool] = []
+    for _e in edges:
+        needed.push(false)
+    var queue: [i64] = []
+    for t in targets:
+        if t >= 0 and t < needed.len() and not needed[t]:
+            needed[t] = true
+            queue.push(t)
+    var head = 0
+    while head < queue.len():
+        val at = queue[head]
+        head = head + 1
+        for t in edges[at]:
+            if t >= 0 and t < needed.len() and not needed[t]:
+                needed[t] = true
+                queue.push(t)
+    needed
+
+# Restrict this MIR child's HIR loads (cache hit or local lowering) to `paths`.
+# Set once per process: the first restriction wins (lazy set-once ref).
+pub fn worker_hir_restrict_loads_v1(paths: [text]):
+    if _ws_hir_restricted:
+        return
+    _ws_hir_restricted = true
+    for p in paths:
+        _ws_hir_allowed[p] = true
+
+# Counted gate the HIR stage asks before loading a module.
+pub fn worker_hir_load_allowed_v1(path: text) -> bool:
+    if not _ws_hir_restricted or _ws_hir_allowed.contains_key(path):
+        _ws_hir_loaded = _ws_hir_loaded + 1
+        return true
+    _ws_hir_skipped = _ws_hir_skipped + 1
+    false
+
+pub fn worker_hir_counters_v1() -> text:
+    "hir_loaded={_ws_hir_loaded} hir_skipped={_ws_hir_skipped}"
+
 fn _ws_sidecar_path_v1(root: text, source_path: text) -> text:
     val tldr = module_tldr_companion_path_v1(root, source_path)
     tldr.substring(0, tldr.len() - 5) + ".surface"
@@ -237,3 +315,6 @@ export worker_surface_closure_selected_v1, worker_surface_seed_v1, worker_surfac
 export worker_surface_closure_v1, worker_surface_ready_v1
 export worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1
 export worker_surface_text_v1, worker_surface_counters_v1
+export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
+export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
+export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1

@@ -1,6 +1,6 @@
 # HIR shard workers parse the whole closure to build import surfaces
 
-Status: Fixed for HIR shard workers (2026-10-25); MIR shard workers open.
+Status: Fixed for HIR shard workers (2026-10-25) and module-scoped MIR children (P-A); global-mono MIR shards open.
 
 ## Symptom (measured)
 Every `--hir-shard` / `--mir-shard` / `--file-worker` child re-parsed the
@@ -31,9 +31,11 @@ Default ON; `SIMPLE_HIR_WORKER_SKELETON=0` restores the old whole-closure,
 full-source behaviour. Parent build unchanged.
 
 ## Not covered
-- `--mir-shard` children: they run mono over the whole program's HIR, so a
+- Global-mono `--mir-shard` children (no SIMPLE_MIR_SHARD_ONLY_PATHS +
+  SIMPLE_MONO_MODULE_SCOPED=1): they run mono over the whole program's HIR, so a
   closure-only surface set is not sound there yet.
-- The retained (non-streaming) route still builds every surface (skeleton
+- The retained (non-streaming) route never restricts MIR-child HIR loads
+  (whole-closure loading stays) and still builds every surface (skeleton
   text in workers, but no closure restriction).
 
 ## Evidence
@@ -41,3 +43,20 @@ Spec: `test/01_unit/compiler/driver/worker_surface_differential_spec.spl`
 (+ `test/unit` mirror). Not run: on this Windows host the seed fails with
 `parse: in ...windows_redirected_process.spl: Unexpected token: expected Fn,
 found Colon`. No pass is claimed; no worker timing measured yet.
+
+## P-A: module-scoped MIR children (file-worker lane)
+A MIR child with `SIMPLE_MONO_MODULE_SCOPED=1` and `SIMPLE_MIR_SHARD_ONLY_PATHS`
+seeds the surface closure from its admitted targets (not the hash slice),
+then after freeze requires every target to be surface-ready; otherwise it
+publishes `<mir_queue>/<sha>.mono-pending` and fails closed. The HIR stage
+loads (cache hit or local lower) only the targets plus their frozen
+import/export-route closure (`worker_hir_load_allowed_v1`, set-once), plus
+every module whose source may declare AOP advice (`pc{` text superset of the
+parser rule) and its closure: the weave reads advice from all loaded HIR. A
+not-ready advice module fails closed (`aop advice outside import closure`).
+Logs:
+`[file-worker] mir-child hir closure modules=N of=M` and
+`[file-worker] mir-child hir_loaded= hir_skipped=`.
+Spec: `test/01_unit/compiler/driver/worker_mir_child_closure_spec.spl`
+(+ mirror). Not run on the Windows host: the seed fails with
+`semantic: unknown extern function: GetProcessHeap`.
