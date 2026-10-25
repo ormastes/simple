@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.common.source_region_descriptor_v1.*
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, mir_operand_const_int}
+use compiler.mir.mir_types.{LocalId}
+
+describe "C4 private LLVM native-word descriptor":
+    it "rejects empty storage consistently with the native provider":
+        val result = source_region_llvm_descriptor_v1("c4.empty", 8, 0, [])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.InvalidExtent)
+            case Ok(_): assert(false)
+
+    it "checks extent overflow before native-word multiplication":
+        val result = source_region_descriptor_extent_v1(1152921504606846976)
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.InvalidExtent)
+            case Ok(_): assert(false)
+
+    it "rejects unqualified 32-bit storage":
+        val result = source_region_llvm_descriptor_v1("c4.word32", 4, 4, [SourceRegionSlotV1(kind: 1, representation: 0)])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.UnsupportedWordWidth)
+            case Ok(_): assert(false)
+
+    it "decodes compiler constant pairs in physical slot order":
+        val result = source_region_descriptor_slots_v1([
+            mir_operand_const_int(1), mir_operand_const_int(0),
+            mir_operand_const_int(2), mir_operand_const_int(2)
+        ])
+        match result:
+            case Ok(slots):
+                expect(slots.len()).to_equal(2)
+                expect(slots[0].kind).to_equal(1)
+                expect(slots[1].representation).to_equal(2)
+            case Err(_): assert(false)
+
+    it "rejects a runtime operand as descriptor authority":
+        val result = source_region_descriptor_slots_v1([
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))), mir_operand_const_int(0)
+        ])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.MalformedOperand)
+            case Ok(_): assert(false)
+
+    it "emits physical scalar width and a readonly relocated slot table":
+        val result = source_region_llvm_descriptor_v1("c4.subject", 8, 16, [
+            SourceRegionSlotV1(kind: 1, representation: 0),
+            SourceRegionSlotV1(kind: 2, representation: 2)
+        ])
+        match result:
+            case Ok(ir):
+                expect(ir).to_contain("[4 x i64] [i64 0, i64 8, i64 1, i64 0]")
+                expect(ir).to_contain("[4 x i64] [i64 8, i64 8, i64 2, i64 2]")
+                expect(ir).to_contain("private constant [6 x i64]")
+                expect(ir).to_contain("ptrtoint (ptr @c4.subject.slots to i64)")
+            case Err(_): assert(false)
+
+    it "rejects an unclassified slot before emitting metadata":
+        val result = source_region_llvm_descriptor_v1("c4.unknown", 8, 8, [
+            SourceRegionSlotV1(kind: -1, representation: 0)
+        ])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.UnclassifiedSlot)
+            case Ok(_): assert(false)
+
+    it "rejects scalar claims carrying pointer representation":
+        val result = source_region_llvm_descriptor_v1("c4.pointer", 8, 8, [
+            SourceRegionSlotV1(kind: 1, representation: 1)
+        ])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.InvalidRepresentation)
+            case Ok(_): assert(false)
+
+    it "rejects allocation extents with uncovered words":
+        val result = source_region_llvm_descriptor_v1("c4.extent", 8, 16, [
+            SourceRegionSlotV1(kind: 1, representation: 0)
+        ])
+        match result:
+            case Err(error): expect(error).to_equal(SourceRegionDescriptorErrorV1.InvalidExtent)
+            case Ok(_): assert(false)
