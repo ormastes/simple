@@ -409,6 +409,7 @@ fn build_c_runtime_library(
     let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_file_view.c",
+        "runtime_disk_headroom.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
