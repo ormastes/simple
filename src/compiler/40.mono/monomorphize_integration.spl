@@ -3233,11 +3233,11 @@ impl MonomorphizationPass:
         recorded as a loud diagnostic (the post-mono verifier also counts it)."""
         val gname = self.callee_generic_name(callee)
         if gname == "" and self.module_scoped_v1:
-            self.module_scoped_visibility_check_v1(callee, type_args)
+            self.module_scoped_visibility_check_v1(callee, type_args, args)
         self.rewrite_template_call_v1(gname, callee,
             args, type_args, expected_result, call_span)
 
-    me module_scoped_visibility_check_v1(callee: HirExpr, type_args: [HirType]):
+    me module_scoped_visibility_check_v1(callee: HirExpr, type_args: [HirType], args: [HirCallArg]):
         """Module-scoped fail-closed rule: a call in the target module whose
         callee carries generic evidence (explicit type args, an imported
         signature that is not concrete, or no declaration at all) but names
@@ -3282,8 +3282,32 @@ impl MonomorphizationPass:
             return
         self.reported_once[code_key] = true
         self.diagnostics = self.diagnostics.push(
-            "E-MONO-040: template {name} not visible to module {self.current_module}")
+            "E-MONO-040: template {name} not visible to module {self.current_module}" +
+            self.module_scoped_missing_args_suffix_v1(type_args, args))
         self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
+
+    me module_scoped_missing_args_suffix_v1(type_args: [HirType], args: [HirCallArg]) -> text:
+        """` type-args <k1 US k2>` (explicit) or ` arg-types <k1 US k2>` (argument
+        value types) for an E-MONO-040 row, so the template-body seam can key
+        the missing instance (P-G5b). "" when any key is unknown."""
+        var keys: [text] = []
+        var label = " type-args "
+        if type_args.len() > 0:
+            for ta in type_args:
+                val k = self.type_key(ta)
+                if k == "": return ""
+                keys = keys.push(k)
+        else:
+            label = " arg-types "
+            for raw in args:
+                val a: HirCallArg = raw
+                val t = self.infer_expr_type(a.value)
+                if t == nil: return ""
+                val k = self.type_key(t)
+                if k == "": return ""
+                keys = keys.push(k)
+        if keys.len() == 0: return ""
+        label + keys.join("\u001f")
 
     me rewrite_template_call_v1(gname: text, callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType?, call_span: Span?) -> HirExprKind:
         val new_args = self.rewrite_call_args(args)

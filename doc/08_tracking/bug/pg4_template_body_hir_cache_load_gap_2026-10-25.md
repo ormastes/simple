@@ -1,6 +1,6 @@
 # P-G4 gap: the template-body seam cannot load an owner body this child does not already hold
 
-**Status:** open. This is P-G5 scope.
+**Status:** fixed in P-G5b (work/perfile-pg5b): `.hirkey` ledger record + single-flight owner load, path-keyed closure walk, E-MONO-040 argument keys.
 **Filed by:** P-G4 (#4625)
 
 ## The gap
