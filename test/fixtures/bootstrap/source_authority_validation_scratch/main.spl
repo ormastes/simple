@@ -1,0 +1,125 @@
+"""Real inventory/manifest validation and scope lifetime probe; native execution required."""
+use app.io.env_ops.{env_get}
+use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1,
+    compiler_source_authority_validate_v1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.host.{heap_live_bytes, heap_aux_live_bytes,
+    heap_array_capacity_bytes}
+
+extern fn rt_process_rss_kib() -> i64
+
+fn checked(condition: bool, label: text) -> i64:
+    if not condition:
+        print("source-authority-scratch FAIL " + label)
+    assert(condition)
+    1
+
+fn fixture_snapshot(root: text, revision: text, digest: text,
+    count: i64, valid: bool = true) -> ScvCompileSnapshotV1:
+    val snapshot_root = root + "/build/scv/snapshots/scv-revision-v1-" + revision
+    ScvCompileSnapshotV1(valid, "fixture-invalid-snapshot",
+        "scv-revision-v1-" + revision, "fixture-commit", "fixture-tree",
+        digest, count, snapshot_root, "fixture-provenance", "fixture-receipt", true)
+
+fn check_valid(result: CompilerSourceAuthorityV1, expected: ScvCompileSnapshotV1,
+    digest: text, generation: i64) -> i64:
+    var checks = checked(result.valid, "valid")
+    checks = checks + checked(result.reason == "ok", "reason")
+    checks = checks + checked(result.source_inventory_digest == digest, "inventory-digest")
+    checks = checks + checked(result.inventory_generation == generation, "generation")
+    checks = checks + checked(result.snapshot.valid == expected.valid, "snapshot-valid")
+    checks = checks + checked(result.snapshot.reason == expected.reason, "snapshot-reason")
+    checks = checks + checked(result.snapshot.revision_id == expected.revision_id, "revision")
+    checks = checks + checked(result.snapshot.commit_id == expected.commit_id, "commit")
+    checks = checks + checked(result.snapshot.tree_id == expected.tree_id, "tree")
+    checks = checks + checked(result.snapshot.inventory_digest == expected.inventory_digest, "manifest-digest")
+    checks = checks + checked(result.snapshot.inventory_count == expected.inventory_count, "manifest-count")
+    checks = checks + checked(result.snapshot.snapshot_root == expected.snapshot_root, "snapshot-root")
+    checks = checks + checked(result.snapshot.provenance_path == expected.provenance_path, "provenance")
+    checks = checks + checked(result.snapshot.receipt_path == expected.receipt_path, "receipt")
+    checks = checks + checked(result.snapshot.source_drifted == expected.source_drifted, "drift")
+    checks
+
+fn check_invalid(result: CompilerSourceAuthorityV1, reason: text) -> i64:
+    var checks = checked(not result.valid, "invalid")
+    checks = checks + checked(result.reason == reason, "invalid-reason:" + reason)
+    checks = checks + checked(not result.snapshot.valid, "invalid-snapshot")
+    checks = checks + checked(result.snapshot.reason == reason, "invalid-snapshot-reason")
+    checks = checks + checked(result.snapshot.snapshot_root == "", "invalid-snapshot-root")
+    checks = checks + checked(result.source_inventory_digest == "", "invalid-inventory-digest")
+    checks = checks + checked(result.inventory_generation == -1, "invalid-generation")
+    checks
+
+fn report_memory(stage: text):
+    print("source-authority-scratch memory stage=" + stage +
+        " heap_header_live=" + heap_live_bytes().to_text() +
+        " heap_aux_live=" + heap_aux_live_bytes().to_text() +
+        " array_capacity=" + heap_array_capacity_bytes().to_text() +
+        " rss_kib=" + rt_process_rss_kib().to_text())
+
+fn main() -> i32:
+    val root = env_get("SIMPLE_AUTHORITY_FIXTURE_ROOT") ?? ""
+    val digest = env_get("SIMPLE_AUTHORITY_FIXTURE_DIGEST") ?? ""
+    val manifest_digest = env_get("SIMPLE_AUTHORITY_FIXTURE_MANIFEST") ?? ""
+    val bad_manifest_digest = env_get("SIMPLE_AUTHORITY_FIXTURE_BAD_MANIFEST") ?? ""
+    val count = (env_get("SIMPLE_AUTHORITY_FIXTURE_COUNT") ?? "").to_i64() ?? -1
+    val a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    val cache = root + "/build/scv"
+    var checks = checked(root != "" and digest.len() == 64 and count > 32, "real-inputs")
+    val snapshot = fixture_snapshot(root, a, manifest_digest, count)
+    checks = checks + checked(transient_array_scope_state_v1() == 0, "initial-no-scope")
+    report_memory("before")
+    var attempt = 0
+    while attempt < 24:
+        val admitted = compiler_source_authority_validate_v1(root, cache, snapshot, digest, 17, false)
+        checks = checks + check_valid(admitted, snapshot, digest, 17)
+        checks = checks + checked(transient_array_scope_state_v1() == 0, "owned-scope-retired")
+        attempt = attempt + 1
+    report_memory("after-24-validations")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(
+        root + "-other", cache, snapshot, digest, 17, false), "snapshot-source-owner-mismatch")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, a, manifest_digest, count, false), digest, 17, false), "fixture-invalid-snapshot")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(
+        root, cache, snapshot, "bad", 17, false), "inventory-pointer-invalid")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(
+        root, cache, snapshot, digest, 18, false), "source-inventory-generation-mismatch")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, a, "bad", count), digest, 17, false), "snapshot-manifest-digest-invalid")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, a, b, count), digest, 17, false), "snapshot-source-manifest-mismatch")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, a, manifest_digest, count + 1), digest, 17, false), "snapshot-source-count-mismatch")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, b, bad_manifest_digest, count), digest, 17, false), "snapshot-source-membership-mismatch")
+    checks = checks + check_invalid(compiler_source_authority_validate_v1(root, cache,
+        fixture_snapshot(root, c, manifest_digest, count), digest, 17, false), "snapshot-source-manifest-unreadable")
+    # The caller's input snapshot and raw struct children predate either scope.
+    checks = checks + checked(transient_scope_begin(), "caller-begin")
+    val active = compiler_source_authority_validate_v1(root, cache, snapshot, digest, 17, true)
+    checks = checks + checked(transient_array_scope_state_v1() == 1, "caller-still-active")
+    checks = checks + checked(transient_scope_pause(), "caller-pause")
+    checks = checks + checked(transient_promote(active), "caller-promote-preexisting-children")
+    checks = checks + checked(transient_scope_end(), "caller-end")
+    checks = checks + check_valid(active, snapshot, digest, 17)
+    checks = checks + checked(transient_scope_begin(), "paused-caller-begin")
+    checks = checks + checked(transient_scope_pause(), "paused-caller-pause")
+    val paused = compiler_source_authority_validate_v1(root, cache, snapshot, digest, 17, true)
+    checks = checks + checked(transient_array_scope_state_v1() == 2, "caller-still-paused")
+    checks = checks + checked(transient_promote(paused), "paused-caller-retain-result")
+    checks = checks + checked(transient_scope_end(), "paused-caller-end")
+    checks = checks + check_valid(paused, snapshot, digest, 17)
+    # Churn more retired inventory scratch before reading both retained results.
+    val churn = compiler_source_authority_validate_v1(root, cache, snapshot, digest, 17, false)
+    checks = checks + check_valid(churn, snapshot, digest, 17)
+    checks = checks + check_valid(active, snapshot, digest, 17)
+    checks = checks + check_valid(paused, snapshot, digest, 17)
+    checks = checks + checked(transient_array_scope_state_v1() == 0, "final-no-scope")
+    report_memory("final")
+    print("source-authority-scratch PASS assertions=" + checks.to_text() + " validations=24 caller_states=active,paused")
+    0
