@@ -58,6 +58,7 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 
 void rt_free(uint8_t* ptr);
 static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
+static void rt_source_region_retire_locked_v1(uintptr_t ptr);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -370,6 +371,12 @@ uint8_t* rt_alloc(int64_t size) {
 typedef struct RtStructAllocation {
     uintptr_t ptr;
     size_t bytes;
+    /* C4 ownership lives in this existing allocation owner, never a parallel
+     * pointer registry. Zero denotes ordinary/unadmitted storage. */
+    uintptr_t source_region;
+    uint64_t source_incarnation;
+    const uint64_t* source_descriptor;
+    uint8_t source_control;
 } RtStructAllocation;
 
 #define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
@@ -379,6 +386,12 @@ static RtStructAllocation* rt_struct_allocs = NULL;
 static size_t rt_struct_alloc_cap = 0;
 static size_t rt_struct_alloc_len = 0;
 static size_t rt_struct_alloc_tombs = 0;
+static uint64_t rt_source_region_registry_revision_v1 = 1;
+
+static void rt_source_region_registry_changed_v1(void) {
+    if (rt_source_region_registry_revision_v1 < INT64_MAX)
+        ++rt_source_region_registry_revision_v1;
+}
 #if defined(_WIN32)
 static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
 #else
@@ -428,12 +441,14 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
             rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
             if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
             rt_struct_alloc_len++;
+            rt_source_region_registry_changed_v1();
             return 1;
         }
         if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
             if (first_tomb == SIZE_MAX) first_tomb = index;
         } else if (entry == ptr) {
             rt_struct_allocs[index].bytes = bytes;
+            rt_source_region_registry_changed_v1();
             return 1;
         }
         index = (index + 1) & mask;
@@ -452,10 +467,15 @@ static int rt_struct_alloc_resize(size_t next_cap) {
     rt_struct_alloc_cap = next_cap;
     rt_struct_alloc_len = 0;
     rt_struct_alloc_tombs = 0;
+    rt_source_region_registry_changed_v1();
     for (size_t i = 0; i < old_cap; i++) {
         uintptr_t ptr = old[i].ptr;
         if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
             rt_struct_alloc_insert_raw(ptr, old[i].bytes);
+            size_t slot = rt_transient_raw_hash(ptr) & (next_cap - 1);
+            while (rt_struct_allocs[slot].ptr != ptr)
+                slot = (slot + 1) & (next_cap - 1);
+            rt_struct_allocs[slot] = old[i];
         }
     }
     free(old);
@@ -493,10 +513,12 @@ static void rt_struct_alloc_unregister(void* ptr) {
             uintptr_t entry = rt_struct_allocs[index].ptr;
             if (entry == 0) break;
             if (entry == (uintptr_t)ptr) {
+                rt_source_region_retire_locked_v1(entry);
                 rt_struct_allocs[index] =
                     (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
                 rt_struct_alloc_len--;
                 rt_struct_alloc_tombs++;
+                rt_source_region_registry_changed_v1();
                 break;
             }
             index = (index + 1) & mask;
@@ -782,3 +804,5 @@ int64_t rt_mem_profile_abi_version(void) {
 int64_t rt_mem_profile_features(void) {
     return 0;
 }
+
+#include "runtime_source_region_v1.inc"
