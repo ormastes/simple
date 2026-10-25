@@ -952,7 +952,13 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     # Measured commit admission (shard_mem_clamp.spl). The estimate starts at
     # the larger of the phase's static figure and the peak the previous run of
     # this phase recorded beside the ledger, and grows with every sample.
-    val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.peak_kib"
+    # Keyed on producer identity (the published frontend cache scope hashes
+    # the compiler binary): a redeployed compiler, whose footprint may differ
+    # (BuildSession memory model), starts from static + live observation.
+    val producer = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+    val producer_key = if producer == "": "unknown" else: producer
+    val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
+    val old_dataset_cap = env_get("SIMPLE_GLOBAL_DATASET_MAX_BYTES") ?? ""
     val static_kib = if label == "mir-shard": shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000) else: shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
     val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
     var observed_peak_kib: i64 = 0
@@ -992,6 +998,8 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 next_pending = next_pending + 1
                 val owner = "{index}/{count}@{generation}"
                 val owner_installed = env_set(owner_env, owner)
+                # Per-process surface retention cap for the child (P5 GlobalDataset).
+                val _dataset_cap = env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", "{est_kib * 1024}")
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
                 pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
@@ -1085,6 +1093,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         generation = generation + 1
     env_set(queue_env, old_queue)
     env_set(owner_env, old_owner)
+    env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
     if observed_peak_kib > 0:
         val _peak_written = file_write(peak_record, "{observed_peak_kib}")
         print "[{label}] measured worker peak private={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
