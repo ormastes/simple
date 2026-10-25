@@ -1,0 +1,114 @@
+#!/bin/sh
+# Real canonical stop dispatch + checkpoint publisher; no compiler build.
+# Existing admission/planner adversarial tests own their full proof checks.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+constructor="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-producer-checkpoint.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+sh "$constructor" --help >"$work/help"
+grep -Fq -- '--stop-after-stage2-producer' "$work/help" || fail 'help lacks producer flag'
+grep -Fq 'Matrix NOTRUN; tools' "$work/help" || fail 'help implies tool qualification'
+reject_args() {
+  code=0
+  sh "$constructor" "$@" >"$work/args.log" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "accepted incompatible arguments: $*"
+}
+reject_args --stop-after-stage2-producer
+reject_args --full-bootstrap --stop-after-stage2-producer
+reject_args --full-bootstrap --produce-stage3-receipt=stale-native-cache --stop-after-stage2 --stop-after-stage2-producer
+reject_args --full-bootstrap --produce-stage3-receipt=stale-native-cache --stop-after-stage2-producer --stop-after-stage2
+reject_args --full-bootstrap --produce-stage3-receipt=stale-native-cache --stop-after-stage2-producer --full-cli
+reject_args --full-bootstrap --produce-stage3-receipt=stale-native-cache --stop-after-stage2-producer --refresh-stage2-source-cache=old
+reject_args --full-bootstrap --stop-after-seed --stop-after-stage2-producer
+
+# Extract the actual constructor gate, not a duplicate implementation. The
+# fixture supplies already-admitted input shapes, with the canonical planner
+# verifier intercepted solely to exercise success/failure propagation.
+awk '/^  # Explicit producer-only checkpoint\./ {copy=1} /^  # Stage 2 compiler tests / {copy=0} copy {print}' \
+  "$constructor" >"$work/gate.sh"
+[ -s "$work/gate.sh" ] || fail 'canonical checkpoint gate missing'
+gate_line=$(awk '/^  # Explicit producer-only checkpoint\./ {print NR; exit}' "$constructor")
+seal_line=$(awk '/chmod -R a-w "\$\{stage2_cache_absolute\}"/ {print NR; exit}' "$constructor")
+matrix_line=$(awk '/^  # Stage 2 compiler tests / {print NR; exit}' "$constructor")
+[ "$seal_line" -lt "$gate_line" ] && [ "$gate_line" -lt "$matrix_line" ] || fail 'checkpoint bypasses cache seal or reaches matrix'
+mkdir "$work/admitted" "$work/capsule"
+printf '#!/bin/sh\nexit 0\n' >"$work/admitted/compiler"
+chmod +x "$work/admitted/compiler"
+printf 'fixture-runtime-capsule\n' >"$work/capsule/phase2-runtime-capsule.env"
+printf 'fixture-parent-sanity\n' >"$work/parent-sanity"
+printf 'fixture-parent-provenance\n' >"$work/parent-provenance"
+printf 'fixture-planner\n' >"$work/planner"
+{
+  printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\ncandidate_path=%s\ncandidate_sha256=%s\n' \
+    "$work/admitted/compiler" "$(sha "$work/admitted/compiler")"
+  for key in source_snapshot runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+    printf '%s fixture\n' "$key" >"$work/$key"
+    printf '%s_path=%s/%s\n%s_sha256=%s\n' "$key" "$work" "$key" "$key" "$(sha "$work/$key")"
+  done
+} >"$work/admitted/admission.env"
+printf 'schema=simple-phase2-runtime-binding-v1\ncompiler_sha256=%s\nadmission_sha256=%s\ncapsule_path=%s/capsule\ncapsule_receipt_sha256=%s\n' \
+  "$(sha "$work/admitted/compiler")" "$(sha "$work/admitted/admission.env")" "$work" \
+  "$(sha "$work/capsule/phase2-runtime-capsule.env")" >"$work/admitted/runtime-capsule.env"
+cat >"$work/run.sh" <<'SH'
+set -eu
+root=$1 work=$2
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_planner_v2_verify() { [ "${PLANNER_STATUS:-0}" = 0 ] && [ "$(cat "$1")" = fixture-planner ]; }
+bootstrap_planner_v2_field() {
+  case "$1" in
+    target) echo //bootstrap:stage3 ;;
+    parent_compiler_sha256) sha256sum "$work/admitted/compiler" | cut -d ' ' -f 1 ;;
+    parent_stage2_sanity_path) echo "$work/parent-sanity" ;;
+    parent_stage2_provenance_path) echo "$work/parent-provenance" ;;
+    *) return 1 ;;
+  esac
+}
+bootstrap_verdict() { printf '%s\n' "$*"; }
+repo_root=$root output_dir=$work
+stop_after_stage2_producer=${SELECTED:-1}
+stage2_status=${PRODUCER_STATUS:-0}
+bootstrap_stage2_trust_root=${TRUST_ROOT:-1}
+stage2_admitted_dir="$work/admitted"
+stage2_admitted_absolute="$work/admitted/compiler"
+stage2_admission_receipt_absolute="$work/admitted/admission.env"
+stage2_parent_sanity="$work/parent-sanity"
+stage2_parent_provenance="$work/parent-provenance"
+stage3_planner_receipt="$work/planner"
+. "$work/gate.sh"
+touch "$work/matrix-ran"
+SH
+run_gate() { sh "$work/run.sh" "$root" "$work" >"$work/gate.log" 2>&1; }
+# Default/old-stop gate remains inert even with deliberately failing producer.
+SELECTED=0 PRODUCER_STATUS=7 run_gate
+[ -f "$work/matrix-ran" ] && [ ! -e "$work/stage2-producer-checkpoint.sdn" ] || fail 'default skipped mandatory matrix'
+rm "$work/matrix-ran"
+expect_failure() {
+  expected=$1; shift
+  code=0
+  env "$@" sh "$work/run.sh" "$root" "$work" >"$work/gate.log" 2>&1 || code=$?
+  [ "$code" -eq "$expected" ] && [ ! -e "$work/stage2-producer-checkpoint.sdn" ] &&
+    [ ! -e "$work/matrix-ran" ] || fail "failure became a producer checkpoint: $* (exit=$code)"
+}
+expect_failure 7 PRODUCER_STATUS=7
+expect_failure 1 TRUST_ROOT=0
+expect_failure 1 PLANNER_STATUS=1
+mv "$work/planner" "$work/planner.saved"
+expect_failure 1
+mv "$work/planner.saved" "$work/planner"
+printf 'changed\n' >>"$work/receiver_evidence"
+expect_failure 1
+printf 'receiver_evidence fixture\n' >"$work/receiver_evidence"
+run_gate || { cat "$work/gate.log" >&2; fail 'producer checkpoint failed'; }
+[ ! -e "$work/matrix-ran" ] || fail 'producer checkpoint ran matrix'
+grep -qx 'status: producer_admitted' "$work/stage2-producer-checkpoint.sdn"
+grep -qx 'matrix: NOTRUN' "$work/stage2-producer-checkpoint.sdn"
+grep -qx 'tools: UNQUALIFIED' "$work/stage2-producer-checkpoint.sdn"
+grep -qx 'full_qualification: false' "$work/stage2-producer-checkpoint.sdn"
+grep -qx "compiler_sha256: $(sha "$work/admitted/compiler")" "$work/stage2-producer-checkpoint.sdn"
+[ ! -e "$work/stage2-compiler-tests.receipt" ] || fail 'manufactured matrix admission'
+echo 'PASS: canonical producer-only flag, prerequisites, failure propagation, honest checkpoint and default matrix dispatch'
