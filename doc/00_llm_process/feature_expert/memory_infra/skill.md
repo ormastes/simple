@@ -140,6 +140,14 @@ sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak
   interpreter (the `io_runtime.spl` shim doesn't re-export it) — import from
   `std.nogc_sync_mut.io_runtime` directly instead.
 
+## Build session memory model (compiler, 2026-10-25)
+`doc/05_design/compiler/memory/build_session_memory_model_v1.md` — three
+lifetimes (module transient scope, `BuildSession` heap, bounded
+`GlobalDataset`) plus object-graph refcount (`rt_rc_*`, registry meta row,
+layout ABI frozen). Promotion becomes "move to parent tier", publish is
+adopt-then-append under the session allocator, which removes the O(N²)
+`bootstrap_hir_modules_promote_last` walk. Packages P0..P6 in §7.
+
 ## Update Rule
 When a new M-phase lands, gains a design doc, or an env gate's status
 changes, update the Code map / Env gates / Known limits tables above and the
