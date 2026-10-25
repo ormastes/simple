@@ -30,7 +30,7 @@ use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
 }
 use compiler.driver.perf.compiler_work_counters.{compiler_work_mir_schedule_v1}
-use compiler.driver.driver_log_helpers.{log_debug, log_phase, log_build_progress, log_bootstrap_flat_warning,
+use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_build_progress, log_bootstrap_flat_warning,
     mir_progress_due, log_mir_progress}
 use std.io_runtime.{time_now_monotonic_ms}
 use compiler.driver.driver_phase_gates.{
@@ -38,7 +38,8 @@ use compiler.driver.driver_phase_gates.{
     driver_source_entry_request
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context, driver_collection_target_options}
-use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
+use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors,
+    driver_module_mir_failure_message_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_admissible_v1,
     driver_native_prelower_module_keys_v1, driver_native_prelower_lookup_v1}
@@ -1442,6 +1443,22 @@ impl CompilerDriver:
                 if mir_physical_ownership_active:
                     mir_direct.name = name_direct
                 val module_mir_failed = module_new_fatal or self.ctx.error_count_value > module_context_errors_before
+                if module_mir_failed:
+                    # Report one actual cause now: a long keep-going scan may
+                    # not reach the aggregate collector for many minutes.
+                    # Inspect only this module's newly appended errors, without
+                    # copying the shared array or re-scanning prior modules.
+                    var immediate_cause = ""
+                    var immediate_index = module_lowering_errors_before
+                    while immediate_index < direct_lowering.errors.len() and immediate_cause == "":
+                        val immediate_error = direct_lowering.errors[immediate_index]
+                        if driver_mir_error_is_fatal_v1(immediate_error):
+                            immediate_cause = immediate_error.message
+                        immediate_index = immediate_index + 1
+                    if immediate_cause == "" and self.ctx.errors.len() > module_context_errors_before:
+                        immediate_cause = self.ctx.errors[module_context_errors_before]
+                    log_error(driver_module_mir_failure_message_v1(name_direct,
+                        src_direct.path, immediate_cause))
                 if go_to_end_active and module_mir_failed:
                     # go-to-end: record the module with its own errors and never
                     # publish its (broken) MIR, so codegen sees only good modules.
