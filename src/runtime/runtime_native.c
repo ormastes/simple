@@ -1569,6 +1569,11 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+static _Thread_local uint64_t rt_core_source_raw_revision_v1 = 1;
+static void rt_core_source_raw_changed_v1(void) {
+    if (rt_core_source_raw_revision_v1 < INT64_MAX)
+        ++rt_core_source_raw_revision_v1;
+}
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 extern int32_t rt_transient_raw_scope_begin(void);
 extern int32_t rt_transient_raw_scope_pause(void);
@@ -1832,6 +1837,7 @@ int8_t rt_transient_array_scope_begin(void) {
     }
 #endif
     rt_core_transient_array_scope_id = next_id;
+    rt_core_source_raw_changed_v1();
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
     return 1;
@@ -1845,6 +1851,7 @@ int8_t rt_transient_array_scope_pause(void) {
     if (!rt_transient_raw_scope_pause()) return 0;
 #endif
     rt_core_transient_array_scope_paused = 1;
+    rt_core_source_raw_changed_v1();
     return 1;
 }
 
@@ -1854,6 +1861,7 @@ int8_t rt_transient_array_scope_end(void) {
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     const uint32_t scope_id = rt_core_transient_array_scope_id;
     core_transient_share_reset(); /* a promotion share window never outlives its scope */
+    rt_core_source_raw_changed_v1();
     rt_core_transient_array_scope_active = 0;
     rt_core_transient_array_scope_paused = 0;
 
@@ -1981,12 +1989,14 @@ static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
             rt_core_transient_raw_allocs[target] = (RtCoreTransientRawAlloc){ptr, bytes};
             if (first_tomb != SIZE_MAX) rt_core_transient_raw_alloc_tombs--;
             rt_core_transient_raw_alloc_len++;
+            rt_core_source_raw_changed_v1();
             return 1;
         }
         if (entry == RT_CORE_TRANSIENT_RAW_TOMBSTONE) {
             if (first_tomb == SIZE_MAX) first_tomb = i;
         } else if (entry == ptr) {
             rt_core_transient_raw_allocs[i].bytes = bytes;
+            rt_core_source_raw_changed_v1();
             return 1;
         }
         i = (i + 1) & mask;
@@ -2013,6 +2023,7 @@ static int rt_core_transient_raw_grow(void) {
     rt_core_transient_raw_alloc_cap = next_cap;
     rt_core_transient_raw_alloc_len = 0;
     rt_core_transient_raw_alloc_tombs = 0;
+    rt_core_source_raw_changed_v1();
     for (size_t i = 0; i < old_cap; i++) {
         uintptr_t old_ptr = old[i].ptr;
         if (old_ptr != 0 && old_ptr != RT_CORE_TRANSIENT_RAW_TOMBSTONE) {
@@ -2059,6 +2070,7 @@ static void rt_core_transient_raw_erase(void* ptr) {
     entry->bytes = 0;
     rt_core_transient_raw_alloc_len--;
     rt_core_transient_raw_alloc_tombs++;
+    rt_core_source_raw_changed_v1();
 }
 
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes) {
@@ -2089,10 +2101,44 @@ int8_t rt_transient_raw_owner_thread_allows(void) {
     return owner == 0 || owner == (uintptr_t)&rt_core_transient_scope_thread_token;
 }
 
+/* C4 construction preparation on the actual existing transient owner. These
+ * are compiler-private helpers, not mutable-object adoption or graph scans. */
+int64_t rt_transient_raw_source_bound_v1(int64_t metric) {
+    if (metric < 0 || metric > 2 || !rt_transient_raw_owner_thread_allows() ||
+        rt_core_source_raw_revision_v1 >= INT64_MAX) return -1;
+    uint64_t cap = rt_core_transient_raw_alloc_cap, next = 0;
+    if (rt_core_transient_array_scope_active &&
+        (rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10 >= cap * 7) {
+        if (cap > (uint64_t)INT64_MAX / 2) return -4;
+        next = cap ? cap * 2 : 256;
+        if (cap && (rt_core_transient_raw_alloc_len + 1) * 10 < cap * 6) next=cap;
+    }
+    if (next && next > (uint64_t)INT64_MAX / (next + sizeof(RtCoreTransientRawAlloc) + 4)) return -4;
+    uint64_t fields=next*2, bytes=next*sizeof(RtCoreTransientRawAlloc);
+    uint64_t work=cap*next+cap+next+fields+bytes+8;
+    return (int64_t)(metric == 0 ? work : metric == 1 ? fields : bytes);
+}
+
+int64_t rt_transient_raw_source_prepare_v1(int64_t prepaid) {
+    int64_t bound = rt_transient_raw_source_bound_v1(0);
+    if (bound < 0 || prepaid < bound) return bound < 0 ? bound : -4;
+    if (rt_core_transient_array_scope_active &&
+        (rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
+            >= rt_core_transient_raw_alloc_cap * 7 && !rt_core_transient_raw_grow()) return -4;
+    return (int64_t)rt_core_source_raw_revision_v1;
+}
+
+int64_t rt_transient_raw_source_revision_v1(void) {
+    return rt_transient_raw_owner_thread_allows() &&
+        rt_core_source_raw_revision_v1 < INT64_MAX
+        ? (int64_t)rt_core_source_raw_revision_v1 : -1;
+}
+
 /* Entries (16 bytes each) an empty table may keep between scopes. */
 #define RT_CORE_TRANSIENT_RAW_RETAIN_CAP ((size_t)1 << 21)
 
 static void rt_core_transient_raw_clear(void) {
+    rt_core_source_raw_changed_v1();
     /* The table only grows, so one huge scope (HIR per-file scopes reach
      * millions of raw blocks) used to make every later scope end pay a full
      * scan plus a memset of that high-water capacity: measured 16,777,216

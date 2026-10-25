@@ -58,6 +58,8 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 
 void rt_free(uint8_t* ptr);
 static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
+struct RtSourceAllocationMetadataV1;
+static void rt_source_region_retire_locked_v1(struct RtSourceAllocationMetadataV1* metadata);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -367,10 +369,38 @@ uint8_t* rt_alloc(int64_t size) {
 /* Struct field accesses are emitted as direct native loads/stores.  Keep a
  * registry of allocations that may legally back those accesses so forged or
  * stale tagged values are rejected before dereference. */
+typedef struct RtSourceAllocationMetadataV1 {
+    size_t bytes;
+    uintptr_t region;
+    uint64_t generation;
+    const uint64_t* descriptor;
+    uint8_t control;
+} RtSourceAllocationMetadataV1;
+
+/* Ordinary allocations retain their original two-word registry footprint.
+ * Positive i64 extents cannot set size_t's high bit on the 64-bit provider. */
 typedef struct RtStructAllocation {
     uintptr_t ptr;
     size_t bytes;
 } RtStructAllocation;
+#define RT_SOURCE_EXTENT_METADATA_V1 ((size_t)1 << (sizeof(size_t)*CHAR_BIT-1))
+static RtSourceAllocationMetadataV1* rt_struct_source_metadata_v1(const RtStructAllocation* entry) {
+    if (sizeof(size_t)!=8) return NULL;
+    return entry && (entry->bytes & RT_SOURCE_EXTENT_METADATA_V1)
+        ? (RtSourceAllocationMetadataV1*)(uintptr_t)(entry->bytes & ~RT_SOURCE_EXTENT_METADATA_V1)
+        : NULL;
+}
+static size_t rt_struct_extent_v1(const RtStructAllocation* entry) {
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
+    return metadata ? metadata->bytes : entry->bytes;
+}
+static int rt_struct_source_metadata_bits_v1(RtSourceAllocationMetadataV1* metadata, size_t* bits) {
+    uintptr_t ptr=(uintptr_t)metadata;
+    if (sizeof(uintptr_t)!=8 || sizeof(size_t)!=8 || !ptr ||
+        (ptr & RT_SOURCE_EXTENT_METADATA_V1) || ptr % 8) return 0;
+    *bits=(size_t)ptr | RT_SOURCE_EXTENT_METADATA_V1;
+    return 1;
+}
 
 #define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
 #define RT_STRUCT_ALLOC_MAX_CAP ((size_t)1 << 22)
@@ -379,6 +409,13 @@ static RtStructAllocation* rt_struct_allocs = NULL;
 static size_t rt_struct_alloc_cap = 0;
 static size_t rt_struct_alloc_len = 0;
 static size_t rt_struct_alloc_tombs = 0;
+static size_t rt_struct_alloc_max_success_probe_v1 = 0;
+static uint64_t rt_source_region_registry_revision_v1 = 1;
+
+static void rt_source_region_registry_changed_v1(void) {
+    if (rt_source_region_registry_revision_v1 < INT64_MAX)
+        ++rt_source_region_registry_revision_v1;
+}
 #if defined(_WIN32)
 static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
 #else
@@ -421,23 +458,30 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
     size_t mask = rt_struct_alloc_cap - 1;
     size_t index = rt_transient_raw_hash(ptr) & mask;
     size_t first_tomb = SIZE_MAX;
-    for (;;) {
+    for (size_t probes=1;probes<=rt_struct_alloc_cap;++probes) {
         uintptr_t entry = rt_struct_allocs[index].ptr;
         if (entry == 0) {
             size_t target = first_tomb == SIZE_MAX ? index : first_tomb;
             rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
             if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
             rt_struct_alloc_len++;
+            if (probes > rt_struct_alloc_max_success_probe_v1)
+                rt_struct_alloc_max_success_probe_v1=probes;
+            rt_source_region_registry_changed_v1();
             return 1;
         }
         if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
             if (first_tomb == SIZE_MAX) first_tomb = index;
         } else if (entry == ptr) {
             rt_struct_allocs[index].bytes = bytes;
+            if (probes > rt_struct_alloc_max_success_probe_v1)
+                rt_struct_alloc_max_success_probe_v1=probes;
+            rt_source_region_registry_changed_v1();
             return 1;
         }
         index = (index + 1) & mask;
     }
+    return 0;
 }
 
 static int rt_struct_alloc_resize(size_t next_cap) {
@@ -452,10 +496,13 @@ static int rt_struct_alloc_resize(size_t next_cap) {
     rt_struct_alloc_cap = next_cap;
     rt_struct_alloc_len = 0;
     rt_struct_alloc_tombs = 0;
+    rt_struct_alloc_max_success_probe_v1 = 0;
+    rt_source_region_registry_changed_v1();
     for (size_t i = 0; i < old_cap; i++) {
         uintptr_t ptr = old[i].ptr;
         if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
             rt_struct_alloc_insert_raw(ptr, old[i].bytes);
+
         }
     }
     free(old);
@@ -463,7 +510,7 @@ static int rt_struct_alloc_resize(size_t next_cap) {
 }
 
 static int rt_struct_alloc_register(void* ptr, size_t bytes) {
-    if (!ptr) return 0;
+    if (!ptr || bytes > INT64_MAX) return 0;
     rt_struct_alloc_lock_acquire();
     int ok = rt_struct_alloc_cap != 0 || rt_struct_alloc_resize(256);
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
@@ -493,10 +540,14 @@ static void rt_struct_alloc_unregister(void* ptr) {
             uintptr_t entry = rt_struct_allocs[index].ptr;
             if (entry == 0) break;
             if (entry == (uintptr_t)ptr) {
+                RtSourceAllocationMetadataV1* metadata =
+                    rt_struct_source_metadata_v1(&rt_struct_allocs[index]);
+                if (metadata) rt_source_region_retire_locked_v1(metadata);
                 rt_struct_allocs[index] =
                     (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
                 rt_struct_alloc_len--;
                 rt_struct_alloc_tombs++;
+                rt_source_region_registry_changed_v1();
                 break;
             }
             index = (index + 1) & mask;
@@ -516,7 +567,7 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
             uintptr_t entry = rt_struct_allocs[index].ptr;
             if (entry == 0) break;
             if (entry == (uintptr_t)ptr) {
-                *bytes_out = rt_struct_allocs[index].bytes;
+                *bytes_out = rt_struct_extent_v1(&rt_struct_allocs[index]);
                 found = 1;
                 break;
             }
@@ -555,7 +606,7 @@ int8_t rt_struct_receiver_valid(
             if (entry == ptr) {
                 size_t offset = (size_t)byte_offset;
                 size_t width = (size_t)access_width;
-                size_t bytes = rt_struct_allocs[index].bytes;
+                size_t bytes = rt_struct_extent_v1(&rt_struct_allocs[index]);
                 valid = offset <= bytes && width <= bytes - offset;
                 break;
             }
@@ -782,3 +833,5 @@ int64_t rt_mem_profile_abi_version(void) {
 int64_t rt_mem_profile_features(void) {
     return 0;
 }
+
+#include "runtime_source_region_v1.inc"
