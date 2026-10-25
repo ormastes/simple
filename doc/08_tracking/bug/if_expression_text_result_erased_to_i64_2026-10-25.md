@@ -29,3 +29,6 @@ run-27e object; Stage 3 hello world then links and runs ("hello stage3").
 ## Compiler fix (open)
 MIR/HIR must keep the declared text type of a nested if-expression whose arm
 contains `?`.
+
+## Bug DB
+DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
