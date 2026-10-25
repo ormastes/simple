@@ -1,0 +1,98 @@
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# Authored source regression; requires the working-copy compiler test runner.
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir.*
+
+val STRUCT_INEQUALITY_SOURCE = "struct ModuloRecord:\n    value: i64\n\nimpl ModuloRecord:\n    fn __eq__(other: ModuloRecord) -> bool:\n        self.value % 10 == other.value % 10\n\nfn same(a: ModuloRecord, b: ModuloRecord) -> bool:\n    a == b\n\nfn different(a: ModuloRecord, b: ModuloRecord) -> bool:\n    a != b\n\nfn present(a: ModuloRecord) -> bool:\n    a != nil\n"
+
+fn lower_struct_inequality(source: text) -> (MirModule, text):
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan: Dict<text, HirModule> = {}
+    prescan["app.main"] = hir
+    mir_lowering.prescan_module_struct_names(prescan, "app.main")
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for error in mir_lowering.errors:
+        errors = errors + error.message + "\n"
+    (mir, errors)
+
+fn struct_inequality_function(module: MirModule, name: text) -> MirFunction:
+    var found: MirFunction? = nil
+    for function in module.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            found = Some(function)
+    expect(found.?).to_be(true)
+    found.unwrap()
+
+fn struct_equality_calls(function: MirFunction) -> (i64, i64):
+    var calls = 0
+    var result_id: i64 = -1
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Call(destination, callee, _):
+                    match callee.kind:
+                        case Const(value, _):
+                            match value:
+                                case Str(name):
+                                    if name.ends_with("__eq__"):
+                                        calls = calls + 1
+                                        if val destination_local = destination:
+                                            result_id = destination_local.id
+                                case _: ()
+                        case _: ()
+                case _: ()
+    (calls, result_id)
+
+describe "struct inequality uses user equality":
+    it "calls equality exactly once and negates that call's result":
+        step("Lower unequal syntax through the user's custom equality relation")
+        val result = lower_struct_inequality(STRUCT_INEQUALITY_SOURCE)
+        expect(result.1).to_equal("")
+        val function = struct_inequality_function(result.0, "different")
+        val equality = struct_equality_calls(function)
+        expect(equality.0).to_equal(1)
+        expect(equality.1 >= 0).to_be(true)
+        var negated_calls = 0
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case UnaryOp(_, op, operand):
+                        match op:
+                            case MirUnaryOp.Not:
+                                match operand.kind:
+                                    case Copy(local):
+                                        if local.id == equality.1: negated_calls = negated_calls + 1
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+        expect(negated_calls).to_equal(1)
+
+    it "keeps ordinary equality dispatch and bypasses it for nil presence":
+        step("Distinguish value equality from nil presence")
+        val result = lower_struct_inequality(STRUCT_INEQUALITY_SOURCE)
+        expect(result.1).to_equal("")
+        expect(struct_equality_calls(struct_inequality_function(result.0, "same")).0).to_equal(1)
+        expect(struct_equality_calls(struct_inequality_function(result.0, "present")).0).to_equal(0)
+
+    it "retains a diagnostic when no equality implementation exists":
+        step("Reject a missing equality owner without comparing raw pointers")
+        val result = lower_struct_inequality("struct MissingEquality:\n    value: i64\n\nfn different(a: MissingEquality, b: MissingEquality) -> bool:\n    a != b\n")
+        expect(result.1).to_contain("operator overload for struct")
