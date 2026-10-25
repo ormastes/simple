@@ -89,3 +89,39 @@ The three affected source beforeimages on this branch exactly match donor
 `642659ae779763091e138b0226a7576fee435cc6`. This port reuses that generator,
 generated HIR/AST folds and real regression SSpec without disabling the
 representation pass. Focused rebuilt-producer qualification remains pending.
+
+## Focused rebuilt-producer result — 2026-10-25
+
+Source commit `9fc4cf97132d2d31e0c89643d6667d3bb35d6c06` was rebuilt
+incrementally with the canonical hosted producer environment (`SIMPLE_BOOTSTRAP=1`),
+ten jobs and a private copy of the native cache. Result:3 compiled,1484 reused,
+0 failed;44.67 seconds including linking. Frozen producer SHA256:
+`17f3c6d97489380c28ec56755ec17a5d774c50740e4591f94ba18f57b77c1b00`.
+New candidate SHA256:
+`fe8d11e1ec1d05f8eb84306a2bbd69db7ca5cc4548df81a4ea8c90149dd96614`.
+The linked Cranelift configuration entrypoint has the real1332-byte implementation,
+not the32-byte trap stub. Source, argv, environment and runtime authority path
+are retained in `/tmp/phase3-optional-fold-rebuild-20261025/`.
+
+The original `check-bootstrap-stage2-struct-receiver.shs` returned0 and reported
+both `bootstrap_stage2_struct_receiver=PASS` and
+`bootstrap_stage2_positional_stage3_route=PASS`; the positional executable
+produced exactly the three required module names. The fresh-worktree first
+attempt refused before compilation because its SCV journal was missing. The
+retained passing attempt used the compiler-prescribed one-time inventory cold
+initialization, with no semantic checker disabled. Receipts are in
+`receiver-gate-cold-init/{gate.log,status,argv.txt,env.txt}` beneath that directory.
+
+Independent positional controls also compiled and ran successfully: `p2_add`
+with bootstrap1 produced exactly `5\n`; Hello World with bootstrap0 produced
+exactly `hello\n`. Both compile/run exits were0 and runtime stderr was empty.
+Control receipts are in `controls/{p2_add,hello_world}/`; each compile/link
+completed in about19 seconds, with roughly16.5 seconds in linking.
+
+The eight authored regression SSpecs, executable generator parity, full CLI,
+full Phase3 and the broader acceptance matrix remain UNRUN. The focused native
+gate is not substituted for those results. Source review finds constant work
+per optional edge, no new retained state and no additional payload allocation;
+no end-to-end memory/performance qualification is claimed. Independent Astra
+review of9fc returned GO with no P0/P1 finding. Any later rebase carries this
+exact source-pinned evidence and does not qualify newly added base features.
