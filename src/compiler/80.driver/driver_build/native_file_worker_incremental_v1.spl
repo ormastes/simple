@@ -20,11 +20,19 @@
 # cached object, a missing cached output. Known gap: the coordinator has no AOP
 # directory facts, so the pointcut change list is empty here (the planner's
 # pointcut path is exercised by its own spec).
+#
+# Cache identity: the cache directory and the manifest header both carry the
+# producer (native_build_cache_scope_key: compiler/runtime/bundle/lane, plus a
+# digest of the native-build arguments: backend, opt level, target). Known
+# limitation: two CONCURRENT builds with the same producer and the same -o
+# share one directory and can race on obj/, pending and output.
+
 use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalModuleV1, PointcutDirChangeV1,
-    incremental_rebuild_plan_v1}
+    IncrementalObjectV1, incremental_rebuild_plan_v1}
 
 pub const FILE_WORKER_INC_DIR_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_DIR"
 pub const FILE_WORKER_LINK_PLACED_ENV_V1: text = "SIMPLE_FILE_WORKER_LINK_PLACED"
+pub const FILE_WORKER_INC_PRODUCER_ENV_V1: text = "SIMPLE_FILE_WORKER_INC_PRODUCER"
 pub const FILE_WORKER_INC_MANIFEST_VERSION_V1: text = "file-worker-incremental-v1"
 
 pub struct FileWorkerIncRowV1:
@@ -53,8 +61,11 @@ fn _row_ok_v1(r: FileWorkerIncRowV1) -> bool:
             return false
     not r.cached_object.contains("\t") and not r.capsule.contains("\t")
 
-pub fn file_worker_inc_manifest_encode_v1(rows: [FileWorkerIncRowV1], output_digest: text) -> text:
-    var out = FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\n" + output_digest + "\n"
+# Header line = version + "\t" + producer identity (compiler/runtime/lane cache
+# scope + native-build options). A manifest from another producer is foreign.
+pub fn file_worker_inc_manifest_encode_v1(rows: [FileWorkerIncRowV1], output_digest: text,
+        producer: text) -> text:
+    var out = FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer + "\n" + output_digest + "\n"
     for r in rows:
         if not _row_ok_v1(r):
             continue
@@ -62,11 +73,12 @@ pub fn file_worker_inc_manifest_encode_v1(rows: [FileWorkerIncRowV1], output_dig
         out = out + "{r.path}\t{r.source_digest}\t{r.iface_digest}\t{imports}\t{r.object_digest}\t{r.cached_object}\t{r.functions}\t{r.statics}\t{r.capsule}\n"
     out
 
-# (rows, output_digest); a malformed or foreign manifest yields no rows.
-pub fn file_worker_inc_manifest_parse_v1(content: text) -> ([FileWorkerIncRowV1], text):
+# (rows, output_digest); a malformed manifest, or one written by a different
+# producer (or with an empty producer), yields no rows.
+pub fn file_worker_inc_manifest_parse_v1(content: text, producer: text) -> ([FileWorkerIncRowV1], text):
     val lines = content.split("\n")
     var rows: [FileWorkerIncRowV1] = []
-    if lines.len() < 2 or lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V1:
+    if producer == "" or lines.len() < 2 or lines[0] != FILE_WORKER_INC_MANIFEST_VERSION_V1 + "\t" + producer:
         return (rows, "")
     var i = 2
     while i < lines.len():
@@ -111,11 +123,32 @@ pub fn file_worker_inc_select_v1(prev: [FileWorkerIncRowV1], new_source: Dict<te
             reuse = reuse.push(r)
     FileWorkerIncSelectionV1(reuse: reuse, rebuild: plan.recompile)
 
+# Link inputs for incremental_link_decision_v1: every current object against
+# its previous digest (absent = new), plus every previous module no longer in
+# the closure as removed (new digest ""), so a removal always relinks.
+pub fn file_worker_inc_link_objects_v1(prev: [FileWorkerIncRowV1],
+        current: [FileWorkerIncRowV1]) -> [IncrementalObjectV1]:
+    var old: Dict<text, text> = {}
+    for r in prev:
+        old[r.path] = r.object_digest
+    var seen: [text] = []
+    var out: [IncrementalObjectV1] = []
+    for c in current:
+        seen = seen.push(c.path)
+        val before = if old.contains_key(c.path): old[c.path] else: ""
+        out = out.push(IncrementalObjectV1(path: c.path, old_object_digest: before,
+            new_object_digest: c.object_digest))
+    for r in prev:
+        if not seen.contains(r.path):
+            out = out.push(IncrementalObjectV1(path: r.path, old_object_digest: r.object_digest,
+                new_object_digest: ""))
+    out
+
 pub fn file_worker_inc_receipt_line_v1(reused: i64, rebuilt: i64, relinked: bool) -> text:
     val link = if relinked: "relinked" else: "reused"
     "[file-workers] {reused} reused / {rebuilt} rebuilt / link={link}"
 
 export FileWorkerIncRowV1, FileWorkerIncSelectionV1
-export FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_MANIFEST_VERSION_V1
+export FILE_WORKER_INC_DIR_ENV_V1, FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1, FILE_WORKER_INC_MANIFEST_VERSION_V1
 export file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1
-export file_worker_inc_select_v1, file_worker_inc_receipt_line_v1
+export file_worker_inc_select_v1, file_worker_inc_receipt_line_v1, file_worker_inc_link_objects_v1

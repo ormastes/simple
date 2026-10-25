@@ -23,7 +23,7 @@ use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.driver.cache.incremental_rebuild_plan_v1.{IncrementalObjectV1, incremental_link_decision_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{FileWorkerIncRowV1,
     file_worker_inc_select_v1, file_worker_inc_receipt_line_v1,
-    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1}
+    file_worker_inc_manifest_encode_v1, file_worker_inc_manifest_parse_v1, file_worker_inc_link_objects_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FileWorkerReuseRowV1,
     file_worker_reuse_encode_v1, file_worker_reuse_find_v1}
 
@@ -96,10 +96,33 @@ describe "file-worker incremental selection":
         assert_true(link.relink)
         assert_false(link.place_cached)
 
+    it "a module removed from the closure relinks even with unchanged objects":
+        var current = prev_rows()
+        current = [current[0], current[1], current[2]]
+        val link = incremental_link_decision_v1(file_worker_inc_link_objects_v1(prev_rows(), current), true)
+        assert_true(link.relink)
+        assert_false(link.place_cached)
+        assert_equal(link.changed_objects, ["d.spl"])
+
+    it "unchanged closure through the link-object builder reuses the output":
+        val link = incremental_link_decision_v1(file_worker_inc_link_objects_v1(prev_rows(), prev_rows()), true)
+        assert_false(link.relink)
+        assert_true(link.place_cached)
+
+    it "a manifest from a different producer reuses nothing":
+        val encoded = file_worker_inc_manifest_encode_v1(prev_rows(), "out-digest", "prodA")
+        val (rows, out) = file_worker_inc_manifest_parse_v1(encoded, "prodB")
+        assert_equal(rows.len(), 0)
+        assert_equal(out, "")
+        val sel = file_worker_inc_select_v1(rows, digests("s-"), digests("i-"), [])
+        assert_equal(sel.reuse.len(), 0)
+        val (none, _o) = file_worker_inc_manifest_parse_v1(encoded, "")
+        assert_equal(none.len(), 0)
+
 describe "file-worker incremental records":
     it "round-trips the manifest":
-        val encoded = file_worker_inc_manifest_encode_v1(prev_rows(), "out-digest")
-        val (rows, out) = file_worker_inc_manifest_parse_v1(encoded)
+        val encoded = file_worker_inc_manifest_encode_v1(prev_rows(), "out-digest", "prodA")
+        val (rows, out) = file_worker_inc_manifest_parse_v1(encoded, "prodA")
         assert_equal(out, "out-digest")
         assert_equal(rows.len(), 4)
         assert_equal(rows[0].imports, ["b.spl"])
@@ -108,7 +131,7 @@ describe "file-worker incremental records":
         assert_equal(rows[1].cached_object, "/cache/b.spl.o")
 
     it "refuses a foreign manifest":
-        val (rows, out) = file_worker_inc_manifest_parse_v1("other-v9\nx\n")
+        val (rows, out) = file_worker_inc_manifest_parse_v1("other-v9\tprodA\nx\n", "prodA")
         assert_equal(rows.len(), 0)
         assert_equal(out, "")
 
