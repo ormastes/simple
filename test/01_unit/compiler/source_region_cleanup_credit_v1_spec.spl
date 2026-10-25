@@ -1,0 +1,59 @@
+# Actual native-facade escrow checks; UNRUN until a qualified native runtime
+# contains the live-cleanup ABI. These unsafe fixtures own genuinely born
+# controllers; they do NOT issue an affine compiler pin receipt.
+use std.spec.{describe, it, expect}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.common.source_region_context_v1.*
+use compiler.common.source_region_request_v1.{SourceRegionRequestV1}
+use compiler.common.source_region_pinned_lifecycle_v1.*
+
+describe "SOURCE shared-account cleanup credit":
+    it "uses prepaid revoke and release credit after the actual account closes":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val slot = SourceRegionRequestV1.create(account).unwrap()
+        val before = account.snapshot()
+        expect(before.work_used).to_be_greater_than(0)
+        account.close()
+        val revoked = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_revoke_pinned_v1(slot)
+        expect(revoked.unwrap()).to_equal(0)
+        val released = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_release_pinned_v1(slot)
+        expect(released.unwrap()).to_equal(0)
+        expect(slot.context.live_).to_equal(false)
+        expect(slot.released).to_equal(true)
+        val repeated = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_release_pinned_v1(slot)
+        expect(repeated).to_equal(Err(SourceRegionErrorV1.Consumed))
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it "retires an actual read lease using its prepaid end credit":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val slot = SourceRegionRequestV1.create(account).unwrap()
+        val epoch = source_region_stamp_v1(slot.context).unwrap()
+        val lease = source_region_read_begin_v1(slot.context, epoch).unwrap()
+        expect(lease).to_be_greater_than(0)
+        val before = account.snapshot()
+        expect(before.work_used).to_be_greater_than(0)
+        account.close()
+        val ended = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_read_end_pinned_v1(slot)
+        expect(ended.unwrap()).to_equal(0)
+        expect(slot.context.pending_lease_).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_revoke_pinned_v1(slot).unwrap()
+            source_region_release_pinned_v1(slot).unwrap()
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it "retains the first semantic and cleanup errors independently":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val slot = SourceRegionRequestV1.create(account).unwrap()
+        source_region_retain_first_error_v1(slot, SourceRegionErrorV1.Stale).unwrap()
+        source_region_retain_first_error_v1(slot, SourceRegionErrorV1.Capacity).unwrap()
+        source_region_retain_cleanup_error_v1(slot, SourceRegionErrorV1.Conflict).unwrap()
+        source_region_retain_cleanup_error_v1(slot, SourceRegionErrorV1.Consumed).unwrap()
+        expect(slot.first_error).to_equal(Some(SourceRegionErrorV1.Stale))
+        expect(slot.cleanup_error).to_equal(Some(SourceRegionErrorV1.Conflict))
+        unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_revoke_pinned_v1(slot).unwrap()
+            source_region_release_pinned_v1(slot).unwrap()

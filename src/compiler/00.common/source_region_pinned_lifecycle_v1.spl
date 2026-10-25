@@ -1,0 +1,105 @@
+# UNSAFE compiler-private boundary. A positive token or live_ flag is NOT a
+# pin receipt. Only the actual request CFG/caller confinement verifier may
+# authorize calls; ordinary SourceRegionRequest methods stay registry-guarded.
+use compiler.common.source_region_context_v1.*
+use compiler.common.source_region_request_v1.{SourceRegionRequestV1}
+
+@unsafe(reason: "compiler-verified live control pin required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_revoke_live_v1(control: i64, generation: i64, work: i64) -> i64
+@unsafe(reason: "compiler-verified live read lease pin required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_read_end_live_v1(control: i64, generation: i64, lease: i64, work: i64) -> i64
+@unsafe(reason: "compiler-verified affine live control release required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_release_live_v1(control: i64, generation: i64, work: i64) -> i64
+
+# Mutation belongs to the retained request owner; ABI wrappers tail-call it.
+impl SourceRegionRequestV1:
+    me retain_first_error_v1(error: SourceRegionErrorV1) -> Result<i64, SourceRegionErrorV1>:
+        if self.first_error == nil: self.first_error = Some(error)
+        Ok(0)
+
+    me retain_cleanup_error_v1(error: SourceRegionErrorV1) -> Result<i64, SourceRegionErrorV1>:
+        if self.cleanup_error == nil: self.cleanup_error = Some(error)
+        Ok(0)
+
+    @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+    me read_end_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
+        if self.context.pending_lease_ == 0: return Ok(0)
+        val work = self.context.pending_read_end_work_
+        if work <= 0: return Err(SourceRegionErrorV1.Consumed)
+        self.context.pending_read_end_work_ = 0
+        val raw = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_read_end_live_v1(self.context.native_control,
+                self.context.generation, self.context.pending_lease_, work)
+        match source_region_value_v1(raw):
+            case Ok(value):
+                self.context.pending_lease_ = 0
+                Ok(value)
+            case Err(error):
+                self.retain_cleanup_error_v1(error)
+                Err(error)
+
+    @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+    me revoke_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
+        if self.context.revoked_: return Ok(0)
+        val work = self.context.cleanup_revoke_work_
+        if work <= 0: return Err(SourceRegionErrorV1.Consumed)
+        self.context.cleanup_revoke_work_ = 0
+        val raw = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_revoke_live_v1(self.context.native_control, self.context.generation, work)
+        match source_region_value_v1(raw):
+            case Ok(value):
+                self.context.revoked_ = true
+                self.context.pending_ticket_ = 0
+                self.context.pending_commit_work_ = 0
+                self.ended = true
+                Ok(value)
+            case Err(error):
+                self.retain_cleanup_error_v1(error)
+                Err(error)
+
+    @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+    me release_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if self.released: return Err(SourceRegionErrorV1.Consumed)
+        if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
+        if not self.context.revoked_: return Err(SourceRegionErrorV1.Conflict)
+        if self.context.release_attempted_: return Err(SourceRegionErrorV1.Consumed)
+        val work = self.context.cleanup_release_work_
+        if work <= 0: return Err(SourceRegionErrorV1.Consumed)
+        self.context.cleanup_release_work_ = 0
+        self.context.release_attempted_ = true
+        val raw = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_release_live_v1(self.context.native_control, self.context.generation, work)
+        match source_region_value_v1(raw):
+            case Ok(value):
+                # No subsequent direct native use may occur after success.
+                self.context.live_ = false
+                self.released = true
+                Ok(value)
+            case Err(error):
+                self.retain_cleanup_error_v1(error)
+                Err(error)
+
+pub fn source_region_retain_first_error_v1(slot: SourceRegionRequestV1,
+        error: SourceRegionErrorV1) -> Result<i64, SourceRegionErrorV1>:
+    slot.retain_first_error_v1(error)
+
+pub fn source_region_retain_cleanup_error_v1(slot: SourceRegionRequestV1,
+        error: SourceRegionErrorV1) -> Result<i64, SourceRegionErrorV1>:
+    slot.retain_cleanup_error_v1(error)
+
+@unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+pub fn source_region_read_end_pinned_v1(slot: SourceRegionRequestV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        slot.read_end_pinned_v1()
+
+@unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+pub fn source_region_revoke_pinned_v1(slot: SourceRegionRequestV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        slot.revoke_pinned_v1()
+
+@unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
+pub fn source_region_release_pinned_v1(slot: SourceRegionRequestV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        slot.release_pinned_v1()
