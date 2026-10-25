@@ -1,0 +1,31 @@
+"""Exercise actual private worker directory creation, without compiler claims."""
+use std.spec.*
+use app.io.env_ops.{env_get}
+use app.cli.native_mir_worker_private_paths_v1.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+describe "MIR worker writable roots":
+    it "creates distinct roots for twelve owners and replacement generations":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val queue = secure_temp_dir_raw(temporary, "mir-private-paths-spec")
+        expect(queue != "").to_equal(true)
+        var roots: [text] = []
+        for index in 0..12:
+            val result = native_mir_worker_private_paths_v1(queue, index, 12, 0)
+            expect(result.is_ok()).to_equal(true)
+            val paths = result.unwrap()
+            expect(roots.contains(paths.root)).to_equal(false)
+            expect(paths.native_cache.starts_with(paths.root + "/")).to_equal(true)
+            roots.push(paths.root)
+        val replacement = native_mir_worker_private_paths_v1(queue, 0, 12, 1)
+        expect(replacement.is_ok()).to_equal(true)
+        expect(roots.contains(replacement.unwrap().root)).to_equal(false)
+        val removed = dir_remove(queue, true)
+        expect(removed).to_equal(true)
+
+    it "rejects invalid owners before allocating directories":
+        expect(native_mir_worker_private_paths_v1("/unused", -1, 12, 0).is_err()).to_equal(true)
+        expect(native_mir_worker_private_paths_v1("/unused", 12, 12, 0).is_err()).to_equal(true)
+        expect(native_mir_worker_private_paths_v1("/unused", 0, 0, 0).is_err()).to_equal(true)
+        expect(native_mir_worker_private_paths_v1("/unused", 0, 12, -1).is_err()).to_equal(true)

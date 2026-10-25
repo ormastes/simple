@@ -1,0 +1,178 @@
+# Compact object-result handoff. No MIR graphs cross this boundary.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_put,
+    binary_object_magic_kind}
+
+pub const NATIVE_MIR_WORKER_OBJECT_BYTES_V1: i64 = 128 * 1024 * 1024
+pub const NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1: i64 = 65536
+
+# Parent supplies these values from the admitted manifest and launch owner,
+# never from a child's result. context includes semantic configuration.
+pub struct NativeMirWorkerObjectExpectedV1:
+    invocation: text
+    owner: text
+    private_root: text
+    source: text
+    context: text
+    manifest: text
+    module: text
+    module_source: text
+    backend: text
+    target: text
+    provider: text
+    producer: text
+    job: text
+    child_pid: i64
+    child_birth: text
+
+pub struct NativeMirWorkerObjectFragmentV1:
+    expected: NativeMirWorkerObjectExpectedV1
+    object_path: text
+    object_digest: text
+    object_bytes: i64
+    capsule_identity: text
+
+pub fn native_mir_worker_expected_valid_v1(e: NativeMirWorkerObjectExpectedV1) -> bool:
+    if not sha256_lower_hex_valid(e.invocation) or not sha256_lower_hex_valid(e.source) or
+            not sha256_lower_hex_valid(e.context) or not sha256_lower_hex_valid(e.manifest) or
+            not sha256_lower_hex_valid(e.module_source) or
+            not sha256_lower_hex_valid(e.producer) or not sha256_lower_hex_valid(e.job) or
+            e.child_pid <= 0 or (e.child_birth.to_i64() ?? -1) <= 0 or
+            (e.provider != "" and not sha256_lower_hex_valid(e.provider)):
+        return false
+    if e.owner == "" or e.module == "" or e.target == "" or
+            (e.backend != "cranelift" and e.backend != "llvm" and e.backend != "llvm-lib"):
+        return false
+    e.private_root != "" and not e.private_root.contains("\0") and
+        not e.private_root.contains("\n") and not e.private_root.contains("/../") and
+        not e.private_root.ends_with("/..") and not e.private_root.ends_with("/")
+
+pub fn native_mir_worker_fragment_encode_v1(f: NativeMirWorkerObjectFragmentV1) -> Result<text, text>:
+    val e = f.expected
+    if not native_mir_worker_expected_valid_v1(e) or
+            not sha256_lower_hex_valid(f.object_digest) or
+            f.object_bytes < 4 or f.object_bytes > NATIVE_MIR_WORKER_OBJECT_BYTES_V1 or
+            f.capsule_identity == "" or f.capsule_identity.len() > 16384 or
+            not f.object_path.starts_with("{e.private_root}/native/") or
+            f.object_path.contains("/../") or f.object_path.contains("\0"):
+        return Err("MIR worker object fragment fields refused")
+    val fields = ["simple/mir-worker-object/v1", e.invocation, e.owner,
+        e.private_root, e.source, e.context, e.manifest, e.module, e.module_source,
+        e.backend, e.target, e.provider, e.producer, e.job, "{e.child_pid}",
+        e.child_birth, f.object_path, f.object_digest,
+        "{f.object_bytes}", f.capsule_identity]
+    var values: [SdnValue] = []
+    var budget = 64
+    for field in fields:
+        # Worst-case quoting bound before encoder allocations.
+        if field.len() > (NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1 - budget) / 2:
+            return Err("MIR worker object fragment byte budget exceeded")
+        budget = budget + field.len() * 2 + 4
+        values.push(SdnValue.String(field))
+    val encoded = sdn_encode_canonical(SdnValue.Array(values)) + "\n"
+    if encoded.len() > NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1:
+        return Err("MIR worker object fragment byte budget exceeded")
+    Ok(encoded)
+
+pub fn native_mir_worker_fragment_decode_v1(blob: text,
+        expected: NativeMirWorkerObjectExpectedV1) -> Result<NativeMirWorkerObjectFragmentV1, text>:
+    if blob.len() > NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1 or
+            not native_mir_worker_expected_valid_v1(expected):
+        return Err("MIR worker object fragment bounds refused")
+    val parsed = parse_untrusted(blob)?
+    var fields: [text] = []
+    match parsed:
+        case Array(values):
+            if values.len() != 20: return Err("MIR worker object fragment shape refused")
+            for value in values:
+                match value:
+                    case String(field): fields.push(field)
+                    case _: return Err("MIR worker object fragment field type refused")
+        case _: return Err("MIR worker object fragment shape refused")
+    val e = expected
+    val prefix = ["simple/mir-worker-object/v1", e.invocation, e.owner,
+        e.private_root, e.source, e.context, e.manifest, e.module, e.module_source,
+        e.backend, e.target, e.provider, e.producer, e.job, "{e.child_pid}", e.child_birth]
+    for index in 0..prefix.len():
+        if fields[index] != prefix[index]: return Err("MIR worker object fragment authority mismatch")
+    val result = NativeMirWorkerObjectFragmentV1(expected: expected,
+        object_path: fields[16], object_digest: fields[17],
+        object_bytes: fields[18].to_i64() ?? -1, capsule_identity: fields[19])
+    val canonical = native_mir_worker_fragment_encode_v1(result)?
+    if canonical != blob: return Err("MIR worker object fragment is noncanonical")
+    Ok(result)
+
+# This revalidates the worker's previously capsule-validated compact result.
+# It grants immutable blob retention only, never action-cache hits or linking.
+pub fn native_mir_worker_object_adopt_v1(cache_root: text,
+        expected: NativeMirWorkerObjectExpectedV1) -> Result<text, text>:
+    val blob = file_read_regular_no_follow_bounded("{expected.private_root}/result.sdn",
+        NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1)?
+    val f = native_mir_worker_fragment_decode_v1(blob, expected)?
+    val receipt = file_read_regular_no_follow_bounded("{f.object_path}.capsule-receipt",
+        NATIVE_MIR_WORKER_FRAGMENT_BYTES_V1)?
+    val wanted = "native-capsule-result-v1\n{f.capsule_identity}\n{f.object_path}\n{f.object_bytes}\n{f.object_digest}\n"
+    if receipt != wanted: return Err("MIR worker capsule receipt mismatch")
+    val bytes = file_read_regular_no_follow_bounded_bytes(f.object_path,
+        NATIVE_MIR_WORKER_OBJECT_BYTES_V1)?
+    if bytes.len() != f.object_bytes or sha256_u8_hex(bytes) != f.object_digest or
+            binary_object_magic_kind(bytes) == "":
+        return Err("MIR worker object readback mismatch")
+    if binary_object_cas_put(cache_root, bytes) != f.object_digest:
+        return Err("MIR worker immutable object retention failed")
+    Ok(f.object_digest)
+
+pub struct NativeMirPartialObjectAdoptionV1:
+    modules: [text]
+    digests: [text]
+    errors: [text]
+    may_link: bool
+
+# Input is the original manifest order (including non-ready rows as failures),
+# not worker completion order. Every row gets exactly one result; retain later
+# independent successes after a failed row. The original failure never clears.
+pub fn native_mir_worker_objects_adopt_ordered_v1(cache_root: text,
+        rows: [NativeMirWorkerObjectExpectedV1], ready: [bool],
+        original_passed: bool, protocol_complete: bool,
+        all_stopped: bool) -> Result<NativeMirPartialObjectAdoptionV1, text>:
+    if cache_root == "" or rows.len() == 0 or rows.len() > 65536 or rows.len() != ready.len():
+        return Err("MIR partial object inventory refused")
+    if not all_stopped: return Err("MIR partial object workers not reaped")
+    var seen: Dict<text, bool> = {}
+    for row in rows:
+        if not native_mir_worker_expected_valid_v1(row) or seen.has(row.module):
+            return Err("MIR partial object inventory duplicate or invalid")
+        if row.invocation != rows[0].invocation or row.source != rows[0].source or
+                row.context != rows[0].context or row.manifest != rows[0].manifest or
+                row.producer != rows[0].producer:
+            return Err("MIR partial object inventory mixed generation")
+        seen[row.module] = true
+    var modules: [text] = []
+    var digests: [text] = []
+    var errors: [text] = []
+    var complete = original_passed and protocol_complete
+    for index in 0..rows.len():
+        val row = rows[index]
+        modules.push(row.module)
+        if not ready[index]:
+            digests.push("")
+            errors.push("original source is not READY")
+            complete = false
+        else:
+            match native_mir_worker_object_adopt_v1(cache_root, row):
+                case Ok(digest):
+                    digests.push(digest)
+                    errors.push("")
+                case Err(reason):
+                    digests.push("")
+                    errors.push(reason)
+                    complete = false
+    # Existing native_mir_shard_link_inputs_v1 remains required even when true.
+    Ok(NativeMirPartialObjectAdoptionV1(modules: modules, digests: digests,
+        errors: errors, may_link: complete))

@@ -1,0 +1,80 @@
+"""Private MIR worker object handoff contracts; runtime execution UNRUN."""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_mir_worker_object_fragment_v1.*
+
+fn worker_fragment_expected_for_test() -> NativeMirWorkerObjectExpectedV1:
+    NativeMirWorkerObjectExpectedV1(invocation: sha256_text("invocation"),
+        owner: "0/12@0", private_root: "/owned/invocation/worker-0",
+        source: sha256_text("sources"), context: sha256_text("configuration"),
+        manifest: sha256_text("physical manifest"), module: "app.한글",
+        module_source: sha256_text("source bytes"), backend: "cranelift",
+        target: "aarch64-unknown-linux-gnu", provider: "",
+        producer: sha256_text("producer"), job: sha256_text("job"),
+        child_pid: 123, child_birth: "456")
+
+fn worker_fragment_for_test() -> NativeMirWorkerObjectFragmentV1:
+    val expected = worker_fragment_expected_for_test()
+    NativeMirWorkerObjectFragmentV1(expected: expected,
+        object_path: "{expected.private_root}/native/scope/module.o",
+        object_digest: sha256_text("object bytes"), object_bytes: 64,
+        capsule_identity: "native-capsule-v1|Unicode 한글")
+
+describe "MIR private worker compact receipt":
+    it "round trips exact Unicode metadata and manifest authority":
+        val fragment = worker_fragment_for_test()
+        val encoded = native_mir_worker_fragment_encode_v1(fragment)
+        expect(encoded.is_ok()).to_equal(true)
+        val decoded = native_mir_worker_fragment_decode_v1(encoded.unwrap(), fragment.expected)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().expected.module).to_equal("app.한글")
+        expect(decoded.unwrap().object_digest).to_equal(fragment.object_digest)
+
+    it "rejects stale source context owner and manifest":
+        val fragment = worker_fragment_for_test()
+        val encoded = native_mir_worker_fragment_encode_v1(fragment).unwrap()
+        var stale = worker_fragment_expected_for_test()
+        stale.source = sha256_text("changed sources")
+        expect(native_mir_worker_fragment_decode_v1(encoded, stale).is_err()).to_equal(true)
+        stale = worker_fragment_expected_for_test()
+        stale.context = sha256_text("changed config")
+        expect(native_mir_worker_fragment_decode_v1(encoded, stale).is_err()).to_equal(true)
+        stale = worker_fragment_expected_for_test()
+        stale.owner = "1/12@0"
+        expect(native_mir_worker_fragment_decode_v1(encoded, stale).is_err()).to_equal(true)
+        stale = worker_fragment_expected_for_test()
+        stale.manifest = sha256_text("changed manifest")
+        expect(native_mir_worker_fragment_decode_v1(encoded, stale).is_err()).to_equal(true)
+
+    it "rejects traversal escaped output and noncanonical trailing data":
+        var fragment = worker_fragment_for_test()
+        fragment.object_path = "/other/module.o"
+        expect(native_mir_worker_fragment_encode_v1(fragment).is_err()).to_equal(true)
+        fragment = worker_fragment_for_test()
+        fragment.object_path = "{fragment.expected.private_root}/native/../escape.o"
+        expect(native_mir_worker_fragment_encode_v1(fragment).is_err()).to_equal(true)
+        fragment = worker_fragment_for_test()
+        val encoded = native_mir_worker_fragment_encode_v1(fragment).unwrap()
+        expect(native_mir_worker_fragment_decode_v1(encoded + " ", fragment.expected).is_err()).to_equal(true)
+
+    it "keeps original failure and ordered non-ready diagnostics":
+        val first = worker_fragment_expected_for_test()
+        var second = worker_fragment_expected_for_test()
+        second.module = "app.other"
+        second.owner = "1/12@0"
+        second.private_root = "/owned/invocation/worker-1"
+        val result = native_mir_worker_objects_adopt_ordered_v1("/cache",
+            [first, second], [false, false], false, true, true)
+        expect(result.is_ok()).to_equal(true)
+        val adopted = result.unwrap()
+        expect(adopted.modules).to_equal(["app.한글", "app.other"])
+        expect(adopted.digests).to_equal(["", ""])
+        expect(adopted.errors).to_equal(["original source is not READY", "original source is not READY"])
+        expect(adopted.may_link).to_equal(false)
+        expect(native_mir_worker_objects_adopt_ordered_v1("/cache", [first],
+            [true], true, true, false).is_err()).to_equal(true)
+
+    it "rejects duplicate manifest rows before any retention":
+        val row = worker_fragment_expected_for_test()
+        expect(native_mir_worker_objects_adopt_ordered_v1("/cache", [row, row],
+            [true, true], true, true, true).is_err()).to_equal(true)

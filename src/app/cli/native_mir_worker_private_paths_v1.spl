@@ -1,0 +1,59 @@
+# Parent-owned launch isolation for existing MIR ledger workers.
+# Call enter immediately before spawn and restore immediately after spawn;
+# the child inherits a copy, never the next owner's writable directories.
+use app.io.env_ops.{env_get, env_set}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+pub struct NativeMirWorkerPrivatePathsV1:
+    owner: text
+    root: text
+    native_cache: text
+    temporary: text
+    fragment: text
+
+pub fn native_mir_worker_private_paths_v1(queue: text, index: i64,
+        count: i64, generation: i64) -> Result<NativeMirWorkerPrivatePathsV1, text>:
+    if queue == "" or queue.contains("\n") or queue.contains("\0") or
+            count <= 0 or index < 0 or index >= count or generation < 0:
+        return Err("invalid MIR worker private-path owner")
+    val owner = "{index}/{count}@{generation}"
+    # Atomic host-created directory prevents generation/retry collisions and
+    # avoids adopting a preexisting worker-writable directory as authority.
+    val root = secure_temp_dir_raw(queue, "mir-worker-" + sha256_text(owner))
+    if root == "" or not dir_create_all("{root}/native") or
+            not dir_create_all("{root}/tmp"):
+        return Err("MIR worker private directories unavailable")
+    Ok(NativeMirWorkerPrivatePathsV1(owner: owner, root: root,
+        native_cache: "{root}/native", temporary: "{root}/tmp",
+        fragment: "{root}/result.sdn"))
+
+fn native_mir_worker_private_environment_names_v1() -> [text]:
+    ["SIMPLE_NATIVE_BUILD_CACHE_DIR", "TMPDIR", "TEMP", "TMP",
+        "SIMPLE_MIR_WORKER_PRIVATE_ROOT"]
+
+pub fn native_mir_worker_private_environment_restore_v1(saved: [text]) -> bool:
+    val names = native_mir_worker_private_environment_names_v1()
+    if saved.len() != names.len(): return false
+    var restored = true
+    for index in 0..names.len():
+        if not env_set(names[index], saved[index]): restored = false
+    restored
+
+pub fn native_mir_worker_private_environment_enter_v1(
+        paths: NativeMirWorkerPrivatePathsV1) -> Result<[text], text>:
+    if paths.root == "" or paths.native_cache != "{paths.root}/native" or
+            paths.temporary != "{paths.root}/tmp" or paths.fragment != "{paths.root}/result.sdn":
+        return Err("MIR worker private-path layout refused")
+    val names = native_mir_worker_private_environment_names_v1()
+    val values = [paths.native_cache, paths.temporary, paths.temporary,
+        paths.temporary, paths.root]
+    var saved: [text] = []
+    for name in names: saved.push(env_get(name) ?? "")
+    for index in 0..names.len():
+        if not env_set(names[index], values[index]):
+            val restored = native_mir_worker_private_environment_restore_v1(saved)
+            return Err(if restored: "MIR worker private environment refused" else:
+                "MIR worker private environment rollback failed")
+    Ok(saved)
