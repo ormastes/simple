@@ -11,6 +11,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1}
 use compiler.driver.driver_hir_pipeline_support.{driver_admit_nogc_param_effects_v1}
 use compiler.driver.driver_types.{CompileContext}
@@ -108,3 +109,27 @@ describe "strict driver ownership gate":
         val actual: HirModule = ctx.hir_modules["admitted_borrow"]
         expect(actual.nogc_param_effects_checked).to_equal(false)
         expect(ctx.validation_module_array[0].nogc_param_effects.len()).to_equal(0)
+
+    it "publishes modules in physical order after an unordered shard handoff":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        var surfaces: [ModuleSurface] = []
+        for name in ["c", "a", "b"]:
+            val path = "testdata/admission_order/{name}.spl"
+            val body = "fn value() -> i64:\n    7\n"
+            val parsed = parse_full_frontend(body, path, name, Logger(level: 0))
+            val source = SourceFile(path: path, content: body, module_name: name)
+            val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+            surfaces.push(surface)
+            var lowering = HirLowering.with_filename(path)
+            val actual: HirModule = lowering.lower_module(parsed)
+            ctx.hir_modules[name] = actual
+            ctx.validation_module_array.push(actual)
+        driver_admit_nogc_param_effects_v1(ctx, surfaces)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(ctx.validation_module_array.len()).to_equal(3)
+        expect(ctx.validation_module_array[0].path).to_equal("testdata/admission_order/a.spl")
+        expect(ctx.validation_module_array[1].path).to_equal("testdata/admission_order/b.spl")
+        expect(ctx.validation_module_array[2].path).to_equal("testdata/admission_order/c.spl")
+        for name in ["a", "b", "c"]:
+            val actual: HirModule = ctx.hir_modules[name]
+            expect(actual.path).to_equal("testdata/admission_order/{name}.spl")
