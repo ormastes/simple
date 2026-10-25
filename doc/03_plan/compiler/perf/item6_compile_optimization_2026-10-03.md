@@ -158,7 +158,7 @@ compile-time, memory, or first-object number below is a retained measurement.
 | Module-scoped mono + COMDAT, per-file mono, relocation, dedup | PARTIAL — opt-in | #4575 `00e0ab21f0b`, #4580 `29250ecf501`, #4597 `7ec523277de`, #4598 `220b35b4b35`, #4603 `cbe361c2497` |
 | Incremental planner + object cache in file-worker pool | PARTIAL — opt-in lane | #4594 `9314979e6e6`; planner #4511 `f37c76ddaf4` |
 | Default flip readiness + overlap receipt check | PARTIAL — prepared, **not flipped** | #4592 `1c6ccfb61c4`; `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`) |
-| TLDR specialization list + `.rr` producers (P-G2) | OPEN — PR #4600 not merged | — |
+| TLDR specialization list + `.rr` producers (P-G2) | DONE (opt-in lane) | #4600 `73c4aef632a` |
 | HIR phase speed (admission O(n²), lazy validation blobs, cache scope publish) | DONE (code); speedups are PR-reported, not re-measured | #4557 `4ce52b4d99f`, #4562 `5e8ad7e3638`, #4565 `700a2f742a4`, #4567 `24889530ad3` |
 | Packed `.spab` parse cache | DONE — default store (`SIMPLE_FRONTEND_SPAB=0` opts out) | #4436 `387470fb5b3`, #4445 `2400d260405`, #4582 `2e958d33746`, #4589 `d1ee8738d60` |
 | Generic TLDR view / instance cache / reader instances | DONE (code) | #4389 `9de5aade86a`, #4403 `5c8390bd95c`, #4433 `eba045f665c`, #4591 `3383735e8cb` |

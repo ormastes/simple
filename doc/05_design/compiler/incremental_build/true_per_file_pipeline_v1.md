@@ -82,8 +82,8 @@ template's module" coupling. Design detail: `build_runner_fiber_scheduler_v1.md`
 #4576 `106ab239fff`, #4584, #4585, #4588 (P-A), #4594 (P-E planner + object
 cache). P4 DONE (opt-in) #4575, #4580, #4597 (P-B), #4598 (P-G3, no global
 mono pass on this lane), #4603 (P-D). P5 PARTIAL — #4585/#4588 limit HIR to the
-claimed module's import closure; TLDR specialization producers (P-G2) are OPEN
-in PR #4600. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568). Default
+claimed module's import closure; TLDR specialization list + `.rr` producers (P-G2) DONE
+#4600 `73c4aef632a`. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568). Default
 flip (P-F #4592 `1c6ccfb61c4`) is prepared but **not flipped**:
 `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` in
 `src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`; enable with
