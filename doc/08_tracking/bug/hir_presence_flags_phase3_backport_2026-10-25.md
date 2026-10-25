@@ -6,13 +6,20 @@ constructor arguments absent; this is not covered by decoder hardening #4772.
 
 Five production files receive the original thirteen constructor arguments.
 Parser presence flags are copied where available; lambda parameters and
-specialization metadata receive explicit false, and lowered bitfield types
-receive explicit true. Optional payload fields and existing semantics remain.
+specialization metadata receive explicit false. Bitfield type presence derives
+from the actual lowered optional payload. Optional payload fields remain.
 An omitted boolean can otherwise remain nil and encode as `N`, preventing
 faithful HIR cache admission. Decoder refusal is not a substitute for producing
 the correct concrete boolean in lowered HIR.
 
-The original five-case source-coverage spec is retained unchanged. Its new
+Exact source review found an upstream donor defect: unconditional bitfield
+`has_type_: true` disagrees with nil payloads on reserved/untyped fields. The
+backport corrects that argument rather than copying the defect. The lowering
+uses presence binds for the source type and resulting lowered type. A real
+typed-versus-reserved owner fixture checks both values and stable roundtrips.
+
+The original five-case source-coverage spec is retained with its bitfield
+expectation corrected to match actual payload presence. Its new
 behavioral counterpart parses/lowers an actual struct/trait, checks false-valued
 metadata and field presence directly, and checks those values and stable bytes
 after the hardened bounded generated decoder. Canonical availability stays
