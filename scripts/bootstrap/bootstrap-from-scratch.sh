@@ -87,7 +87,7 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
     case "${bootstrap_strategy_option}" in
       --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
-      --help|--validate-bootstrap-receipt|--stop-after-seed|--stop-after-stage2|--stop-after-stage3|\
+      --help|--validate-bootstrap-receipt|--stop-after-seed|--stop-after-stage2|--stop-after-stage2-producer|--stop-after-stage3|\
       --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|\
       --resume-managed-from-admitted=*|--diagnostic-sweep)
@@ -308,6 +308,11 @@ Options:
                      Stage-2 trust root, run the Stage 2 compiler tests
                      described under --full-bootstrap, then stop before
                      Stage 3. This is the sole receipt-free bootstrap lane.
+  --stop-after-stage2-producer
+                     With --full-bootstrap and --produce-stage3-receipt=<reason>,
+                     build and admit the pure-Simple Stage 2 producer, then stop
+                     before CLI/runner/compiler tests. Matrix NOTRUN; tools
+                     UNQUALIFIED. This does not qualify a full Stage 2 toolchain.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
@@ -412,6 +417,7 @@ refresh_stage2_source_cache=""
 release_tests=0
 diagnostic_sweep=0
 stop_after_stage2=0
+stop_after_stage2_producer=0
 diagnostic_roots=""
 diagnostic_child_compiler="${SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER:-bin/simple}"
 diagnostics_mode="${SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off}"
@@ -523,7 +529,13 @@ while [ "$#" -gt 0 ]; do
       diagnostic_sweep=1
       ;;
     --stop-after-stage2)
+      [ "${stop_after_stage2_producer}" -eq 0 ] || { echo 'error: Stage 2 producer and full-matrix stops conflict' >&2; exit 64; }
       stop_after_stage2=1
+      ;;
+    --stop-after-stage2-producer)
+      [ "${stop_after_stage2}" -eq 0 ] || { echo 'error: Stage 2 producer and full-matrix stops conflict' >&2; exit 64; }
+      stop_after_stage2=1
+      stop_after_stage2_producer=1
       ;;
     --stop-after-seed)
       stop_after_seed=1
@@ -600,6 +612,17 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 # -- argv-parse end
+if [ "${stop_after_stage2_producer}" -eq 1 ]; then
+  [ "${full_bootstrap}" -eq 1 ] && [ -n "${produce_stage3_receipt_reason}" ] &&
+    [ -z "${refresh_stage2_source_cache}" ] && [ "${validate_bootstrap_receipt}" -eq 0 ] &&
+    [ "${produce_managed_receipt_requested}" -eq 0 ] && [ -z "${bootstrap_receipt_path}" ] || {
+    echo 'error: --stop-after-stage2-producer requires --full-bootstrap and --produce-stage3-receipt=<typed-reason>; refresh/receipt-validation/managed options conflict' >&2
+    exit 64
+  }
+  case "${target}" in simpleos-*|*-simpleos|freebsd-*)
+    echo 'error: --stop-after-stage2-producer requires the canonical local host lane' >&2; exit 64 ;;
+  esac
+fi
 case "${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF:-0}" in
   0|1) ;;
   *) echo "error: SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF must be 0 or 1 (got '${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF}')" >&2; exit 64 ;;
@@ -4820,6 +4843,23 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
       chmod 400 "${stage2_compatibility_manifest_absolute}"
     fi
+  fi
+
+  # Explicit producer-only checkpoint. The admission/runtime/parent/planner
+  # gates and compatibility/cache sealing above remain mandatory. Ordinary
+  # --stop-after-stage2 still reaches the full compiler/tool matrix below.
+  if [ "${stop_after_stage2_producer}" -eq 1 ]; then
+    . "${repo_root}/scripts/bootstrap/lib/stage2-producer-checkpoint.shs"
+    bootstrap_stage2_producer_checkpoint_publish \
+      "${stop_after_stage2_producer}" "${stage2_status}" "${bootstrap_stage2_trust_root}" \
+      "${stage2_admitted_absolute}" "${stage2_admission_receipt_absolute}" \
+      "${stage2_parent_sanity:-}" "${stage2_parent_provenance:-}" \
+      "${stage3_planner_receipt:-}" "${stage2_admitted_dir}/runtime-capsule.env" \
+      "${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh" "${repo_root}" \
+      "${output_dir}/stage2-producer-checkpoint.sdn" || exit $?
+    echo 'Stage 2 producer admitted; matrix NOTRUN; tools UNQUALIFIED.'
+    bootstrap_verdict "PRODUCER_ADMITTED: stage=stage2-producer exit=0 signal=none matrix=NOTRUN tools=UNQUALIFIED full_qualification=false"
+    exit 0
   fi
 
   # Stage 2 compiler tests (--full-bootstrap).

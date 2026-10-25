@@ -1,0 +1,82 @@
+#!/bin/sh
+# Producer-only checkpoint of the canonical constructor. Never tool qualification.
+bootstrap_stage2_producer_checkpoint_publish() (
+  [ "$1" = 1 ] || return 0
+  selected_status=$2 trust_root=$3 candidate=$4 admission=$5
+  parent_sanity=$6 parent_provenance=$7 planner=$8 binding=$9
+  shift 9
+  constructor=$1 root=$2 destination=$3
+  fail() { echo "stage2-producer-checkpoint: $*" >&2; return 1; }
+  [ "$selected_status" = 0 ] || {
+    echo "stage2-producer-checkpoint: producer failed (status=$selected_status)" >&2
+    return "$selected_status"
+  }
+  [ "$trust_root" = 1 ] && [ -x "$candidate" ] || { fail 'canonical admitted producer required'; return 1; }
+  for input in "$candidate" "$admission" "$parent_sanity" "$parent_provenance" \
+      "$planner" "$binding" "$constructor"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || { fail "missing regular prerequisite: $input"; return 1; }
+  done
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] || { fail 'checkpoint already exists'; return 1; }
+  candidate_sha=$(bootstrap_stage3_hash_file "$candidate") || return 1
+  [ "$(bootstrap_stage3_manifest_value schema "$admission")" = simple-bootstrap-stage2-admission-v2 ] &&
+    [ "$(bootstrap_stage3_manifest_value status "$admission")" = admitted ] &&
+    [ "$(bootstrap_stage3_manifest_value candidate_path "$admission")" = "$candidate" ] &&
+    [ "$(bootstrap_stage3_manifest_value candidate_sha256 "$admission")" = "$candidate_sha" ] || {
+    fail 'admitted compiler identity differs'; return 1;
+  }
+  # Check all actual evidence leaves named by the existing admission. The
+  # canonical producer already executed mode-0/mode-1 Hello and receiver gates.
+  for key in source_snapshot runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+    path=$(bootstrap_stage3_manifest_value "${key}_path" "$admission") || return 1
+    digest=$(bootstrap_stage3_manifest_value "${key}_sha256" "$admission") || return 1
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    actual=$(bootstrap_stage3_hash_file "$path") || return 1
+    [ "$actual" = "$digest" ] || {
+      fail "changed admission evidence: $key"; return 1;
+    }
+  done
+  admission_sha=$(bootstrap_stage3_hash_file "$admission") || return 1
+  [ "$(bootstrap_stage3_manifest_value schema "$binding")" = simple-phase2-runtime-binding-v1 ] &&
+    [ "$(bootstrap_stage3_manifest_value compiler_sha256 "$binding")" = "$candidate_sha" ] &&
+    [ "$(bootstrap_stage3_manifest_value admission_sha256 "$binding")" = "$admission_sha" ] || {
+    fail 'runtime capsule binding differs'; return 1;
+  }
+  capsule=$(bootstrap_stage3_manifest_value capsule_path "$binding") || return 1
+  [ -f "$capsule/phase2-runtime-capsule.env" ] && [ ! -L "$capsule/phase2-runtime-capsule.env" ] || return 1
+  capsule_sha=$(bootstrap_stage3_hash_file "$capsule/phase2-runtime-capsule.env") || return 1
+  [ "$capsule_sha" = \
+    "$(bootstrap_stage3_manifest_value capsule_receipt_sha256 "$binding")" ] || {
+    fail 'runtime capsule receipt differs'; return 1;
+  }
+  # This existing verifier binds the actual admitted parent, source, runtime,
+  # canonical planner and typed reason; a file-shaped planner is insufficient.
+  SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=$(dirname -- "$destination")
+  export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+  bootstrap_planner_v2_verify "$planner" "$root" || return 1
+  [ "$(bootstrap_planner_v2_field target "$planner")" = //bootstrap:stage3 ] || {
+    fail 'Stage 3 planner target required'; return 1;
+  }
+  [ "$(bootstrap_planner_v2_field parent_compiler_sha256 "$planner")" = "$candidate_sha" ] &&
+    [ "$(bootstrap_planner_v2_field parent_stage2_sanity_path "$planner")" = "$parent_sanity" ] &&
+    [ "$(bootstrap_planner_v2_field parent_stage2_provenance_path "$planner")" = "$parent_provenance" ] || {
+    fail 'planner names a different admitted producer or parent evidence'; return 1;
+  }
+  temporary="$destination.tmp.$$"
+  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  {
+    printf '%s\n' 'schema: simple/bootstrap-stage2-producer-checkpoint/v1' \
+      'status: producer_admitted' 'matrix: NOTRUN' 'tools: UNQUALIFIED' 'full_qualification: false'
+    printf 'compiler_sha256: %s\nadmission_sha256: %s\n' "$candidate_sha" "$admission_sha"
+    for item in "parent_sanity:$parent_sanity" "parent_provenance:$parent_provenance" \
+        "planner:$planner" "runtime_binding:$binding" "runtime_capsule:$capsule/phase2-runtime-capsule.env" \
+        "constructor:$constructor" "checkpoint_owner:$root/scripts/bootstrap/lib/stage2-producer-checkpoint.shs"; do
+      item_sha=$(bootstrap_stage3_hash_file "${item#*:}") || return 1
+      printf '%s_sha256: %s\n' "${item%%:*}" "$item_sha" || return 1
+    done
+    for key in source_snapshot runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+      printf '%s_sha256: %s\n' "$key" "$(bootstrap_stage3_manifest_value "${key}_sha256" "$admission")" || return 1
+    done
+  } >"$temporary" || return 1
+  chmod 400 "$temporary" && mv "$temporary" "$destination" || return 1
+  trap - EXIT HUP INT TERM
+)
