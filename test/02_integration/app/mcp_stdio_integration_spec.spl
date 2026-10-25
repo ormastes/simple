@@ -16,6 +16,12 @@ fn mcp_msg(body: text) -> text:
 fn mcp_jsonl(body: text) -> text:
     body + "\n"
 
+fn mcp_ping_body(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":\"ping\"" + "}"
+
+fn mcp_ping_reply(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + "{" + "}" + "}" + "\n"
+
 fn init_request(id: text) -> text:
     val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
     mcp_msg(body)
@@ -98,6 +104,35 @@ fn send_mcp(messages: text) -> text:
     stdout
 
 describe "MCP Protocol Runtime":
+    it "does not answer no-ID requests or promote nested IDs into request IDs":
+        step("Send two notifications followed by one correlated ping")
+        val no_id = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"ping\"" + "}"
+        val nested = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":" + "{" + "\"clientInfo\":" + "{" + "\"id\":\"nested-client\"" + "}" + "}" + "}"
+        val output = send_mcp(mcp_jsonl(no_id) + mcp_jsonl(nested) + mcp_jsonl(mcp_ping_body("37")))
+        expect(output).to_equal(mcp_ping_reply("37"))
+
+    it "does not dispatch a nested method instead of the root method":
+        step("Put a known method inside params of an unknown root request")
+        val params = "{" + "\"method\":\"ping\",\"id\":99" + "}"
+        val output = send_mcp(generic_request("root-method", "not/a/method", params))
+        expect(output.contains("\"id\":\"root-method\"")).to_equal(true)
+        expect(output.contains("\"code\":-32601")).to_equal(true)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "rejects an explicit null ID without inventing initialize ID one":
+        step("Send an invalid null-ID MCP request")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"initialize\"" + "}"
+        val output = send_mcp(mcp_jsonl(request))
+        expect(output.contains("\"id\":null")).to_equal(true)
+        expect(output.contains("\"code\":-32600")).to_equal(true)
+        expect(output.contains("\"id\":\"1\"")).to_equal(false)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "decodes escaped protocol key and method spellings":
+        step("Resolve JSON Unicode escapes before selecting the ping handler")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":41,\"me\\u0074hod\":\"pi\\u006eg\"" + "}"
+        expect(send_mcp(mcp_jsonl(request))).to_equal(mcp_ping_reply("41"))
+
     it "quotes Windows stdin paths with spaces and command metacharacters":
         val command = match mcp_stdin_command("C:/Program Files/MCP & Tools/server.exe", "C:/private scope/input.txt", true):
             Ok(value): value
