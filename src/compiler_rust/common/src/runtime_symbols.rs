@@ -491,6 +491,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dict_clear",
     "rt_dict_keys",
     "rt_dict_values",
+    "rt_dict_scope_read_bound_v1",
+    "rt_dict_scope_read_owner_v1",
+    "rt_dict_scope_read_epoch_v1",
+    "rt_dict_scope_read_meta_v1",
+    "rt_dict_scope_read_slot_v1",
     // for-in iteration over dicts/arrays (cranelift for-loop lowering)
     "rt_dict_entries",
     "rt_for_iterable",

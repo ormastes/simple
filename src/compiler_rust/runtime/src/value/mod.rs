@@ -35,6 +35,7 @@ mod core;
 pub mod diagram_sffi;
 pub mod profiler_sffi;
 mod dict;
+mod dict_scope_read;
 pub mod db_accel_bitmap_ops;
 // SFFI object-based system
 pub mod sffi_example;
@@ -180,6 +181,11 @@ pub use dict::{
 };
 
 // Re-export high-performance collection SFFI functions (Rust std::collections)
+pub use dict_scope_read::{
+    rt_dict_scope_read_bound_v1, rt_dict_scope_read_owner_v1, rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1, rt_dict_scope_read_slot_v1,
+};
+
 pub use hpcollections::{
     // HashMap
     rt_hashmap_clear,

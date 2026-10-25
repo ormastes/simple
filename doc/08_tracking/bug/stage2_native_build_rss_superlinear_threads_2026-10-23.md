@@ -141,3 +141,29 @@ Evidence (`src/compiler/10.frontend/core/parser.spl` at `a440291a0b8`):
 - Decision measurement: once a stage-2 binary exists, compile ~50 files in
   one process with per-file RSS sampling; a monotonic per-file step that
   scales with diagnostics/struct count confirms it.
+## Addendum 2026-10-24: Linux runtime confirmation — the stage-2 BINARY leaks at run time
+
+The "worth a separate check of stage-2 compile RSS" note is confirmed on the
+Linux lane. Same host, same probe (`src/compiler/bootstrap_admission/p2_add.spl`,
+`native-build --backend llvm --runtime-bundle core-c-bootstrap --entry-closure
+--mode one-binary`):
+
+| stage-2 candidate | peak RSS | result |
+|---|---|---|
+| 4ab52ecd1f0 (pre-convergence, no b065988b5a2) | 2.17 GB total | build OK |
+| ea1a3a7879a (has b065988b5a2) | 4.06 GB coordinator alone | kernel OOM kill |
+
+Measured with `/usr/bin/time -v` on an otherwise quiet 7.6 GiB host. The
+post-change candidate grows past the host's RAM during the MIR phase of a
+trivial one-module probe, so the stage-2 sanity battery fails on this host
+class with `raw_status=137` (SIGKILL from the kernel OOM reaper; the bounded
+collector records `reason=child-signal`). The per-file promotions in
+`parser_promote_transient_owners` (par_errors/par_warnings/par_struct_names
+are reassigned per file, orphaning each promoted copy) plus per-module HIR
+promotions have no release path, so the growth is cumulative per file as the
+Windows curve suggests — but here it is fatal within a single small build,
+not just on 1,488-file runs.
+
+Workaround for memory-constrained hosts until the release/demote path lands:
+none found — disabling the HIR/parse shard workers does not bring the
+single-process footprint back under the host budget.

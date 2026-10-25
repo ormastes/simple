@@ -19,6 +19,7 @@ use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_e
 use compiler.core.ast.{decl_set_type_params}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
+use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags, decl_set_asm_placement}
@@ -33,7 +34,7 @@ use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
-use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register}
+use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register, named_generic_instance_register}
 use compiler.core.types.{newunit_register}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
@@ -47,6 +48,8 @@ use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
 use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -592,7 +595,20 @@ fn parse_enum_decl() -> i64:
     if type_params.len() > 0:
         decl_set_type_params(enum_d, type_params)
     if parse_enum_method_ids.len() > 0:
-        val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
+        # This construction site proves the impl is synthetic. Preserve the
+        # enum's ordered binders and applied receiver here; a missing target
+        # tag elsewhere also denotes explicit bare impls and is not evidence
+        # that type arguments may be inferred.
+        var enum_impl_target = -1
+        if type_params.len() > 0:
+            var enum_impl_args: [i64] = []
+            for parameter_name in type_params:
+                val parameter_id = named_type_register(parameter_name, [], [])
+                enum_impl_args.push(TYPE_NAMED_BASE + parameter_id)
+            enum_impl_target = named_generic_instance_register(enum_name, enum_impl_args)
+        val enum_impl = decl_impl_block_typed(enum_name, parse_enum_method_ids, 0, enum_impl_target)
+        if type_params.len() > 0:
+            decl_set_type_params(enum_impl, type_params)
         module_add_decl(enum_impl)
     enum_d
 
@@ -787,6 +803,10 @@ fn parser_parse_member_attribute() -> bool:
         return true
     val attr_name = par_text_get()
     parser_advance()
+    if attr_name == "lock_level" or lock_level_is_exception_attribute(attr_name):
+        lock_level_parse_attribute(attr_name)
+        parser_skip_newlines_and_semicolons()
+        return true
     if attr_name == "representation_boundary":
         representation_parse_attribute_v1(representation_start, representation_line, representation_col)
         parser_skip_newlines_and_semicolons()
@@ -965,7 +985,8 @@ pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
     rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
         rt_transient_heap_promote(ENUM_ATTRIBUTES) and
         rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
-        representation_parser_promote_transient_owner_v1()
+        representation_parser_promote_transient_owner_v1() and
+        lock_level_metadata_promote()
 
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
@@ -1079,6 +1100,7 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
+            lock_level_reject_non_function(190)
             representation_reject_pending_v1()
             break
         val pm_kind = par_kind_get()
@@ -1102,6 +1124,7 @@ fn parse_module_body():
             continue
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
+            lock_level_reject_non_function(par_kind_get())
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
@@ -1115,6 +1138,7 @@ fn parse_module_body():
                 module_add_decl(visible_decl)
                 parser_reset_pending_vhdl_decorators()
             continue
+        lock_level_reject_non_function(par_kind_get())
         if par_kind_get() == 182:
             # Stray dedent at module level -- skip it
             parser_advance()
@@ -1173,6 +1197,7 @@ fn parse_module_body():
             else:
                 representation_reject_pending_v1()
                 val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
+                lock_level_reject_non_function(-1)
                 if static_is_mut:
                     parser_advance()
                 val static_name = par_text_get()
@@ -1382,6 +1407,10 @@ fn parse_module_body():
                 # Capture its text and consume it so we don't mis-dispatch to AOP parser
                 decorator_name = par_text_get()
                 parser_advance()
+            if decorator_name == "lock_level" or lock_level_is_exception_attribute(decorator_name):
+                lock_level_parse_attribute(decorator_name)
+                parser_skip_newlines_and_semicolons()
+                continue
             if decorator_name == "representation_boundary":
                 representation_parse_attribute_v1(representation_start, representation_line, representation_col)
                 parser_skip_newlines_and_semicolons()

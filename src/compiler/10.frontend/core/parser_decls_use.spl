@@ -39,6 +39,8 @@ use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
 use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_pending_take, lock_level_record}
+use compiler.frontend.core.lock_level_parser.{lock_level_reject_non_function}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
@@ -323,6 +325,7 @@ fn parse_export_decl() -> i64:
 use compiler.frontend.core.representation_declarations_v1.{representation_reject_pending_v1, representation_method_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1}
 
 fn parse_val_decl() -> i64:
+    val lock_rank = lock_level_pending_take()
     representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -352,7 +355,9 @@ fn parse_val_decl() -> i64:
         # Create a placeholder DECL_VAL with no init expression
         val placeholder_expr = expr_int_lit(0, 0)
         val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-        return decl_val_binding("__generic_" + param_name, 0, placeholder_expr, decl_span)
+        val generic_decl = decl_val_binding("__generic_" + param_name, 0, placeholder_expr, decl_span)
+        if lock_rank >= 0: parser_error("[E-LOCK-LEVEL-001] file generic declarations cannot have lock levels")
+        return generic_decl
 
     val name = par_text_get()
     parser_expect(6)
@@ -373,7 +378,9 @@ fn parse_val_decl() -> i64:
         parser_skip_newlines()
         parser_expect(TOK_DEDENT)
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-    decl_val_binding(name, type_tag, init, decl_span)
+    val result = decl_val_binding(name, type_tag, init, decl_span)
+    lock_level_record(result, lock_rank)
+    result
 
 fn parse_lazy_val_decl() -> i64:
     representation_reject_pending_v1()
@@ -496,6 +503,7 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     parse_class_body_method_typed(struct_name, is_static, is_me, -1)
 
 fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool, self_type_override: i64) -> i64:
+    val lock_rank = lock_level_pending_take()
     val representation_owner = representation_method_begin_v1()
     var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
@@ -689,6 +697,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
             param_defaults = method_param_defaults
             param_muts = method_param_muts
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
+    lock_level_record(mid, lock_rank)
     decl_set_param_defaults(mid, param_defaults)
     decl_set_param_muts(mid, param_muts)
     representation_declaration_end_v1(representation_owner, mid, method_name)
@@ -876,6 +885,7 @@ fn parse_impl_decl() -> i64:
 
     while true:
         parser_skip_newlines()
+        lock_level_reject_non_function(par_kind_get())
         if par_kind_get() == 182:
             parser_advance()
             break

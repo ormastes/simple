@@ -197,3 +197,25 @@ RV32/RV64 NVMe wrapper set. Completion or release claims must run the same
 command with `--strict`. After changing wrapper coverage classification, run
 `sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --self-test` so
 fake missing RV32/RV64 wrapper and spec fixtures prove the audit fails closed.
+
+
+### Explicit semantic links in SPipe manuals
+
+For REQ-MC-008 B4, the existing `spipe-docgen` command accepts exactly one spec
+with `--source-file <path> --package <name> --module <path> --revision <sha256>`.
+Leading scenario docstrings use the existing `**Links:** spl:...` annotation.
+The generator validates explicit URIs through the common semantic source owner
+and adds a Verified Declarations section; guessed names keep their ordinary
+presentation. Existing specs without explicit semantic annotations need no
+source authority. Explicit URIs without authority, partial or duplicate options,
+and multi-spec authority fail closed.
+
+Resolution uses a bounded common resolver batch, copied declaration facts and
+an exact source digest. Immediately before atomic replacement, the existing
+semantic publisher verifies the source revision again and emits its revision
+receipt. Unresolved, forged or stale targets preserve any prior output, return
+CLI failure and skip index publication. This is revision-snapshot validation,
+not a lock or a cross-file transaction against arbitrary external writers.
+Actual CLI acceptance requires an admitted tools runtime; authored coverage in
+`test/02_integration/app/doc/semantic_document_rendering_spec.spl` is not a
+runtime PASS by itself.
