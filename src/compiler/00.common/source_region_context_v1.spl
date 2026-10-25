@@ -16,6 +16,50 @@ pub class SourceRegionContextV1:
     generation: i64
     pending_ticket_: i64 = 0
     pending_commit_work_: i64 = 0
+    cleanup_revoke_work_: i64 = 0
+    cleanup_release_work_: i64 = 0
+    pending_lease_: i64 = 0
+    pending_read_end_work_: i64 = 0
+    live_: bool = false
+    revoked_: bool = false
+    release_attempted_: bool = false
+
+    me close_guarded() -> Result<i64, SourceRegionErrorV1>:
+        val work = source_region_prepare_v1(self.account, 10)?
+        val result = source_region_value_v1(rt_source_region_close_v1(
+            self.native_control, self.generation, work))?
+        self.revoked_ = true
+        self.pending_ticket_ = 0
+        self.pending_commit_work_ = 0
+        Ok(result)
+
+    me release_guarded() -> Result<i64, SourceRegionErrorV1>:
+        val work = source_region_prepare_v1(self.account, 11)?
+        val result = source_region_value_v1(rt_source_region_release_v1(
+            self.native_control, self.generation, work))?
+        self.live_ = false
+        Ok(result)
+
+    me begin_read(expected_epoch: i64) -> Result<i64, SourceRegionErrorV1>:
+        if not self.live_ or self.revoked_: return Err(SourceRegionErrorV1.Closed)
+        if self.pending_lease_ != 0: return Err(SourceRegionErrorV1.Conflict)
+        val end_work = source_region_cleanup_credit_v1(self.account, 2)?
+        val work = source_region_prepare_v1(self.account, 5)?
+        val lease = source_region_value_v1(rt_source_region_read_begin_v1(
+            self.native_control, self.generation, expected_epoch, work))?
+        self.pending_lease_ = lease
+        self.pending_read_end_work_ = end_work
+        Ok(lease)
+
+    me end_read_guarded(lease: i64) -> Result<i64, SourceRegionErrorV1>:
+        if lease <= 0 or lease != self.pending_lease_:
+            return Err(SourceRegionErrorV1.Consumed)
+        val work = source_region_prepare_v1(self.account, 6)?
+        val result = source_region_value_v1(rt_source_region_read_end_v1(
+            self.native_control, self.generation, lease, work))?
+        self.pending_lease_ = 0
+        self.pending_read_end_work_ = 0
+        Ok(result)
 
     me begin_write(expected_epoch: i64, destination: i64, slot: i64) -> Result<i64, SourceRegionErrorV1>:
         if self.pending_ticket_ != 0: return Err(SourceRegionErrorV1.Conflict)
@@ -38,6 +82,7 @@ pub class SourceRegionContextV1:
             self.native_control, self.generation, ticket, value_bits, work))
 
 extern fn rt_source_region_bound_v1(operation: i64, descriptor: i64, capacity: i64, metric: i64) -> i64
+extern fn rt_source_region_live_cleanup_bound_v1(operation: i64, metric: i64) -> i64
 extern fn rt_source_region_create_v1(work: i64) -> i64
 extern fn rt_source_region_created_generation_v1(control: i64) -> i64
 extern fn rt_source_region_allocation_prepare_v1(descriptor: i64, capacity: i64, work: i64) -> i64
@@ -51,7 +96,7 @@ extern fn rt_source_region_alias_write_v1(control: i64, generation: i64, destina
 extern fn rt_source_region_close_v1(control: i64, generation: i64, work: i64) -> i64
 extern fn rt_source_region_release_v1(control: i64, generation: i64, work: i64) -> i64
 
-fn source_region_value_v1(value: i64) -> Result<i64, SourceRegionErrorV1>:
+pub fn source_region_value_v1(value: i64) -> Result<i64, SourceRegionErrorV1>:
     match value:
         case -1: Err(SourceRegionErrorV1.Incomplete)
         case -2: Err(SourceRegionErrorV1.ForeignOwner)
@@ -82,15 +127,26 @@ fn source_region_prepare_v1(account: MirLoopResourceAccountV1,
     source_region_reserve_v1(account, work, fields, bytes)?
     Ok(work)
 
+fn source_region_cleanup_credit_v1(account: MirLoopResourceAccountV1,
+        operation: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_reserve_v1(account, 1)?
+    val work = source_region_value_v1(rt_source_region_live_cleanup_bound_v1(operation, 0))?
+    if work <= 0: return Err(SourceRegionErrorV1.Incomplete)
+    source_region_reserve_v1(account, work)?
+    Ok(work)
+
 pub fn source_region_create_v1(account: MirLoopResourceAccountV1) -> Result<SourceRegionContextV1, SourceRegionErrorV1>:
-    # Reserve the five-field facade and birth-only immutable generation read
+    # Reserve the twelve-field facade and birth-only immutable generation read
     # before native creation. There is no fallible lookup after native birth.
-    source_region_reserve_v1(account, 46, 5, 40)?
+    source_region_reserve_v1(account, 109, 12, 96)?
+    val revoke_work = source_region_cleanup_credit_v1(account, 1)?
+    val release_work = source_region_cleanup_credit_v1(account, 3)?
     val work = source_region_prepare_v1(account, 1)?
     val control = source_region_value_v1(rt_source_region_create_v1(work))?
     if control == 0: return Err(SourceRegionErrorV1.Incomplete)
     val generation = rt_source_region_created_generation_v1(control)
-    Ok(SourceRegionContextV1(account: account, native_control: control, generation: generation))
+    Ok(SourceRegionContextV1(account: account, native_control: control, generation: generation,
+        cleanup_revoke_work_: revoke_work, cleanup_release_work_: release_work, live_: true))
 
 pub fn source_region_stamp_v1(context: SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>:
     val work = source_region_prepare_v1(context.account, 4)?
@@ -105,12 +161,10 @@ pub fn source_region_alloc_v1(context: SourceRegionContextV1, descriptor: i64, c
         context.generation, epoch, descriptor, capacity, prepared, work))
 
 pub fn source_region_read_begin_v1(context: SourceRegionContextV1, expected_epoch: i64) -> Result<i64, SourceRegionErrorV1>:
-    val work = source_region_prepare_v1(context.account, 5)?
-    source_region_value_v1(rt_source_region_read_begin_v1(context.native_control, context.generation, expected_epoch, work))
+    context.begin_read(expected_epoch)
 
 pub fn source_region_read_end_v1(context: SourceRegionContextV1, lease: i64) -> Result<i64, SourceRegionErrorV1>:
-    val work = source_region_prepare_v1(context.account, 6)?
-    source_region_value_v1(rt_source_region_read_end_v1(context.native_control, context.generation, lease, work))
+    context.end_read_guarded(lease)
 
 pub fn source_region_write_begin_v1(context: SourceRegionContextV1, expected_epoch: i64,
         destination: i64, slot: i64) -> Result<i64, SourceRegionErrorV1>:
@@ -125,12 +179,10 @@ pub fn source_region_alias_write_v1(context: SourceRegionContextV1,
     source_region_value_v1(rt_source_region_alias_write_v1(context.native_control, context.generation, destination, slot, value_bits, work))
 
 pub fn source_region_close_v1(context: SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>:
-    val work = source_region_prepare_v1(context.account, 10)?
-    source_region_value_v1(rt_source_region_close_v1(context.native_control, context.generation, work))
+    context.close_guarded()
 
 pub fn source_region_release_v1(context: SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>:
-    val work = source_region_prepare_v1(context.account, 11)?
-    source_region_value_v1(rt_source_region_release_v1(context.native_control, context.generation, work))
+    context.release_guarded()
 
 pub fn source_region_incomplete_v1() -> Result<i64, SourceRegionErrorV1>:
     Err(SourceRegionErrorV1.Incomplete)
