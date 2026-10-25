@@ -30,6 +30,8 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_definitions.{HirFunction, HirConst}
 use compiler.hir.nominal_type_relocation.{hir_relocate_types}
+use compiler.mono.mono_template_symbol_relocation_v1.{MonoTemplateRelocationPlanV1, mono_template_relocation_plan_v1, mono_relocation_error_v1}
+use compiler.monomorphize.hir_subst.body_subst.{relocate_template_body_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
@@ -740,9 +742,34 @@ impl MonomorphizationPass:
             out.symbols = self.module_symbols[module_name]
         out.constants = consts
         val specialized_keys: [text] = self.specialized_functions.keys()
+        # Template-symbol relocation (E-MONO-041): an instance body copied
+        # from template module T still names T's SymbolIds. Rewrite each
+        # T function/constant reference to its module-qualified object
+        # symbol; an instance with an unrelocatable reference is NOT placed
+        # (the module falls back to MONO-PENDING via the diagnostic).
+        var plans: Dict<text, MonoTemplateRelocationPlanV1> = {}
+        var reloc_next = self.next_symbol
         for mangled in specialized_keys:
             val m: text = mangled
             var spec: HirFunction = self.specialized_functions[m]
+            var owner = module_name
+            if self.spec_module.has(m):
+                owner = self.spec_module[m]
+            if owner != module_name and templates.has(owner):
+                if not plans.has(owner):
+                    val provider: HirModule = templates[owner]
+                    val made = mono_template_relocation_plan_v1(provider, owner, reloc_next)
+                    reloc_next = made.next_symbol
+                    plans[owner] = made
+                    self.register_relocated_symbols_v1(out, made, module_name)
+                val plan: MonoTemplateRelocationPlanV1 = plans[owner]
+                val relocated = relocate_template_body_v1(spec.body, plan.names, plan.ids, plan.reject)
+                if relocated.diagnostics.len() > 0:
+                    for what in relocated.diagnostics:
+                        val wt: text = what
+                        self.diagnostics = self.diagnostics.push(mono_relocation_error_v1(wt, owner, module_name))
+                    continue
+                spec.body = relocated.body
             var attr: FunctionAttr = spec.func_attr
             attr.is_comdat_instance = true
             spec.func_attr = attr
@@ -753,10 +780,25 @@ impl MonomorphizationPass:
                 visibility: Visibility.Private, is_public: false,
                 is_mutable: false, defining_module: module_name,
                 builtin_method_tag: BUILTIN_METHOD_NONE))
-        if out.symbols.next_symbol_id < self.next_symbol:
-            out.symbols.next_symbol_id = self.next_symbol
+        if out.symbols.next_symbol_id < reloc_next:
+            out.symbols.next_symbol_id = reloc_next
         out.functions = funcs
         self.prune_consumed_templates(out)
+
+    me register_relocated_symbols_v1(out: HirModule, plan: MonoTemplateRelocationPlanV1, module_name: text):
+        """Give every relocated T symbol a row in F's table under its fresh
+        id, named by its object symbol and owned by T."""
+        val keys: [text] = plan.names.keys()
+        for k in keys:
+            val key: text = k
+            val kind_name: text = plan.kinds[key]
+            val kind = if kind_name == "const": SymbolKind.Const else: SymbolKind.Function
+            out.symbols.register_preserved_symbol(HirSymbol(
+                id: SymbolId(id: plan.ids[key]), name: plan.names[key], kind: kind,
+                type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+                visibility: Visibility.Public, is_public: true,
+                is_mutable: false, defining_module: plan.template_module,
+                builtin_method_tag: BUILTIN_METHOD_NONE))
 
     # ========================================================================
     # Step 1: Collect Generic Definitions
