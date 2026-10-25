@@ -1,0 +1,52 @@
+"""
+An optional tuple whose slot is a runtime byte array (`([u8], text)?`, as
+returned by `rt_io_udp_recv_from` in std io driver) lowers to MIR. Before the
+fix, result_try_tuple_collection_element admitted only i64 integer elements,
+so `[u8]` was rejected with "unsupported optional tuple payload element type:
+slot 0 is Array".
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/result_tuple_payload.spl
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_messages(source: text) -> [text]:
+    val filename = "optional_tuple_byte_array_slot.spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var messages: [text] = []
+    for err in mir_lowering.errors:
+        messages = messages.push(err.message)
+    messages
+
+val SOURCE = """
+extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+
+fn recv_len(fd: i64) -> i64:
+    val r = unsafe(capabilities: [ffi]):
+        rt_io_udp_recv_from(fd, 64)
+    if r != nil:
+        val data = r.0
+        val addr = r.1
+        return data.len() + addr.len()
+    0
+"""
+
+describe "optional tuple with byte-array slot":
+    it "lowers ([u8], text)? field projection without unsupported-payload error":
+        val messages = lower_messages(SOURCE)
+        var hits = 0
+        for m in messages:
+            if m.contains("unsupported optional tuple payload"):
+                hits = hits + 1
+        expect(hits).to_equal(0)
