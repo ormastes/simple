@@ -595,9 +595,56 @@ pub fn module_tldr_update_generic_spec_from_mono_v1(source_path: text, tldr_root
         return "tldr publish failed: {tldr_path}"
     ""
 
+# P-G7: the ConcreteTldrKey of each mono use on its own ("" = unkeyable), keyed
+# exactly like the module's generic-spec list (same templates, same context),
+# so a placed instance symbol maps to the key its instance object is cached by.
+pub fn module_tldr_instance_keys_from_mono_v1(source_path: text, tldr_root: text,
+        mono: MonoGenericUsesV1) -> [text]:
+    var out: [text] = []
+    for _n in mono.names:
+        out.push("")
+    if not file_exists(source_path):
+        return out
+    val source = file_read(source_path)
+    val tldr_path = module_tldr_companion_path_v1(tldr_root, source_path)
+    if not file_exists(tldr_path):
+        return out
+    val content = file_read(tldr_path)
+    if module_tldr_companion_body_v1(content, source) == "":
+        return out
+    val module_id = module_artifact_module_id_v1(source_path)
+    var sections: [text] = []
+    for s in module_tldr_companion_sections_v1(content, source):
+        if not s.starts_with("generic-spec|"):
+            sections.push(s)
+    val inputs = module_tldr_generic_spec_ctx_of_sections_v1(sections)
+    if inputs == nil:
+        return out
+    val i = inputs!
+    var templates: [GenericTemplateEntryV1] = []
+    val (own, own_ok) = generic_templates_of_sections_v1(sections)
+    if not own_ok:
+        return out
+    for e in own: templates.push(e)
+    for p in i.import_paths:
+        val (entries, _bearing, ok) = _module_tldr_generic_templates_of_import_v1(p, tldr_root)
+        if not ok:
+            return out
+        for e in entries: templates.push(e)
+    val ctx = GenericSpecContextV1(profile_digest: GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
+        guard_root: i.guard_root, generic_import_names: i.import_names, generic_imports_unknown: false)
+    var u = 0
+    while u < mono.names.len() and u < mono.owners.len() and u < mono.args.len():
+        val one = generic_specializations_of_mono_v1([mono.owners[u]], [mono.names[u]], [mono.args[u]],
+            true, module_id, templates, ctx)
+        if one.complete and one.specs.len() == 1:
+            out[u] = one.specs[0].concrete_key
+        u = u + 1
+    out
+
 export MonoGenericUsesV1, GenericSpecInputsV1, module_tldr_generic_spec_section_mono_v1
 export module_tldr_generic_spec_ctx_section_v1, module_tldr_generic_spec_ctx_of_sections_v1
-export module_tldr_update_generic_spec_from_mono_v1
+export module_tldr_update_generic_spec_from_mono_v1, module_tldr_instance_keys_from_mono_v1
 export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1
 export module_tldr_companion_render_v1, module_tldr_companion_body_v1

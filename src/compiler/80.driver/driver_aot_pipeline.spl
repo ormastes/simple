@@ -35,6 +35,8 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
+use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_RETIRE_ENV_V1,
+    GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_retire_in_module_v1, generic_instance_list_read_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
@@ -684,6 +686,16 @@ impl CompilerDriver:
                 log_phase("aot:flat_mir_passes:skipped")
                 log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
             if self.ctx.error_count_value == 0:
+                # P-G7: retire COMDAT copies whose instance object the link
+                # step links (coordinator-verified snapshot; empty = keep all).
+                val retire = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? "")
+                if retire.len() > 0:
+                    for retire_name in self.ctx.mir_modules.keys():
+                        val (retired_module, retired_keys) = generic_instance_retire_in_module_v1(
+                            self.ctx.mir_modules[retire_name], retire)
+                        if retired_keys.len() > 0:
+                            self.ctx.mir_modules[retire_name] = retired_module
+                            print "[file-worker] instances retired module={retire_name} copies={retired_keys.len()}"
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
                     module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
@@ -779,7 +791,13 @@ impl CompilerDriver:
         val inputs = admitted.unwrap()
         var link_state = NativeStagedCodegenStateV1.begin(0)
         link_state.active = true
-        link_state.object_files = inputs.object_files
+        # P-G7: generic instance objects (one per ConcreteTldrKey, COMDAT/weak)
+        # the coordinator verified; linked once, after the module objects.
+        var link_objects = inputs.object_files
+        val instance_objects = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_LINK_ENV_V1) ?? "")
+        for instance_object in instance_objects:
+            link_objects = link_objects.push(instance_object)
+        link_state.object_files = link_objects
         link_state.modules_flushed = inputs.modules.len()
         link_state.lane_functions = inputs.functions
         link_state.lane_statics = inputs.statics
@@ -804,7 +822,7 @@ impl CompilerDriver:
             if objectless_reason != "":
                 return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
-        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
+        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} instance_objects={instance_objects.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         self.compile_to_native(output)
 use compiler.common.diagnostics.span.{Span}
