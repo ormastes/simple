@@ -5110,7 +5110,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # .shs callers (stage1/stage3/stage4, run-*-phase2-tests.shs) keep their
     # own defaults.
     case "$(uname -s 2>/dev/null || :)" in
-      MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=7200 ;;
+      MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=21600 ;;
       *) stage2_tests_timeout_default=3600 ;;
     esac
     stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-${stage2_tests_timeout_default}}
@@ -5324,7 +5324,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # mid-promote with the same BLOCKED exit=-2 claimed=0 signature as the
       # mirror stall. Size the per-row internal native-build timeout for the
       # host; callers may override.
-      BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-1800}"
+      case "$(uname -s 2>/dev/null || :)" in
+        MINGW*|MSYS*|CYGWIN*) stage2_native_internal_default=14400 ;;
+        *) stage2_native_internal_default=1800 ;;
+      esac
+      BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-$stage2_native_internal_default}"
       export BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and

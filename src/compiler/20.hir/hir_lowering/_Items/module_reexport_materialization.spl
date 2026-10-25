@@ -1249,8 +1249,16 @@ impl HirLowering:
     me materialize_imported_callable_type_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
         """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
         val started = hir_phase_profile_now()
-        self.materialize_imported_callable_type_dependencies_inner(
-            imported_mod, imported_mod_name, callable, import_span, materialize_enum)
+        # A generic callable's own binders (`fn mutex_new<T>(initial: T)`) are
+        # scoped to its signature, never module symbols of the owner. Walking
+        # them as owner dependencies chased a phantom `owner::T` re-export.
+        if callable.type_params.len() > 0:
+            self.materialize_imported_callable_type_dependencies_inner_with_owner(
+                imported_mod, imported_mod_name, callable, import_span,
+                materialize_enum, callable.type_params)
+        else:
+            self.materialize_imported_callable_type_dependencies_inner(
+                imported_mod, imported_mod_name, callable, import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, started)
 
     me qtype_raw_counted(module_name: text, name: text) -> i64:
@@ -1663,9 +1671,14 @@ impl HirLowering:
                             materialize_enum)
                     else:
                         val dependencies_started = hir_phase_profile_now()
+                        var binders: [ParserTypeParam] = []
+                        for owner_binder in owner_type_params:
+                            binders.push(owner_binder)
+                        for method_binder in method.type_params:
+                            binders.push(method_binder)
                         self.materialize_imported_callable_type_dependencies_inner_with_owner(
                             imported_mod, imported_mod_name, method, import_span,
-                            materialize_enum, owner_type_params)
+                            materialize_enum, binders)
                         hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, dependencies_started)
                     val sig_started = hir_phase_profile_now()
                     var method_type: HirType? = nil

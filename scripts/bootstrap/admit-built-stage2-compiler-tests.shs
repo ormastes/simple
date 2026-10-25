@@ -32,7 +32,10 @@ done
 src=$(CDPATH= cd -- "$src" && pwd -P)
 out=$(CDPATH= cd -- "$out" && pwd -P)
 case "$strategy" in full) profile=full ;; normal) profile=slim ;; *) exit 64 ;; esac
-case "$plat" in *windows*) default_timeout=7200 ;; *) default_timeout=3600 ;; esac
+# Windows pins one frontend worker (product-frontend-policy.shs), so the cold
+# full-CLI parse alone is ~1 file/s over ~2950 files; the CLI + runner + tests
+# campaign does not fit 2 h there.
+case "$plat" in *windows*) default_timeout=21600 ;; *) default_timeout=3600 ;; esac
 timeout=${timeout:-$default_timeout}
 compiler="$out/stage3/$plat/stage2-admitted/simple"
 [ -f "$compiler" ] || compiler="$compiler.exe"
@@ -62,7 +65,10 @@ status=0
   # Same per-row native-build budget bootstrap-from-scratch.sh gives this gate:
   # the verifier default (600s) kills the HIR/MIR shard worker mid-promote
   # (BLOCKED exit=-2 claimed=0) on the full-CLI build.
-  BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-1800}"
+  # Windows: one pinned frontend worker -> cold full-CLI build takes hours; 1800s
+  # always expired there (exit=-2). Host-scaled default, env-overridable.
+  case "$plat" in *windows*) native_internal_default=14400 ;; *) native_internal_default=1800 ;; esac
+  BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-$native_internal_default}"
   export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE SIMPLE_PROJECT_ROOT \
     BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
   sh "$src/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
