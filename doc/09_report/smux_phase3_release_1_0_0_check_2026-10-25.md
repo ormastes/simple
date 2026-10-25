@@ -18,6 +18,10 @@ Subsequent terminal observation: `C:/dev/simple-phase3-phase4-13d-storage-202610
 
 User constraint: rebuild Phase3 with Phase3 if necessary; do not rebuild Phase2. No compiler was launched or rebuilt in this review. A usable Phase3 executable, its producer/runtime receipts and successful actual Hello compilation/execution are prerequisites for the requested smux run. Full CLI or a matching standalone SSpec runner is additionally required for suite execution.
 
+At 07:27 UTC a separate owner's LLVM build in `D:/dev/simple-devhub-release-20261025` was confirmed live through process chain 22740 -> 49668 -> 37020, with increasing worker CPU and active HIR log output. Its requested output `build/devhub-system/phase3/simple.exe` was absent. The producer is again provisional Phase2 `13d73267...`; current source HEAD and subsequently edited launcher are not immutable launch provenance. This is a timestamped live observation, not an artifact, Hello result or admission. No restart or mutation was performed.
+
+Remote refresh: `release/1.0.0` advanced to `42d00bfe4c9` during this continuation. The new commits do not alter the reviewed smux, common mux, dashboard or checked tmux owners relative to the preceding `4fa2bc4d...` baseline. PR4721 corrects workaround-comment placement only; its name is not evidence of a built Phase3 compiler. The draft product branch has not been rebased across other sessions' dirty files.
+
 ## Feature findings
 
 Existing production and executable specs cover separate sessions/windows, directional API splits, named layouts, attachment state, independent server lifetime, real ConPTY, terminal input, history and multiple clients. Their presence does not prove runtime success. Current review found no matching executed PASS receipts for this producer/source tuple.
