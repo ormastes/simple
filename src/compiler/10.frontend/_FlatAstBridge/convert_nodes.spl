@@ -824,8 +824,12 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     # Source position of each region's first inner character, so the
     # sub-parsed fragment's spans can be rebased onto the real source line
     # (fragment-relative spans made every receiver at a region start `:1:1`).
-    var newline_count = 0
-    var last_newline = -1
+    # Only ordinary `"..."` literals interpolate (triple-quoted and `'`/r-prefixed
+    # ones are raw: lexer_struct.spl scan_string / primary_expr.spl), and an
+    # ordinary literal cannot contain a real newline, so every `\n` in the
+    # stored (escape-DECODED) value is an escape: the region is on the
+    # literal's own line. The column is exact when no escape precedes the
+    # region and short by the escapes' extra source bytes otherwise.
     var region_line = 0
     var region_col = 0
     var region_offset = 0
@@ -834,9 +838,6 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if ch == "\n":
-            newline_count = newline_count + 1
-            last_newline = i
         if depth == 0 and ch == "{" and ch_next == "{":
             # `{{` escape (Python f-string / Rust format! parity; doc
             # interp_brace_literal_collides_with_string_interpolation): a
@@ -855,8 +856,8 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             inner_parts = []
             region_offset = span.start + 1 + i + 1
             if span.line > 0:
-                region_line = span.line + newline_count
-                region_col = if newline_count == 0: span.col + 1 + i + 1 else: i + 1 - last_newline
+                region_line = span.line
+                region_col = span.col + 1 + i + 1
         elif depth > 0 and ch == "{":
             depth = depth + 1
             inner_parts.push(ch)
