@@ -34,7 +34,7 @@ use compiler.driver.driver_build.native_file_worker_incremental_v1.{FILE_WORKER_
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_commit_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1,
     NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
-    native_bootstrap_stage3_per_file_selected_v1}
+    native_bootstrap_stage3_per_file_selected_v1, native_bootstrap_stage3_pool_result_accepts_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -180,12 +180,28 @@ fn bootstrap_file_worker_requested(args: [text]) -> bool:
 # the workers' objects and lowers nothing. False only when the MIR aggregate
 # failed (the link is blocked, as on the coordinator lane).
 fn bootstrap_capsule_shard_prepass(args: [text], allow_mir: bool) -> bool:
+    bootstrap_capsule_shard_prepass_routed(args, allow_mir, false)
+
+# A shard child (or an externally driven link) never runs the pool itself;
+# the prepass returns "" for it by design, which is not a missing verdict.
+fn bootstrap_shard_child_active() -> bool:
+    (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != ""
+
+# per_file: the per-file route was selected (Stage3 / plain coordinator). Then
+# only a sealed ledger is accepted -- no verdict fails closed instead of
+# silently building a whole-program binary (P-H review round 1).
+fn bootstrap_capsule_shard_prepass_routed(args: [text], allow_mir: bool, per_file: bool) -> bool:
+    val strict = per_file and not bootstrap_shard_child_active()
     var base: [text] = ["native-build"]
     for arg in bootstrap_native_build_worker_args(args):
         base = base.push(arg)
     val ledger = native_build_focused_capsule_shards_v1(base, base, allow_mir)
-    if ledger == "fail":
-        print "error: MIR shard aggregate failure; link and artifact publication blocked"
+    if not native_bootstrap_stage3_pool_result_accepts_v1(ledger, strict):
+        if ledger == "fail":
+            print "error: MIR shard aggregate failure; link and artifact publication blocked"
+        else:
+            print "error: per-file route selected but the file-worker pool produced no sealed ledger; refusing whole-program fallback (set SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 to build the single-object binary)"
         return false
     if ledger != "":
         env_set("SIMPLE_MIR_SHARD_LINK", ledger)
@@ -225,7 +241,7 @@ fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
             env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
             env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""):
         print "[coordinator-route] per-file worker pool + per-module link"
-        if not bootstrap_capsule_shard_prepass(args, true):
+        if not bootstrap_capsule_shard_prepass_routed(args, true, true):
             return 1
     run_bootstrap_stage3_process_route(args)
 
@@ -410,7 +426,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
                 if stage3_allow_mir:
                     print "[stage3-route] per-file worker pool + per-module link"
-                if not bootstrap_capsule_shard_prepass(args, stage3_allow_mir):
+                if not bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir, stage3_allow_mir):
                     return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
