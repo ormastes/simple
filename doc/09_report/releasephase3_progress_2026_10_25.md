@@ -103,7 +103,7 @@ This append records a later bounded snapshot; the preceding failed and pending r
 
 | Merged PR | Scoped source head | Result and qualification limit |
 |---|---|---|
-| [#4671](https://github.com/ormastes/simple/pull/4671) | `ae98d9af9c9` | Generic enum receiver source repair; focused frozen-candidate receiver control passed, broader feature acceptance UNRUN. |
+| [#4671](https://github.com/ormastes/simple/pull/4671) | `ae98d9af9c9` | Generic enum receiver source repair; generic regression specs UNRUN (canonical struct-receiver control is separate evidence). |
 | [#4674](https://github.com/ormastes/simple/pull/4674) | `8901574c710` | MMIO owner/test-mode repair; source review GO, authored feature specs UNRUN. |
 | [#4675](https://github.com/ormastes/simple/pull/4675) | `29e3fbd72cc` | CUDA no-guess layout source repair; runtime/PTX execution UNRUN, portable-type acceptance OPEN. |
 | [#4680](https://github.com/ormastes/simple/pull/4680) | `ae0006adbc6` | Root semantic Markdown lint dispatch; source GO, runtime/docgen acceptance UNRUN. |
