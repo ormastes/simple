@@ -33,9 +33,10 @@ by this backtrace.
 
 ## Repair and evidence
 
-Ported only `src/compiler/00.common/cache/reverse_reference_facts.spl` from
-the refreshed `release/1.0.0` head `5e8ad7e3638`; its contents match that branch
-exactly. This carries the existing explicit promotion of the batch, array
+Initially ported only `src/compiler/00.common/cache/reverse_reference_facts.spl`
+from the refreshed `release/1.0.0` head `5e8ad7e3638`; that initial port matched
+the branch exactly. The review correction below subsequently changes the
+promotion schedule and failure result. The port carries explicit promotion of the batch, array
 limbs, element strings and phase-owner roots, typed generic arguments, and
 persistent array mirrors. Related upstream commits include `2b996fbc6f7`,
 `ff1f69fd931`, `3159810d701`, `9a79de084e9` and `8511efb3598`.
@@ -64,6 +65,52 @@ arrays across two consecutive scopes, dynamic fact fields and evidence digests,
 alias order, incomplete-family filtering, duplicate seals and wrong/stale tokens.
 The exact p2_add before/after result is the causal regression evidence; the
 standalone fixture does not reproduce the full compiler's original corruption.
+
+## Review correction: bounded phase promotion and truthful seal failure
+
+Review of `d8b185ab2bf` found that promoting the accumulated phase containers
+on every module seal repeatedly walks earlier facts and aliases. Persistent
+array/dictionary roots still undergo child traversal in the native runtime;
+being persistent does not make their promotion a constant-time operation.
+
+The corrected owner retains phase containers once per owner generation. The
+readiness flag resets with `reverse_reference_owner_clear_v1` and is set only
+after all four initial promotions succeed. This supports owner initialization
+inside the first allocation scope. Each later module promotes its own batch;
+publication then appends after scope end, where container growth and newly
+allocated alias lists are persistent. Direct registration without a module
+batch is an unscoped operation. The audited HIR/MIR/selective/archive paths
+start their batch immediately after entering their transient scope.
+
+The seal now returns the conjunction of initial ownership, element ownership,
+and phase-root ownership. It publishes its sealed mirror and batch handles only
+after all succeed; an unsuccessful seal remains invalid and requires abort
+before scope reclamation. No accumulated phase graph is promoted repeatedly.
+This removes the newly added repeated traversal by construction; no whole-build
+time or RSS improvement is claimed from the small fixtures.
+
+Ordinary native checks of this correction used the recorded bootstrap producer
+and `core-c-bootstrap` runtime authority, with `SIMPLE_NATIVE_BUILD_RUST=1` and
+`SIMPLE_NO_STUB_FALLBACK=1`. They are bootstrap-produced fixture evidence:
+
+- The revised scope-survival fixture passed owner creation both inside and
+  outside an allocation scope, then passed 32 batches per generation (64 total),
+  checking retained dynamic facts, aliases, digests, filtering, and tokens.
+  Binary SHA256: `82efb0203d6ad68287b397e0275e8ad2920fa0cc055520e464efa8b47c0806f9`.
+- `abort.spl` deterministically attempts sealing before pause, requires refusal
+  and refusal to publish, then pauses, aborts and ends the scope. It verifies
+  that no facts/families/aliases escaped. Compilation was 1 changed module,
+  41 cached, 0 failed; executable exit 0 and the PASS marker were observed.
+  Binary SHA256: `517a5144b0f4f08bb684a57a476a78983ad9a04fd9c655268221312fc1124180`.
+  Logs: `/tmp/releasephase3-p2add-debug/review-fix/abort-deterministic-authority-build.log`
+  and `abort-deterministic-run.log` in the same directory.
+
+An initial fixture compile omitted the recorded native-build authority flag
+and exited 1; its `abort-deterministic-build.log` is retained separately. The
+ordinary deterministic test covers early promotion refusal, not a failure
+injected after some element promotions. No debugger-injection result is claimed.
+The p2_add and Hello receipts above belong to the initial port; a compiler
+rebuilt with this review correction and full admission remain pending.
 
 ## Open qualification blocker: custom primitive registry HIR crash
 
