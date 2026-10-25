@@ -88,6 +88,13 @@ fn incremental_hash_text(content: text) -> i64:
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 var _frontend_src_fingerprint_memo: text = "@@unset@@"
 var _stdlib_src_fingerprint_memo: text = "@@unset@@"
+# Per-process memos for the compiler executable digest and the runtime provider
+# fingerprint. Both hash large files (the compiler exe is ~60 MB, ~0.4 s per
+# sha256) and were recomputed on every call: twice per staged-codegen batch
+# (cache config + cache scope), i.e. ~190 batches x 2 in a stage-3 build.
+var _compiler_exe_hash_memo: text = "@@unset@@"
+var _runtime_provider_fp_memo_path: text = "@@unset@@"
+var _runtime_provider_fp_memo: text = ""
 var _frontend_portable_root_memo_v1: text = ""
 var _frontend_portable_authority_memo_v1: text = ""
 var _frontend_portable_digest_memo_v1: text = ""
@@ -353,6 +360,11 @@ pub fn native_build_frontend_portable_source_digest_v1(source_root: text,
     identity
 
 fn native_build_compiler_executable_hash() -> text:
+    if _compiler_exe_hash_memo == "@@unset@@":
+        _compiler_exe_hash_memo = _native_build_compiler_executable_hash_uncached()
+    _compiler_exe_hash_memo
+
+fn _native_build_compiler_executable_hash_uncached() -> text:
     # Under `simple run <script>` rt_cli_get_args()[0] is the SCRIPT, not the
     # compiler, so each entrypoint script hashed to a different "exe=" identity:
     # parse-shard children (parse_shard_main.spl) and HIR-shard children
@@ -388,6 +400,12 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
     direct runtime archive/object path is hashed as-is. Missing or unreadable
     configured providers return a per-process uncacheable identity.
     """
+    if _runtime_provider_fp_memo_path != runtime_path:
+        _runtime_provider_fp_memo = _native_build_runtime_provider_fingerprint_uncached(runtime_path)
+        _runtime_provider_fp_memo_path = runtime_path
+    _runtime_provider_fp_memo
+
+fn _native_build_runtime_provider_fingerprint_uncached(runtime_path: text) -> text:
     if runtime_path == "":
         return "embedded"
     if rt_file_exists(runtime_path) and not rt_dir_exists(runtime_path):
