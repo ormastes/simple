@@ -31,6 +31,8 @@ impl HirLowering:
         var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
         if p.has_type_:
             type_ = self.lower_type(p.type_)
+            if val bound_receiver = declared_receiver:
+                type_ = self.receiver_with_impl_arguments(type_, bound_receiver)
         elif val receiver_type = declared_receiver:
             # Supplied only for the first unannotated receiver of its owning
             # nonstatic method. Never manufacture a type for an unknown owner.
@@ -61,6 +63,37 @@ impl HirLowering:
             span: p.span,
             is_mutable: p.is_mutable
         )
+
+    me receiver_with_impl_arguments(parsed: HirType, bound: HirType) -> HirType:
+        """The parser types a method receiver as its bare owner, so a generic
+        owner's `self` lost the impl-bound arguments (`FailSafeResult<T>`
+        became `FailSafeResult`) and `match self` in a generic enum method was
+        rejected as lacking declaration-ordered type arguments. Adopt the
+        enclosing impl's applied owner only when the parsed receiver is that
+        same owner with no arguments; any other annotation is kept as-is."""
+        var parsed_owner = SymbolId(id: -1)
+        var parsed_argument_count = -1
+        match parsed.kind:
+            case HirTypeKind.Named(owner, arguments):
+                parsed_owner = owner
+                parsed_argument_count = arguments.len()
+            case _: ()
+        if parsed_argument_count != 0 or not parsed_owner.is_valid():
+            return parsed
+        var bound_owner = SymbolId(id: -1)
+        var bound_argument_count = 0
+        match bound.kind:
+            case HirTypeKind.Named(owner, arguments):
+                bound_owner = owner
+                bound_argument_count = arguments.len()
+            case _: ()
+        if bound_argument_count == 0 or not bound_owner.is_valid():
+            return parsed
+        if parsed_owner.id == bound_owner.id:
+            return bound
+        if self.pattern_enum_same_owner(parsed_owner, bound_owner):
+            return bound
+        parsed
 
     me lower_class(class_: ParserClass) -> HirClass:
         # DIRECT field access, NOT `match class_: case Class(...)` — struct
