@@ -37,7 +37,19 @@ current stage2 resolves.
 
 ## Compiler fix
 `switch_operators_calls.spl` multi-slot bind path now calls
-`remember_local_hir_type(bound_slot, declared slot type)`. Cases 2/3 remain open.
+`remember_local_hir_type(bound_slot, declared slot type)`.
+
+Cases 2/3 (unverified — needs a stage2 rebuild to confirm zero warnings):
+- Single-slot bind read `enum_single_payload_types[key]` directly, but the
+  declaration-repository lane registers enums names-only and installs payload
+  rows lazily via `ensure_declaration_enum_payloads_v1` — so the row was absent.
+  Now demanded first, with `enum_variant_payload_type_at(key, 0)` fallback.
+- A declared Named struct/class payload now also seeds `struct_value_syms` on
+  the bound local (same as a typed param), so trait-impl methods resolve.
+- `enum_match_expr_type`: trait-object receiver falls back to
+  `lookup_trait_method` for the declared return (`Ok(output)` of `compile_module`).
+- `for_collection_declared_type`: Var iterables fall back to
+  `receiver_declared_type` (the bind's remembered type) when `iter.type_` is nil.
 Remove WAs once a stage2 with the fix shows zero warnings for these sites.
 
 ## Related: native `d[k]` on Dict<text, bool> yields int 1/0 (found via #4504)
