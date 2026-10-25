@@ -1,5 +1,11 @@
 # Phase 3 acceptance execution plan
 
+## Current landing and qualification status — 2026-10-25
+
+The [current progress report](../09_report/releasephase3_progress_2026_10_25.md) pins GitHub `release_phase3` at `75d260930c3` and separates merged work from executed acceptance. The coding inventory remains **15 complete-unverified / 54 partial / 4 absent selected behaviors / 9 requiring decisions (82 scopes)**; these are the last full audit classifications, not a new completeness audit after every landing. All **82 feature acceptance scopes remain UNRUN**. Landed static-lock, C4 foundation and builder-hook additions contain **33, 37 and 20 authored scenarios**, respectively; all remain UNRUN.
+
+Source `1690b09c34d` produced the admitted Stage 2 candidate `7934d8c2e119…` (1,492 modules rebuilt, both bootstrap-mode frontend smokes and receiver gate passed). Its compiler test matrix then **FAILED** on the `std.cli.log_modes` source-alias conflict; the provisional Stage 3 compiler crashed during HIR and produced no compiler artifact. The newer GitHub head is not qualified by that older source receipt. The requested cache-backed 500-item batch has not executed. See the report for exact source/runtime receipts, merged PRs, the unlanded runtime repair and remaining end conditions. Historical snapshots below are preserved.
+
 ## Current coding inventory — 2026-10-25
 
 The [source-backed82-scope coding inventory](../09_report/releasephase3_coding_inventory_2026_10_25.md) now records `release_phase3` at `1690b09c34d`: **15 coded-complete but unverified,54 partial,4 selected behaviors absent on this branch,9 requiring authority/requirement decisions**. ASYNC-LOCK-ORDER moved from absent to partial after PR #4605 landed ranked-function and canonical Mutex callback checking; unsupported broader cases remain closed and native SSpecs remain UNRUN. The original f5c0 audit is retained as history. Partial does not mean wholly uncoded. External reviewed Reference/FLS and heap-provenance packets remain available for reuse; exact source/test evidence and task boundaries are in the report.
