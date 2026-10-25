@@ -116,3 +116,20 @@ seed JIT fallback on `native_build_main`.
 - Investigating: closure walk not following `use os.*` imports (selected 1 vs
   5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
   despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).
+
+
+## Reconciliation 2026-10-26 — terminal build evidence
+
+Current status: **INCOMPLETE**. The evening observations above are historical,
+not current admission. P-G7 #4696 and integration #4704 are now merged, but the
+retained stage3 whole-program run terminated with 3,104 MIR errors. An old-stage2
+control lane also failed with thousands of payload errors; the claimed new
+compiler type-ID regression is unproven. A 122-module closure compiled, while
+a 512-module closure failed in 3 modules. No successful per-file self-rebuild,
+overlap receipt, strict compiler link/Hello World, or complete cache acceptance
+was established by this inspection. Keep the default flip unqualified.
+
+See [the evidence and remaining acceptance ledger](../../evidence/cache_perfile_phase3_reconciliation_2026-10-26.md)
+for terminal outcomes, current PR states, compiler identities, artifact hashes,
+and the next reduced reproduction. The complete Phase 3 feature matrix and
+historical acceptance scenarios remain required; none is dropped by this update.
