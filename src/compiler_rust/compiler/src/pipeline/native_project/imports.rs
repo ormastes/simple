@@ -35,6 +35,11 @@ pub(crate) struct ImportMapResult {
     /// order).  This is the source of truth for cross-module layouts: a bare
     /// type name is not a nominal identity.
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    /// Declared field `= default` expressions keyed by the same canonical
+    /// `module_prefix__Type` owner as `struct_defs` (first definition wins,
+    /// mirroring `record_struct_fields`). The HIR lowerer fills an omitted
+    /// constructor field from here when the type is not in its local registry.
+    pub struct_field_defaults: std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>,
     /// Compatibility index for a bare type name that has exactly one owner in
     /// the compilation closure.  Colliding names are deliberately absent.
     pub unique_struct_owners: std::collections::HashMap<String, String>,
@@ -354,6 +359,7 @@ pub(crate) fn build_import_map(
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
     let mut unique_struct_owners: HashMap<String, String> = HashMap::new();
+    let mut struct_field_defaults: HashMap<String, HashMap<String, simple_parser::ast::Expr>> = HashMap::new();
     let mut struct_module_owners: HashMap<PathBuf, String> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
@@ -482,6 +488,12 @@ pub(crate) fn build_import_map(
                                 &c.name,
                                 fields,
                             );
+                            record_struct_field_defaults(
+                                &mut struct_field_defaults,
+                                &prefix,
+                                &c.name,
+                                c.fields.iter().map(|f| (&f.name, &f.default)),
+                            );
                         }
                         let own_methods: HashSet<String> = c.methods.iter().map(|m| m.name.clone()).collect();
                         for mixin_ref in &c.mixins {
@@ -568,6 +580,12 @@ pub(crate) fn build_import_map(
                                 &prefix,
                                 &s.name,
                                 fields,
+                            );
+                            record_struct_field_defaults(
+                                &mut struct_field_defaults,
+                                &prefix,
+                                &s.name,
+                                s.fields.iter().map(|f| (&f.name, &f.default)),
                             );
                         }
                         for m in &s.methods {
@@ -1170,6 +1188,7 @@ pub(crate) fn build_import_map(
         vtable_type_owners,
         vtable_symbols,
         struct_defs,
+        struct_field_defaults,
         unique_struct_owners,
         struct_module_owners,
         duplicate_struct_defs,
@@ -1217,6 +1236,26 @@ fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::coll
         }
         Type::TypeBinding { value, .. } => type_mentions_ambiguous_owner(value, ambiguous),
         Type::SelfType | Type::ConstKeySet { .. } | Type::DependentKeys { .. } => false,
+    }
+}
+
+/// Record a type's declared field `= default` expressions under the same
+/// canonical owner key `record_struct_fields` uses (first definition wins).
+fn record_struct_field_defaults<'a>(
+    struct_field_defaults: &mut std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>,
+    module_prefix: &str,
+    name: &str,
+    fields: impl Iterator<Item = (&'a String, &'a Option<simple_parser::ast::Expr>)>,
+) {
+    let owner = format!("{}__{}", module_prefix, name);
+    if struct_field_defaults.contains_key(&owner) {
+        return;
+    }
+    let defaults: std::collections::HashMap<String, simple_parser::ast::Expr> = fields
+        .filter_map(|(field_name, default)| default.as_ref().map(|d| (field_name.clone(), d.clone())))
+        .collect();
+    if !defaults.is_empty() {
+        struct_field_defaults.insert(owner, defaults);
     }
 }
 

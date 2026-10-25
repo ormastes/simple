@@ -13,6 +13,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
 
 type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
+type GlobalStructFieldDefaults = std::sync::Arc<HashMap<String, HashMap<String, Expr>>>;
 type UniqueStructOwners = std::sync::Arc<HashMap<String, String>>;
 type StructModuleOwners = std::sync::Arc<HashMap<PathBuf, String>>;
 type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
@@ -199,6 +200,12 @@ pub struct Lowerer {
     pub(super) declared_function_value_types: HashMap<String, TypeId>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
+    /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
+    /// keyed like `global_struct_defs`. Fallback for `struct_field_defaults`
+    /// when the constructed type reached this module only through the global
+    /// layout map (e.g. a glob re-export), so its declaration was never
+    /// registered locally and an omitted field would otherwise get nil.
+    pub(super) global_struct_field_defaults: Option<GlobalStructFieldDefaults>,
     /// Bare names that have exactly one canonical nominal owner.  This is a
     /// compatibility index, never an identity source for colliding types.
     pub(super) unique_global_struct_owners: Option<UniqueStructOwners>,
@@ -317,6 +324,7 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
@@ -388,6 +396,7 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
@@ -482,6 +491,7 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
@@ -556,6 +566,10 @@ impl Lowerer {
     /// isn't in the per-file registry.
     pub fn set_global_struct_defs(&mut self, defs: GlobalStructDefs) {
         self.global_struct_defs = Some(defs);
+    }
+
+    pub fn set_global_struct_field_defaults(&mut self, defaults: GlobalStructFieldDefaults) {
+        self.global_struct_field_defaults = Some(defaults);
     }
 
     pub fn set_unique_global_struct_owners(&mut self, owners: UniqueStructOwners) {

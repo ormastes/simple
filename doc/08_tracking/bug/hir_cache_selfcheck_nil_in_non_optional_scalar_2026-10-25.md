@@ -114,3 +114,8 @@ explicitly (copies preserve the source value). Spec:
 `test/01_unit/compiler/20.hir/hir_symbol_generic_param_count_explicit_spec.spl`.
 Underlying codegen gap (struct field defaults dropped on named construction
 under staged-native) is still open and is the general form of fixes 3 and 4.
+
+## Root cause located (2026-10-25)
+
+The dropped default is a Rust-seed HIR gap (stage2 is seed-built), not
+pure-Simple MIR: see `native_struct_field_default_dropped_on_reexport_2026-10-25.md`.
