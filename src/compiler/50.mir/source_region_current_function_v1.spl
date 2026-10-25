@@ -13,6 +13,8 @@ use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.source_region_result_payload_codec_v1.*
+use compiler.mir.canonical_enum_builtin_capture_v1.*
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
 
 fn source_region_current_runtime_v1(name: text, params: [MirType], result: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
@@ -28,9 +30,13 @@ impl MirLowering:
         local
 
     me source_region_current_payload_v1(result: LocalId) -> LocalId:
-        self.source_region_current_call_v1(source_region_current_runtime_v1(
-            "rt_enum_payload", [MirType.i64()], MirType.i64()),
-            [mir_operand_copy(result)], MirType.i64())
+        val callee = source_region_current_runtime_v1(
+            "rt_enum_payload", [MirType.i64()], MirType.i64())
+        var builder = self.builder
+        val payload = builder.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Payload,
+            self.enum_runtime_id("Result"), -1, callee, [mir_operand_copy(result)], MirType.i64())
+        self.builder = builder
+        payload ?? LocalId(id: -1)
 
     me source_region_current_construct_v1(value: LocalId, expected: HirType,
             discriminant: i64, outer: MirType, plan: SourceRegionFunctionPlanV1
@@ -38,10 +44,15 @@ impl MirLowering:
         val encoded = self.encode_source_region_result_payload_v1(value, expected)?
         val constructor = source_region_current_runtime_v1("rt_enum_new",
             [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], outer)
-        Ok(self.source_region_current_call_v1(constructor, [
+        var builder = self.builder
+        val constructed = builder.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.New,
+            plan.result_construction.runtime_enum_id, discriminant, constructor, [
             MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(plan.result_construction.runtime_enum_id), MirType(kind: MirTypeKind.I32))),
             MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(discriminant), MirType(kind: MirTypeKind.I32))),
-            mir_operand_copy(encoded)], outer))
+            mir_operand_copy(encoded)], outer)
+        self.builder = builder
+        if val result = constructed: return Ok(result)
+        Err("SOURCE-CURRENT: canonical Result constructor emitted no result")
 
     me source_region_current_propagate_v1(result: LocalId, outer: MirType,
             plan: SourceRegionFunctionPlanV1) -> Result<(), text>:
@@ -66,10 +77,13 @@ impl MirLowering:
                 case _: return Err("SOURCE-CURRENT: actual local is not typed Result")
         else:
             return Err("SOURCE-CURRENT: Result local is outside actual builder")
-        val tag = self.source_region_current_call_v1(source_region_current_runtime_v1(
-            "rt_enum_discriminant", [MirType.i64()], MirType.i64()),
-            [mir_operand_copy(result)], MirType.i64())
+        val discriminant_callee = source_region_current_runtime_v1(
+            "rt_enum_discriminant", [MirType.i64()], MirType.i64())
         var builder = self.builder
+        val tag_result = builder.emit_canonical_enum_builtin_v1(CanonicalEnumBuiltinOperationV1.Discriminant,
+            self.enum_runtime_id("Result"), -1, discriminant_callee, [mir_operand_copy(result)], MirType.i64())
+        if tag_result == nil: return Err("SOURCE-CURRENT: canonical discriminant emitted no result")
+        val tag = tag_result ?? LocalId(id: -1)
         val ok_block = builder.new_block(Some("source_region_ok"))
         val err_block = builder.new_block(Some("source_region_err"))
         val malformed_block = builder.new_block(Some("source_region_incomplete"))
