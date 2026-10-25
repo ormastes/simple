@@ -46,8 +46,8 @@ use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
     SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1,
-    shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1}
-use std.nogc_sync_mut.sffi.process_memory.{process_private_kib, host_commit_avail_kib}
+    shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1}
+use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
 use app.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
@@ -962,6 +962,13 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val static_kib = if label == "mir-shard": shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000) else: shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
     val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
     var observed_peak_kib: i64 = 0
+    # Commit is measured from the registered host headroom probe only (works
+    # in the seed interpreter and native code alike): the pool's commit use
+    # since it started, split over live workers. -1 = unavailable -> the
+    # pre-existing static cap, logged once.
+    val pool_base_headroom = host_commit_avail_kib()
+    if pool_base_headroom < 0:
+        print "[{label}] commit headroom unavailable on this host/engine; static worker cap only"
     val commit_reserve_kib: i64 = 4194304
     var pending: [i64] = []
     var i: i64 = 0
@@ -985,15 +992,13 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var indices: [i64] = []
         var started_ms: [i64] = []
         while next_pending < pending.len() or pids.len() > 0:
-            var live_private: [i64] = []
-            for live_pid in pids:
-                val private_kib = if live_pid > 0: process_private_kib(live_pid) else: 0
-                if private_kib > observed_peak_kib: observed_peak_kib = private_kib
-                live_private = live_private.push(private_kib)
+            val now_headroom = if pool_base_headroom < 0: -1 else: host_commit_avail_kib()
+            var live_private = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
+            if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
             val est_kib = shard_commit_estimate_kib_v1(shard_commit_estimate_kib_v1(static_kib, recorded_peak), observed_peak_kib)
             while pids.len() < window_size and next_pending < pending.len() and
                     not hir_shard_recovery_blocked(queue_dir) and
-                    shard_commit_spawn_admit_v1(host_commit_avail_kib(), commit_reserve_kib, est_kib, live_private):
+                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private):
                 val index = pending[next_pending]
                 next_pending = next_pending + 1
                 val owner = "{index}/{count}@{generation}"
@@ -1096,7 +1101,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     env_set("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
     if observed_peak_kib > 0:
         val _peak_written = file_write(peak_record, "{observed_peak_kib}")
-        print "[{label}] measured worker peak private={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
+        print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
     val unfinished = if all_stopped: hir_shard_recovery_close_inventory(queue_dir, fail_fast) else: -1
     if unfinished != 0:
         failed_workers = failed_workers + 1
