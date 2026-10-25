@@ -77,3 +77,12 @@ does not establish the result ABI. Native LLVM and Cranelift aggregate parity
 remain pending. Any subsequent compiler build must use its normal admission
 flow and establish real Hello execution before dependent application tests.
 No build, runtime launch, cache modification or retry was made for this repair.
+
+
+## Upstream typed-result reconciliation - 2026-10-25
+
+Status: **WARN / NOT_RUN**. The text and pins above describe historical source and remain unchanged. Upstream `f3b3d615124128de0535deb1645263380a2796cf` intentionally supersedes the earlier `[Any]?` representation with `DeflateBlockResult?` and updates RFC callers to named fields. Rebased head `a007a05292906ec5ecf07fa912d64c93a26d4a5f`, onto `3fafd89481dc07d1688e16150e0ca60ea0905825`, retains that concrete result and our nullable `[u8]?` input with explicit Some/nil unwrapping.
+
+The four semantic values (integer block type, boolean final flag, byte payload, integer next offset), stored/marker behavior, nil input and malformed-offset/truncation failures remain covered. The focused three-case spec now asserts named fields and includes upstream's extreme-negative-offset control; no mixed-array compatibility API is restored. Current RFC callers and the asynchronous result-type reexport are preserved. Historical claims that the RFC suite was unchanged apply only to the earlier revision.
+
+Current Git blobs: source `fdd8c379633ab723b868f583dce6a93127580402`; focused spec `13af0f7826bb82319c52853be0085ab1e7a12027`. The six-overlap integration evidence is in [the release sync source review](../../09_report/smux_release_sync_source_review_2026_10_25.md). This source reconciliation supplies no runtime validation: all three focused cases and RFC/native integration remain NOT_RUN. No compiler admission, cache policy, or guard was weakened.
