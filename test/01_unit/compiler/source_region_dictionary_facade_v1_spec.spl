@@ -191,3 +191,55 @@ describe "SOURCE dictionary shared-account facade":
             rt_free(fixture.dict_rows)
             rt_free(fixture.struct_descriptor)
             rt_free(fixture.struct_rows)
+
+    it "reaches the dictionary operation reservation and refuses one unit short":
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_put_v1(fixture.context, fixture.dictionary, 1, fixture.child).unwrap()
+        val saved = source_region_stamp_v1(fixture.context).unwrap()
+        # Reserve every later observation/teardown attempt on this same account
+        # BEFORE exhaustion. No replacement account or restored credit exists.
+        val stamp_work = source_region_prepare_v1(fixture.account, 4).unwrap()
+        source_region_reserve_v1(fixture.account, 1).unwrap()
+        val allowance = unsafe(capabilities: [ffi, raw_ptr]): rt_source_region_dict_observation_bound_v1()
+        expect(allowance).to_be_greater_than(0)
+        expect(allowance).to_be_less_than(3074457345618258603)
+        source_region_reserve_v1(fixture.account, 3 * allowance).unwrap()
+        val read_work = source_region_prepare_v1(fixture.account, 16, fixture.dictionary, allowance).unwrap()
+        val close_work = source_region_prepare_v1(fixture.account, 10).unwrap()
+        val release_work = source_region_prepare_v1(fixture.account, 11).unwrap()
+        val remaining = fixture.account.remaining(MirLoopResourceKindV1.Work)
+        # Owner observation1 + three paid lookups + common query overhead3,
+        # followed by the actual operation reservation, short by exactly one.
+        val needed = 1 + 3 * allowance + 3 + read_work
+        expect(remaining).to_be_greater_than(needed)
+        fixture.account.reserve(remaining - (needed - 1)).unwrap()
+        val before = fixture.account.snapshot()
+        val refused = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_dict_get_v1(fixture.context, saved, fixture.dictionary, 1)
+        expect(refused).to_equal(Err(SourceRegionErrorV1.Capacity))
+        val paid_observations = 1 + 3 * allowance + 3
+        expect(fixture.account.snapshot().work_used).to_equal(before.work_used + paid_observations)
+        expect(fixture.context.account.snapshot().work_used).to_equal(before.work_used + paid_observations)
+        expect(fixture.account.snapshot().state_fields).to_equal(before.state_fields)
+        expect(fixture.account.snapshot().output_bytes).to_equal(before.output_bytes)
+        val observed_epoch = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_stamp_v1(fixture.context.native_control, fixture.context.generation, stamp_work)
+        expect(observed_epoch).to_equal(saved)
+        val observed_child = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_dict_get_v1(fixture.context.native_control, fixture.context.generation,
+                saved, fixture.dictionary, 1, read_work)
+        expect(observed_child).to_equal(fixture.child)
+        val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+        expect(ended).to_equal(true)
+        val closed = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_close_v1(fixture.context.native_control, fixture.context.generation, close_work)
+        expect(closed).to_equal(0)
+        val released = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_source_region_release_v1(fixture.context.native_control, fixture.context.generation, release_work)
+        expect(released).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_free(fixture.dict_descriptor)
+            rt_free(fixture.dict_rows)
+            rt_free(fixture.struct_descriptor)
+            rt_free(fixture.struct_rows)
