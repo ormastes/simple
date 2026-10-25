@@ -1,0 +1,72 @@
+# Finite compiler-time resolved direct-call closure. This is discovery only;
+# discovering an edge does not discharge its allocation/write obligations.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirTerminator}
+use compiler.mir.verification_contract_bridge.{verification_direct_call_name_v2}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+struct SourceRegionCallClosureV1:
+    entry: SymbolId
+    functions: [SymbolId]
+    targets_by_name: Dict<text, SymbolId>
+    input_digest: text
+
+pub fn source_region_resolved_call_closure_v1(
+    module: MirModule, entry: SymbolId
+) -> Result<SourceRegionCallClosureV1, text>:
+    if not module.functions.contains_key(entry):
+        return Err("SOURCE-CLOSURE-ENTRY: resolved producer SymbolId is absent")
+    var targets: Dict<text, SymbolId> = {}
+    var ambiguous: Dict<text, bool> = {}
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        if symbol.id != function.symbol.id:
+            return Err("SOURCE-CLOSURE-IDENTITY: module key and function differ")
+        if targets.contains_key(function.name):
+            ambiguous[function.name] = true
+        else:
+            targets[function.name] = symbol
+    var pending: [SymbolId] = [entry]
+    var seen: Dict<i64, bool> = {}
+    var functions: [SymbolId] = []
+    var rows: [text] = ["SourceRegionCallClosure-v1|instrumentation=1"]
+    var cursor = 0
+    while cursor < pending.len():
+        val symbol = pending[cursor]
+        cursor = cursor + 1
+        if seen.contains_key(symbol.id):
+            continue
+        seen[symbol.id] = true
+        val function = module.functions[symbol]
+        if (function.is_export_c or function.is_generic_template or
+                function.signature.is_variadic or function.is_kernel or function.is_naked):
+            return Err("SOURCE-CLOSURE-FUNCTION: foreign/template/variadic execution is open")
+        functions.push(symbol)
+        rows.push(serialize_mir_function(function))
+        for block in function.blocks:
+            match block.terminator:
+                case MirTerminator.Ret(_) | MirTerminator.Goto(_) | MirTerminator.If(_, _, _) | MirTerminator.Switch(_, _, _) | MirTerminator.Abort(_) | MirTerminator.Unreachable:
+                    ()
+                case _:
+                    return Err("SOURCE-CLOSURE-TERMINATOR: exceptional or suspended edge is open")
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, _, _):
+                        val name = verification_direct_call_name_v2(instruction.kind)
+                        if name == "" or ambiguous.contains_key(name) or not targets.contains_key(name):
+                            return Err("SOURCE-CLOSURE-CALL: indirect/foreign/unresolved target")
+                        val target = targets[name]
+                        rows.push("edge={symbol.id}:{target.id}")
+                        if not seen.contains_key(target.id):
+                            pending.push(target)
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        return Err("SOURCE-CLOSURE-CALL: indirect target set is unproved")
+                    case _:
+                        # Actual instruction admission belongs to the typed
+                        # birth/store planner, never to this edge discovery.
+                        ()
+    Ok(SourceRegionCallClosureV1(entry: entry, functions: functions,
+        targets_by_name: targets, input_digest: sha256_text(rows.join("\n"))))
