@@ -1,0 +1,92 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: a store or read of a field the struct does not have fails
+
+`resolve_field_index` used to return index 0 when no layout tier named the
+field. A source that assigned `options.target_opt_ctx = ...` to a
+`CompileOptions` without that field overwrote field 0 (`mode`), and Stage 3
+native-build panicked in `CompileMode.to_text`. When the layout is known and
+the field is missing, lowering now records an error. A known field still
+lowers cleanly.
+See doc/08_tracking/bug/missing_struct_field_store_writes_field0_2026-10-25.md
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn field_src_of(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn field_lower_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    val _mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for e in mir_lowering.errors:
+        errs = errs + e.message + "\n"
+    errs
+
+val FIELD_OPTS = [
+    "struct Opts:",
+    "    mode: i64",
+    "    level: i64",
+    ""
+]
+
+fn with_opts(lines: [text]) -> text:
+    var out: [text] = []
+    for l in FIELD_OPTS:
+        out.push(l)
+    for l in lines:
+        out.push(l)
+    field_src_of(out)
+
+describe "missing struct field in MIR lowering":
+    it "rejects a store to a field the struct lacks":
+        val errs = field_lower_errors(with_opts([
+            "fn run() -> i64:",
+            "    var o: Opts = Opts(mode: 1, level: 2)",
+            "    o.target_opt_ctx = 9",
+            "    o.mode"
+        ]))
+        expect(errs.contains("no field 'target_opt_ctx' on '") and errs.contains("::Opts'")).to_equal(true)
+
+    it "rejects a read of a field the struct lacks":
+        val errs = field_lower_errors(with_opts([
+            "fn run(o: Opts) -> i64:",
+            "    o.target_opt_ctx"
+        ]))
+        expect(errs.contains("no field 'target_opt_ctx' on '") and errs.contains("::Opts'")).to_equal(true)
+
+    it "still lowers a known field store and read":
+        val errs = field_lower_errors(with_opts([
+            "fn run() -> i64:",
+            "    var o: Opts = Opts(mode: 1, level: 2)",
+            "    o.level = 9",
+            "    o.level"
+        ]))
+        expect(errs.contains("no field")).to_equal(false)

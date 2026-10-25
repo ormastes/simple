@@ -63,3 +63,12 @@ shim (stage3 `simple.r7`, sha c145d410):
 
 Spec: `test/01_unit/compiler/50.mir/missing_struct_field_lowering_spec.spl`
 (MIR lowering through the interpreter).
+
+## Coverage limit (open)
+
+`composite_layout_key` is not normalized across imports (see
+`module_lowering.spl:665-675`), so on an IMPORTED struct the qualified tier
+can miss. In that case a store to a missing field can still fall back to
+index 0 silently, and `CompileOptions` itself is imported where it was
+misused. This change closes the same-module case only. The cross-module case
+needs that key normalized, or a type-check-time field existence error.
