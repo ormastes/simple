@@ -15,9 +15,10 @@
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
+use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source}
 use std.test_runner.native_owned_process.{ScopedChildRun, run_scoped_child as _run_scoped_child}
 export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
-use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
@@ -478,28 +479,6 @@ fn spipe_last_index_of(haystack: text, needle: text) -> i64:
         idx = idx - 1
     -1
 
-fn spipe_rewrite_infix_expect_line(line: text) -> text:
-    val trimmed = line.trim()
-    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
-        return line
-    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
-    var i = 0
-    while i < matchers.len():
-        val matcher = matchers[i]
-        val needle = " " + matcher + " "
-        val split_at = trimmed.index_of(needle)
-        if split_at >= 0:
-            val actual = trimmed.substring(7, split_at).trim()
-            val expected = trimmed.substring(split_at + needle.len()).trim()
-            if actual.len() == 0 or expected.len() == 0:
-                return line
-            val trimmed_line = line.trim_start()
-            val indent_len = line.len() - trimmed_line.len()
-            val indent = line.substring(0, indent_len)
-            return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
-        i = i + 1
-    line
-
 fn preprocess_infix_matchers_only(file_path: text) -> text:
     """Rewrite legacy word-infix `expect X to_equal Y` lines to method form
     `expect(X).to_equal(Y)` so the interpreter `run` path actually evaluates the
@@ -616,68 +595,6 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
         return line
     indent + "expect " + form
 
-fn spipe_brace_delta(line: text) -> i64:
-    var delta = 0
-    var i = 0
-    while i < line.len():
-        val ch = line.slice(i, i + 1)
-        if ch == "{":
-            delta = delta + 1
-        elif ch == "}":
-            delta = delta - 1
-        i = i + 1
-    delta
-
-fn spipe_open_bracket_delta(line: text) -> i64:
-    """Net count of unclosed `[`/`(`/`{` on one line.
-
-    String literals and `#` comments are skipped so a bracket inside spec
-    prose (e.g. `it "matrix[0] is zero":`) does not shift the depth.
-    Used to keep a multi-line top-level declaration such as
-    `val XS: [text] = [` ... `]` whole at module scope: without it the
-    closing `]` (at column 0, and not itself a declaration keyword) was
-    swept into the generated `fn main()`, leaving the module-scope list
-    literal unterminated -> "parse: expected RBracket, found Val".
-    """
-    var delta = 0
-    var i = 0
-    var in_str = false
-    var quote = ""
-    while i < line.len():
-        val ch = line.slice(i, i + 1)
-        if in_str:
-            if ch == "\\":
-                i = i + 2
-                continue
-            if ch == quote:
-                in_str = false
-        elif ch == "\"" or ch == "'":
-            in_str = true
-            quote = ch
-        elif ch == "#":
-            break
-        elif ch == "[" or ch == "(" or ch == "{":
-            delta = delta + 1
-        elif ch == "]" or ch == ")" or ch == "}":
-            delta = delta - 1
-        i = i + 1
-    delta
-
-fn spipe_is_top_level_start(trimmed: text) -> bool:
-    trimmed.starts_with("fn ") or
-    trimmed.starts_with("async fn ") or
-    trimmed.starts_with("static fn ") or
-    trimmed.starts_with("extern fn ") or
-    trimmed.starts_with("class ") or
-    trimmed.starts_with("impl ") or
-    trimmed.starts_with("enum ") or
-    trimmed.starts_with("trait ") or
-    trimmed.starts_with("type ") or
-    trimmed.starts_with("val ") or
-    trimmed.starts_with("let ") or
-    trimmed.starts_with("var ") or
-    trimmed.starts_with("mod ")
-
 fn spipe_helpers_used(body: text, top_level: text) -> bool:
     val helper_names: [text] = [
         "step", "pending", "skip", "skip_it", "check", "check_msg",
@@ -695,15 +612,16 @@ fn spipe_helpers_used(body: text, top_level: text) -> bool:
         i = i + 1
     false
 
-fn preprocess_spipe_file(file_path: text) -> text:
-    """Wrap SPipe file content in fn main() for native compilation.
-    Returns path to temporary wrapped file, or original path if not SPipe."""
+fn preprocess_spipe_file(file_path: text, native_framework: bool = false) -> text:
+    """Wrap specs with legacy SMF helpers or the complete configured framework.
+    Native AOT preserves framework calls and obtains its actual result status.
+    Returns an empty path on native refusal, never an alternative test engine."""
     if not file_path.ends_with("_spec.spl"):
         return file_path
 
     var content = read_file_content(file_path)
     if content == "":
-        return file_path
+        return if native_framework: "" else: file_path
 
     # Coverage wraps before SPipe preprocessing. Preserve its authenticated
     # source marker at byte zero instead of indenting it into generated main.
@@ -720,143 +638,27 @@ fn preprocess_spipe_file(file_path: text) -> text:
                 content = content[marker_newline + 1:]
 
     # Split into imports/top-level-defs and body, wrap body in fn main():
-    val lines = content.split("\n")
-    var import_parts: [text] = []
-    var top_level_parts: [text] = []
-    var body_parts: [text] = []
-    # Element i pairs with lines[i]. Replaces a docstring flag that toggled on
-    # ANY line starting with `"""`, so a one-line docstring switched it on and
-    # nothing ever switched it off: every later import and top-level
-    # declaration was pushed verbatim into the main body (1,657 spec files
-    # carry a one-line docstring; measured 2026-09-06).
-    val string_continuation = simple_string_continuation_lines(content)
     val code_lines = simple_code_lines(content)
-    var in_top_fn = false
-    var top_fn_indent = 0
-    var in_import_block = false
-    var import_brace_depth = 0
-    var skipping_spec_import = false
-    # Unclosed bracket depth of the top-level declaration currently being
-    # collected (a multi-line `val XS: [text] = [` ... `]`). Non-zero keeps
-    # collecting into top_level_parts regardless of indentation.
-    var top_decl_depth = 0
+    val string_continuation = simple_string_continuation_lines(content)
+    if native_framework:
+        val native_source = native_framework_wrapper_source(content, code_lines, string_continuation, simple_string_byte_ranges(content))
+        if native_source.is_err(): return ""
+        var wrapped = native_source.unwrap()
+        if coverage_source_marker != "": wrapped = coverage_source_marker + "\n" + wrapped
+        val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
+        val tmp_path = _tp_get_temp_dir() + "/spipe_wrapped_" + getpid().to_text() + "_" + safe_name[0:safe_name.len() - 4] + "_native.spl"
+        if not file_write(tmp_path, wrapped): return ""
+        return tmp_path
 
-    var line_index = 0
-    while line_index < lines.len():
-        val raw_line = lines[line_index]
-        val fact_index = line_index
-        line_index = line_index + 1
-        val infix_line = spipe_rewrite_infix_expect_line(raw_line)
-        val line = spipe_rewrite_method_expect_line(infix_line)
-        val trimmed = line.trim()
-
-        if skipping_spec_import:
-            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
-            if import_brace_depth <= 0:
-                skipping_spec_import = false
-                import_brace_depth = 0
-            continue
-
-        if in_import_block:
-            import_parts.push(line)
-            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
-            if import_brace_depth <= 0:
-                in_import_block = false
-                import_brace_depth = 0
-            continue
-
-        # Track multi-line docstrings (""")
-         # Docstring lines pass through verbatim: a line inside a string opened
-        # earlier, or a line that is itself only a string (opener, closer, or a
-        # one-liner). Fixture-string interiors pass through too, instead of
-        # being classified as declarations.
-        if string_continuation[fact_index] or code_lines[fact_index].trim() == "\"\"":
-            if in_top_fn:
-                top_level_parts.push(line)
-            else:
-                body_parts.push("    " + line)
-            continue
-
-        # Import/use statements go before fn main()
-        if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            # `std.spec` is the interpreter-only BDD harness and is replaced by
-            # the inline helpers below, so its imports are dropped. The
-            # `std.spec.scenario_governance` module is a plain library, and
-            # `build_coverage_wrapper` injects `use std.spec.scenario_governance
-            # .{scenario_governance_mcdc_exclusions_reset, ..._snapshot}` while
-            # its generated MC/DC dump code calls both — dropping that line
-            # left every MC/DC-lane spec at `Undefined("undefined identifier:
-            # scenario_governance_mcdc_exclusions_snapshot")`.
-            val is_spec_harness_import = (trimmed.starts_with("import std.spec") or
-                trimmed.starts_with("use std.spec")) and
-                not trimmed.starts_with("use std.spec.scenario_governance") and
-                not trimmed.starts_with("import std.spec.scenario_governance")
-            if is_spec_harness_import:
-                val delta = spipe_brace_delta(line)
-                if delta > 0:
-                    skipping_spec_import = true
-                    import_brace_depth = delta
-                continue
-            import_parts.push(trimmed)
-            val delta = spipe_brace_delta(line)
-            if delta > 0:
-                in_import_block = true
-                import_brace_depth = delta
-            continue
-
-        # Top-level declarations (at column 0 only) stay outside main.
-        if not in_top_fn:
-            val line_indent = line.len() - trimmed.len()
-            if line_indent == 0:
-                if spipe_is_top_level_start(trimmed):
-                    in_top_fn = true
-                    top_fn_indent = 0
-                    top_decl_depth = spipe_open_bracket_delta(line)
-                    if top_decl_depth < 0:
-                        top_decl_depth = 0
-                    top_level_parts.push(line)
-                    continue
-
-        # If we're inside a top-level function definition, keep collecting
-        # lines until we see a line at the same or lesser indentation (not blank)
-        if in_top_fn:
-            # A declaration whose first line left brackets open continues at
-            # column 0 (the closing `]`), so indentation alone cannot end it.
-            if top_decl_depth > 0:
-                top_decl_depth = top_decl_depth + spipe_open_bracket_delta(line)
-                if top_decl_depth < 0:
-                    top_decl_depth = 0
-                top_level_parts.push(line)
-                continue
-            if trimmed.len() == 0:
-                top_level_parts.push("")
-                continue
-            val current_indent = line.len() - trimmed.len()
-            if current_indent > top_fn_indent:
-                top_level_parts.push(line)
-                continue
-            else:
-                # This line is at same/lesser indent — end of function
-                in_top_fn = false
-                if current_indent == 0 and spipe_is_top_level_start(trimmed):
-                    in_top_fn = true
-                    top_fn_indent = 0
-                    top_decl_depth = spipe_open_bracket_delta(line)
-                    if top_decl_depth < 0:
-                        top_decl_depth = 0
-                    top_level_parts.push(line)
-                    continue
-                # Fall through to body processing
-
-        # Everything else goes into fn main() body
-        if trimmed.len() > 0:
-            body_parts.push("    " + line)
-        else:
-            body_parts.push("")
-
-    val imports = import_parts.join("\n")
-    val top_level = top_level_parts.join("\n")
-    val body = body_parts.join("\n")
+    var rendered_lines: [text] = []
+    for raw_line in content.split("\n"):
+        rendered_lines.push(spipe_rewrite_method_expect_line(spipe_rewrite_infix_expect_line(raw_line)))
+    val partition = spipe_partition_source(content, rendered_lines, code_lines, string_continuation, false)
+    if partition.is_err(): return ""
+    val parts = partition.unwrap()
+    val imports = parts.imports
+    val top_level = parts.declarations
+    val body = parts.body
     val helpers = if spipe_helpers_used(body, top_level): spipe_inline_helpers() else: ""
     var wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
     if coverage_source_marker != "":
@@ -1146,7 +948,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
-    val preprocessed_path = preprocess_spipe_file(wrapped_path)
+    val preprocessed_path = preprocess_spipe_file(wrapped_path, options.coverage or explicit_aot)
     var source_path = preprocessed_path
     var generated_stage: Option<NativeTestSourceStageV1> = nil
     if options.coverage or explicit_aot:
