@@ -25,6 +25,7 @@ use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
+use compiler.backend.common.source_region_descriptor_v1.{source_region_descriptor_slots_v1, source_region_descriptor_extent_v1, source_region_descriptor_slot_words_v1}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -830,7 +831,33 @@ fn cl_translate_instruction(
                     cranelift_store(ctx, result, dest_addr, 0)
 
         case Intrinsic(dest, name, args):
-            if name == "source_region_publish_struct_v1":
+            if name == "source_region_struct_descriptor_v1":
+                if val target = dest:
+                    if local_type(target.id, func).kind != MirTypeKind.I64:
+                        panic("C4 descriptor requires an i64 address destination")
+                    match source_region_descriptor_slots_v1(args):
+                        case Ok(slots):
+                            var extent = 0
+                            match source_region_descriptor_extent_v1(slots.len()):
+                                case Ok(value): extent = value
+                                case Err(_): panic("C4 descriptor has empty or overflowing storage")
+                            match source_region_descriptor_slot_words_v1(slots):
+                                case Ok(words):
+                                    val data_name = ".c4.{func.symbol.id}.{target.id}"
+                                    val slot_data = cranelift_declare_readonly_words_v1(cl_module, data_name + ".slots", words, 8, -1, 0, 0)
+                                    if slot_data <= 0: panic("C4 readonly slot table declaration failed")
+                                    val header_data = cranelift_declare_readonly_words_v1(cl_module, data_name, [1, 1, extent, slots.len(), 0, 1], 8, 4, slot_data, 0)
+                                    if header_data <= 0: panic("C4 readonly descriptor relocation failed")
+                                    val address = cranelift_data_addr_in_func(ctx, header_data)
+                                    value_map[target.id] = address
+                                    if slot_map.has(target.id):
+                                        val storage = cranelift_stack_addr(ctx, slot_map[target.id], 0)
+                                        cranelift_store(ctx, address, storage, 0)
+                                case Err(_): panic("C4 descriptor has unclassified physical slots")
+                        case Err(_): panic("C4 descriptor operands must be compiler layout constants")
+                else:
+                    panic("C4 descriptor requires an address destination")
+            elif name == "source_region_publish_struct_v1":
                 if val target = dest:
                     var exact_struct = false
                     match local_type(target.id, func).kind:
