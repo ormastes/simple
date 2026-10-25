@@ -53,4 +53,9 @@ Retire when a generation built by a compiler carrying the root fix runs
 variant a correctly (spec below).
 
 ## Spec
-`test/01_unit/compiler/codegen/native_result_struct_payload_push_spec.spl`.
+`test/01_unit/compiler/codegen/native_result_struct_payload_push_spec.spl` -- a retirement guard.
+It is green on the interpreter; the miscompile (SEGV) shows only when the same
+shapes are native-compiled by Stage 2, so the default test lane does not reproduce it.
+
+## Bug DB
+DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
