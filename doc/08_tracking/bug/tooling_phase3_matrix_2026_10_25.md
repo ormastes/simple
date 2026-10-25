@@ -187,6 +187,13 @@ the appropriate error and a subsequent valid request still dispatches; framed
 traffic remains intact. The exhausted six-cycle MCP budget prohibits another
 repair/build retry without the requested explicit extension. Keep the PR draft.
 
+The integration SSpec now records that removal criterion with actual stdin:
+each non-object JSONL root (array, null, bool, number, string) precedes a ping;
+the expected output is exactly one Invalid Request reply followed by that ping's
+correlated reply. It contains real assertions and no placeholder pass. This
+new regression is authored/UNRUN, and the existing array wire evidence predicts
+failure against the retained candidate. No new MCP build or repair cycle ran.
+
 ## Independent T32/CMM object collection
 
 While compiler cycle five remained live, two bounded native object diagnostics
