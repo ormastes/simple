@@ -1,0 +1,320 @@
+# REQ-CMUX-001/002/003/006/007/008/011: pure contract controls.
+# NOT_RUN. These tests never instantiate or qualify a provider/child/backend.
+use std.spec.{describe, it, expect, step}
+use std.common.debug.capability.{CapLevel}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.request_validation_v1.*
+
+fn contract_handle() -> MuxHandleV1:
+    MuxHandleV1(owner_id: "owner-a", owner_generation: 7, lease_id: "lease-a")
+
+fn contract_target(kind: MuxObjectKindV1, id: text) -> MuxObjectRefV1:
+    MuxObjectRefV1(owner_id: "owner-a", owner_generation: 7, kind: kind, object_id: id)
+
+fn contract_size() -> MuxCellSizeV1:
+    MuxCellSizeV1(columns: 80, rows: 24)
+
+fn contract_launch() -> MuxLaunchV1:
+    MuxLaunchV1(mode: MuxLaunchModeV1.Exec("child-program", ["literal arg", ""]),
+        cwd: Some("workspace"), environment: [MuxEnvironmentChangeV1.Set("MUX_TEST", "한😀")], size: contract_size())
+
+fn contract_request(command: MuxCommandV1) -> MuxRequestV1:
+    MuxRequestV1(handle: contract_handle(), request_id: 19,
+        deadline: MuxDeadlineV1(timeout_ms: 1000), expected_revision: Some(11), command: command)
+
+fn contract_limits() -> MuxCoreLimitsV1:
+    MuxCoreLimitsV1(discovery: MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536),
+        max_windows: 8, max_panes: 16, max_clients: 4, max_input_bytes: 4096,
+        max_capture_bytes: 4096, max_events: 32, max_request_timeout_ms: 1000)
+
+# Native here is untrusted descriptor data, not a provider or support assertion.
+fn contract_capability(operation: MuxOperationV1) -> MuxOperationCapabilityV1:
+    MuxOperationCapabilityV1(operation: operation, level: CapLevel.Native,
+        backend: MuxBackendV1.Smux, backend_version: "untrusted-test-descriptor",
+        owner_id: "owner-a", owner_generation: 7, limits: contract_limits(),
+        constraints: [], evidence: MuxEvidenceV1.NotRun)
+
+fn contract_capture() -> MuxCaptureV1:
+    MuxCaptureV1(pane: contract_target(MuxObjectKindV1.Pane, "p1"),
+        range: MuxCaptureRangeV1.Lines(-20, 10), join_wrapped: true, styled: false,
+        max_bytes: 4, continuation: nil)
+
+fn contract_receipt() -> MuxRequestReceiptV1:
+    MuxRequestReceiptV1(handle: contract_handle(), request_id: 19,
+        operation: Some(MuxOperationV1.SplitPane), knowledge: MuxRequestKnowledgeV1.Retained,
+        commit_state: MuxCommitStateV1.Partial, prior_revision: Some(11), observed_revision: Some(12),
+        affected: [contract_target(MuxObjectKindV1.Window, "w1")],
+        error_kind: Some(MuxErrorKindV1.PartialFailure), detail: "native operation failed after unzoom",
+        cleanup_pending: true)
+
+describe "CoreMux execution contract values":
+    it "validates all thirty command shapes without issuing any operation":
+        step("Validate the closed mandatory command set")
+        val session = contract_target(MuxObjectKindV1.Session, "s1")
+        val window = contract_target(MuxObjectKindV1.Window, "w1")
+        val pane = contract_target(MuxObjectKindV1.Pane, "p1")
+        val client = contract_target(MuxObjectKindV1.Client, "c1")
+        val commands: [MuxCommandV1] = [
+            MuxCommandV1.CreateSession(MuxCreateSessionV1(name: "session", first_window_name: "window", launch: contract_launch(), background: true)),
+            MuxCommandV1.RenameSession(session, "renamed"),
+            MuxCommandV1.TerminateSession(session),
+            MuxCommandV1.StopOwnedNamespace(MuxNamespaceStopV1(owner_id: "owner-a", owner_generation: 7, stop_token: "stop-authority")),
+            MuxCommandV1.CreateWindow(MuxCreateWindowV1(session: session, name: "window", launch: contract_launch())),
+            MuxCommandV1.RenameWindow(window, "renamed"),
+            MuxCommandV1.TerminateWindow(window),
+            MuxCommandV1.FocusWindow(client, window),
+            MuxCommandV1.LaunchPane(window, contract_launch()),
+            MuxCommandV1.SplitPane(MuxSplitPaneV1(pane: pane, direction: MuxSplitDirectionV1.Horizontal, size: MuxSplitSizeV1.Percent(40), launch: contract_launch())),
+            MuxCommandV1.TerminatePane(pane),
+            MuxCommandV1.FocusPane(client, pane),
+            MuxCommandV1.ResizePane(pane, contract_size()),
+            MuxCommandV1.ResizeWindow(window, contract_size()),
+            MuxCommandV1.SelectLayout(window, MuxLayoutKindV1.Tiled),
+            MuxCommandV1.ToggleZoom(window, pane),
+            MuxCommandV1.HidePane(pane),
+            MuxCommandV1.ShowPane(pane),
+            MuxCommandV1.Rebalance(window),
+            MuxCommandV1.SetPaneTitle(pane, "한😀"),
+            MuxCommandV1.SetPaneBorder(pane, MuxBorderV1.Single),
+            MuxCommandV1.SetPaneBorderStatus(pane, MuxBorderStatusV1.Top),
+            MuxCommandV1.AttachClient(MuxAttachClientV1(session: session, client_identity: "client", viewport: contract_size())),
+            MuxCommandV1.DetachClient(client),
+            MuxCommandV1.SetClientViewport(client, contract_size()),
+            MuxCommandV1.SendLiteral(pane, [0, 27, 255]),
+            MuxCommandV1.SendKeys(pane, [MuxKeyV1.Named(MuxNamedKeyV1.Enter)]),
+            MuxCommandV1.Paste(pane, MuxPasteV1(bytes: [65, 10], bracketed: true, append_enter: false)),
+            MuxCommandV1.SubmitShellCommand(pane, "echo literal"),
+            MuxCommandV1.Notify(MuxNotifyV1(recipient: MuxRecipientV1.Client(client), kind: MuxMessageKindV1.Info, literal_text: "hello", ttl_ms: 1000)),
+        ]
+        val operations = mux_mandatory_operations_v1()
+        expect(commands.len()).to_equal(30)
+        expect(operations.len()).to_equal(39)
+        for index in 0..commands.len():
+            val validated = mux_validate_request_v1(contract_request(commands[index])).unwrap()
+            expect(validated.request_id).to_equal(19)
+            expect(validated.expected_revision).to_equal(Some(11))
+            expect(mux_command_operation_v1(validated.command)).to_equal(operations[index + 9])
+
+    it "rejects foreign owner incarnation and object kind with correlated errors":
+        step("Reject forged target representation before mutation")
+        val pane = contract_target(MuxObjectKindV1.Pane, "p1")
+        var foreign = pane
+        foreign.owner_id = "other-owner"
+        var stale = pane
+        stale.owner_generation = 6
+        val wrong_kind = contract_target(MuxObjectKindV1.Window, "p1")
+        for target in [foreign, stale, wrong_kind]:
+            val failure = mux_validate_request_v1(contract_request(MuxCommandV1.TerminatePane(target))).unwrap_err()
+            expect(failure.kind).to_equal(MuxErrorKindV1.InvalidRequest)
+            expect(failure.request_id).to_equal(19)
+            expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+            expect(failure.observed_revision).to_be_nil()
+            expect(failure.affected.len()).to_equal(0)
+
+    it "bounds relative deadlines IDs and terminal coordinates without overflow":
+        step("Check exact request and cell bounds")
+        for timeout in [1, 30000]:
+            expect(mux_validate_deadline_v1(MuxDeadlineV1(timeout_ms: timeout)).unwrap().timeout_ms).to_equal(timeout)
+        for timeout in [-1, 0, 30001]:
+            expect(mux_validate_deadline_v1(MuxDeadlineV1(timeout_ms: timeout)).is_err()).to_equal(true)
+        var request = contract_request(MuxCommandV1.TerminatePane(contract_target(MuxObjectKindV1.Pane, "p1")))
+        request.request_id = 0
+        expect(mux_validate_request_v1(request).is_err()).to_equal(true)
+        expect(mux_validate_rect_v1(MuxRectV1(x_cells: 32766, y_cells: 0, width_cells: 1, height_cells: 1)).is_ok()).to_equal(true)
+        expect(mux_validate_rect_v1(MuxRectV1(x_cells: 9223372036854775807, y_cells: 0, width_cells: 2, height_cells: 1)).is_err()).to_equal(true)
+        expect(mux_validate_size_v1(MuxCellSizeV1(columns: 80, rows: 0)).is_err()).to_equal(true)
+
+    it "preserves exec arguments Unicode environment and explicit shell mode":
+        step("Validate launch data without shell interpolation")
+        val launch = mux_validate_launch_v1(contract_launch()).unwrap()
+        expect(launch.mode).to_equal(MuxLaunchModeV1.Exec("child-program", ["literal arg", ""]))
+        expect(launch.environment).to_equal([MuxEnvironmentChangeV1.Set("MUX_TEST", "한😀")])
+        val environment_value = match launch.environment[0]:
+            case MuxEnvironmentChangeV1.Set(_, value): value
+            case MuxEnvironmentChangeV1.Remove(_): ""
+        expect(text_to_bytes(environment_value)).to_equal([237, 149, 156, 240, 159, 152, 128])
+        expect(launch.cwd).to_equal(Some("workspace"))
+        var shell = launch
+        shell.mode = MuxLaunchModeV1.Shell("printf 'literal arg'")
+        expect(mux_validate_launch_v1(shell).unwrap().mode).to_equal(shell.mode)
+        var duplicate = launch
+        duplicate.environment = [MuxEnvironmentChangeV1.Set("KEY", "one"), MuxEnvironmentChangeV1.Remove("KEY")]
+        expect(mux_validate_launch_v1(duplicate).is_err()).to_equal(true)
+        var nul_argument = launch
+        nul_argument.mode = MuxLaunchModeV1.Exec("child-program", ["a\0b"])
+        expect(mux_validate_launch_v1(nul_argument).is_err()).to_equal(true)
+
+    it "keeps binary literal input distinct from paste keys and shell submission":
+        step("Preserve bytes and explicit input intent")
+        val pane = contract_target(MuxObjectKindV1.Pane, "p1")
+        val literal = MuxCommandV1.SendLiteral(pane, [0, 27, 255])
+        expect(mux_validate_request_v1(contract_request(literal)).unwrap().command).to_equal(literal)
+        val paste = MuxCommandV1.Paste(pane, MuxPasteV1(bytes: [0, 27, 255], bracketed: true, append_enter: true))
+        expect(mux_validate_request_v1(contract_request(paste)).unwrap().command).to_equal(paste)
+        expect(mux_command_operation_v1(literal)).to_equal(MuxOperationV1.SendLiteral)
+        expect(mux_command_operation_v1(paste)).to_equal(MuxOperationV1.Paste)
+        expect(mux_validate_request_v1(contract_request(MuxCommandV1.SendLiteral(pane, []))).is_err()).to_equal(true)
+
+    it "accepts valid Unicode scalars and rejects surrogate keys and invalid function keys":
+        step("Check typed key encoding bounds")
+        val pane = contract_target(MuxObjectKindV1.Pane, "p1")
+        val valid: [MuxKeyV1] = [MuxKeyV1.Scalar(128512, false, false, false), MuxKeyV1.Function(24)]
+        expect(mux_validate_request_v1(contract_request(MuxCommandV1.SendKeys(pane, valid))).is_ok()).to_equal(true)
+        for key in [MuxKeyV1.Scalar(55296, false, false, false), MuxKeyV1.Scalar(1114112, false, false, false), MuxKeyV1.Function(0), MuxKeyV1.Function(25)]:
+            expect(mux_validate_request_v1(contract_request(MuxCommandV1.SendKeys(pane, [key]))).is_err()).to_equal(true)
+
+    it "requires coherent byte extents and continuation for bounded captures":
+        step("Validate truncated capture and continuation")
+        val request = contract_capture()
+        var captured = MuxCapturedV1(pane: request.pane, observed_revision: 11, content_revision: 41,
+            ingestion: MuxIngestionV1.Ingested, bytes: [0, 255, 65, 10], byte_extent: 4,
+            truncated: true, continuation: Some("owner-cursor-41"))
+        val checked = mux_validate_captured_v1(contract_handle(), request, captured).unwrap()
+        expect(checked.bytes).to_equal([0, 255, 65, 10])
+        expect(checked.observed_revision).to_equal(11)
+        expect(checked.content_revision).to_equal(41)
+        captured.continuation = nil
+        expect(mux_validate_captured_v1(contract_handle(), request, captured).is_err()).to_equal(true)
+        captured.truncated = false
+        captured.byte_extent = 3
+        expect(mux_validate_captured_v1(contract_handle(), request, captured).is_err()).to_equal(true)
+        var reversed = request
+        reversed.range = MuxCaptureRangeV1.Lines(10, -20)
+        expect(mux_validate_capture_v1(contract_handle(), reversed).is_err()).to_equal(true)
+
+    it "retains partial native effects while unknown and expired receipts cannot assert NotApplied":
+        step("Preserve uncertainty instead of manufacturing rollback")
+        val partial = mux_validate_receipt_v1(contract_receipt()).unwrap()
+        expect(partial.commit_state).to_equal(MuxCommitStateV1.Partial)
+        expect(partial.observed_revision).to_equal(Some(12))
+        expect(partial.cleanup_pending).to_equal(true)
+        for knowledge in [MuxRequestKnowledgeV1.NotKnown, MuxRequestKnowledgeV1.Expired]:
+            var unknown = contract_receipt()
+            unknown.knowledge = knowledge
+            unknown.operation = nil
+            unknown.commit_state = MuxCommitStateV1.Unknown
+            expect(mux_validate_receipt_v1(unknown).unwrap().operation).to_be_nil()
+            unknown.commit_state = MuxCommitStateV1.NotApplied
+            expect(mux_validate_receipt_v1(unknown).is_err()).to_equal(true)
+        var pending = contract_receipt()
+        pending.knowledge = MuxRequestKnowledgeV1.Pending
+        expect(mux_validate_receipt_v1(pending).is_err()).to_equal(true)
+        pending.commit_state = MuxCommitStateV1.Unknown
+        expect(mux_validate_receipt_v1(pending).is_ok()).to_equal(true)
+        pending.operation = nil
+        expect(mux_validate_receipt_v1(pending).is_err()).to_equal(true)
+
+    it "checks full descriptor coverage without converting NotRun evidence into qualification":
+        step("Validate completeness of untrusted capability data")
+        var capabilities: [MuxOperationCapabilityV1] = []
+        for operation in mux_mandatory_operations_v1(): capabilities.push(contract_capability(operation))
+        expect(mux_require_core_capabilities_v1(contract_handle(), MuxBackendV1.Smux, capabilities).is_ok()).to_equal(true)
+        val capture = mux_require_operation_v1(contract_handle(), MuxBackendV1.Smux, MuxOperationV1.Capture, capabilities).unwrap()
+        expect(capture.evidence).to_equal(MuxEvidenceV1.NotRun)
+        expect(capture.operation).to_equal(MuxOperationV1.Capture)
+        expect(mux_require_core_capabilities_v1(contract_handle(), MuxBackendV1.Smux, [capture]).is_err()).to_equal(true)
+
+    it "returns structured Unsupported for absent or unavailable mandatory operations":
+        step("Refuse incomplete descriptors before provider invocation")
+        var unavailable = contract_capability(MuxOperationV1.Capture)
+        unavailable.level = CapLevel.Unavailable
+        val failure = mux_require_operation_v1(contract_handle(), MuxBackendV1.Smux, MuxOperationV1.Capture, [unavailable]).unwrap_err()
+        expect(failure.kind).to_equal(MuxErrorKindV1.Unsupported)
+        expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(failure.affected.len()).to_equal(0)
+        val absent = mux_require_operation_v1(contract_handle(), MuxBackendV1.Smux, MuxOperationV1.Capture, []).unwrap_err()
+        expect(absent.kind).to_equal(MuxErrorKindV1.Unsupported)
+        val duplicate = contract_capability(MuxOperationV1.Capture)
+        expect(mux_require_operation_v1(contract_handle(), MuxBackendV1.Smux, MuxOperationV1.Capture, [duplicate, duplicate]).is_err()).to_equal(true)
+        var foreign = duplicate
+        foreign.owner_generation = 8
+        expect(mux_require_operation_v1(contract_handle(), MuxBackendV1.Smux, MuxOperationV1.Capture, [foreign]).is_err()).to_equal(true)
+
+    it "checks query context disconnect correlation and bounded event polling":
+        step("Validate observation and release requests")
+        val handle = contract_handle()
+        val deadline = MuxDeadlineV1(timeout_ms: 1000)
+        val context = MuxContextV1(client: nil, session: nil, window: nil, pane: Some(contract_target(MuxObjectKindV1.Pane, "p1")))
+        val query = MuxQueryV1.ResolveTarget("%1", MuxObjectKindV1.Pane, context)
+        expect(mux_validate_query_v1(handle, query, deadline).unwrap()).to_equal(query)
+        var foreign = context
+        foreign.pane = Some(MuxObjectRefV1(owner_id: "other-owner", owner_generation: 7, kind: MuxObjectKindV1.Pane, object_id: "p1"))
+        expect(mux_validate_query_v1(handle, MuxQueryV1.ResolveTarget("%1", MuxObjectKindV1.Pane, foreign), deadline).is_err()).to_equal(true)
+        expect(mux_validate_query_v1(handle, MuxQueryV1.RequestStatus(0), deadline).is_err()).to_equal(true)
+        expect(mux_validate_disconnect_v1(MuxDisconnectRequestV1(handle: handle, request_id: 20, deadline: deadline)).unwrap().request_id).to_equal(20)
+        expect(mux_validate_disconnect_v1(MuxDisconnectRequestV1(handle: handle, request_id: 0, deadline: deadline)).is_err()).to_equal(true)
+        expect(mux_validate_event_limits_v1(MuxEventLimitsV1(max_events: 1024, max_bytes: 1048576)).is_ok()).to_equal(true)
+        expect(mux_validate_event_limits_v1(MuxEventLimitsV1(max_events: 1025, max_bytes: 1)).is_err()).to_equal(true)
+
+
+    it "preserves disconnect correlation on nested handle and deadline failures":
+        step("Keep the original disconnect request ID on every validation error")
+        val handle = contract_handle()
+        var bad_handle = handle
+        bad_handle.owner_generation = 0
+        val requests: [MuxDisconnectRequestV1] = [
+            MuxDisconnectRequestV1(handle: bad_handle, request_id: 91, deadline: MuxDeadlineV1(timeout_ms: 1000)),
+            MuxDisconnectRequestV1(handle: handle, request_id: 92, deadline: MuxDeadlineV1(timeout_ms: 0)),
+            MuxDisconnectRequestV1(handle: handle, request_id: 93, deadline: MuxDeadlineV1(timeout_ms: 30001)),
+        ]
+        for request in requests:
+            val failure = mux_validate_disconnect_v1(request).unwrap_err()
+            expect(failure.request_id).to_equal(request.request_id)
+            expect(failure.kind).to_equal(MuxErrorKindV1.InvalidRequest)
+            expect(failure.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+            expect(failure.observed_revision).to_be_nil()
+            expect(failure.affected.len()).to_equal(0)
+
+    it "binds reconciliation receipts to original owner incarnation token and request":
+        step("Reject a receipt from another request or lease")
+        val original = contract_receipt()
+        val checked = mux_validate_reconciliation_receipt_v1(contract_handle(), 19, original).unwrap()
+        expect(checked.commit_state).to_equal(MuxCommitStateV1.Partial)
+        expect(checked.observed_revision).to_equal(Some(12))
+        var another_token = contract_handle()
+        another_token.lease_id = "lease-b"
+        var another_owner = contract_handle()
+        another_owner.owner_id = "owner-b"
+        var another_generation = contract_handle()
+        another_generation.owner_generation = 8
+        for handle in [another_token, another_owner, another_generation]:
+            expect(mux_validate_reconciliation_receipt_v1(handle, 19, original).is_err()).to_equal(true)
+        expect(mux_validate_reconciliation_receipt_v1(contract_handle(), 20, original).is_err()).to_equal(true)
+        var lost = original
+        lost.knowledge = MuxRequestKnowledgeV1.Expired
+        lost.operation = nil
+        lost.commit_state = MuxCommitStateV1.Unknown
+        expect(mux_validate_reconciliation_receipt_v1(contract_handle(), 19, lost).unwrap().operation).to_be_nil()
+        lost.commit_state = MuxCommitStateV1.NotApplied
+        expect(mux_validate_reconciliation_receipt_v1(contract_handle(), 19, lost).is_err()).to_equal(true)
+
+    it "bounds lease lifetime renewal cadence and retained history without creating authority":
+        step("Validate owner advertised lease duration and bounded receipt retention")
+        val terms = MuxLeaseTermsV1(lifetime_ms: 30000, renew_after_ms: 10000,
+            retained_receipt_ms: 60000, max_retained_receipts: 64)
+        val checked = mux_validate_lease_terms_v1(terms).unwrap()
+        expect(checked.lifetime_ms).to_equal(30000)
+        expect(checked.renew_after_ms).to_equal(10000)
+        expect(checked.retained_receipt_ms).to_equal(60000)
+        expect(checked.max_retained_receipts).to_equal(64)
+        expect(mux_validate_lease_terms_v1(MuxLeaseTermsV1(lifetime_ms: 1000, renew_after_ms: 500, retained_receipt_ms: 1000, max_retained_receipts: 1)).is_ok()).to_equal(true)
+        expect(mux_validate_lease_terms_v1(MuxLeaseTermsV1(lifetime_ms: 600000, renew_after_ms: 300000, retained_receipt_ms: 86400000, max_retained_receipts: 4096)).is_ok()).to_equal(true)
+        for lifetime in [0, 999, 600001]:
+            var invalid = terms
+            invalid.lifetime_ms = lifetime
+            expect(mux_validate_lease_terms_v1(invalid).is_err()).to_equal(true)
+        for cadence in [0, 15001, 30000]:
+            var invalid = terms
+            invalid.renew_after_ms = cadence
+            expect(mux_validate_lease_terms_v1(invalid).is_err()).to_equal(true)
+        for retention in [0, 999, 86400001]:
+            var invalid = terms
+            invalid.retained_receipt_ms = retention
+            expect(mux_validate_lease_terms_v1(invalid).is_err()).to_equal(true)
+        for capacity in [0, 4097]:
+            var invalid = terms
+            invalid.max_retained_receipts = capacity
+            expect(mux_validate_lease_terms_v1(invalid).is_err()).to_equal(true)

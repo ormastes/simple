@@ -203,3 +203,94 @@ per session is permitted but must be reported explicitly. Run 24 actual hours
 on each backend; no time scaling. Measure warm metadata latency and independent
 settled child layout latency, bounded queues, RSS, handles and child cleanup.
 All runtime/spec/docgen evidence remains NOT_RUN pending admitted Phase3/full CLI.
+
+
+## Addendum: typed full port source checkpoint, 2026-10-25
+
+This additive source checkpoint supersedes the opening statement that none of
+these contracts are callable source. Existing D1 discovery records, validators
+and MuxProviderPortV1 remain byte-for-byte unchanged. No provider or transport
+is implemented or qualified by this checkpoint. All execution is NOT_RUN.
+
+| Source owner under `src/lib/common/contracts/mux/` | Contract |
+|---|---|
+| `execution_v1.spl` | Closed 30-command sum, 39 mandatory operation identities, typed launch/input/layout/deadline/request/disconnect values |
+| `observation_v1.spl` | Full operation descriptors, snapshots with child/client/layout state, capture/content revision, request knowledge/outcome, events and cleanup receipts |
+| `port_v1.spl` | Canonical full CoreMuxV1 provider port: backend, connect, query, execute, poll_events, disconnect; no default bodies |
+| `request_validation_v1.spl` | Bounded representation validation and descriptor completeness checks; no authentication or provider support certification |
+
+CoreMuxV1 is the canonical full provider port. D1 MuxProviderPortV1 continues to
+serve discovery-only callers. The full connection returns MuxConnectionV1 whose
+snapshot.capabilities carries full MuxOperationCapabilityV1 values; it does not
+reinterpret D1's three-operation enum as full command support. Every full port
+operation is mandatory. Optional terminal extensions remain separately acquired.
+The 30 command operations plus nine connection/query/event/release operations
+must all be present for descriptor completeness. Real provider admission must
+also authenticate owner evidence and qualify actual behavior.
+
+All transport methods use `me`, including queries whose transport correlation or
+capture ingestion mutates state. Metadata queries themselves do not drain output
+or increment configuration revision. Content revisions are independent. Providers
+are composition-owned; public record copies never copy or create an owner registry.
+Normal calls check the live owner-issued lease, incarnation and object membership;
+receipt-only reconciliation has the narrow cycle-2 exception described below.
+The shape validator checks only representation/owner equality, not authenticity.
+
+MuxRequestV1 carries handle, nonzero lease-scoped request ID, relative deadline,
+optional expected configuration revision and one typed command. The owner clamps
+the relative budget to its monotonic policy and remaining lease; caller time cannot
+renew authority. Reusing an ID with another payload fails. Pending requests remain
+Unknown; evicted/not-known receipts cannot assert NotApplied. Their operation may
+be nil because it is unknown, not because an operation is optional. A retained
+Partial outcome includes affected identities, observed revision and pending cleanup.
+Native errors after effects, including tmux unzoom before a later operation error,
+must retain Partial/Unknown rather than fabricate rollback.
+
+Literal byte input, named/scalar keys, paste with bracketed/append-enter flags and
+shell command submission are distinct commands. Capture supports screen/history
+ranges, wrap joining, styling, a byte limit and owner-issued continuation. Responses
+report exact byte extent, truncation, separate content/configuration revisions and
+whether ingestion occurred. Continuations bind pane/incarnation/content/options;
+stale continuation errors must not silently restart capture.
+
+ToggleZoom follows tmux resize-pane -Z: an already zoomed window restores regardless
+of requested member pane. Window observations retain zoomed_pane and restore_layout.
+FocusPane does not claim the separate select-pane -Z focus-and-preserve behavior.
+Disconnect revokes/releases its requesting lease and client capacity, never background
+sessions. Namespace stop requires separate owner-issued stop authority. Cleanup is
+reported through explicit pending/remaining resource identities and receipts.
+
+Focused contract controls are in core_execution_v1_spec.spl under
+`test/01_unit/lib/common/contracts/mux/`, with its matching Markdown manual.
+These 14 cases validate real pure functions, not real processes/backends. Existing
+system plans and both backend N2 requirements remain pending unchanged.
+
+
+### Contract correction cycle 2: lease lifetime and receipt recovery
+
+MuxConnectionV1 additionally exposes lease_terms: MuxLeaseTermsV1. Its fields are
+lifetime_ms (1000..600000), renew_after_ms (1..half the lifetime),
+retained_receipt_ms (1000..86400000) and max_retained_receipts (1..4096).
+These are advertised durations/capacity, not caller wall-clock expiry timestamps.
+The transport retains them and performs authenticated normal query/poll_events
+by the advertised cadence when idle. Successful normal query/poll may renew only
+an already-live lease using the owner's monotonic clock, rechecked at renewal.
+A request finishing after expiry cannot revive the token. Failed calls and recovery
+reads never renew; reconnect issues a distinct lease. Renewal alone does not
+advance configuration or content revision.
+
+After revocation or expiry, retained receipt access is the sole authority exception:
+the same authenticated original token/owner incarnation may query RequestStatus
+for IDs already bound to that lease or replay an identical retained disconnect.
+It confers no metadata/capture/event access, fresh effects or renewal. Retention
+starts once at expiry/revocation and is non-sliding; reads do not extend it. Capacity
+eviction or lost outcome is Unknown, never NotApplied or invented operation metadata.
+If the ID binding itself was lost, return an Unknown error without other receipt
+data. Once retention expires, reject all old-token access. Providers authenticate
+against bounded retained history, not caller-created records. The pure reconciliation
+validator merely rejects receipt identity mismatches.
+
+Disconnect nested validation errors now carry the original request ID. The contract
+spec adds correlation/receipt-binding/lease-bounds controls and an explicit UTF-8
+byte oracle. Fourteen authored cases remain NOT_RUN; none executes a lease clock,
+provider or persistent child. All actual renewal/revocation/N2 evidence remains pending.

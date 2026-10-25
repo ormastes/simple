@@ -1,0 +1,342 @@
+# Pure representation checks. No lease registry, child, timer, transport or
+# capability implementation is created here. Providers still authenticate and
+# check current membership/revision/support BEFORE any output polling or mutation.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.contracts.mux.observation_v1.*
+use std.common.contracts.mux.validation_v1.{mux_validate_handle_v1, mux_make_object_ref_v1, mux_validate_limits_v1}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.debug.capability.{CapLevel}
+
+fn reject(detail: text) -> MuxErrorV1:
+    MuxErrorV1(kind: MuxErrorKindV1.InvalidRequest, detail: detail, request_id: 0,
+        commit_state: MuxCommitStateV1.NotApplied, observed_revision: nil,
+        affected: [], cleanup_pending: false)
+
+fn check_text(value: text, limit: i64, empty: bool, clean: bool) -> Result<(), MuxErrorV1>:
+    if value.len() > limit or (not empty and value.len() == 0): return Err(reject("text size outside request limit"))
+    val bytes = text_to_bytes(value)
+    if bytes.len() > limit or validated_utf8_bytes_to_text_linear(bytes).is_err(): return Err(reject("invalid bounded UTF8 text"))
+    for byte in bytes:
+        if byte == 0 or (clean and (byte < 32 or byte == 127)): return Err(reject("invalid control character"))
+    if clean:
+        for index in 0..bytes.len():
+            if bytes[index] == 194 and index + 1 < bytes.len():
+                if bytes[index + 1] >= 128 and bytes[index + 1] <= 159: return Err(reject("invalid C1 control character"))
+    Ok(())
+
+pub fn mux_validate_deadline_v1(deadline: MuxDeadlineV1) -> Result<MuxDeadlineV1, MuxErrorV1>:
+    if deadline.timeout_ms < 1 or deadline.timeout_ms > MUX_REQUEST_TIMEOUT_MAX_MS_V1: return Err(reject("invalid relative request deadline"))
+    Ok(deadline)
+
+pub fn mux_validate_size_v1(size: MuxCellSizeV1) -> Result<MuxCellSizeV1, MuxErrorV1>:
+    if size.columns < 1 or size.rows < 1 or size.columns > MUX_CELLS_MAX_V1 or size.rows > MUX_CELLS_MAX_V1: return Err(reject("invalid terminal cell size"))
+    Ok(size)
+
+pub fn mux_validate_rect_v1(rectangle: MuxRectV1) -> Result<MuxRectV1, MuxErrorV1>:
+    mux_validate_size_v1(MuxCellSizeV1(columns: rectangle.width_cells, rows: rectangle.height_cells))?
+    if rectangle.x_cells < 0 or rectangle.y_cells < 0 or rectangle.x_cells > MUX_CELLS_MAX_V1 - rectangle.width_cells or rectangle.y_cells > MUX_CELLS_MAX_V1 - rectangle.height_cells:
+        return Err(reject("rectangle exceeds bounded terminal coordinate space"))
+    Ok(rectangle)
+
+pub fn mux_validate_target_v1(handle: MuxHandleV1, target: MuxObjectRefV1, kind: MuxObjectKindV1) -> Result<MuxObjectRefV1, MuxErrorV1>:
+    mux_validate_handle_v1(handle)?
+    mux_make_object_ref_v1(target.owner_id, target.owner_generation, target.kind, target.object_id)?
+    if target.owner_id != handle.owner_id or target.owner_generation != handle.owner_generation or target.kind != kind: return Err(reject("target owner, incarnation or kind differs"))
+    Ok(target)
+
+pub fn mux_validate_launch_v1(launch: MuxLaunchV1) -> Result<MuxLaunchV1, MuxErrorV1>:
+    mux_validate_size_v1(launch.size)?
+    match launch.cwd:
+        case Some(path): check_text(path, 4096, false, false)?
+        case nil: ()
+    var total_bytes = 0
+    match launch.mode:
+        case MuxLaunchModeV1.Exec(executable, argv):
+            check_text(executable, 4096, false, false)?
+            total_bytes = text_to_bytes(executable).len()
+            if argv.len() > MUX_ARGUMENTS_MAX_V1: return Err(reject("too many launch arguments"))
+            for argument in argv:
+                check_text(argument, 65536, true, false)?
+                total_bytes = total_bytes + text_to_bytes(argument).len()
+                if total_bytes > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("launch argument budget exceeded"))
+        case MuxLaunchModeV1.Shell(command):
+            check_text(command, 65536, false, false)?
+            total_bytes = text_to_bytes(command).len()
+    if launch.environment.len() > MUX_ENVIRONMENT_MAX_V1: return Err(reject("too many environment changes"))
+    var names: [text] = []
+    for change in launch.environment:
+        val name = match change:
+            case MuxEnvironmentChangeV1.Set(key, value):
+                check_text(value, 65536, true, false)?
+                total_bytes = total_bytes + text_to_bytes(value).len()
+                key
+            case MuxEnvironmentChangeV1.Remove(key): key
+        check_text(name, 256, false, true)?
+        if name.contains("=") or names.contains(name): return Err(reject("duplicate or invalid environment name"))
+        names.push(name)
+        total_bytes = total_bytes + text_to_bytes(name).len()
+        if total_bytes > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("launch environment budget exceeded"))
+    Ok(launch)
+
+fn check_recipient(handle: MuxHandleV1, recipient: MuxRecipientV1) -> Result<(), MuxErrorV1>:
+    match recipient:
+        case MuxRecipientV1.Client(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Client)?
+        case MuxRecipientV1.Session(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+        case MuxRecipientV1.Pane(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Pane)?
+    Ok(())
+
+fn check_command(handle: MuxHandleV1, command: MuxCommandV1) -> Result<(), MuxErrorV1>:
+    match command:
+        case MuxCommandV1.CreateSession(spec):
+            check_text(spec.name, MUX_NAME_MAX_BYTES_V1, false, true)?
+            check_text(spec.first_window_name, MUX_NAME_MAX_BYTES_V1, false, true)?
+            mux_validate_launch_v1(spec.launch)?
+        case MuxCommandV1.RenameSession(target, name):
+            mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+            check_text(name, MUX_NAME_MAX_BYTES_V1, false, true)?
+        case MuxCommandV1.TerminateSession(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+        case MuxCommandV1.StopOwnedNamespace(authorization):
+            if authorization.owner_id != handle.owner_id or authorization.owner_generation != handle.owner_generation: return Err(reject("namespace stop authority owner differs"))
+            mux_validate_handle_v1(MuxHandleV1(owner_id: authorization.owner_id, owner_generation: authorization.owner_generation, lease_id: authorization.stop_token))?
+        case MuxCommandV1.CreateWindow(spec):
+            mux_validate_target_v1(handle, spec.session, MuxObjectKindV1.Session)?
+            check_text(spec.name, MUX_NAME_MAX_BYTES_V1, false, true)?
+            mux_validate_launch_v1(spec.launch)?
+        case MuxCommandV1.RenameWindow(target, name):
+            mux_validate_target_v1(handle, target, MuxObjectKindV1.Window)?
+            check_text(name, MUX_NAME_MAX_BYTES_V1, false, true)?
+        case MuxCommandV1.TerminateWindow(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Window)?
+        case MuxCommandV1.FocusWindow(client, window):
+            mux_validate_target_v1(handle, client, MuxObjectKindV1.Client)?
+            mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+        case MuxCommandV1.LaunchPane(window, launch):
+            mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+            mux_validate_launch_v1(launch)?
+        case MuxCommandV1.SplitPane(spec):
+            mux_validate_target_v1(handle, spec.pane, MuxObjectKindV1.Pane)?
+            mux_validate_launch_v1(spec.launch)?
+            match spec.size:
+                case MuxSplitSizeV1.Equal: ()
+                case MuxSplitSizeV1.Cells(count):
+                    if count < 1 or count > MUX_CELLS_MAX_V1: return Err(reject("invalid split cell extent"))
+                case MuxSplitSizeV1.Percent(percent):
+                    if percent < 1 or percent > 99: return Err(reject("invalid split percentage"))
+        case MuxCommandV1.TerminatePane(pane): mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.FocusPane(client, pane):
+            mux_validate_target_v1(handle, client, MuxObjectKindV1.Client)?
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.ResizePane(pane, size):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            mux_validate_size_v1(size)?
+        case MuxCommandV1.ResizeWindow(window, size):
+            mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+            mux_validate_size_v1(size)?
+        case MuxCommandV1.SelectLayout(window, layout):
+            mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+            if layout == MuxLayoutKindV1.Manual: return Err(reject("manual is observed geometry, not a named layout command"))
+        case MuxCommandV1.ToggleZoom(window, pane):
+            mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.HidePane(pane): mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.ShowPane(pane): mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.Rebalance(window): mux_validate_target_v1(handle, window, MuxObjectKindV1.Window)?
+        case MuxCommandV1.SetPaneTitle(pane, title):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            check_text(title, MUX_NAME_MAX_BYTES_V1, true, true)?
+        case MuxCommandV1.SetPaneBorder(pane, _): mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.SetPaneBorderStatus(pane, _): mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+        case MuxCommandV1.AttachClient(spec):
+            mux_validate_target_v1(handle, spec.session, MuxObjectKindV1.Session)?
+            check_text(spec.client_identity, MUX_NAME_MAX_BYTES_V1, false, true)?
+            mux_validate_size_v1(spec.viewport)?
+        case MuxCommandV1.DetachClient(client): mux_validate_target_v1(handle, client, MuxObjectKindV1.Client)?
+        case MuxCommandV1.SetClientViewport(client, size):
+            mux_validate_target_v1(handle, client, MuxObjectKindV1.Client)?
+            mux_validate_size_v1(size)?
+        case MuxCommandV1.SendLiteral(pane, bytes):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            if bytes.len() < 1 or bytes.len() > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("invalid literal input byte count"))
+        case MuxCommandV1.SendKeys(pane, keys):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            if keys.len() < 1 or keys.len() > 256: return Err(reject("invalid key count"))
+            for key in keys:
+                match key:
+                    case MuxKeyV1.Named(_): ()
+                    case MuxKeyV1.Function(number):
+                        if number < 1 or number > 24: return Err(reject("invalid function key"))
+                    case MuxKeyV1.Scalar(codepoint, _, _, _):
+                        if codepoint > 1114111 or (codepoint >= 55296 and codepoint <= 57343): return Err(reject("invalid Unicode scalar key"))
+        case MuxCommandV1.Paste(pane, paste):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            if paste.bytes.len() < 1 or paste.bytes.len() > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("invalid paste byte count"))
+        case MuxCommandV1.SubmitShellCommand(pane, command):
+            mux_validate_target_v1(handle, pane, MuxObjectKindV1.Pane)?
+            check_text(command, 65536, false, false)?
+        case MuxCommandV1.Notify(message):
+            check_recipient(handle, message.recipient)?
+            check_text(message.literal_text, MUX_DETAIL_MAX_BYTES_V1, false, true)?
+            if message.ttl_ms < 1 or message.ttl_ms > 300000: return Err(reject("invalid notification lifetime"))
+    Ok(())
+
+fn check_request(request: MuxRequestV1) -> Result<(), MuxErrorV1>:
+    mux_validate_handle_v1(request.handle)?
+    mux_validate_deadline_v1(request.deadline)?
+    if request.request_id == 0: return Err(reject("request ID must be nonzero"))
+    check_command(request.handle, request.command)
+
+pub fn mux_validate_request_v1(request: MuxRequestV1) -> Result<MuxRequestV1, MuxErrorV1>:
+    match check_request(request):
+        case Ok(_): Ok(request)
+        case Err(failure):
+            var correlated = failure
+            correlated.request_id = request.request_id
+            Err(correlated)
+
+pub fn mux_validate_capture_v1(handle: MuxHandleV1, request: MuxCaptureV1) -> Result<MuxCaptureV1, MuxErrorV1>:
+    mux_validate_target_v1(handle, request.pane, MuxObjectKindV1.Pane)?
+    if request.max_bytes < 1 or request.max_bytes > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("invalid capture byte limit"))
+    match request.range:
+        case MuxCaptureRangeV1.Screen: ()
+        case MuxCaptureRangeV1.AllHistory: ()
+        case MuxCaptureRangeV1.Lines(first, last):
+            if first > last or first < -1048576 or last > 1048576: return Err(reject("invalid capture history range"))
+    match request.continuation:
+        case Some(token): check_text(token, 1024, false, true)?
+        case nil: ()
+    Ok(request)
+
+pub fn mux_validate_captured_v1(handle: MuxHandleV1, request: MuxCaptureV1, captured: MuxCapturedV1) -> Result<MuxCapturedV1, MuxErrorV1>:
+    mux_validate_capture_v1(handle, request)?
+    mux_validate_target_v1(handle, captured.pane, MuxObjectKindV1.Pane)?
+    if captured.pane.object_id != request.pane.object_id or captured.byte_extent != captured.bytes.len() or captured.byte_extent > request.max_bytes: return Err(reject("capture target or byte extent differs"))
+    match captured.continuation:
+        case Some(token):
+            check_text(token, 1024, false, true)?
+            if not captured.truncated: return Err(reject("complete capture has continuation"))
+        case nil:
+            if captured.truncated: return Err(reject("truncated capture lacks continuation"))
+    Ok(captured)
+
+pub fn mux_validate_receipt_v1(receipt: MuxRequestReceiptV1) -> Result<MuxRequestReceiptV1, MuxErrorV1>:
+    mux_validate_handle_v1(receipt.handle)?
+    if receipt.request_id == 0 or receipt.affected.len() > 16384: return Err(reject("invalid receipt bounds"))
+    check_text(receipt.detail, MUX_DETAIL_MAX_BYTES_V1, true, true)?
+    for target in receipt.affected: mux_validate_target_v1(receipt.handle, target, target.kind)?
+    if receipt.knowledge == MuxRequestKnowledgeV1.Expired or receipt.knowledge == MuxRequestKnowledgeV1.NotKnown:
+        if receipt.commit_state != MuxCommitStateV1.Unknown: return Err(reject("lost receipt cannot prove a commit outcome"))
+    else:
+        match receipt.operation:
+            case Some(_): ()
+            case nil: return Err(reject("known request receipt lacks operation"))
+    if receipt.knowledge == MuxRequestKnowledgeV1.Pending and receipt.commit_state != MuxCommitStateV1.Unknown: return Err(reject("pending request cannot report a final commit"))
+    Ok(receipt)
+
+pub fn mux_validate_core_limits_v1(limits: MuxCoreLimitsV1) -> Result<MuxCoreLimitsV1, MuxErrorV1>:
+    mux_validate_limits_v1(limits.discovery)?
+    if limits.max_windows < 1 or limits.max_windows > 4096 or limits.max_panes < 1 or limits.max_panes > 16384 or limits.max_clients < 1 or limits.max_clients > 4096: return Err(reject("invalid object limits"))
+    if limits.max_input_bytes < 1 or limits.max_input_bytes > MUX_PAYLOAD_MAX_BYTES_V1 or limits.max_capture_bytes < 1 or limits.max_capture_bytes > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("invalid I/O limits"))
+    if limits.max_events < 1 or limits.max_events > 1024: return Err(reject("invalid event limit"))
+    mux_validate_deadline_v1(MuxDeadlineV1(timeout_ms: limits.max_request_timeout_ms))?
+    Ok(limits)
+
+# Representation-level admission only: no evidence receipt is certified here.
+# Providers must additionally authenticate live owner/lease and their support.
+pub fn mux_require_operation_v1(handle: MuxHandleV1, backend: MuxBackendV1, operation: MuxOperationV1, capabilities: [MuxOperationCapabilityV1]) -> Result<MuxOperationCapabilityV1, MuxErrorV1>:
+    mux_validate_handle_v1(handle)?
+    if capabilities.len() > mux_mandatory_operations_v1().len(): return Err(reject("too many operation descriptors"))
+    var seen: [MuxOperationV1] = []
+    var selected: MuxOperationCapabilityV1? = nil
+    for capability in capabilities:
+        if capability.owner_id != handle.owner_id or capability.owner_generation != handle.owner_generation or capability.backend != backend or seen.contains(capability.operation): return Err(reject("capability owner, backend or uniqueness differs"))
+        seen.push(capability.operation)
+        mux_validate_core_limits_v1(capability.limits)?
+        check_text(capability.backend_version, MUX_NAME_MAX_BYTES_V1, false, true)?
+        if capability.constraints.len() > 16: return Err(reject("too many operation constraints"))
+        for constraint in capability.constraints: check_text(constraint, MUX_DETAIL_MAX_BYTES_V1, false, true)?
+        match capability.evidence:
+            case MuxEvidenceV1.NotRun: ()
+            case MuxEvidenceV1.Blocked(reason): check_text(reason, MUX_DETAIL_MAX_BYTES_V1, false, true)?
+            case MuxEvidenceV1.Qualified(receipt): check_text(receipt, MUX_DETAIL_MAX_BYTES_V1, false, true)?
+        if capability.operation == operation: selected = Some(capability)
+    match selected:
+        case Some(capability):
+            if capability.level != CapLevel.Unavailable: return Ok(capability)
+        case nil: ()
+    Err(MuxErrorV1(kind: MuxErrorKindV1.Unsupported, detail: "required CoreMux operation unavailable",
+        request_id: 0, commit_state: MuxCommitStateV1.NotApplied,
+        observed_revision: nil, affected: [], cleanup_pending: false))
+
+pub fn mux_require_core_capabilities_v1(handle: MuxHandleV1, backend: MuxBackendV1, capabilities: [MuxOperationCapabilityV1]) -> Result<(), MuxErrorV1>:
+    for operation in mux_mandatory_operations_v1(): mux_require_operation_v1(handle, backend, operation, capabilities)?
+    Ok(())
+
+fn check_context(handle: MuxHandleV1, context: MuxContextV1) -> Result<(), MuxErrorV1>:
+    match context.client:
+        case Some(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Client)?
+        case nil: ()
+    match context.session:
+        case Some(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+        case nil: ()
+    match context.window:
+        case Some(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Window)?
+        case nil: ()
+    match context.pane:
+        case Some(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Pane)?
+        case nil: ()
+    Ok(())
+
+pub fn mux_validate_query_v1(handle: MuxHandleV1, query: MuxQueryV1, deadline: MuxDeadlineV1) -> Result<MuxQueryV1, MuxErrorV1>:
+    mux_validate_handle_v1(handle)?
+    mux_validate_deadline_v1(deadline)?
+    match query:
+        case MuxQueryV1.Snapshot(scope, _):
+            match scope:
+                case MuxScopeV1.Namespace: ()
+                case MuxScopeV1.Session(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Session)?
+                case MuxScopeV1.Window(target): mux_validate_target_v1(handle, target, MuxObjectKindV1.Window)?
+        case MuxQueryV1.ResolveTarget(target, _, context):
+            check_text(target, MUX_NAME_MAX_BYTES_V1, false, true)?
+            check_context(handle, context)?
+        case MuxQueryV1.Capture(request): mux_validate_capture_v1(handle, request)?
+        case MuxQueryV1.CurrentContext(client): mux_validate_target_v1(handle, client, MuxObjectKindV1.Client)?
+        case MuxQueryV1.RequestStatus(request_id):
+            if request_id == 0: return Err(reject("request status ID must be nonzero"))
+        case MuxQueryV1.Capabilities: ()
+    Ok(query)
+
+fn check_disconnect(request: MuxDisconnectRequestV1) -> Result<(), MuxErrorV1>:
+    mux_validate_handle_v1(request.handle)?
+    mux_validate_deadline_v1(request.deadline)?
+    if request.request_id == 0: return Err(reject("disconnect request ID must be nonzero"))
+    Ok(())
+
+pub fn mux_validate_disconnect_v1(request: MuxDisconnectRequestV1) -> Result<MuxDisconnectRequestV1, MuxErrorV1>:
+    match check_disconnect(request):
+        case Ok(_): Ok(request)
+        case Err(failure):
+            var correlated = failure
+            correlated.request_id = request.request_id
+            Err(correlated)
+
+# Shape validation only: does not create a lease, read a clock or renew authority.
+pub fn mux_validate_lease_terms_v1(terms: MuxLeaseTermsV1) -> Result<MuxLeaseTermsV1, MuxErrorV1>:
+    if terms.lifetime_ms < 1000 or terms.lifetime_ms > 600000: return Err(reject("invalid lease lifetime"))
+    if terms.renew_after_ms < 1 or terms.renew_after_ms > terms.lifetime_ms / 2: return Err(reject("renewal cadence must leave half the lease lifetime"))
+    if terms.retained_receipt_ms < 1000 or terms.retained_receipt_ms > 86400000: return Err(reject("invalid receipt retention duration"))
+    if terms.max_retained_receipts < 1 or terms.max_retained_receipts > 4096: return Err(reject("invalid receipt retention capacity"))
+    Ok(terms)
+
+# Match a received receipt to its original request; NOT authentication or a grant
+# of revoked-token access. Provider must verify retained token/history and expiry.
+pub fn mux_validate_reconciliation_receipt_v1(handle: MuxHandleV1, request_id: u64, receipt: MuxRequestReceiptV1) -> Result<MuxRequestReceiptV1, MuxErrorV1>:
+    mux_validate_handle_v1(handle)?
+    mux_validate_receipt_v1(receipt)?
+    if request_id == 0 or receipt.request_id != request_id or receipt.handle.owner_id != handle.owner_id or receipt.handle.owner_generation != handle.owner_generation or receipt.handle.lease_id != handle.lease_id:
+        return Err(reject("reconciliation receipt differs from original lease or request"))
+    Ok(receipt)
+
+pub fn mux_validate_event_limits_v1(limits: MuxEventLimitsV1) -> Result<MuxEventLimitsV1, MuxErrorV1>:
+    if limits.max_events < 1 or limits.max_events > 1024 or limits.max_bytes < 1 or limits.max_bytes > MUX_PAYLOAD_MAX_BYTES_V1: return Err(reject("invalid event polling limit"))
+    Ok(limits)
