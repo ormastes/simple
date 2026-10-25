@@ -2654,7 +2654,7 @@ impl MirLowering:
                 # SAME return type method_calls_literals.spl would use to
                 # lower the call itself, without depending on the
                 # inference-only `resolution` field.
-                if val method_id = resolution.get_symbol_id():
+                if val method_id = wa_method_resolution_symbol_id(resolution):
                     return self.resolved_call_hir_return_type(method_id)
                 # Builtin Option/Result `.unwrap()` / `.expect(msg)` has no
                 # method symbol on the --entry path; its type is the
@@ -2982,7 +2982,7 @@ impl MirLowering:
                         return self.resolved_call_payload_shape(call_symbol, variant)
                     case _: ()
             case MethodCall(receiver, method, _, resolution):
-                if val method_id = resolution.get_symbol_id():
+                if val method_id = wa_method_resolution_symbol_id(resolution):
                     return self.resolved_call_payload_shape(method_id, variant)
                 val receiver_type = self.receiver_declared_type(receiver)
                 if receiver_type != nil:
@@ -4795,6 +4795,11 @@ impl MirLowering:
                                 val slot_index = bind_pos_row[fi]
                                 if slot_index >= 0 and slot_index < slot_types.len():
                                     bound_slot = self.decode_declared_enum_payload_slot(gl, slot_types[slot_index])
+                                    # Keep the declared slot type on the bound local, as the
+                                    # single-payload path does, so `case Add(l, r): l.format()`
+                                    # resolves the receiver instead of lowering a const-0
+                                    # placeholder (bug mir_unresolved_method_on_enum_payload_binding).
+                                    self.remember_local_hir_type(bound_slot.id, slot_types[slot_index], 0, 0)
                         # Text retag: mirror the single-field path — if this
                         # slot was observed TEXT at the construction site,
                         # rt_interp_cstr(gl) produces a genuinely
@@ -8723,3 +8728,9 @@ impl MirLowering:
             case "inc": true
             case "dec": true
             case _: false
+
+# WA-MIR-UNRESOLVED-get_symbol_id: `resolution.get_symbol_id()` on a multi-slot
+# enum payload binding (`case MethodCall(receiver, method, _, resolution)`)
+# lowered to a const-0 placeholder in MIR. Bug: doc/08_tracking/bug/mir_unresolved_method_on_enum_payload_binding_2026-10-25.md
+fn wa_method_resolution_symbol_id(r: MethodResolution) -> SymbolId?:
+    r.get_symbol_id()
