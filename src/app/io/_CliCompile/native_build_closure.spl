@@ -14,6 +14,8 @@ use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1
     compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1,
+    driver_library_mode_native_owner_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -263,7 +265,7 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
-pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
+pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mode: text = "") -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
@@ -376,11 +378,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if resolve_cache.has(cache_key):
                 rp = resolve_cache[cache_key]
             else:
-                val selected = driver_resolve_closure_import_v1(mp, closure_source_dirs, importer_dir)
+                val selected = match driver_library_mode_resolve_v1(mp, closure_source_dirs, importer_dir, library_mode, importer_module):
+                    case Ok(value): value
+                    case Err(reason):
+                        _cli_eprint(reason)
+                        return []
                 match selected:
                     case SourceRootResolutionV1.Found(path):
                         val spelling = if mp.starts_with(".") and not mp.starts_with(".."): importer_module + mp else: mp
-                        rp = driver_closure_native_owner_v1(path, spelling, importer_dir)
+                        rp = driver_library_mode_native_owner_v1(path, spelling, importer_dir, library_mode, importer_module)
                     case SourceRootResolutionV1.Missing: ()
                     case SourceRootResolutionV1.Ambiguous(directory):
                         _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")

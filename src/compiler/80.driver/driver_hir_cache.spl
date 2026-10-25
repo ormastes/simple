@@ -149,7 +149,7 @@ fn _hir_cache_env_switches() -> text:
         out = out + name + "=" + (sosix_env_get_nullable(name) ?? "") + "\n"
     out
 
-fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
+fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool, library_mode: text = "") -> text:
     if closure_digest == "" or not file_exists(source_path):
         return ""
     val source_digest = rt_file_hash_sha256(source_path)
@@ -164,13 +164,16 @@ fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> tex
     # Logical aliases share the one physical surface lowering; their registry
     # identities already participate in the closure digest above.
     val source_path_digest = sha256_text(module_source_relative_path(source_path))
-    sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
+    val legacy = sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
+    if library_mode == "": return legacy
+    sha256_text("hir-library-mode-key-v1\n" + legacy + "\n" + sha256_text(library_mode))
 
 fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
     hir_cache_dir() + "/" + key + (if parser_selected: ".parser-v4.hir" else: ".hir")
 
-fn hir_cache_header() -> text:
-    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
+fn hir_cache_header(library_mode: text = "") -> text:
+    val legacy = HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + _hir_cache_identity_scope()
+    if library_mode == "": legacy else: legacy + " library-mode-v1=" + sha256_text(library_mode)
 
 # `has` MUST apply the same validity test `hir_cache_load` does. The KEY folds
 # source + closure digests, but the HEADER additionally folds
@@ -193,7 +196,7 @@ fn hir_cache_header() -> text:
 #   [hir-cache] hits=0 misses=102 stores=102                    (real build)
 # Reproduced identically in the 02:03 build of the same target. On disk, 114 of
 # 216 entries carried a header from a superseded compiler identity.
-fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
+fn hir_cache_has(key: text, parser_binding: text = "", library_mode: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     val path = hir_cache_path(key, parser_binding != "")
@@ -205,7 +208,7 @@ fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
     val previous_parser_objectless = _hir_cache_last_parser_objectless
     if not transient_scope_begin():
         return false
-    val valid = hir_cache_load_in_owned_scope(key, parser_binding) != nil
+    val valid = hir_cache_load_in_owned_scope(key, parser_binding, "", library_mode) != nil
     _hir_cache_last_warnings = previous_warnings
     _hir_cache_last_parser_objectless = previous_parser_objectless
     val ended = transient_scope_end()
@@ -261,9 +264,9 @@ fn hir_cache_snapshot_root_rebind_v1(blob: text, source_path: text) -> [text]:
     if new_root + rel != source_path: return []
     [old_root, new_root]
 
-fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "") -> HirModule?:
+fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "", library_mode: text = "") -> HirModule?:
     if parser_binding.len() != 64: return nil
-    val loaded = hir_cache_load(key, parser_binding, source_path)
+    val loaded = hir_cache_load(key, parser_binding, source_path, library_mode)
     if source_path == "" or loaded == nil: return loaded
     # The entry may come from the other route's spelling of this file. A
     # snapshot-root move was already rebased inside the load.
@@ -271,17 +274,17 @@ fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text =
     module.path = source_path
     Some(module)
 
-fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text) -> text:
+fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text, library_mode: text = "") -> text:
     if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
-    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header())
+    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header(library_mode))
 
-fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "") -> HirModule?:
+fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
     if key == "" or not hir_cache_enabled():
         return nil
     if not transient_scope_begin():
         return nil
-    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path)
+    val decoded = hir_cache_load_in_owned_scope(key, parser_binding, source_path, library_mode)
     val paused = transient_scope_pause()
     # A miss has no graph to promote: the runtime correctly rejects nil roots.
     # The owned loader only replaces the persistent warning root on a hit.
@@ -306,7 +309,7 @@ fn hir_cache_load(key: text, parser_binding: text = "", source_path: text = "") 
 
 # HIR shard transactions already own the decode's scratch lifetime. They retain
 # only their small diagnostics/receipts, so no full HIR root is promoted here.
-fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "") -> HirModule?:
+fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_path: text = "", library_mode: text = "") -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key, parser_binding != "")
@@ -314,7 +317,7 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_pa
         _hir_cache_reject("absent")
         return nil
     val raw = file_read_nullable(path) ?? ""
-    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
+    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
     val entry = hir_cache_entry_parse(raw, expected_header, parser_binding)
     if entry.reason != "":
         _hir_cache_reject(entry.reason)
@@ -458,10 +461,10 @@ fn hir_cache_rejected_summary() -> text:
 # existence -> read -> parse sequence in this file: hir_cache_file_exists_facade_contract_spec
 # pins that ordering by source position, and it is a real contract, not an
 # accident of layout.
-fn _hir_cache_entry_header_valid(path: text) -> bool:
+fn _hir_cache_entry_header_valid(path: text, library_mode: text = "") -> bool:
     val raw = file_read_nullable(path) ?? ""
     var reader: FlatPoolReader = FlatPoolReader.new_canonical(raw)
-    reader.ok and reader.next() == hir_cache_header()
+    reader.ok and reader.next() == hir_cache_header(library_mode)
 
 fn hir_cache_last_warnings() -> [text]:
     _hir_cache_last_warnings
@@ -476,7 +479,7 @@ fn hir_cache_clear_last_warnings():
 fn hir_cache_promote_diagnostic_owner_v1() -> bool:
     transient_promote(_hir_cache_last_reason)
 
-fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classification: text = "", library_mode: text = "") -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     # Eligibility initializes the immutable frontend scope memo before scratch
@@ -484,7 +487,7 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classi
     # only the scalar store counter escapes. Do not borrow an enclosing scope.
     if not transient_scope_begin():
         return false
-    val stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_classification)
+    val stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_classification, library_mode)
     # Always close, including codec refusal and failed writes/renames. A
     # short-circuit expression here would leak precisely the failure cases.
     val ended = transient_scope_end()
@@ -512,7 +515,7 @@ fn hir_module_encode_retained_v1(module: HirModule) -> text:
         panic("HIR validation blob encode scope ownership failed")
     blob
 
-fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "", library_mode: text = "") -> bool:
     _hir_cache_note_store_attempt()
     if parser_classification != "" and
             not hir_cache_parser_record_valid_v1(parser_classification): return false
@@ -566,7 +569,7 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key, parser_classification != "")
     val tmp = final_path + ".{rt_getpid()}.tmp"
-    val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header() else: hir_cache_header()
+    val header = if parser_classification != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
     # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=name_dead_store_content_limb
     # The store write fails (rt_core_string_bytes NULL -> -1) when any limb
     # of the concatenated content is a dead transient handle. Bind each part

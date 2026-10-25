@@ -1,6 +1,7 @@
 # Parent-only parse-selection transaction. The worker consumes durable files;
 # no inventory, source text, or source-scan container crosses this boundary.
 use app.io.env_ops.{env_set}
+use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
 use std.io_runtime.{dir_create_all, getpid}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
@@ -39,7 +40,7 @@ fn _parse_closure_text_list_eq_v1(a: [text], b: [text]) -> bool:
 
 fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
-        frontend_cache_dir: text) -> NativeBuildParseClosurePublicationV1:
+        frontend_cache_dir: text, library_mode: text) -> NativeBuildParseClosurePublicationV1:
     val authority = compiler_source_authority_open_published_v1(source_root)
     if not authority.valid:
         return NativeBuildParseClosurePublicationV1("", "", 0,
@@ -50,7 +51,7 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure roots rejected: " + canonical.unwrap_err())
     val entry_path = source_root + "/" + entry_identity
-    val paths = _native_build_entry_closure(entry_path, roots)
+    val paths = _native_build_entry_closure(entry_path, roots, library_mode)
     # Reuse the walker's admitted mapping, never a separate cwd-based receipt
     # spelling. A fallback/live walk cannot publish a frozen closure request.
     val mapped = native_build_closure_source_roots_v1(entry_path, roots)
@@ -68,7 +69,7 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
     val binding = NativeEntryClosureBindingV1(authority.snapshot.revision_id,
         authority.snapshot.commit_id, authority.snapshot.tree_id,
         authority.snapshot.inventory_digest, entry_identity, selected_roots,
-        policy_digest, file_hash_sha256(producer))
+        library_mode_closure_digest_v1(policy_digest, library_mode), file_hash_sha256(producer))
     val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text()
     if frontend_cache_dir == "" or not dir_create_all(request_root):
         return NativeBuildParseClosurePublicationV1("", "", 0,
@@ -98,7 +99,7 @@ fn native_build_parse_closure_clear_v1() -> bool:
 
 pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
         entry_identity: text, policy_digest: text, producer: text,
-        frontend_cache_dir: text) -> bool:
+        frontend_cache_dir: text, library_mode: text = "") -> bool:
     if not native_build_parse_closure_clear_v1(): return false
     # A parent coordinator has no active compiler epoch. Refuse reuse from a
     # worker instead of clearing its semantic owner or promoting its full graph.
@@ -113,7 +114,7 @@ pub fn native_build_publish_parse_closure_v1(source_root: text, roots: [text],
     driver_entry_scan_cache_release()
     native_build_closure_release_snapshot_memo_v1()
     val publication = native_build_parse_closure_write_v1(source_root, roots,
-        entry_identity, policy_digest, producer, frontend_cache_dir)
+        entry_identity, policy_digest, producer, frontend_cache_dir, library_mode)
     val paused = transient_scope_pause()
     # Detach globals BEFORE reclaiming. Replacement containers are persistent
     # only after a successful pause; on pause failure they are detached again
