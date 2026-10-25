@@ -1,0 +1,129 @@
+#!/bin/sh
+# Exercise actual controller selection, worker and env-i transcript dispatch.
+# The workload is a shell probe, never a native compiler or admission claim.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-explicit-cap.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE \
+  SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE \
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP \
+  SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_PARSE_SHARD_WORKER_KB \
+  SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC || :
+mkdir "$work/home" "$work/tmp" "$work/cache" "$work/runtime"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+awk '/^stage3_compiler_ceiling_env=/{on=1} /^stage3_args=/{on=0} on{print}' "$resume" >"$work/controller.sh"
+awk '/^stage3_args=\$\(bootstrap_stage3_args_sha256/{on=1} on{print} on && /src\/app\/cli\/bootstrap_main.spl\)$/{exit}' \
+  "$resume" | sed 's/stage3_args=$(bootstrap_stage3_args_sha256/stage3_args=$(capture_parent_args/' >"$work/parent-vector.sh"
+[ -s "$work/controller.sh" ] && [ -s "$work/parent-vector.sh" ] || fail 'actual controller sections missing'
+bootstrap_stage3_error() { echo "$*" >&2; return 1; }
+select_cap() (stage3_threads=1; . "$work/controller.sh"; printf '%s' "$stage3_compiler_cap")
+[ -z "$(select_cap)" ] || fail 'absent cap changed historical controller default'
+[ "$(SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 select_cap)" = 33554432 ] || fail 'ordinary cap lost by controller'
+for bad in '' 0 01 -1 50331649 9999999999999999 invalid; do
+  if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bad select_cap >"$work/refusal" 2>&1; then
+    fail "controller accepted invalid/over-ceiling cap: $bad"
+  fi
+done
+cat >"$work/producer" <<'SH'
+#!/bin/sh
+printf 'observed_cap=%s\nobserved_budget=%s\nobserved_ceiling=%s\n' \
+  "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-unset}" \
+  "${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB-unset}" \
+  "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-unset}"
+SH
+chmod +x "$work/producer"
+producer_sha=$(bootstrap_stage3_hash_file "$work/producer")
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=%s\n' \
+  "$producer_sha" >"$work/transfer.env"
+transfer_sha=$(bootstrap_stage3_hash_file "$work/transfer.env")
+run_worker() {
+  label=$1 cap=$2
+  sh "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
+    "$work/$label.transcript" "$root" "$work/$label.log" "$work/home" "$work/tmp" "$PATH" \
+    "$work/producer" fixture-apple-darwin cranelift 1 '' "$work/cache" "$work/runtime" \
+    "$work/candidate" "$work/progress" "$work/profile" "$work/memory" fixture \
+    direct none 67108864 '' '' '' 1 v1 "$work/transfer.env" "$transfer_sha" '' "$cap" 1000
+}
+run_worker explicit 33554432 || fail 'ordinary explicit cap worker refused'
+grep -qx 'observed_cap=33554432' "$work/explicit.log" || fail 'env-i lost exact cap'
+grep -qx 'observed_budget=33554432' "$work/explicit.log" || fail 'child frontend budget differs'
+grep -qx 'observed_ceiling=unset' "$work/explicit.log" || fail 'ordinary cap invented elevation'
+grep -qx 'rss_limit_kib=33554432' "$work/explicit.log.rss.env" || fail 'watchdog cap differs'
+grep -qx 'cap_source=explicit-env' "$work/explicit.log.rss.env" || fail 'cap identity not recorded'
+[ "$(bootstrap_stage3_transcript_compiler_cap "$work/explicit.transcript")" = 33554432 ] || fail 'transcript cap missing'
+[ -z "$(bootstrap_stage3_transcript_compiler_ceiling "$work/explicit.transcript")" ] || fail 'transcript invented elevation'
+run_worker default '' || fail 'absent cap worker refused'
+grep -qx 'observed_cap=unset' "$work/default.log" || fail 'default acquired explicit cap'
+grep -qx 'cap_source=default' "$work/default.log.rss.env" || fail 'default policy changed'
+[ -z "$(bootstrap_stage3_transcript_compiler_cap "$work/default.transcript")" ] || fail 'historical vector gained cap'
+for bad in 0 01 -1 50331649 invalid; do
+  if run_worker bad "$bad" >"$work/refusal" 2>&1; then fail "worker accepted bad cap: $bad"; fi
+done
+if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554431 run_worker conflict 33554432 >"$work/refusal" 2>&1; then
+  fail 'worker accepted ambient conflict'
+fi
+if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 run_worker unrecorded '' >"$work/refusal" 2>&1; then
+  fail 'worker accepted unrecorded ambient cap'
+fi
+# Compare the complete NEW controller hash vector with the actual worker
+# transcript, removing only its separately-owned computed shard budget.
+compare_vector() (
+  label=$1 stage3_compiler_cap=$2 stage3_compiler_ceiling_env=
+  resume_abi_policy=v1 stage2_admission="$work/transfer.env"
+  stage3_requested_route=direct stage3_fallback_route=none
+  stage3_cache="$work/cache" progress="$work/progress" phase_profile="$work/profile"
+  memory_snapshot="$work/memory" evidence_run_id=fixture
+  platform=fixture-apple-darwin stage3_threads=1 stage2_backend=cranelift
+  runtime="$work/runtime" admitted="$work/producer" candidate="$work/candidate"
+  stage3_timeout_args= stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env=
+  capture_parent_args() { printf '%s\n' "$@" >"$work/parent-vector"; bootstrap_stage3_args_sha256 "$@"; }
+  set --
+  . "$work/parent-vector.sh"
+  awk '/^explicit-env:|^argv:/ {
+    row=$0; sub(/^[^:]*:[^:]*:/,"",row)
+    if(row ~ /^SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=/) {budgets++; next}
+    if(row ~ /^SIMPLE_HIR_SHARD_WORKER_KB=/) {
+      if(row!="SIMPLE_HIR_SHARD_WORKER_KB=12000000" || hir++) exit 1; next
+    }
+    if(row ~ /^SIMPLE_PARSE_SHARD_WORKER_KB=/) {
+      if(row!="SIMPLE_PARSE_SHARD_WORKER_KB=8000000" || parse++) exit 1; next
+    }
+    if(row ~ /^SIMPLE_SHARD_MEM_CLAMP=/) {
+      if(row!="SIMPLE_SHARD_MEM_CLAMP=1" || clamp++) exit 1; next
+    }
+    print row
+  } END {if(budgets!=1 || hir!=1 || parse!=1 || clamp!=1) exit 1}' "$work/$label.transcript" >"$work/vector"
+  set --
+  while IFS= read -r row; do set -- "$@" "$row"; done <"$work/vector"
+  [ "$stage3_args" = "$(bootstrap_stage3_args_sha256 "$@")" ] || {
+    diff -u "$work/parent-vector" "$work/vector" >&2 || :
+    fail "$label controller/worker hash differs"
+  }
+)
+compare_vector explicit 33554432
+compare_vector default ''
+# The real transcript owner rejects missing/duplicate/conflicting cap rows
+# before dispatch. Case variants must not bypass singleton detection.
+reject_dispatch() (
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  bootstrap_stage3_run_transcribed "$work/reject.transcript" "$root" "$work/reject.log" \
+    "$work/home" "$work/tmp" "$PATH" SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct \
+    "$@" -- "$work/producer" native-build --threads 1
+)
+for shape in missing duplicate conflict mixed; do
+  case "$shape" in
+    missing) set -- ;;
+    duplicate) set -- SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 ;;
+    conflict) set -- SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554431 ;;
+    mixed) set -- SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 simple_bootstrap_process_tree_rss_cap_kib=33554432 ;;
+  esac
+  if reject_dispatch "$@" >"$work/refusal" 2>&1; then fail "transcript accepted $shape cap binding"; fi
+done
+echo 'PASS: ordinary explicit RSS cap controller/worker/env-i/watchdog/hash transport, default preservation and strict refusal'

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Controlled host-name provider for the exact historical Darwin default only.
+# Shell workload; no native compiler or host resource qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-darwin-default-cap.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir "$work/bin" "$work/home" "$work/tmp" "$work/cache" "$work/runtime"
+printf '#!/bin/sh\necho Darwin\n' >"$work/bin/uname"
+printf '#!/bin/sh\nprintf "child_cap=%%s\\nbudget=%%s\\n" "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-unset}" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"\n' >"$work/producer"
+chmod +x "$work/bin/uname" "$work/producer"
+PATH="$work/bin:$PATH"
+export PATH
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE SIMPLE_BOOTSTRAP_RSS_CAP_MODE || :
+sha=$(sha256sum "$work/producer" | cut -d ' ' -f 1)
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=%s\n' "$sha" >"$work/receipt"
+receipt_sha=$(sha256sum "$work/receipt" | cut -d ' ' -f 1)
+run_worker() {
+  sh "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
+    "$work/transcript" "$root" "$work/run.log" "$work/home" "$work/tmp" "$PATH" \
+    "$work/producer" fixture-apple-darwin cranelift 1 '' "$work/cache" "$work/runtime" \
+    "$work/candidate" "$work/progress" "$work/profile" "$work/memory" fixture \
+    direct none 67108864 '' '' '' 1 v1 "$work/receipt" "$receipt_sha" '' '' 1000
+}
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=6835937 run_worker
+grep -qx 'child_cap=unset' "$work/run.log"
+grep -qx 'budget=6835937' "$work/run.log"
+grep -qx 'rss_limit_kib=6835937' "$work/run.log.rss.env"
+if grep -qi '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=' "$work/transcript"; then
+  echo 'FAIL: historical Darwin default gained a new cap row' >&2; exit 1
+fi
+if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=6835938 run_worker >"$work/refusal" 2>&1; then
+  echo 'FAIL: arbitrary unrecorded Darwin cap admitted' >&2; exit 1
+fi
+echo 'PASS: exact historical Darwin cap/vector preserved; other unrecorded cap refused'

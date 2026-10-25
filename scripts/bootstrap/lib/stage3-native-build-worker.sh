@@ -51,7 +51,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 # transcript. It belongs only to this newly hashed compiler invocation.
 case "$compiler_ceiling_env" in
   '')
-    [ -z "$compiler_cap" ] && [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" != x ] || {
       echo 'stage3 worker: unrecorded ambient compiler RSS ceiling' >&2; exit 64;
     } ;;
   SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=*)
@@ -70,6 +70,36 @@ case "$compiler_ceiling_env" in
     export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ;;
   *) echo 'stage3 worker: invalid compiler RSS ceiling binding' >&2; exit 64 ;;
 esac
+if [ -n "$compiler_cap" ]; then
+  bootstrap_stage3_compiler_ceiling_valid "$compiler_cap" &&
+    [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB-$compiler_cap}" = "$compiler_cap" ] || {
+    echo 'stage3 worker: invalid or conflicting compiler RSS cap' >&2; exit 64;
+  }
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$compiler_cap
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  # Re-admit the transported cap against this process's real current policy.
+  # No ceiling variable is invented for an ordinary below-ceiling cap.
+  [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH+x}" ] &&
+    [ -z "${SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE+x}" ] || {
+    echo 'stage3 worker: explicit compiler cap requires enforced real policy' >&2; exit 64;
+  }
+  . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_resolve "$threads" "$root" &&
+    [ "$bootstrap_tree_rss_cap_kib" = "$compiler_cap" ] || {
+    echo "stage3 worker: compiler RSS cap policy refused: ${bootstrap_tree_rss_refusal:-mismatch}" >&2; exit 64;
+  }
+elif [ "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB+x}" = x ]; then
+  # Historical Darwin launches install this exact enclosing default after
+  # hashing their old vector. A user-requested cap is transported nonempty
+  # above, even when its value happens to equal this legacy default.
+  case "$platform:$(uname -s):$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" in
+    *-apple-darwin:Darwin:6835937) ;;
+    *) echo 'stage3 worker: unrecorded ambient compiler RSS cap' >&2; exit 64 ;;
+  esac
+fi
 
 # The caller fully verified admission. Refuse a missing or changed transfer
 # before env-i can erase its policy, or before the compiler can use its bytes.
@@ -138,7 +168,8 @@ bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS="$threads" \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache" SIMPLE_RUNTIME_PATH="$runtime" \
   SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
-  ${diagnostic_env} ${compiler_ceiling_env:+"$compiler_ceiling_env"} -- "$admitted" native-build --target "$platform" \
+  ${diagnostic_env} ${compiler_ceiling_env:+"$compiler_ceiling_env"} \
+  ${compiler_cap:+"SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$compiler_cap"} -- "$admitted" native-build --target "$platform" \
   --backend "$backend" --runtime-bundle core-c-bootstrap --threads "$threads" \
   ${timeout_args} --cache-dir "$cache" --mode dynload --runtime-path "$runtime" \
   -o "$candidate" src/app/cli/bootstrap_main.spl
