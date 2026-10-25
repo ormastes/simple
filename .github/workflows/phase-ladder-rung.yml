@@ -155,6 +155,30 @@ jobs:
           channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
           rustup set default-host x86_64-pc-windows-gnullvm
           rustup toolchain install "$channel" --profile minimal
+      # A Simple-built compiler emits LLVM IR and runs llc (find_llc: PATH);
+      # llvm-mingw ships no llc.exe, so phase-1 hello failed "llc not found"
+      # (run 40157771919). Take llc from the LLVM release archive (the repo's
+      # 23.1.1 pin), verified against GitHub's published asset digest. Only
+      # llc goes on PATH: a clang+llvm tree under /c/dev/install would switch
+      # windows-gitbash-bootstrap-env.shs to its lld-link and off MinGW.
+      - name: llc for the LLVM backend (windows-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'windows-x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=23.1.1
+          name=clang+llvm-$ver-x86_64-pc-windows-msvc.tar.xz
+          dir=/c/ladder-llc
+          mkdir -p "$dir" && cd "$dir"
+          digest=$(gh api "repos/llvm/llvm-project/releases/tags/llvmorg-$ver" \
+            --jq ".assets[] | select(.name == \"$name\") | .digest")
+          case "$digest" in sha256:*) ;; *) echo "no published digest for $name" >&2; exit 1 ;; esac
+          gh release download "llvmorg-$ver" -R llvm/llvm-project -p "$name"
+          echo "${digest#sha256:}  $name" | sha256sum -c -
+          tar -xJf "$name" --strip-components=2 --wildcards '*/bin/llc.exe' '*/bin/*.dll'
+          rm -f "$name"
+          ./llc.exe --version | head -3
+          cygpath -w "$dir" >> "$GITHUB_PATH"
       - name: Climb one phase
         if: steps.sel.outputs.on == 'true'
         env:
