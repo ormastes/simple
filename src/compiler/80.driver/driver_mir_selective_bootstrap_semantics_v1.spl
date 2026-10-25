@@ -1,0 +1,90 @@
+# Explicit semantic recipe only. This carrier does not admit a worker, change
+# eligibility or enable ambient bootstrap policy. The worker must first import
+# the real owner snapshots and pass their reconstructed receipts here.
+use compiler.driver.driver_build.native_mir_selective_bootstrap_context_v1.{
+    NativeMirSelectiveBootstrapContextV1, NativeMirSelectiveBootstrapOwnerReceiptV1,
+    native_mir_selective_bootstrap_validate_v1}
+
+enum NativeMirSelectiveBootstrapModuleModeV1:
+    Closure
+    Entry
+
+struct NativeMirSelectiveBootstrapBindingV1:
+    source_identity: text
+    context_identity: text
+    physical_manifest_identity: text
+    producer_identity: text
+    backend: text
+    target: text
+    bootstrap_active: bool
+    stage4: bool
+
+struct NativeMirSelectiveBootstrapSemanticsV1:
+    mode: NativeMirSelectiveBootstrapModuleModeV1
+    stage4: bool
+    skip_post_chain: bool
+    physical_manifest_identity: text
+
+pub fn driver_mir_selective_bootstrap_semantics_v1(
+        context: NativeMirSelectiveBootstrapContextV1?,
+        expected: NativeMirSelectiveBootstrapBindingV1,
+        installed: [NativeMirSelectiveBootstrapOwnerReceiptV1],
+        emission_name: text, is_entry: bool
+        ) -> Result<NativeMirSelectiveBootstrapSemanticsV1, text>:
+    if context == nil: return Err("bootstrap worker retained context is missing")
+    if not expected.bootstrap_active:
+        return Err("bootstrap worker semantic recipe requires an actual bootstrap request")
+    val retained: NativeMirSelectiveBootstrapContextV1 = context.unwrap()
+    val invalid = native_mir_selective_bootstrap_validate_v1(retained)
+    if invalid != "": return Err(invalid)
+    if retained.source_identity != expected.source_identity or
+            retained.context_identity != expected.context_identity or
+            retained.physical_manifest_identity != expected.physical_manifest_identity or
+            retained.producer_identity != expected.producer_identity or
+            retained.backend != expected.backend or retained.target != expected.target or
+            retained.stage4 != expected.stage4:
+        return Err("bootstrap worker retained context differs from its actual input owner")
+    if emission_name == "" or emission_name.contains("\n") or
+            is_entry != (emission_name == retained.entry_owner):
+        return Err("bootstrap worker physical entry ownership differs")
+    # A digest from the context alone is insufficient. These rows must come
+    # from owner-specific reconstruction/readback, never copied context rows.
+    if installed.len() != retained.owners.len():
+        return Err("bootstrap worker reconstructed registry inventory is incomplete")
+    var index = 0
+    while index < installed.len():
+        val actual: NativeMirSelectiveBootstrapOwnerReceiptV1 = installed[index]
+        val sealed: NativeMirSelectiveBootstrapOwnerReceiptV1 = retained.owners[index]
+        if actual.kind != sealed.kind or actual.digest != sealed.digest or
+                actual.bytes != sealed.bytes or actual.rows != sealed.rows:
+            return Err("bootstrap worker reconstructed registry differs: {sealed.kind}")
+        index = index + 1
+    val mode = if is_entry:
+        NativeMirSelectiveBootstrapModuleModeV1.Entry
+    else:
+        NativeMirSelectiveBootstrapModuleModeV1.Closure
+    Ok(NativeMirSelectiveBootstrapSemanticsV1(mode: mode,
+        stage4: retained.stage4, skip_post_chain: retained.skip_post_chain,
+        physical_manifest_identity: retained.physical_manifest_identity))
+
+# Serial fixed-entry lowering publishes closure outputs before the entry,
+# because each lower_module resets the flat function output. Parent adoption
+# keeps this exact order even when process completion occurs out of order.
+# This is an adoption order, never permission to reorder the sealed manifest.
+pub fn driver_mir_selective_bootstrap_entry_last_v1(
+        physical_names: [text], entry_owner: text) -> Result<[text], text>:
+    if entry_owner != "app.cli.bootstrap_main":
+        return Err("bootstrap parent entry owner is not canonical")
+    var seen: Dict<text, bool> = {}
+    var ordered: [text] = []
+    var entries = 0
+    for name in physical_names:
+        if name == "" or name.contains("\n") or seen.has(name):
+            return Err("bootstrap parent physical inventory is empty or duplicated")
+        seen[name] = true
+        if name == entry_owner:
+            entries = entries + 1
+        else:
+            ordered = ordered.push(name)
+    if entries != 1: return Err("bootstrap parent physical entry is missing or duplicated")
+    Ok(ordered.push(entry_owner))
