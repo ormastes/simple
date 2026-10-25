@@ -41,3 +41,14 @@ next blocker (hc_enc_hir_module SEGV).
   `rt_transient_heap_promote` walker) has no equivalent rule. No new `rt_*`
   symbol is added, so the dual-implementation ratchet does not change; parity
   for the Rust lane is a follow-up.
+- Perf cost (review P1, recorded not fixed): every untagged word above
+  0x10010 reached by the classifier (tagged ints and raw pointer words) now
+  takes `rt_core_immortal_registry_acquire` plus a hash probe where it used
+  to return 0 in O(1). Classification runs per word of every promoted graph at
+  each parse-scope end, and registry contention is already a named cost on
+  release (c2270c8068f). Follow-up: a cheap pre-filter (registry non-empty /
+  string address range) before the probe, or remove the workaround once the
+  compiler fix lands. Not measured here.
+- Selfcheck gap (review P2): the negative case does not exercise an int whose
+  bits equal a live string's data address, nor the shared/non-transient
+  `return 0` arm.
