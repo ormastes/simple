@@ -13,8 +13,10 @@ use super::byte_kernels::{
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{
-    gc_flags, get_typed_ptr, get_typed_ptr_mut, get_typed_ptr_mut_packed, get_typed_ptr_packed, note_aux_alloc, note_aux_free, register_heap_ptr, unregister_heap_ptr,
-    unregister_heap_ptr_checked, HeapHeader, HeapObjectType,
+    gc_flags, get_typed_ptr, get_typed_ptr_mut, get_typed_ptr_mut_packed, get_typed_ptr_packed, note_aux_alloc, note_aux_free, register_heap_ptr,
+    claim_free, claim_scoped_free, claim_typed_free, new_scope_owner, scoped_key_is_live,
+    track_scoped_allocation, transfer_scoped_allocation, ClaimResult, ClaimedAllocation, ScopedAllocationKey,
+    HeapHeader, HeapObjectType,
 };
 use super::objects::{
     rt_closure_func_ptr, rt_option_map, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject,
@@ -38,149 +40,93 @@ thread_local! {
 
 static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-/// Objects owned by a build session (doc/05_design/compiler/memory/
-/// build_session_memory_model_v1.md §2-§4). Rust objects carry no scope tag,
-/// so ownership is membership: `owned` holds header addresses for O(1) checks.
+/// Ledgers retain allocation identity, never pointer bits alone. Canonical
+/// authority lives in the registry; foreign-thread frees need no TLS access.
 struct SessionHeap {
     id: u32,
+    owner: u64,
     alloc_depth: i32,
-    objects: Vec<RuntimeValue>,
-    owned: super::heap::HeapPtrSet<usize>,
+    objects: Vec<ScopedAllocationKey>,
+    owned: std::collections::HashMap<usize, ScopedAllocationKey, std::hash::BuildHasherDefault<ahash::AHasher>>,
 }
 
 impl SessionHeap {
-    fn adopt(&mut self, value: RuntimeValue) {
-        if value.is_heap() && self.owned.insert(value.as_heap_ptr() as usize) {
-            self.objects.push(value);
-        }
+    fn record(&mut self, key: ScopedAllocationKey) {
+        if self.owned.insert(key.ptr, key) != Some(key) { self.objects.push(key); }
     }
 
-    /// Drop every session-owned object whose exact value bits are in
-    /// `reachable` (it became an rc root's graph). Entries are tombstoned to
-    /// NIL, as the module scope does, so `free_transient_objects` skips them.
-    /// O(objects) per call; shares are rare (dataset puts), adopts are not.
-    fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
-        let mut removed = false;
-        for bits in reachable.iter() {
-            let value = RuntimeValue(*bits);
-            if value.is_heap() && self.owned.remove(&(value.as_heap_ptr() as usize)) {
-                removed = true;
-            }
-        }
-        if !removed {
-            return;
-        }
-        for object in self.objects.iter_mut() {
-            if object.is_heap() && reachable.contains(&object.0) {
-                *object = RuntimeValue::NIL;
-            }
-        }
+    fn adopt(&mut self, value: RuntimeValue) {
+        if !value.is_heap() { return; }
+        let key = track_scoped_allocation(value.as_heap_ptr() as usize, self.owner)
+            .expect("scoped allocation identity exhausted or ownership conflict");
+        self.record(key);
     }
+
+
 }
 
-/// Nodes visited by this thread's last `rt_transient_heap_adopt`.
 pub fn session_adopt_visits_debug() -> u64 {
     SESSION_ADOPT_VISITS.with(|visits| visits.get())
 }
 
-/// True when the session (if any) owns header address `ptr`.
 pub fn session_heap_owns(value: RuntimeValue) -> bool {
-    value.is_heap()
-        && SESSION_HEAP.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .is_some_and(|session| session.owned.contains(&(value.as_heap_ptr() as usize)))
-        })
+    value.is_heap() && SESSION_HEAP.with(|slot| {
+        slot.borrow().as_ref().and_then(|session| session.owned.get(&(value.as_heap_ptr() as usize)).copied())
+            .is_some_and(scoped_key_is_live)
+    })
 }
 
 struct TransientHeapScope {
+    owner: u64,
     paused: bool,
-    objects: Vec<RuntimeValue>,
-    /// Lazily built header-address -> `objects` position index, so promotion
-    /// answers ownership and removal in O(reachable) instead of rescanning
-    /// every object the scope ever tracked. Tracking only appends while the
-    /// scope is running and promotion only runs while it is paused, so the
-    /// index is synced (extended over `objects[indexed..]`) at promote time.
-    /// Profiled 2026-10-24 (Windows stage2 parse of the parser closure): the
-    /// two full rescans were ~50% of parse-phase samples.
+    objects: Vec<ScopedAllocationKey>,
     by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
     indexed: usize,
-    /// Two tracked objects share a header address; fall back to the exact
-    /// original linear scans for this scope.
     index_ambiguous: bool,
-    /// Exact value bits promoted while the index is ambiguous. Compaction of
-    /// `objects` is deferred to ONE filter at scope end instead of a
-    /// per-promote `retain` (O(objects) per call -> O(N^2) for N promotes;
-    /// doc/05_design/compiler/memory/build_session_memory_model_v1.md §6, BSM P0).
-    promoted: super::heap::HeapPtrSet<u64>,
+    promoted: super::heap::HeapPtrSet<ScopedAllocationKey>,
 }
 
 impl TransientHeapScope {
     fn sync_index(&mut self) {
         while self.indexed < self.objects.len() {
-            let object = self.objects[self.indexed];
-            if object.is_heap() {
-                let ptr = object.as_heap_ptr() as usize;
-                if self.by_ptr.insert(ptr, self.indexed).is_some() {
-                    self.index_ambiguous = true;
-                }
+            let key = self.objects[self.indexed];
+            if key.ptr != 0 && self.by_ptr.insert(key.ptr, self.indexed).is_some() {
+                self.index_ambiguous = true;
             }
             self.indexed += 1;
         }
     }
 
-    fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
+    fn key_for_ptr(&mut self, ptr: usize) -> Option<ScopedAllocationKey> {
         self.sync_index();
-        if self.index_ambiguous {
-            return self.objects.iter().any(|object| {
-                object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
-            });
-        }
-        self.by_ptr.contains_key(&(root_ptr as usize))
+        let key = *self.objects.get(*self.by_ptr.get(&ptr)?)?;
+        (key.ptr != 0 && !self.promoted.contains(&key) && scoped_key_is_live(key)).then_some(key)
     }
 
-    /// Drop every tracked object whose exact value bits are in `reachable`.
-    /// With `released`, also report each object that left the scope (BSM:
-    /// it moves to the live session instead of becoming permanent).
+    fn owns_heap_ptr(&mut self, ptr: *mut HeapHeader) -> bool {
+        self.key_for_ptr(ptr as usize).is_some()
+    }
+
+    /// Destination record is installed while the canonical registry still
+    /// holds source identity. Only then withdraw this module's ledger entry.
     fn release_reachable(
-        &mut self,
-        reachable: &super::heap::HeapPtrSet<u64>,
-        mut released: Option<&mut Vec<RuntimeValue>>,
+        &mut self, reachable: &super::heap::HeapPtrSet<u64>, mut session: Option<&mut SessionHeap>,
     ) {
         self.sync_index();
-        if self.index_ambiguous {
-            // Deferred: rt_transient_array_scope_end filters once.
-            // Only tracked addresses are recorded, so the set stays bounded
-            // by `objects` however much persistent graph a promote walks.
-            for bits in reachable.iter().copied() {
-                let value = RuntimeValue(bits);
-                if value.is_heap()
-                    && self.by_ptr.contains_key(&(value.as_heap_ptr() as usize))
-                    && self.promoted.insert(bits)
-                {
-                    if let Some(out) = released.as_deref_mut() {
-                        out.push(value);
-                    }
-                }
-            }
-            return;
-        }
-        for bits in reachable.iter() {
+        for bits in reachable {
             let value = RuntimeValue(*bits);
-            if !value.is_heap() {
-                continue;
-            }
-            let ptr = value.as_heap_ptr() as usize;
-            if let Some(&position) = self.by_ptr.get(&ptr) {
-                if self.objects[position].0 == *bits {
-                    // Tombstone: NIL is not heap, so scope end skips it and
-                    // the free order of the survivors is unchanged.
-                    self.objects[position] = RuntimeValue::NIL;
-                    self.by_ptr.remove(&ptr);
-                    if let Some(out) = released.as_deref_mut() {
-                        out.push(value);
-                    }
-                }
+            if !value.is_heap() { continue; }
+            let Some(key) = self.key_for_ptr(value.as_heap_ptr() as usize) else { continue; };
+            let moved = if let Some(destination) = session.as_deref_mut() {
+                transfer_scoped_allocation(key, destination.owner, |next| destination.record(next))
+            } else {
+                transfer_scoped_allocation(key, 0, |_| {})
+            };
+            if !moved { continue; }
+            if self.index_ambiguous {
+                self.promoted.insert(key);
+            } else if let Some(position) = self.by_ptr.remove(&key.ptr) {
+                self.objects[position].ptr = 0;
             }
         }
     }
@@ -234,7 +180,9 @@ pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
-                scope.objects.push(value);
+                let key = track_scoped_allocation(value.as_heap_ptr() as usize, scope.owner)
+                    .expect("scoped allocation identity exhausted or ownership conflict");
+                scope.objects.push(key);
             }
         }
     });
@@ -2852,7 +2800,12 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
         if unsafe { rt_transient_raw_scope_begin() } == 0 {
             return false;
         }
+        let Some(owner) = new_scope_owner() else {
+            unsafe { rt_transient_raw_scope_end(); }
+            return false;
+        };
         *slot = Some(TransientHeapScope {
+            owner,
             paused: false,
             objects: Vec::new(),
             by_ptr: Default::default(),
@@ -3003,36 +2956,15 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
     }
 }
 
+#[path = "collection_dispose.rs"]
+mod dispose;
+pub(crate) use dispose::dispose_claimed;
+
 fn free_transient_heap(value: RuntimeValue) {
-    match value.heap_type() {
-        Some(HeapObjectType::String) => {
-            let _ = rt_string_free(value);
+    if value.is_heap() {
+        if let ClaimResult::Claimed(allocation) = claim_free(value.as_heap_ptr()) {
+            dispose_claimed(allocation);
         }
-        Some(HeapObjectType::Array) => rt_array_free(value),
-        Some(HeapObjectType::Tuple) => rt_tuple_free(value),
-        Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
-        Some(
-            HeapObjectType::Object
-            | HeapObjectType::Closure
-            | HeapObjectType::Enum
-            | HeapObjectType::Float
-            | HeapObjectType::UInt
-            | HeapObjectType::Int,
-        ) => unsafe {
-            let ptr = value.as_heap_ptr();
-            if value.heap_type() == Some(HeapObjectType::Closure)
-                && super::objects::closure_pin_defer_free(ptr as usize)
-            {
-                return; // pinned by a pending consumer; its last release frees it
-            }
-            let size = (*ptr).size as usize;
-            if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
-                if unregister_heap_ptr_checked(ptr) {
-                    std::alloc::dealloc(ptr as *mut u8, layout);
-                }
-            }
-        },
-        _ => (),
     }
 }
 
@@ -3134,19 +3066,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // permanent. The walk above stays FULL (no I2 pruning): legacy
         // callers may still violate I1 (e8152c252ad unowned roots holding
         // module-owned children). With no session this is unchanged.
-        if SESSION_HEAP.with(|slot| slot.borrow().is_some()) {
-            let mut released = Vec::new();
-            scope.release_reachable(&reachable_heap, Some(&mut released));
-            SESSION_HEAP.with(|slot| {
-                if let Some(session) = slot.borrow_mut().as_mut() {
-                    for value in released {
-                        session.adopt(value);
-                    }
-                }
-            });
-        } else {
-            scope.release_reachable(&reachable_heap, None);
-        }
+        SESSION_HEAP.with(|slot| {
+            scope.release_reachable(&reachable_heap, slot.borrow_mut().as_mut());
+        });
         // Fully committed: record it for later calls in an open share window.
         TRANSIENT_PROMOTE_SHARE.with(|share| {
             if let Some(share) = share.borrow_mut().as_mut() {
@@ -3210,7 +3132,7 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // index was ambiguous. The common path already tombstoned them to NIL.
     if !scope.promoted.is_empty() {
         let promoted = std::mem::take(&mut scope.promoted);
-        scope.objects.retain(|object| !promoted.contains(&object.0));
+        scope.objects.retain(|key| !promoted.contains(key));
     }
     free_transient_objects(&scope.objects);
     unsafe { rt_transient_raw_scope_end() != 0 }
@@ -3218,9 +3140,11 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
 
 /// Free every still-registered object in `objects` (module-scope end and
 /// `rt_session_heap_end`, BSM I4 — one sweep).
-fn free_transient_objects(objects: &[RuntimeValue]) {
-    for object in objects {
-        free_transient_heap(*object);
+fn free_transient_objects(objects: &[ScopedAllocationKey]) {
+    for key in objects {
+        if let ClaimResult::Claimed(allocation) = claim_scoped_free(*key) {
+            dispose_claimed(allocation);
+        }
     }
 }
 
@@ -3255,7 +3179,8 @@ pub extern "C" fn rt_session_heap_begin() -> u32 {
         if id == 0 {
             return 0;
         }
-        *slot = Some(SessionHeap { id, alloc_depth: 0, objects: Vec::new(), owned: Default::default() });
+        let Some(owner) = new_scope_owner() else { return 0; };
+        *slot = Some(SessionHeap { id, owner, alloc_depth: 0, objects: Vec::new(), owned: Default::default() });
         id
     })
 }
@@ -3380,14 +3305,8 @@ pub extern "C" fn rt_transient_heap_adopt(value: RuntimeValue) -> bool {
                 return false;
             }
         }
-        let mut released = Vec::with_capacity(moved.len());
-        scope.release_reachable(&moved, Some(&mut released));
         SESSION_HEAP.with(|slot| {
-            if let Some(session) = slot.borrow_mut().as_mut() {
-                for value in released {
-                    session.adopt(value);
-                }
-            }
+            scope.release_reachable(&moved, slot.borrow_mut().as_mut());
         });
         true
     });
@@ -3421,21 +3340,8 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 #[no_mangle]
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
-    let ptr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, ());
-    unsafe {
-        if !(*ptr).data.is_null() {
-            let data_layout = if (*ptr).is_byte_packed() {
-                byte_array_data_layout((*ptr).capacity)
-            } else {
-                array_data_layout((*ptr).capacity)
-            };
-            note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
-            std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
-            (*ptr).data = std::ptr::null_mut();
-        }
-        let header_layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
-        unregister_heap_ptr(ptr as *mut HeapHeader);
-        std::alloc::dealloc(ptr as *mut u8, header_layout);
+    if let ClaimResult::Claimed(allocation) = claim_typed_free(array, HeapObjectType::Array) {
+        dispose_claimed(allocation);
     }
 }
 
@@ -3583,40 +3489,10 @@ pub extern "C" fn rt_array_free_deep(value: RuntimeValue) -> i64 {
     // partial state is observable. Freeing top-down is safe because phase 1
     // already copied out every child pointer.
     for (ptr, kind) in plan {
-        unsafe {
-            match kind {
-                DeepFreeKind::Array => {
-                    let array = ptr as *mut RuntimeArray;
-                    if !unregister_heap_ptr_checked(ptr) {
-                        continue;
-                    }
-                    if !(*array).data.is_null() {
-                        let data_layout = if (*array).is_byte_packed() {
-                            byte_array_data_layout((*array).capacity)
-                        } else {
-                            array_data_layout((*array).capacity)
-                        };
-                        note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
-                        std::alloc::dealloc((*array).data as *mut u8, data_layout);
-                        (*array).data = std::ptr::null_mut();
-                    }
-                    let header_layout =
-                        std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
-                    std::alloc::dealloc(ptr as *mut u8, header_layout);
-                }
-                DeepFreeKind::String => {
-                    let string = ptr as *mut RuntimeString;
-                    // Read len BEFORE unregistering: it sizes the dealloc
-                    // layout and must match `alloc_runtime_string` exactly.
-                    let len = (*string).len;
-                    if !unregister_heap_ptr_checked(ptr) {
-                        continue;
-                    }
-                    let size = std::mem::size_of::<RuntimeString>() + len as usize;
-                    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-                    std::alloc::dealloc(ptr as *mut u8, layout);
-                }
-            }
+        let expected = match kind { DeepFreeKind::Array => HeapObjectType::Array, DeepFreeKind::String => HeapObjectType::String };
+        let value = RuntimeValue(ptr as u64 | super::tags::TAG_HEAP);
+        if let ClaimResult::Claimed(allocation) = claim_typed_free(value, expected) {
+            dispose_claimed(allocation);
         }
     }
     1
@@ -3643,22 +3519,10 @@ pub extern "C" fn rt_array_free_deep(value: RuntimeValue) -> i64 {
 /// refusing is deliberate.
 #[no_mangle]
 pub extern "C" fn rt_string_free(value: RuntimeValue) -> i64 {
-    let ptr = as_typed_ptr!(mut value, HeapObjectType::String, RuntimeString, 0);
-    unsafe {
-        if ((*ptr).header.reserved & RT_STRING_FLAG_SHARED) != 0 {
-            return 0;
-        }
-        // Read len BEFORE unregistering: it sizes the dealloc layout and must
-        // match `alloc_runtime_string` exactly.
-        let len = (*ptr).len;
-        if !unregister_heap_ptr_checked(ptr as *mut HeapHeader) {
-            return 0;
-        }
-        let size = std::mem::size_of::<RuntimeString>() + len as usize;
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-        std::alloc::dealloc(ptr as *mut u8, layout);
+    match claim_typed_free(value, HeapObjectType::String) {
+        ClaimResult::Claimed(allocation) => { dispose_claimed(allocation); 1 }
+        _ => 0,
     }
-    1
 }
 
 // ============================================================================
@@ -3730,12 +3594,8 @@ pub extern "C" fn rt_tuple_len(tuple: RuntimeValue) -> i64 {
 #[no_mangle]
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
-    let ptr = as_typed_ptr!(mut tuple, HeapObjectType::Tuple, RuntimeTuple, ());
-    unsafe {
-        let size = std::mem::size_of::<RuntimeTuple>() + (*ptr).len as usize * std::mem::size_of::<RuntimeValue>();
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-        unregister_heap_ptr(ptr as *mut HeapHeader);
-        std::alloc::dealloc(ptr as *mut u8, layout);
+    if let ClaimResult::Claimed(allocation) = claim_typed_free(tuple, HeapObjectType::Tuple) {
+        dispose_claimed(allocation);
     }
 }
 
@@ -9070,3 +8930,7 @@ mod lazy_string_hash_tests {
         assert_eq!(FNV1A_HASH_CALLS.load(Ordering::Relaxed) - before, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "session_claim_tests.rs"]
+mod session_claim_tests;

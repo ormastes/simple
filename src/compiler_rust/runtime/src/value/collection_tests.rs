@@ -2756,22 +2756,8 @@ fn bsm_p1_session_outside_module_freed_at_end() {
     assert!(super::rt_session_heap_end(again));
 }
 
-/// BSM P1 x P4: an rc root leaves the session; session end must not free it.
-#[test]
-fn bsm_p1_rc_shared_row_survives_session_end() {
-    let s = super::rt_session_heap_begin();
-    assert!(s != 0);
-    let row = bsm_p1_row(3);
-    let leaf = super::rt_array_get(row, 0);
-    assert!(super::session_heap_owns(row) && super::session_heap_owns(leaf));
-    assert!(crate::value::rt_rc_share(row));
-    assert!(!super::session_heap_owns(row) && !super::session_heap_owns(leaf));
-    assert!(super::rt_session_heap_end(s));
-    assert!(bsm_p1_live(row) && bsm_p1_live(leaf), "rc root and its owned graph outlive the session");
-    assert_eq!(crate::value::rt_rc_count(row), 1);
-    assert!(crate::value::rt_rc_release(row));
-    assert!(!bsm_p1_live(row) && !bsm_p1_live(leaf));
-}
+// P4 rc-root ownership was not selected into this P0–P3 candidate. Its donor
+// integration test requires absent rt_rc_share/count/release and is excluded.
 
 #[test]
 fn bsm_p1_module_scope_inside_session() {

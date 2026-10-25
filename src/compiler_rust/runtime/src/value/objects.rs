@@ -157,14 +157,9 @@ pub extern "C" fn rt_object_field_count(object: RuntimeValue) -> i64 {
 /// Free a heap-allocated object.
 #[no_mangle]
 pub extern "C" fn rt_object_free(object: RuntimeValue) {
-    let Some(ptr) = get_typed_ptr_mut::<RuntimeObject>(object, HeapObjectType::Object) else {
-        return;
-    };
-    unsafe {
-        let size =
-            std::mem::size_of::<RuntimeObject>() + (*ptr).field_count as usize * std::mem::size_of::<RuntimeValue>();
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-        std::alloc::dealloc(ptr as *mut u8, layout);
+    if let super::heap::ClaimResult::Claimed(allocation) =
+        super::heap::claim_typed_free(object, HeapObjectType::Object) {
+        super::collections::dispose_claimed(allocation);
     }
 }
 
@@ -232,14 +227,9 @@ pub extern "C" fn rt_closure_func_ptr(closure: RuntimeValue) -> *const u8 {
 /// Free a heap-allocated closure.
 #[no_mangle]
 pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
-    let Some(ptr) = get_typed_ptr_mut::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
-        return;
-    };
-    unsafe {
-        let size =
-            std::mem::size_of::<RuntimeClosure>() + (*ptr).capture_count as usize * std::mem::size_of::<RuntimeValue>();
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-        std::alloc::dealloc(ptr as *mut u8, layout);
+    if let super::heap::ClaimResult::Claimed(allocation) =
+        super::heap::claim_typed_free(closure, HeapObjectType::Closure) {
+        super::collections::dispose_claimed(allocation);
     }
 }
 
@@ -251,7 +241,7 @@ pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
 /// runtime_pool.c) pins it with `rt_closure_retain` and drops the pin exactly
 /// once with `rt_closure_release`. A closure dies only when its transient scope
 /// ends; the scope end marks a pinned closure orphaned instead of freeing it
-/// (`closure_pin_defer_free`), and the release that drops the last pin of an
+/// (the canonical scoped claim), and the release that drops the last pin of an
 /// orphaned closure frees it. Captured heap objects are not pinned.
 struct ClosurePin {
     addr: usize,
@@ -275,27 +265,29 @@ fn closure_pins() -> std::sync::MutexGuard<'static, ClosurePins> {
     CLOSURE_PINS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Scope end: true when `addr` is a pinned closure, which is then orphaned
-/// and must NOT be freed by the caller.
-pub(crate) fn closure_pin_defer_free(addr: usize) -> bool {
+/// Execute the registry claim with pin -> registry lock order. The callback
+/// marks orphaned only after canonical identity and type validation succeeds.
+pub(crate) fn with_closure_pin_claim<R>(
+    addr: usize, action: impl FnOnce(&mut dyn FnMut() -> bool) -> R,
+) -> R {
     let mut table = closure_pins();
-    match table.entries.iter_mut().find(|e| e.addr == addr) {
-        Some(entry) => {
-            entry.orphaned = true;
-            true
-        }
+    let mut defer = || match table.entries.iter_mut().find(|entry| entry.addr == addr) {
+        Some(entry) => { entry.orphaned = true; true }
         None => false,
-    }
+    };
+    action(&mut defer)
 }
 
 /// Pin a closure for a deferred consumer. 1 = pinned; 0 = not a closure.
 #[no_mangle]
 pub extern "C" fn rt_closure_retain(closure: RuntimeValue) -> i64 {
+    // Hold the pin lock across validation and publication; otherwise a claim
+    // could free the closure between get_typed_ptr and insertion.
+    let mut table = closure_pins();
     let Some(ptr) = get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
         return 0;
     };
     let addr = ptr as usize;
-    let mut table = closure_pins();
     match table.entries.iter_mut().find(|e| e.addr == addr) {
         Some(entry) => entry.pins += 1,
         None => table.entries.push(ClosurePin { addr, pins: 1, orphaned: false }),
@@ -328,13 +320,8 @@ pub extern "C" fn rt_closure_release(closure: RuntimeValue) -> i64 {
         }
     };
     if free_now {
-        unsafe {
-            let size = (*ptr).size as usize;
-            if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
-                if super::heap::unregister_heap_ptr_checked(ptr) {
-                    std::alloc::dealloc(ptr as *mut u8, layout);
-                }
-            }
+        if let super::heap::ClaimResult::Claimed(allocation) = super::heap::claim_free(ptr) {
+            super::collections::dispose_claimed(allocation);
         }
     }
     1
