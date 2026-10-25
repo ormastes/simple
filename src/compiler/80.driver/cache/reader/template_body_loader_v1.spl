@@ -1,0 +1,128 @@
+# Template-body loader for reader concrete instances (per-file P-G4).
+#
+# Backs the file worker's body-on-demand seam
+# (driver_reader_concrete_instance_v1): given (owner module, generic decl id,
+# concrete type-arg keys) it serves the OWNER module's already-loaded HIR (the
+# HIR-cache copy the MIR child holds; never a re-parse of the closure) so
+# module-scoped mono instantiates the body into F's own object. Instantiation,
+# template-symbol relocation (E-MONO-041, #4580/#4597) and COMDAT placement
+# (#4575/#4603) stay in MonomorphizationPass.process_module_scoped_v1; this
+# loader only decides WHICH owner body is admissible and caches the decision.
+#
+# Identity: each served instance is cached under its ConcreteTldrKey
+# (concrete_tldr_key_v1 over a template id that folds the owner's content
+# digest, and generic_args_id_v1 over the type-arg keys). Single-flight,
+# set-once: a key is filled at most once per process and a second request is a
+# cache hit. An owner whose content digest changed invalidates every instance
+# cached for the old digest (a new digest is a new key).
+#
+# Fail closed: an unknown owner, an owner whose HIR is not loaded, or an empty
+# digest is a miss with `pending_reason`; the caller then keeps its
+# widen -> MONO-PENDING path, so no object is emitted from a missing body.
+
+use compiler.common.cache_contract.generic_tldr_view_v1.{concrete_tldr_key_v1, generic_args_id_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub val TEMPLATE_BODY_SOURCE_LOADED_V1 = "loaded"
+pub val TEMPLATE_BODY_SOURCE_CACHE_V1 = "cache"
+
+pub struct TemplateBodyResultV1:
+    found: bool
+    owner_module: text
+    instance_key: text     # ConcreteTldrKey (DigestV1 text)
+    source: text           # TEMPLATE_BODY_SOURCE_*_V1
+    pending_reason: text   # non-empty only when found == false
+
+# Template id for a body: owner, decl id and the owner content digest the
+# body was loaded from (so an owner edit yields a different key).
+pub fn template_body_template_id_v1(owner_module: text, generic_decl_id: text, owner_digest: text) -> text:
+    "sha256:" + sha256_text("tldr-template-body/v1|{owner_module.len()}:{owner_module}|" +
+        "{generic_decl_id.len()}:{generic_decl_id}|{owner_digest.len()}:{owner_digest}")
+
+pub fn template_body_instance_key_v1(owner_module: text, generic_decl_id: text, owner_digest: text,
+        type_arg_keys: [text]) -> text:
+    var kinds: [text] = []
+    for _k in type_arg_keys:
+        kinds = kinds.push("type")
+    concrete_tldr_key_v1(template_body_template_id_v1(owner_module, generic_decl_id, owner_digest),
+        generic_args_id_v1(kinds, type_arg_keys), "", "", "")
+
+# Owner of a template named by an E-MONO-040 diagnostic: a qualified name
+# whose module prefix is a known module wins; otherwise the unique module that
+# declares a generic named `name`. Ambiguous or unknown -> "".
+pub fn template_body_owner_of_v1(name: text, declared: Dict<text, [text]>) -> text:
+    val owners: [text] = declared.keys()
+    var best = ""
+    for owner in owners:
+        val prefix = owner + "."
+        if name.starts_with(prefix) and owner.len() > best.len():
+            best = owner
+    if best != "":
+        return best
+    var found = ""
+    for owner in owners:
+        val decls: [text] = declared[owner]
+        if decls.contains(name):
+            if found != "":
+                return ""
+            found = owner
+    found
+
+class TemplateBodyLoaderV1:
+    # owner -> content digest its cached instances were loaded under
+    owner_digests: Dict<text, text>
+    # ConcreteTldrKey -> owner module (set-once)
+    instances: Dict<text, text>
+    loads: i64
+    hits: i64
+    misses: i64
+    invalidations: i64
+
+    static fn create() -> TemplateBodyLoaderV1:
+        TemplateBodyLoaderV1(owner_digests: {}, instances: {}, loads: 0, hits: 0, misses: 0,
+            invalidations: 0)
+
+    me _miss(owner: text, reason: text) -> TemplateBodyResultV1:
+        self.misses = self.misses + 1
+        TemplateBodyResultV1(found: false, owner_module: owner, instance_key: "", source: "",
+            pending_reason: reason)
+
+    # `owner_loaded`: the owner's HIR body is available (HIR cache / packed
+    # surface already admitted in this process). `owner_digest`: its content
+    # identity (empty = unknown -> fail closed).
+    me load(owner_module: text, generic_decl_id: text, type_arg_keys: [text], owner_digest: text,
+            owner_loaded: bool) -> TemplateBodyResultV1:
+        if owner_module == "":
+            return self._miss(owner_module, "owner-unknown")
+        if not owner_loaded:
+            return self._miss(owner_module, "owner-body-unavailable")
+        if owner_digest == "":
+            return self._miss(owner_module, "owner-digest-unknown")
+        if self.owner_digests.contains_key(owner_module) and self.owner_digests[owner_module] != owner_digest:
+            self._invalidate(owner_module)
+        self.owner_digests[owner_module] = owner_digest
+        val key = template_body_instance_key_v1(owner_module, generic_decl_id, owner_digest, type_arg_keys)
+        if self.instances.contains_key(key):
+            self.hits = self.hits + 1
+            return TemplateBodyResultV1(found: true, owner_module: owner_module, instance_key: key,
+                source: TEMPLATE_BODY_SOURCE_CACHE_V1, pending_reason: "")
+        self.instances[key] = owner_module
+        self.loads = self.loads + 1
+        TemplateBodyResultV1(found: true, owner_module: owner_module, instance_key: key,
+            source: TEMPLATE_BODY_SOURCE_LOADED_V1, pending_reason: "")
+
+    me _invalidate(owner_module: text):
+        var kept: Dict<text, text> = {}
+        for key in self.instances.keys():
+            val owner: text = self.instances[key]
+            if owner == owner_module:
+                self.invalidations = self.invalidations + 1
+            else:
+                kept[key] = owner
+        self.instances = kept
+
+    fn cached(key: text) -> bool:
+        self.instances.contains_key(key)
+
+pub fn template_body_loader_new_v1() -> TemplateBodyLoaderV1:
+    TemplateBodyLoaderV1.create()

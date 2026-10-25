@@ -41,20 +41,54 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_
     native_file_worker_reader_instances_available_v1, native_file_worker_reader_instances_enabled_v1,
     NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_counters_v1}
+use compiler.driver.cache.reader.template_body_loader_v1.{TemplateBodyLoaderV1,
+    template_body_loader_new_v1, template_body_owner_of_v1}
 
-# Template-BODY-on-demand seam (stub). Returns the owner module's HIR that
-# carries the body of `template`, loaded on demand from the owner's published
-# artifact (HIR cache / TLDR AST) for the requesting file, so F can instantiate
-# it into F's own object without waiting on the owner's HIR shard. P-G2's
-# specialization list names which instances F needs; P-G1's
-# reader_concrete_instance_v1 (ConcreteTldrAstViewV1) serves TYPE inference
-# only and does not back this seam. None = this body is unavailable.
-fn driver_reader_concrete_instance_v1(template: text, requester_path: text) -> Option<HirModule>:
+# Template-BODY-on-demand seam (P-G4). Serves the OWNER module's HIR that
+# carries the body of `template`, taken from the HIR this MIR child already
+# admitted from the HIR cache (never a re-parse of the closure), so F
+# instantiates it into F's own object (module-scoped mono does relocation and
+# COMDAT placement) without waiting on the owner's HIR shard. The decision is
+# cached per ConcreteTldrKey in a process-local, set-once
+# TemplateBodyLoaderV1; an owner content change invalidates its entries.
+# P-G1's reader_concrete_instance_v1 still serves TYPE views only.
+# None = body unavailable (fail closed: the caller widens, then MONO-PENDING).
+var driver_template_body_loader_v1: TemplateBodyLoaderV1 = template_body_loader_new_v1()
+
+fn driver_template_decl_names_v1(module: HirModule) -> [text]:
+    var names: [text] = []
+    for f in module.functions.values():
+        val func: HirFunction = f
+        if func.is_generic_template or (func.type_params != nil and func.type_params.len() > 0):
+            names = names.push(func.name)
+    for s in module.structs.values():
+        val st: HirStruct = s
+        if st.is_generic_template or (st.type_params != nil and st.type_params.len() > 0):
+            names = names.push(st.name)
+    for c in module.classes.values():
+        val cl: HirClass = c
+        if cl.is_generic_template or (cl.type_params != nil and cl.type_params.len() > 0):
+            names = names.push(cl.name)
+    names
+
+fn driver_reader_concrete_instance_v1(template: text, requester_path: text,
+        modules: Dict<text, HirModule>, declared: Dict<text, [text]>,
+        digests: Dict<text, text>) -> Option<HirModule>:
     if not native_file_worker_reader_instances_enabled_v1(
             env_get(NATIVE_FILE_WORKER_READER_INSTANCES_ENV_V1) ?? "",
             native_file_worker_reader_instances_available_v1()):
         return None
-    None
+    val owner = template_body_owner_of_v1(template, declared)
+    var loaded = owner != "" and modules.contains_key(owner) and modules[owner] != nil
+    if loaded and modules[owner].path == requester_path:
+        loaded = false
+    val digest = if digests.contains_key(owner): digests[owner] else: ""
+    val result = driver_template_body_loader_v1.load(owner, template, [], digest, loaded)
+    if not result.found:
+        print "[file-worker] template-body miss template={template} owner={owner} reason={result.pending_reason}"
+        return None
+    print "[file-worker] template-body {result.source} template={template} owner={owner}"
+    Some(modules[owner])
 
 
 impl CompilerDriver:
@@ -209,8 +243,15 @@ impl CompilerDriver:
         val hir_queue = env_get("SIMPLE_FILE_WORKER_HIR_QUEUE") ?? ""
         val mir_queue = env_get("SIMPLE_MIR_SHARD_QUEUE") ?? ""
         var name_of_path: Dict<text, text> = {}
+        # Owner content identity for the template-body loader (P-G4).
+        var owner_digests: Dict<text, text> = {}
         for src in self.ctx.sources:
             name_of_path[src.path] = src.module_name
+            owner_digests[src.module_name] = sha256_text(src.content)
+        # Template declarations of the HIR this child already holds, built
+        # lazily on the first E-MONO-040 and reused (set-once).
+        var declared: Dict<text, [text]> = {}
+        var declared_built = false
         var verified: Dict<text, HirModule> = {}
         for path in target_paths:
             if not name_of_path.contains_key(path) or self.ctx.hir_modules[name_of_path[path]] == nil:
@@ -243,7 +284,13 @@ impl CompilerDriver:
                     if reader_asked.contains(missing):
                         continue
                     reader_asked = reader_asked.push(missing)
-                    val served = driver_reader_concrete_instance_v1(missing, path)
+                    if not declared_built:
+                        for mname in self.ctx.hir_modules.keys():
+                            if self.ctx.hir_modules[mname] != nil:
+                                declared[mname] = driver_template_decl_names_v1(self.ctx.hir_modules[mname])
+                        declared_built = true
+                    val served = driver_reader_concrete_instance_v1(missing, path,
+                        self.ctx.hir_modules, declared, owner_digests)
                     if served.is_some():
                         val carrier = served.unwrap()
                         reader_templates[carrier.name] = carrier
