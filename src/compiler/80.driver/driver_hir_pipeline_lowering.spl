@@ -260,6 +260,9 @@ fn driver_hir_forbids_written_any(ctx: CompileContext) -> bool:
     ctx.options.mode != CompileMode.Interpret and
         ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust)
 
+fn driver_hir_is_written_any_warning_v1(message: text) -> bool:
+    message.contains("[W-ANY-COMPILE-001]")
+
 fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
         (env_get("SIMPLE_BOOTSTRAP")) == "1"
@@ -1003,6 +1006,8 @@ impl CompilerDriver:
         if abi_receipt.0 != "":
             driver_log_typed_hir_abi_result_v1(abi_receipt.0, abi_receipt.1, source.path)
         for message in warnings:
+            if driver_hir_is_written_any_warning_v1(message):
+                eprint(message)
             if not driver_hir_ambient_bootstrap_enabled(self.ctx):
                 self.ctx.add_warning(message)
         for message in errors:
@@ -1341,8 +1346,10 @@ impl CompilerDriver:
                     source.module_name
                 if hir_bootstrap_mode_gate:
                     bootstrap_hir_modules_add_from_module(hir_module, hir_registry_name, is_requested_bootstrap_entry)
-                if not hir_bootstrap_mode_gate:
-                    for hir_cached_warning in hir_cache_last_warnings():
+                for hir_cached_warning in hir_cache_last_warnings():
+                    if driver_hir_is_written_any_warning_v1(hir_cached_warning):
+                        eprint(hir_cached_warning)
+                    if not hir_bootstrap_mode_gate:
                         self.ctx.add_warning(hir_cached_warning)
                 if not driver_hir_mem_snapshot(
                     "hir-post-lowering", source_index, source.path,
@@ -1418,6 +1425,8 @@ impl CompilerDriver:
                         module_error_index)
                     if module_error_recovered:
                         hir_module_warnings.push(module_error_message)
+                        if driver_hir_is_written_any_warning_v1(module_error_message):
+                            eprint(module_error_message)
                         # The staged compiler's aggregate warning mutation can
                         # corrupt the adjacent error-count scalar. Warnings remain
                         # advisory and are retained outside bootstrap mode.
@@ -1930,11 +1939,12 @@ impl CompilerDriver:
                     name
                 if hir_bootstrap_mode_gate:
                     bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
-                # Replay the stored warning-level diagnostics under the same
-                # gate the in-process path applies (warnings are advisory and
-                # dropped in bootstrap mode there too).
-                if not hir_bootstrap_mode_gate:
-                    for hir_cached_warning in hir_cache_last_warnings():
+                # Replay warnings normally; mandatory written-Any warnings
+                # remain visible during bootstrap as well.
+                for hir_cached_warning in hir_cache_last_warnings():
+                    if driver_hir_is_written_any_warning_v1(hir_cached_warning):
+                        eprint(hir_cached_warning)
+                    if not hir_bootstrap_mode_gate:
                         self.ctx.add_warning(hir_cached_warning)
             var hir_module: HirModule = if hir_cache_hit:
                 dtrace("[DRV] branch=hir_cache_hit")
@@ -2070,6 +2080,8 @@ impl CompilerDriver:
                     eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
                 if module_error_recovered:
                     hir_module_warnings.push(module_error_message)
+                    if driver_hir_is_written_any_warning_v1(module_error_message):
+                        eprint(module_error_message)
                     # Avoid warning aggregate mutation on the old staged ABI;
                     # bounded debug output above keeps diagnostics visible.
                     if not bootstrap_mode:

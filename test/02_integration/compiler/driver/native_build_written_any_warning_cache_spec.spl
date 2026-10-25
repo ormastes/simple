@@ -1,0 +1,53 @@
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.process_ops.{process_run_timeout}
+use std.io_runtime.{dir_create_all, getpid}
+
+val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_written_any"
+
+fn any_warning_build(producer: text, root: text, lane: text) -> (text, text, i32):
+    process_run_timeout(producer, ["native-build", "--source", FIXTURE_ROOT,
+        "--entry-closure", "--threads", "24", "--cache-dir", root + "/objects-" + lane,
+        "--entry", FIXTURE_ROOT + "/main.spl", "--output", root + "/" + lane + ".out"], 1800000)
+
+describe "native-build written Any warning cache relay":
+    slow_it "prints the required Any warning on cold lowering and warm HIR cache replay":
+        # Require the exact rebuilt self-hosted compiler from the test owner.
+        # There is deliberately no bin/simple or Rust-seed fallback.
+        val requested = env_get("SIMPLE_BINARY") ?? ""
+        expect(requested != "").to_equal(true)
+        val producer = path_absolute(requested)
+
+        val root = path_absolute("build/tmp/written_any_cache_" + getpid().to_string())
+        expect(dir_create_all(root)).to_equal(true)
+
+        val keys = ["SIMPLE_SAFETY_PROFILE", "SIMPLE_HIR_CACHE", "SIMPLE_FRONTEND_CACHE",
+            "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_BOOTSTRAP",
+            "SIMPLE_STAGE3_STREAMING_SURFACES"]
+        var old: [text] = []
+        for key in keys: old.push(env_get(key) ?? "")
+        env_set("SIMPLE_SAFETY_PROFILE", "moderate")
+        env_set("SIMPLE_HIR_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_HIR_CACHE_DIR", root + "/hir")
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", root + "/frontend")
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "")
+
+        val (cold_out, cold_err, cold_code) = any_warning_build(producer, root, "cold")
+        val (warm_out, warm_err, warm_code) = any_warning_build(producer, root, "warm")
+
+        var index = 0
+        while index < keys.len():
+            env_set(keys[index], old[index])
+            index = index + 1
+
+        expect(cold_code).to_equal(0)
+        expect(cold_err).to_contain("[W-ANY-COMPILE-001]")
+        val cold_log = cold_out + "\n" + cold_err
+        expect(cold_log).to_contain("[hir-cache] hits=0 misses=1")
+        expect(warm_code).to_equal(0)
+        expect(warm_err).to_contain("[W-ANY-COMPILE-001]")
+        val warm_log = warm_out + "\n" + warm_err
+        expect(warm_log).to_contain("[hir-cache] hits=1 misses=0")

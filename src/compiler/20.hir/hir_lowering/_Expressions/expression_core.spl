@@ -9,7 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
+use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capability_set_contains, unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
@@ -1115,6 +1115,10 @@ impl HirLowering:
                 self.build_match_expr(hir_scrutinee, hir_arms, scrutinee.span)
 
             case ExprKind.Lambda(params, body):
+                # The closure may escape its enclosing unsafe block, so an
+                # outer type_erasure grant cannot authorize its stored types.
+                val enclosing_any_unsafe_depth = self.written_any_unsafe_depth
+                self.written_any_unsafe_depth = 0
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 # Cycle-161 (v22, 2026-10-18): NO for-in element rebind --
@@ -1142,6 +1146,7 @@ impl HirLowering:
                     lam_param_i = lam_param_i + 1
                 val hir_body = self.lower_hir_expr(body)
                 self.symbols.pop_scope()
+                self.written_any_unsafe_depth = enclosing_any_unsafe_depth
                 HirExprKind.Lambda(hir_params, hir_body, [])
 
             case ExprKind.Return(value):
@@ -1289,9 +1294,13 @@ impl HirLowering:
                 val unknown_caps = unknown_unsafe_capability_names(caps)
                 if unknown_caps.len() > 0:
                     self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), e.span)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
+                val grants_type_erasure = unknown_caps.len() == 0 and
+                    unsafe_capability_set_contains(caps, UnsafeCapability.TypeErasure)
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth + 1
                 var unsafe_hir_body = self.lower_hir_block(body)
-                self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
+                if grants_type_erasure:
+                    self.written_any_unsafe_depth = self.written_any_unsafe_depth - 1
                 unsafe_hir_body.unsafe_caps = caps
                 HirExprKind.UnsafeBlock(unsafe_hir_body)
 

@@ -96,9 +96,9 @@ class HirLowering:
     # lower to the legacy Ref / Ptr / Infer so default-mode HIR is unchanged.
     nogc_strict: bool
     # Source-written `Any` policy, set by the driver:
-    #   script (interpreter)          -> allowed
-    #   compiled, below robust        -> allowed
-    #   compiled, robust / critical   -> allowed only inside `unsafe:` / `danger:`
+    #   HIR lowering below robust    -> warning outside type_erasure
+    #   robust / critical lowering  -> error outside type_erasure
+    #   any lowering inside an authorized type_erasure block -> allowed
     # Resolver-internal erasure (`list`, `fn`, unresolved `Self`, the flat
     # parser's `__any` fallback) is not written `Any` and is not affected.
     forbid_written_any: bool
@@ -896,15 +896,21 @@ impl HirLowering:
         self.diagnostic_messages = self.diagnostic_messages.push(rendered)
         self.diagnostic_recovered = self.diagnostic_recovered.push(false)
 
-    me recovered(message: text, span: Span):
+    me record_recovered_diagnostic(message: text, span: Span, label: text):
         self.errors = self.errors.push(LoweringError(
             message: message,
             span: span,
             kind: LoweringErrorKind.Recovered
         ))
-        val rendered = "HIR lowering error in {self.module_filename}: {message}"
+        val rendered = "HIR lowering {label} in {self.module_filename}: {message}"
         self.diagnostic_messages = self.diagnostic_messages.push(rendered)
         self.diagnostic_recovered = self.diagnostic_recovered.push(true)
+
+    me recovered(message: text, span: Span):
+        self.record_recovered_diagnostic(message, span, "error")
+
+    me warning(message: text, span: Span):
+        self.record_recovered_diagnostic(message, span, "warning")
 
     me promote_diagnostics_transient_owner() -> bool:
         # These parallel owners form one diagnostic record stream. Promote all
@@ -1341,11 +1347,14 @@ impl HirLowering:
             case "unit" | "void": HirTypeKind.Unit
             case "char": HirTypeKind.Char
             # Flat-parser fallback (see _FlatAstBridge/convert_nodes.spl), never
-            # source-written: erased, but not subject to the compile-mode ban.
+            # parser-internal fallback, not source-written `Any`.
             case "__any": HirTypeKind.Any
             case "Any" | "any":
+                # NEVER disable this diagnostic for a workaround, bootstrap, cache reuse, or execution mode.
                 if self.forbid_written_any and self.written_any_unsafe_depth == 0:
-                    self.error("[E-ANY-COMPILE-001] `Any` is not allowed in robust/critical compiled code outside an `unsafe:` / `danger:` block; use a generic `<T>`, a concrete type, or a closed enum", span)
+                    self.error("[E-ANY-COMPILE-001] `Any` is not allowed outside `unsafe(capabilities: [type_erasure])`; use a generic `<T>`, a concrete type, or a closed enum", span)
+                elif self.written_any_unsafe_depth == 0:
+                    self.warning("[W-ANY-COMPILE-001] `Any` is not allowed in safe code; use a generic `<T>`, a concrete type, or an explicit `unsafe(capabilities: [type_erasure])` boundary", span)
                 HirTypeKind.Any
             case "text" | "str" | "String": HirTypeKind.Str
             case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), None)
