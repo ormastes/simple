@@ -1,0 +1,150 @@
+"""Actual Linux broker/CLI/tool-tree acceptance. All cases UNRUN.
+
+Requires admitted SIMPLE_TEST_COMPILER + SIMPLE_TEST_COMPILER_DIGEST, cached
+SIMPLE_MIR_GROUP_BROKER_PROGRAM + DIGEST, explicit WORKER_KIB and PHASE_KIB.
+No seed, fake child PID, source broker, or skipped positive acceptance.
+"""
+use std.spec.*
+use app.io.env_ops.{env_get, cwd}
+use app.bootstrap_builder.native_group_linux_launcher.{native_linux_group_broker_launch_v1}
+use app.cli.native_mir_managed_process_owner_v1.{NativeMirManagedWorkerV1,
+    NativeMirManagedPollV1, native_mir_managed_worker_poll_v1, native_mir_managed_worker_drain_v1}
+use std.common.build_manager.group_process_protocol.{GroupProcessRequestV1, GroupProcessInputV1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.common.build_manager.group_process_child_identity_v1.{GroupProcessChildIdentityV1}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1,
+    group_process_start_retained_v2, group_process_child_identity_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_hash_sha256,
+    file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.common.crypto.sha256.{sha256_text}
+
+var managed_spec_registered = false
+
+fn managed_spec_start(root: text, ordinal: i64, lifetime_ms: i64, self_kill: bool = false) -> NativeMirManagedWorkerV1:
+    val program = env_get("SIMPLE_TEST_COMPILER") ?? ""
+    val digest = env_get("SIMPLE_TEST_COMPILER_DIGEST") ?? ""
+    val broker = env_get("SIMPLE_MIR_GROUP_BROKER_PROGRAM") ?? ""
+    val broker_digest = env_get("SIMPLE_MIR_GROUP_BROKER_DIGEST") ?? ""
+    expect(file_is_regular_no_follow(program)).to_equal(true)
+    expect(file_hash_sha256(program)).to_equal(digest)
+    expect(file_is_regular_no_follow(broker)).to_equal(true)
+    expect(file_hash_sha256(broker)).to_equal(broker_digest)
+    val worker_kib = (env_get("SIMPLE_MIR_SELECTIVE_WORKER_KIB") ?? "").to_i64() ?? 0
+    val broker_kib = (env_get("SIMPLE_MIR_SELECTIVE_BROKER_KIB") ?? "").to_i64() ?? 0
+    val phase_kib = (env_get("SIMPLE_MIR_SELECTIVE_PHASE_KIB") ?? "").to_i64() ?? 0
+    expect(worker_kib > 0 and broker_kib > 0 and phase_kib > 0).to_equal(true)
+    expect(worker_kib <= phase_kib / 2 - broker_kib).to_equal(true)
+    if not managed_spec_registered:
+        expect(group_process_set_launcher_v1(native_linux_group_broker_launch_v1, "linux")).to_equal(true)
+        managed_spec_registered = true
+    val fixture = cwd() + "/test/fixtures/native_mir_managed_owner/grandchild.spl"
+    val marker = root + "/started"
+    val request = GroupProcessRequestV1(program: program, producer_digest: digest,
+        args: ["run", fixture], directory: cwd(),
+        environment: ["PATH=/usr/bin:/bin", "SIMPLE_LIB=" + cwd() + "/src",
+            "SIMPLE_TEST_MANAGED_TREE_MARKER=" + marker, "TMPDIR=" + root,
+            "SIMPLE_TEST_MANAGED_SELF_KILL=" + if self_kill: "1" else: "0"],
+        inputs: [GroupProcessInputV1(fixture, file_hash_sha256(fixture))],
+        stdout_path: root + "/stdout", stderr_path: root + "/stderr", timeout_ms: lifetime_ms,
+        broker_program: broker, broker_digest: broker_digest, mode: "native-worker-v1")
+    val worker = "spec_" + ordinal.to_text()
+    val snapshot = sha256_text("fixture:" + file_hash_sha256(fixture))
+    val cache = sha256_text("managed-owner-spec-cache")
+    val started = time_now_monotonic_ms()
+    val attempt = group_process_start_retained_v2(root, worker, 1, snapshot, cache,
+        request, worker_kib * 1024)
+    expect(attempt.is_ok()).to_equal(true)
+    val admitted = attempt.unwrap()
+    val lease = GroupedActionLeaseV1(group_id: "managed_spec", action_id: worker,
+        worker_id: worker, generation: 1, lease_id: admitted.owner.identity_digest,
+        snapshot_digest: snapshot, cache_identity: cache, completed: false)
+    NativeMirManagedWorkerV1(owner: admitted.owner, lease: lease, private_root: root,
+        spawned_ms: started, startup_unknown: admitted.startup_unknown, startup_reason: admitted.reason)
+
+fn managed_spec_wait_started(worker: NativeMirManagedWorkerV1) -> Result<GroupProcessChildIdentityV1, text>:
+    val deadline = time_now_monotonic_ms() + 60000
+    while time_now_monotonic_ms() < deadline:
+        if file_exists(worker.private_root + "/started") and file_exists(worker.private_root + "/started.tool"):
+            val identity = group_process_child_identity_v1(worker.owner)
+            if identity.is_ok(): return identity
+        val observed = native_mir_managed_worker_poll_v1(worker)
+        if observed.state == "TERMINAL": return Err("actual fixture exited before starting child tool")
+        sleep_ms(20)
+    Err("actual managed fixture did not start child tool")
+
+fn managed_spec_wait_terminal(worker: NativeMirManagedWorkerV1, budget_ms: i64) -> Result<NativeMirManagedPollV1, text>:
+    val deadline = time_now_monotonic_ms() + budget_ms
+    while time_now_monotonic_ms() < deadline:
+        val observed = native_mir_managed_worker_poll_v1(worker)
+        if observed.state == "TERMINAL": return Ok(observed)
+        sleep_ms(20)
+    Err("actual managed terminal receipt missing")
+
+describe "Actual managed MIR process-tree ownership":
+    it "cancels and collects a real compiler child and grandchild without trusting an unrelated PID":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val first_root = secure_temp_dir_raw(temporary, "managed-tree-first")
+        val second_root = secure_temp_dir_raw(temporary, "managed-tree-second")
+        expect(first_root != "" and second_root != "").to_equal(true)
+        val first = managed_spec_start(first_root, 0, 180000)
+        val second = managed_spec_start(second_root, 1, 180000)
+        val first_started = managed_spec_wait_started(first)
+        val second_started = managed_spec_wait_started(second)
+        # This numeric self-report is deliberately forged. Cancellation uses
+        # the retained owner, never this PID or a later PID liveness probe.
+        if second_started.is_ok():
+            val altered = file_write(first_root + "/started", second_started.unwrap().pid.to_text())
+            expect(altered).to_equal(true)
+        val drained_first = native_mir_managed_worker_drain_v1(first, 30000)
+        val second_still_owned = native_mir_managed_worker_poll_v1(second)
+        val drained_second = native_mir_managed_worker_drain_v1(second, 30000)
+        # Perform cleanup before asserting startup, so an assertion cannot
+        # intentionally abandon a known live tree.
+        expect(first_started.is_ok()).to_equal(true)
+        expect(second_started.is_ok()).to_equal(true)
+        expect(drained_first.state).to_equal("TERMINAL")
+        expect(drained_first.tree_receipt_digest.len()).to_equal(64)
+        expect(second_still_owned.state).to_equal("ACTIVE")
+        expect(drained_second.state).to_equal("TERMINAL")
+        expect(drained_second.tree_receipt_digest.len()).to_equal(64)
+        # Repeating terminal collection reads the retained proof and never
+        # signals a numeric PID that may since have been reused.
+        val repeated = native_mir_managed_worker_drain_v1(first, 1000)
+        expect(repeated.tree_receipt_digest).to_equal(drained_first.tree_receipt_digest)
+        expect(dir_remove(first_root, true)).to_equal(true)
+        expect(dir_remove(second_root, true)).to_equal(true)
+
+    it "retains actual native timeout status only after descendant drain and collected tree proof":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val root = secure_temp_dir_raw(temporary, "managed-tree-timeout")
+        expect(root != "").to_equal(true)
+        val lifetime = (env_get("SIMPLE_MIR_MANAGED_TEST_TIMEOUT_MS") ?? "").to_i64() ?? 0
+        expect(lifetime > 0 and lifetime <= 86400000).to_equal(true)
+        val worker = managed_spec_start(root, 2, lifetime)
+        val started = managed_spec_wait_started(worker)
+        val terminal = managed_spec_wait_terminal(worker, lifetime + 30000)
+        val cleaned = native_mir_managed_worker_drain_v1(worker, 30000)
+        expect(started.is_ok()).to_equal(true)
+        expect(terminal.is_ok()).to_equal(true)
+        expect(terminal.unwrap().reason).to_contain("timed out")
+        expect(terminal.unwrap().tree_receipt_digest.len()).to_equal(64)
+        expect(cleaned.state).to_equal("TERMINAL")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains SIGKILL exit status and reaps the surviving child tool tree":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val root = secure_temp_dir_raw(temporary, "managed-tree-sigkill")
+        expect(root != "").to_equal(true)
+        val worker = managed_spec_start(root, 3, 180000, true)
+        val started = managed_spec_wait_started(worker)
+        val terminal = managed_spec_wait_terminal(worker, 60000)
+        val cleaned = native_mir_managed_worker_drain_v1(worker, 30000)
+        expect(started.is_ok()).to_equal(true)
+        expect(terminal.is_ok()).to_equal(true)
+        expect(terminal.unwrap().exit_code).to_equal(137)
+        expect(terminal.unwrap().tree_receipt_digest.len()).to_equal(64)
+        expect(cleaned.state).to_equal("TERMINAL")
+        expect(dir_remove(root, true)).to_equal(true)

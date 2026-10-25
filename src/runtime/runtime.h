@@ -1382,7 +1382,6 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
  * exit_code,timed_out,cancelled,memory_peak,memory_current]. The latter is
  * cgroup memory.current while live and zero after the tree is reaped.
  * Unsupported hosts fail closed. */
-#ifdef __linux__
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
     uint64_t program_len, const char* digest, uint64_t digest_len,
     SplArray* args);
@@ -1394,11 +1393,11 @@ SplArray* rt_linux_group_start_v1(const char* program, uint64_t program_len,
     int64_t memory_limit, int64_t timeout_ms,
     const char* stdout_path, uint64_t stdout_len,
     const char* stderr_path, uint64_t stderr_len);
+SplArray* rt_linux_group_child_pid_v1(int64_t token);
 SplArray* rt_linux_group_poll_v1(int64_t token);
 int64_t rt_linux_group_cancel_v1(int64_t token);
 SplArray* rt_linux_group_collect_v1(int64_t token);
 SplArray* rt_linux_group_available_capacity_v1(const char* path, uint64_t path_len);
-#endif
 
 /* ===== Process Piped (editor LSP transport) ===== */
 

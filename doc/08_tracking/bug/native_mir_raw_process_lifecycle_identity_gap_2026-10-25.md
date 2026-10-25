@@ -28,3 +28,15 @@ retained original child identity, terminal status preserved when kill reaps,
 no post-reap PID probe/kill, and complete tool-tree quiescence. Runtime evidence
 is UNRUN without a qualified CLI/provider/runtime; source helpers and sampled
 birth values do not qualify those claims. Frozen campaigns stay unchanged.
+
+## Managed selective-worker source candidate
+
+A subsequent source change adds the existing broker's versioned generic argv
+contract and routes selective workers through its retained pidfd/cgroup owner.
+It binds actual child metadata from the broker, preserves unknown startup/drain
+ownership, and requires durable terminal plus collected tree receipts. Legacy
+raw paths are not qualified by this candidate. Exact review and real managed
+CLI/grandchild/timeout/SIGKILL acceptance remain pending/UNRUN; no overall
+lifecycle or parallel-bootstrap PASS is claimed. The unavailable-host C fixture
+correction records an independently observed ENODATA/ENOTSUP missing-controller
+prerequisite and never treats that denial as positive lifecycle evidence.

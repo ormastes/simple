@@ -1,0 +1,71 @@
+# Broker-issued actual child identity, bound to immutable managed request.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1}
+
+pub struct GroupProcessChildIdentityV1:
+    request_identity: text
+    worker_id: text
+    producer_digest: text
+    birth_identity: text
+    generation: i64
+    pid: i64
+    observed_ms: i64
+
+pub fn group_process_child_identity_encode_v1(c: GroupProcessChildIdentityV1) -> Result<text, text>:
+    val birth = c.birth_identity.to_i64() ?? -1
+    if not sha256_lower_hex_valid(c.request_identity) or not sha256_lower_hex_valid(c.producer_digest) or
+            not builder_identifier_valid_v1(c.worker_id) or c.generation < 1 or c.generation > 1000000000 or
+            c.pid <= 1 or birth <= 0 or "{birth}" != c.birth_identity or c.observed_ms <= 0:
+        return Err("managed child identity fields refused")
+    var d: Dict<text, SdnValue> = {}
+    d["schema"] = SdnValue.String("simple/managed-child-identity/v1")
+    d["request_identity"] = SdnValue.String(c.request_identity)
+    d["worker_id"] = SdnValue.String(c.worker_id)
+    d["producer_digest"] = SdnValue.String(c.producer_digest)
+    d["birth_identity"] = SdnValue.String(c.birth_identity)
+    d["generation"] = SdnValue.Int(c.generation)
+    d["pid"] = SdnValue.Int(c.pid)
+    d["observed_ms"] = SdnValue.Int(c.observed_ms)
+    val blob = sdn_encode_canonical(SdnValue.Dict(d)) + "\n"
+    if blob.len() > 16384: return Err("managed child identity byte bound exceeded")
+    Ok(blob)
+
+fn child_text(d: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not d.has(key): return Err("managed child identity field missing")
+    match d[key]:
+        case String(value): Ok(value)
+        case _: Err("managed child identity text field malformed")
+
+fn child_int(d: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not d.has(key): return Err("managed child identity field missing")
+    match d[key]:
+        case Int(value): Ok(value)
+        case _: Err("managed child identity integer field malformed")
+
+pub fn group_process_child_identity_decode_v1(blob: text, request_identity: text,
+        worker_id: text, generation: i64, producer_digest: text) -> Result<GroupProcessChildIdentityV1, text>:
+    if blob.len() > 16384: return Err("managed child identity byte bound exceeded")
+    val parsed = parse_untrusted(blob)?
+    var d: Dict<text, SdnValue> = {}
+    match parsed:
+        case Dict(fields): d = fields
+        case _: return Err("managed child identity record malformed")
+    if d.keys().len() != 8 or child_text(d, "schema")? != "simple/managed-child-identity/v1":
+        return Err("managed child identity schema mismatch")
+    val child = GroupProcessChildIdentityV1(
+        request_identity: child_text(d, "request_identity")?,
+        worker_id: child_text(d, "worker_id")?,
+        producer_digest: child_text(d, "producer_digest")?,
+        birth_identity: child_text(d, "birth_identity")?,
+        generation: child_int(d, "generation")?,
+        pid: child_int(d, "pid")?,
+        observed_ms: child_int(d, "observed_ms")?)
+    if child.request_identity != request_identity or child.worker_id != worker_id or
+            child.generation != generation or child.producer_digest != producer_digest:
+        return Err("managed child identity differs from retained launch authority")
+    if group_process_child_identity_encode_v1(child)? != blob:
+        return Err("managed child identity is noncanonical")
+    Ok(child)

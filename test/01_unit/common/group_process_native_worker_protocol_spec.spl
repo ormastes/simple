@@ -1,0 +1,66 @@
+"""Versioned request/child-receipt contracts, not process execution evidence."""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.group_process_protocol.*
+use std.common.build_manager.group_process_child_identity_v1.*
+
+fn native_owner_protocol_fixture(mode: text) -> GroupProcessLaunchV1:
+    val request = GroupProcessRequestV1(program: "/cached/simple", producer_digest: sha256_text("compiler"),
+        args: if mode == "group-root-v1": ["--group-root", "/owned/root"] else:
+            ["run", "source with spaces.spl", "--literal=a'\\\"b"],
+        environment: ["PATH=/bin", "VALUE=한글"], directory: if mode == "group-root-v1": "/owned/root" else: "/snapshot",
+        inputs: [], stdout_path: "/owned/root/stdout", stderr_path: "/owned/root/stderr",
+        timeout_ms: 60000, broker_program: "/cached/broker", broker_digest: sha256_text("broker"), mode: mode)
+    GroupProcessLaunchV1(root: "/owned/root", worker_id: "mir_0", generation: 1,
+        snapshot_digest: sha256_text("manifest"), cache_identity: sha256_text("cache"),
+        memory_limit_bytes: 1048576, request: request, memory_policy: "enforce")
+
+describe "Managed native worker versioned ownership contract":
+    it "preserves legacy group-root framing and rejects generic argv in that mode":
+        val legacy = native_owner_protocol_fixture("group-root-v1")
+        val blob = group_process_launch_encode_v1(legacy)
+        expect(blob).to_start_with("SIMPLE-GROUP-BROKER-1\n")
+        expect(group_process_launch_decode_v1(blob).is_ok()).to_equal(true)
+        var wrong = legacy
+        wrong.request.args = ["run", "/source.spl"]
+        expect(group_process_launch_validate_v1(wrong) != "").to_equal(true)
+
+    it "preserves legacy monitor group-root version two framing":
+        var legacy = native_owner_protocol_fixture("group-root-v1")
+        legacy.memory_policy = "monitor"
+        val blob = group_process_launch_encode_v1(legacy)
+        expect(blob).to_start_with("SIMPLE-GROUP-BROKER-2\n")
+        val decoded = group_process_launch_decode_v1(blob)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().request.mode).to_equal("group-root-v1")
+        expect(decoded.unwrap().memory_policy).to_equal("monitor")
+
+    it "round trips exact generic arguments cwd environment and producer digest":
+        val native = native_owner_protocol_fixture("native-worker-v1")
+        val blob = group_process_launch_encode_v1(native)
+        expect(blob).to_start_with("SIMPLE-GROUP-BROKER-3\n")
+        val decoded = group_process_launch_decode_v1(blob)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().request.args).to_equal(native.request.args)
+        expect(decoded.unwrap().request.environment).to_equal(native.request.environment)
+        expect(decoded.unwrap().request.directory).to_equal("/snapshot")
+        expect(decoded.unwrap().request.producer_digest).to_equal(native.request.producer_digest)
+        expect(group_process_launch_decode_v1(blob + "trailing").is_err()).to_equal(true)
+
+    it "rejects unrecognized modes and NUL arguments":
+        var native = native_owner_protocol_fixture("unknown-mode")
+        expect(group_process_launch_validate_v1(native) != "").to_equal(true)
+        native = native_owner_protocol_fixture("native-worker-v1")
+        native.request.args = ["run", "bad\0argument"]
+        expect(group_process_launch_validate_v1(native) != "").to_equal(true)
+
+    it "binds broker-issued child PID and birth to request generation and executable":
+        val request = sha256_text("exact request")
+        val producer = sha256_text("exact executable")
+        val child = GroupProcessChildIdentityV1(request_identity: request, worker_id: "mir_0",
+            producer_digest: producer, birth_identity: "12345", generation: 2, pid: 100, observed_ms: 99)
+        val blob = group_process_child_identity_encode_v1(child).unwrap()
+        expect(group_process_child_identity_decode_v1(blob, request, "mir_0", 2, producer).is_ok()).to_equal(true)
+        expect(group_process_child_identity_decode_v1(blob, request, "mir_0", 3, producer).is_err()).to_equal(true)
+        expect(group_process_child_identity_decode_v1(blob, sha256_text("other request"), "mir_0", 2, producer).is_err()).to_equal(true)
+        expect(group_process_child_identity_decode_v1(blob, request, "mir_0", 2, sha256_text("other executable")).is_err()).to_equal(true)

@@ -1,0 +1,19 @@
+# Actual process/tool tree for the managed-owner acceptance spec.
+use app.io.env_ops.{env_get}
+use app.io.process_ops.{process_spawn_async, process_wait}
+use std.io_runtime.{getpid, file_write}
+
+fn main() -> i64:
+    val marker = env_get("SIMPLE_TEST_MANAGED_TREE_MARKER") ?? ""
+    if marker == "": return 2
+    val child = process_spawn_async("/bin/sh", ["-c",
+        "sleep 300 & child=$!; printf '%s\\n' \"$child\" > \"$1\"; wait \"$child\"",
+        "managed-tree-fixture", marker + ".tool"])
+    if child <= 0: return 3
+    if not file_write(marker, "{getpid()}\n{child}\n"): return 4
+    if (env_get("SIMPLE_TEST_MANAGED_SELF_KILL") ?? "") == "1":
+        val killer = process_spawn_async("/bin/sh", ["-c", "sleep 1; kill -KILL \"$1\"",
+            "managed-sigkill-fixture", getpid().to_text()])
+        if killer <= 0: return 5
+    val code = process_wait(child, 0)
+    if code == 0: 0 else: 1

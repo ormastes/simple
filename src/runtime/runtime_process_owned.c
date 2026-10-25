@@ -5519,3 +5519,48 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 #if defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_linux_group_owner_impl.h"
 #endif
+
+/* Portable link boundary for the explicitly Linux-only managed owner. These
+ * return unsupported sentinels; no PID, owner, receipt or success is forged. */
+#if !defined(__linux__) && !defined(RT_PROCESS_OWNED_CORE_ONLY)
+static SplArray *rt_lg_unavailable_values(int count, int error_at) {
+    int64_t fields[10] = {0};
+    fields[error_at] = ENOTSUP;
+    return owned_adapter_values(fields, count);
+}
+SplArray *rt_linux_group_launch_broker_v1(const char *program, uint64_t program_len,
+        const char *digest, uint64_t digest_len, SplArray *args) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args;
+    return rt_lg_unavailable_values(2, 1);
+}
+SplArray *rt_linux_group_start_v1(const char *program, uint64_t program_len,
+        const char *digest, uint64_t digest_len, SplArray *args, SplArray *environment,
+        const char *directory, uint64_t directory_len, const char *root, uint64_t root_len,
+        const char *identity, uint64_t identity_len, int64_t memory_limit, int64_t timeout_ms,
+        const char *stdout_path, uint64_t stdout_len, const char *stderr_path, uint64_t stderr_len) {
+    (void)program; (void)program_len; (void)digest; (void)digest_len; (void)args;
+    (void)environment; (void)directory; (void)directory_len; (void)root; (void)root_len;
+    (void)identity; (void)identity_len; (void)memory_limit; (void)timeout_ms;
+    (void)stdout_path; (void)stdout_len; (void)stderr_path; (void)stderr_len;
+    return rt_lg_unavailable_values(2, 1);
+}
+SplArray *rt_linux_group_child_pid_v1(int64_t token) {
+    (void)token; return rt_lg_unavailable_values(2, 0);
+}
+SplArray *rt_linux_group_poll_v1(int64_t token) {
+    (void)token; return rt_lg_unavailable_values(10, 0);
+}
+SplArray *rt_linux_group_collect_v1(int64_t token) {
+    (void)token; return rt_lg_unavailable_values(10, 0);
+}
+int64_t rt_linux_group_cancel_v1(int64_t token) { (void)token; return ENOTSUP; }
+SplArray *rt_linux_group_available_capacity_v1(const char *path, uint64_t length) {
+    (void)path; (void)length; return rt_lg_unavailable_values(3, 0);
+}
+SplArray *rt_linux_group_parent_acquire_v1(const char *path, uint64_t path_len,
+        const char *identity, uint64_t identity_len) {
+    (void)path; (void)path_len; (void)identity; (void)identity_len;
+    return rt_lg_unavailable_values(4, 0);
+}
+int64_t rt_linux_group_parent_release_v1(int64_t token) { (void)token; return ENOTSUP; }
+#endif

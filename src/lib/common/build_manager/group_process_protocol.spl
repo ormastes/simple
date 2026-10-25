@@ -21,6 +21,7 @@ struct GroupProcessRequestV1:
     timeout_ms: i64
     broker_program: text
     broker_digest: text
+    mode: text = "group-root-v1"
 
 struct GroupProcessLaunchV1:
     root: text
@@ -53,9 +54,28 @@ fn group_process_launch_validate_v1(value: GroupProcessLaunchV1) -> text:
         if not builder_digest_valid_v1(digest): return "invalid group digest"
     if value.memory_limit_bytes < 1 or value.memory_limit_bytes > 1125899906842624: return "invalid group memory limit"
     if request.timeout_ms < 0 or request.timeout_ms > 86400000: return "invalid group lifetime bound"
-    if request.args.len() != 2: return "group worker argv must have exactly two fields"
-    if request.args[0] != "--group-root" or request.args[1] != value.root: return "group worker argv must name exact group root"
-    if request.directory != value.root: return "group worker cwd must equal installed root"
+    if request.inputs.len() > 100000 or request.environment.len() > 4096: return "group request inventory exceeds bound"
+    if request.mode == "group-root-v1":
+        if request.args.len() != 2: return "group worker argv must have exactly two fields"
+        if request.args[0] != "--group-root" or request.args[1] != value.root: return "group worker argv must name exact group root"
+        if request.directory != value.root: return "group worker cwd must equal installed root"
+    elif request.mode == "native-worker-v1":
+        if request.args.len() == 0 or request.args.len() > 4096:
+            return "native worker argv count exceeds bound"
+        if not request.program.starts_with("/") or not request.directory.starts_with("/") or
+                not request.broker_program.starts_with("/"):
+            return "native worker requires explicit absolute executable and cwd"
+        var bytes: i64 = 4096
+        for field in request.args:
+            if field.contains("\0") or field.len() > 65536 or field.len() > 8 * 1024 * 1024 - bytes - 32:
+                return "native worker argv/environment exceeds bound"
+            bytes = bytes + field.len() + 32
+        for field in request.environment:
+            if field.contains("\0") or field.len() > 65536 or field.len() > 8 * 1024 * 1024 - bytes - 32:
+                return "native worker argv/environment exceeds bound"
+            bytes = bytes + field.len() + 32
+    else:
+        return "unknown managed worker invocation mode"
     if request.inputs.len() > 100000 or request.environment.len() > 4096: return "group request inventory exceeds bound"
     for path in [request.program, request.broker_program, request.directory, request.stdout_path, request.stderr_path]:
         if path == "" or path.contains("\0"): return "invalid group path"
@@ -69,7 +89,10 @@ fn group_process_launch_encode_v1(value: GroupProcessLaunchV1) -> text:
     if group_process_launch_validate_v1(value) != "": return ""
     val request = value.request
     var out = if value.memory_policy == "enforce": "SIMPLE-GROUP-BROKER-1\n" else: "SIMPLE-GROUP-BROKER-2\n"
-    if value.memory_policy != "enforce": out = out + builder_wire_line_v1(value.memory_policy)
+    if request.mode == "native-worker-v1":
+        out = "SIMPLE-GROUP-BROKER-3\n" + builder_wire_line_v1(value.memory_policy) + builder_wire_line_v1(request.mode)
+    elif value.memory_policy != "enforce":
+        out = out + builder_wire_line_v1(value.memory_policy)
     for field in [value.root, value.worker_id, str(value.generation), value.snapshot_digest, value.cache_identity, str(value.memory_limit_bytes), request.program, request.producer_digest, request.directory, request.stdout_path, request.stderr_path, str(request.timeout_ms), request.broker_program, request.broker_digest]:
         out = out + builder_wire_line_v1(field)
     out = out + builder_wire_line_v1(str(request.args.len()))
@@ -85,8 +108,12 @@ fn group_process_launch_encode_v1(value: GroupProcessLaunchV1) -> text:
 fn group_process_launch_decode_v1(payload: text) -> Result<GroupProcessLaunchV1, text>:
     var reader = BuilderWireReaderV1.create(payload)
     val header = reader.scalar()
-    if header != "SIMPLE-GROUP-BROKER-1" and header != "SIMPLE-GROUP-BROKER-2": return Err("invalid group broker header")
-    val memory_policy = if header == "SIMPLE-GROUP-BROKER-2": reader.scalar() else: "enforce"
+    if header != "SIMPLE-GROUP-BROKER-1" and header != "SIMPLE-GROUP-BROKER-2" and
+            header != "SIMPLE-GROUP-BROKER-3": return Err("invalid group broker header")
+    val memory_policy = if header == "SIMPLE-GROUP-BROKER-2" or header == "SIMPLE-GROUP-BROKER-3": reader.scalar() else: "enforce"
+    val mode = if header == "SIMPLE-GROUP-BROKER-3": reader.scalar() else: "group-root-v1"
+    if header == "SIMPLE-GROUP-BROKER-3" and mode != "native-worker-v1":
+        return Err("invalid versioned native worker invocation mode")
     val root = reader.scalar()
     val worker = reader.scalar()
     val generation = reader.number(1000000000, false)
@@ -121,7 +148,7 @@ fn group_process_launch_decode_v1(payload: text) -> Result<GroupProcessLaunchV1,
         inputs = inputs.push(GroupProcessInputV1(path, reader.scalar()))
         index = index + 1
     val result = GroupProcessLaunchV1(root, worker, generation, snapshot, cache, memory,
-        GroupProcessRequestV1(program, producer, args, environment, directory, inputs, stdout_path, stderr_path, timeout_ms, broker_program, broker_digest), memory_policy)
+        GroupProcessRequestV1(program, producer, args, environment, directory, inputs, stdout_path, stderr_path, timeout_ms, broker_program, broker_digest, mode), memory_policy)
     if reader.reason != "": return Err(reader.reason)
     if group_process_launch_encode_v1(result) != payload: return Err("noncanonical/invalid group broker request")
     Ok(result)

@@ -613,6 +613,17 @@ done:
     return owned_adapter_values(answer, 2);
 }
 
+/* Metadata of the exact retained pidfd owner, before its leader is reaped.
+ * This does not acquire authority from a numeric PID and never signals it. */
+SplArray *rt_linux_group_child_pid_v1(int64_t token) {
+    const int valid = token == 1 && rt_linux_group.active &&
+        !rt_linux_group.collected && !rt_linux_group.leader_reaped &&
+        rt_linux_group.pidfd >= 0 && rt_linux_group.pid > 0;
+    int64_t fields[2] = {valid ? 0 : EINVAL,
+        valid ? (int64_t)rt_linux_group.pid : 0};
+    return owned_adapter_values(fields, 2);
+}
+
 SplArray *rt_linux_group_poll_v1(int64_t token) {
     if (token != 1 || !rt_linux_group.active) return rt_lg_observation(EINVAL);
     return rt_lg_observation(rt_lg_poll(&rt_linux_group));

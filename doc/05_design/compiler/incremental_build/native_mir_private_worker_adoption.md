@@ -59,3 +59,15 @@ The lifecycle source defect and remaining admission blocker are recorded in
 `doc/08_tracking/bug/native_mir_raw_process_lifecycle_identity_gap_2026-10-25.md`.
 A successful wait now prevents subsequent PID probing/termination, but this
 source repair does not qualify cancellation or managed descendant cleanup.
+
+## Managed owner integration candidate
+
+The follow-up now routes selected workers through the existing Linux durable
+broker with version-three generic argv requests, explicit cached launcher,
+retained startup uncertainty, broker-issued actual PID/birth identity, and
+lease-bound terminal tree collection. Private environment values are copied
+into each explicit request rather than installed globally around spawn.
+See `doc/04_architecture/compiler/native_mir_managed_process_owner_v3.md` for
+owner lifetimes, platform/error contracts and the UNRUN acceptance gates.
+The coordinator now records managed request/tree receipt identities; the final
+original-inventory/provider-bound object adoption caller remains separate.

@@ -52,6 +52,8 @@ extern fn rt_linux_group_start_v1(program: text, digest: text, args: [text],
 @unsafe(reason: "Linux exact pinned broker image detached exec", capabilities: [ffi])
 extern fn rt_linux_group_launch_broker_v1(program: text, digest: text,
     args: [text]) -> [i64]
+@unsafe(reason: "metadata of retained Linux pidfd owner before reap", capabilities: [ffi])
+extern fn rt_linux_group_child_pid_v1(token: i64) -> [i64]
 @unsafe(reason: "Linux pidfd and cgroup-v2 tree poll", capabilities: [ffi])
 extern fn rt_linux_group_poll_v1(token: i64) -> [i64]
 @unsafe(reason: "Linux cgroup.kill cancellation", capabilities: [ffi])
@@ -206,3 +208,14 @@ export linux_available_capacity_v1, linux_process_request_valid_v1
 export linux_process_launch_broker_v1
 export LinuxCgroupParentV1, linux_cgroup_parent_acquire_v1, linux_cgroup_parent_release_v1
 export LinuxCgroupParentAdmissionV1, linux_cgroup_parent_admit_v1
+
+# Only the broker holding this lease may request the child PID. Birth lookup
+# happens before any poll/collect can reap it, while the retained pidfd and
+# unreaped-child relation prevent numeric PID reuse.
+fn linux_process_child_pid_v1(lease: LinuxProcessLeaseV1) -> Result<i64, text>:
+    val fields = unsafe(capabilities: [ffi]): rt_linux_group_child_pid_v1(lease.token)
+    if fields.len() != 2 or fields[0] != 0 or fields[1] <= 0:
+        return Err("Linux retained child identity unavailable")
+    Ok(fields[1])
+
+export linux_process_child_pid_v1
