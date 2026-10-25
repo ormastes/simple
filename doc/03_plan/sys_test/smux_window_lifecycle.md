@@ -9,6 +9,11 @@ Design: `doc/05_design/smux_window_lifecycle_2026-10-25.md`.
 
 1. Use the verified Phase 3 Windows producer and real native provider roots;
    retain source/compiler/provider identities and actual assertion counts.
+   Compile both smux and the actual generated native SSpec runner with semantic
+   `--library-mode nogc-sync-mut` and generic source roots, as specified in
+   `smux_major_features_phase3.md`. Compiler flag support and runner transport
+   are prerequisites; an older compiler or unforwarded mode is BLOCKED, never
+   a reason to fall back to physical family roots/imports or another profile.
 2. Run this native SSpec once with an external 120s process-tree watchdog per
    native case. Retain failed/pending cleanup instead of discarding its owner.
 3. Generate/review the manual and run the SSpec maintenance scanner when the

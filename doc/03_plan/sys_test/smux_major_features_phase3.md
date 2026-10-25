@@ -70,12 +70,31 @@ snapshot, matching runtime/provider capsule, backend, target, exact argv and
 private cache/output paths. A file named `phase3` or an older Phase 2 admission
 is insufficient. Preserve unrelated dirty files and materialized links.
 
-The existing native test route is mandatory; no new runner framework is needed:
+The application now uses configured generic library imports. Both product and
+actual native runner compilation must select `nogc-sync-mut` semantically;
+neither a physical family source root nor a global NoGC default selects it.
+These templates require an admitted Phase 3 compiler that actually implements
+the reviewed library-mode transport. An older compiler rejecting the flag is
+an attributed compiler-support blocker, never permission to restore physical
+family imports or fall back to another compiler/profile.
 
 ```text
-<admitted-phase3-cli> test test/03_system/tools/smux_major_features_phase3_spec.spl --native-backend=llvm --native-source src/providers/windows_native/lib --native-source src/app --native-source src/lib --native-source src/os --native-source src/compiler --keep-artifacts --verbose
+<admitted-phase3-cli> native-build --library-mode nogc-sync-mut --source src/providers/windows_native/lib --source src/app --source src/lib --source src/os --source src/compiler --entry-closure --entry src/app/hosted_apps/smux_client.spl --backend <admitted-backend> --target <admitted-windows-target> --runtime-path <matching-runtime> --output <private-output>/smux.exe
+<admitted-phase3-cli> native-build --library-mode nogc-sync-mut --source src/providers/windows_native/lib --source src/app --source src/lib --source src/os --source src/compiler --entry-closure --entry <retained-generated-native-sspec-runner-entry> --backend <admitted-backend> --target <admitted-windows-target> --runtime-path <matching-runtime> --output <private-output>/smux-spec.exe
 <admitted-phase3-cli> spipe-docgen test/03_system/tools/smux_major_features_phase3_spec.spl --output doc/06_spec --no-index
 ```
+
+The runner entry must be the actual retained native SSpec wrapper for the
+selected spec, not a hand-written assertion mirror. Its production test route
+remains mandatory. `test --native` library-mode forwarding is not established
+by this migration: until its actual compile argv/typed request carries the
+selection, that convenience route is BLOCKED for configured qualification.
+Do not invent an unsupported test-runner flag or count source discovery as
+execution. Real runner execution and docgen/maintenance gates remain NOT_RUN.
+The Windows source overlay selects host providers; `--library-mode` separately
+selects semantic library policy. Missing selected owners must diagnose without
+searching another runtime family. Source migration/equivalence pins are in
+`doc/09_report/smux_configured_import_migration_2026_10_25.sdn`.
 
 Apply the parent campaign's finite process-tree memory/time limits outside the
 runner. Preserve binary-owned listing, actual case/assertion counts, terminal exit,
