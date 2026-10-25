@@ -84,6 +84,11 @@ int64_t rt_source_region_native_struct_dict_write_v1(int64_t control,int64_t gen
  * Retirement has the same native-owner -> region-owner lock order. */
 int64_t rt_source_region_native_owner_enter_v1(int64_t control,int64_t generation,
     int64_t epoch,int64_t operation,int64_t child,int64_t representation,int64_t work);
+/* Get16 projection work/validation: C owners only. Bound observes the region
+ * registry; projection requires BOTH locks retained by successful enter16. */
+int64_t rt_source_region_native_projection_bound_v1(void);
+int64_t rt_source_region_native_project_struct_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t child,int64_t representation,int64_t work);
 void rt_source_region_native_owner_exit_v1(int64_t control,int64_t operation,
     int64_t changed,int64_t born);
 void rt_source_region_native_owner_retire_v1(int64_t control,int64_t generation);

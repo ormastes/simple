@@ -265,3 +265,23 @@ describe "SOURCE dictionary shared-account facade":
             rt_free(fixture.dict_rows)
             rt_free(fixture.struct_descriptor)
             rt_free(fixture.struct_rows)
+
+    it "preserves checked tag1 read bits and charges their projection on the same account":
+        # Physical fixture only; compiler nominal/epoch receipts are separate.
+        val fixture = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_v1()
+        val rows = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([0, 8, 1, 0, 8, 8, 2, 2])
+        val descriptor = unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_words_v1([1, 4, 64, 2, rows, 1])
+        val dictionary = unsafe(capabilities: [ffi, raw_ptr]): source_region_dict_new_v1(fixture.context, descriptor, 0).unwrap()
+        val inserted = unsafe(capabilities: [ffi, raw_ptr]): source_region_dict_put_v1(fixture.context, dictionary, 19, fixture.child + 1).unwrap()
+        expect(inserted).to_equal(1)
+        val saved = source_region_stamp_v1(fixture.context).unwrap()
+        val before = fixture.account.snapshot()
+        val found = unsafe(capabilities: [ffi, raw_ptr]): source_region_dict_get_v1(fixture.context, saved, dictionary, 19).unwrap()
+        expect(found).to_equal(Some(fixture.child + 1))
+        expect(fixture.account.snapshot().work_used).to_be_greater_than(before.work_used + 256)
+        expect(fixture.context.account.snapshot().work_used).to_equal(fixture.account.snapshot().work_used)
+        expect(source_region_stamp_v1(fixture.context).unwrap()).to_equal(saved)
+        unsafe(capabilities: [ffi, raw_ptr]): dictionary_fixture_finish_v1(fixture)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_free(descriptor)
+            rt_free(rows)

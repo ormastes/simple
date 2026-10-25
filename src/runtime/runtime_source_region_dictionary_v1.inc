@@ -190,7 +190,12 @@ int64_t rt_source_region_dict_bound_v1(int64_t operation,int64_t operand,
         int64_t region=rt_source_region_bound_v1(9,0,0,0);
         if (region<0) result=region;
         else if (!sd_add(&native_work,(uint64_t)region)) result=SD_CAPACITY;
-        else result=(int64_t)native_work;
+        else if (operation==16) {
+            int64_t projection=rt_source_region_native_projection_bound_v1();
+            if (projection<0) result=projection;
+            else if (!sd_add(&native_work,(uint64_t)projection)) result=SD_CAPACITY;
+            else result=(int64_t)native_work;
+        } else result=(int64_t)native_work;
     }
     rt_core_immortal_registry_release(); return result;
 #endif
@@ -343,6 +348,9 @@ static int64_t sd_operation(int operation,int64_t control,int64_t generation,
     if (!error) {
         if (operation==14) { changed=sd_put_locked(d,registration,key,value); result=changed ? 1 : SD_CAPACITY; }
         else result=sd_project_locked(d,key,operation==15,&changed);
+        if (operation==16 && result>0)
+            result=rt_source_region_native_project_struct_v1(control,generation,epoch,
+                result,repr,work-cost);
         rt_source_region_native_owner_exit_v1(control,operation,changed,0);
     }
     rt_core_immortal_registry_release(); return result;

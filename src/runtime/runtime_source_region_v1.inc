@@ -569,10 +569,54 @@ int64_t rt_source_region_release_live_v1(int64_t control,int64_t generation,
     return error;
 }
 
+/* Get16 pays one additional successful member-registry lookup (<=P probes,
+ * eight logical slot/branch/index steps per probe) plus 256 fixed logical
+ * hash/tag/header/metadata/bound steps. No descriptor-slot
+ * walk is performed: SOURCE birth validated its immutable full descriptor. */
+static int64_t sr_projection_work_locked_v1(void) {
+    if (rt_struct_alloc_max_success_probe_v1>((uint64_t)INT64_MAX-256)/8)
+        return SR_CAPACITY;
+    return (int64_t)(rt_struct_alloc_max_success_probe_v1*8+256);
+}
+int64_t rt_source_region_native_projection_bound_v1(void) {
+    if (!sr_try_lock()) return SR_INCOMPLETE;
+    int64_t result=sr_projection_work_locked_v1();
+    rt_struct_alloc_lock_release(); return result;
+}
+/* Caller holds native owner then region owner after successful enter16.
+ * This internal entry cannot mint a lifetime or nominal type certificate. */
+int64_t rt_source_region_native_project_struct_v1(int64_t control,int64_t generation,
+    int64_t epoch,int64_t child,int64_t representation,int64_t work) {
+    int64_t base=sr_bound_locked(9,0,0,0), projection=sr_projection_work_locked_v1();
+    if (base<0 || projection<0 || base>INT64_MAX-projection || work<base+projection)
+        return SR_CAPACITY; /* before the additional registry lookup */
+    RtSourceRegionV1* r=(RtSourceRegionV1*)(uintptr_t)control;
+    int64_t error=sr_validate(r,generation);
+    if (!error && r->epoch!=(uint64_t)epoch) error=SR_STALE;
+    uintptr_t identity=(uintptr_t)child;
+    if (!error && (child<=0 || (representation!=1 && representation!=2) ||
+        (representation==1 && (identity&7)) ||
+        (representation==2 && (identity&7)!=1))) error=SR_FOREIGN;
+    if (representation==2) identity &= ~(uintptr_t)7;
+    RtStructAllocation* entry=!error ? sr_find(identity) : NULL;
+    RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
+    if (!error && (!metadata || metadata->control || metadata->region!=(uintptr_t)r ||
+        metadata->generation!=r->generation)) error=SR_FOREIGN;
+    if (!error && (!sr_descriptor_header(metadata->descriptor,1) ||
+        metadata->bytes!=metadata->descriptor[2])) error=SR_INCOMPLETE;
+    return error ? error : child; /* preserve documented raw/tag1 bits */
+}
+
 int64_t rt_source_region_native_owner_enter_v1(int64_t control,int64_t generation,
     int64_t epoch,int64_t operation,int64_t child,int64_t representation,int64_t work) {
     if (operation<13 || operation>16) return SR_INCOMPLETE;
     if (!sr_allow(9,0,0,work)) return sr_allow_failure_v1;
+    if (operation==16) {
+        int64_t base=sr_bound_locked(9,0,0,0), projection=sr_projection_work_locked_v1();
+        if (base<0 || projection<0 || base>INT64_MAX-projection || work<base+projection) {
+            rt_struct_alloc_lock_release(); return SR_CAPACITY;
+        }
+    }
     RtSourceRegionV1* r=sr_control(control);
     int64_t error=sr_validate(r,generation);
     if (!error && r->epoch!=(uint64_t)epoch) error=SR_STALE;
