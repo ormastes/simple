@@ -1,3 +1,18 @@
+# Single synchronous server owner; restart revokes all leases. No default account.
+use app.io.env_ops.{env_get}
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.common.crypto.pbkdf2.{pbkdf2_sha256_bytes}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{crypto_text_to_bytes, bytes_to_hex}
+use std.common.crypto.constant_time.{constant_time_compare}
+use std.common.binary_inspect.{hex_to_bytes}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex, entropy_hex_valid_for}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
+use std.common.web.html_escape.{html_escape_core}
+
 pub struct DashboardAuthSession:
     session_id: text
     username: text
@@ -5,44 +20,263 @@ pub struct DashboardAuthSession:
     static fn new(session_id: text, username: text) -> DashboardAuthSession:
         DashboardAuthSession(session_id: session_id, username: username)
 
+struct DashboardAuthConfig:
+    identity: text
+    username: text
+    salt: text
+    verifier: text
+    iterations: i64
+    ttl_ms: i64
+    capacity: i64
+
+struct DashboardAuthLease:
+    token_hash: text
+    username: text
+    expires_ms: i64
+
+var _auth_identity: text = ""
+var _auth_leases: [DashboardAuthLease] = []
+var _auth_last_clock: i64 = 0
+var _auth_attempt_start: i64 = 0
+var _auth_attempts: i64 = 0
+
+fn _auth_revoke_all():
+    _auth_leases = []
+    _auth_identity = ""
+
+fn _auth_string(value: SdnValue, key: text) -> text:
+    val item = value.get(key)
+    if item == nil: return ""
+    match item!:
+        case SdnValue.String(content): content
+        case _: ""
+
+fn _auth_integer(value: SdnValue, key: text, fallback: i64) -> i64:
+    val item = value.get(key)
+    if item == nil: return fallback
+    match item!:
+        case SdnValue.Int(number): number
+        case _: -1
+
+fn _auth_username_valid(username: text) -> bool:
+    if username.len() < 1 or username.len() > 64: return false
+    for i in 0..username.len():
+        val b = username.byte_at(i)
+        if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 90) or
+                (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95):
+            return false
+    true
+
+fn _auth_read_config() -> DashboardAuthConfig?:
+    # Bounded 4KiB reread intentionally gives immediate revocation on the next
+    # check. Native latency/RSS qualification must include this file access.
+    val path = env_get("DASH_AUTH_FILE")
+    if path.len() < 1 or path.len() > 4096: return nil
+    val absolute = path.starts_with("/") or
+        (path.len() > 2 and path[1:2] == ":" and (path[2:3] == "/" or path[2:3] == "\\"))
+    if not absolute: return nil
+    val content = file_read_regular_no_follow_bounded(path, 4096)
+    if content.is_err(): return nil
+    val parsed = parse_with_issues(content.unwrap())
+    if parsed.is_err(): return nil
+    val pair = parsed.unwrap()
+    if pair.1.len() != 0 or not pair.0.is_dict(): return nil
+    val username = _auth_string(pair.0, "username")
+    val salt = _auth_string(pair.0, "password_salt_hex")
+    val verifier = _auth_string(pair.0, "password_hash_hex")
+    val iterations = _auth_integer(pair.0, "iterations", -1)
+    val seconds = _auth_integer(pair.0, "session_ttl_seconds", 3600)
+    val capacity = _auth_integer(pair.0, "max_sessions", 64)
+    if not _auth_username_valid(username): return nil
+    if not entropy_hex_valid_for(salt, 16) or not entropy_hex_valid_for(verifier, 32): return nil
+    if iterations < 600000 or iterations > 1000000: return nil
+    if seconds < 1 or seconds > 86400 or capacity < 1 or capacity > 64: return nil
+    Some(DashboardAuthConfig(identity: path + "\n" + content.unwrap(), username: username,
+        salt: salt, verifier: verifier, iterations: iterations,
+        ttl_ms: seconds * 1000, capacity: capacity))
+
+fn _auth_config() -> DashboardAuthConfig?:
+    val config = _auth_read_config()
+    if config == nil:
+        _auth_revoke_all()
+        return nil
+    if config!.identity != _auth_identity:
+        _auth_leases = []
+        _auth_identity = config!.identity
+    config
+
+fn _auth_now() -> i64:
+    val now = sosix_time_now_monotonic_ms()
+    if now <= 0 or now < _auth_last_clock:
+        _auth_revoke_all()
+        return -1
+    _auth_last_clock = now
+    now
+
+fn _auth_prune(now: i64):
+    var live: [DashboardAuthLease] = []
+    for lease in _auth_leases:
+        if now < lease.expires_ms: live.push(lease)
+    _auth_leases = live
+
 fn auth_ensure_bootstrap():
-    pass_dn
+    # Read only operator configuration; never manufacture an account.
+    val config = _auth_config()
+    val now = _auth_now()
+    if config != nil and now > 0: _auth_prune(now)
 
 fn auth_login_page(message: text, username: text) -> text:
     var html = "<!DOCTYPE html><html><head><title>LLM Dashboard Login</title></head><body>"
     html = html + "<h1>LLM Dashboard Login</h1>"
     if message != "":
-        html = html + "<p class=\"error\">" + message + "</p>"
+        html = html + "<p class=\"error\">" + html_escape_core(message) + "</p>"
     html = html + "<form method=\"POST\" action=\"/login\">"
-    html = html + "<input name=\"username\" autocomplete=\"username\" value=\"" + username + "\">"
+    html = html + "<input name=\"username\" autocomplete=\"username\" value=\"" + html_escape_core(username) + "\">"
     html = html + "<input name=\"password\" type=\"password\" autocomplete=\"current-password\">"
     html = html + "<button type=\"submit\">Log in</button>"
     html = html + "</form></body></html>"
     html
 
+fn _auth_form_component(encoded: text) -> text?:
+    var bytes: [u8] = []
+    var i = 0
+    while i < encoded.len():
+        val b = encoded.byte_at(i)
+        if b < 32 or b == 127: return nil
+        if b == 37:
+            if i + 2 >= encoded.len(): return nil
+            val octet = hex_to_bytes(encoded[i + 1:i + 3])
+            if octet.len() != 1: return nil
+            bytes.push(octet[0] as u8)
+            i = i + 2
+        elif b == 43:
+            bytes.push(32u8)
+        else:
+            bytes.push(b as u8)
+        i = i + 1
+    val decoded = validated_utf8_bytes_to_text_linear(bytes)
+    if decoded.is_err(): return nil
+    if decoded.unwrap().contains("\x00") or decoded.unwrap().contains("\r") or decoded.unwrap().contains("\n"):
+        return nil
+    Some(decoded.unwrap())
+
+fn _auth_token_hash(token: text) -> text:
+    val digest = sha256_bytes(crypto_text_to_bytes(token))
+    if digest.len() != 32: return ""
+    bytes_to_hex(digest)
+
+fn _auth_form(body: text) -> [text]:
+    if body.len() < 1 or body.len() > 8192: return []
+    var username = ""
+    var password = ""
+    var user_seen = false
+    var password_seen = false
+    for pair in body.split("&"):
+        val equals = pair.index_of("=")
+        if equals < 1: return []
+        val key = _auth_form_component(pair[0:equals])
+        val value = _auth_form_component(pair[equals + 1:])
+        if key == nil or value == nil: return []
+        if key! == "username":
+            if user_seen: return []
+            user_seen = true
+            username = value!
+        elif key! == "password":
+            if password_seen: return []
+            password_seen = true
+            password = value!
+        else: return []
+    if not user_seen or not password_seen or not _auth_username_valid(username): return []
+    if password.len() < 1 or crypto_text_to_bytes(password).len() > 1024: return []
+    [username, password]
+
 fn auth_authenticate_form(body: text) -> (DashboardAuthSession?, text, text):
-    if body.contains("username="):
-        return (Some(DashboardAuthSession.new("local", "user")), "", "")
-    (nil, "Invalid credentials", "")
+    val config = _auth_config()
+    val now = _auth_now()
+    if config == nil or now < 0: return (nil, "Authentication unavailable", "")
+    _auth_prune(now)
+    if _auth_attempt_start == 0 or now - _auth_attempt_start >= 60000:
+        _auth_attempt_start = now
+        _auth_attempts = 0
+    # Bound expensive derivations even for wrong users and local hostile callers.
+    if _auth_attempts >= 8: return (nil, "Authentication temporarily unavailable", "")
+    _auth_attempts = _auth_attempts + 1
+    val form = _auth_form(body)
+    if form.len() != 2: return (nil, "Invalid credentials", "")
+    val derived = pbkdf2_sha256_bytes(crypto_text_to_bytes(form[1]), hex_to_bytes(config!.salt), config!.iterations, 32)
+    if derived.len() != 32: return (nil, "Authentication unavailable", "")
+    val verified = constant_time_compare(bytes_to_hex(derived), config!.verifier)
+    if not verified or form[0] != config!.username: return (nil, "Invalid credentials", form[0])
+    # Rotation/removal during derivation must not issue an old credential lease.
+    val fresh = _auth_config()
+    if fresh == nil or fresh!.identity != config!.identity: return (nil, "Authentication unavailable", "")
+    val issued = _auth_now()
+    if issued < 0: return (nil, "Authentication unavailable", "")
+    _auth_prune(issued)
+    if _auth_leases.len() >= fresh!.capacity: return (nil, "Authentication temporarily unavailable", "")
+    val token = random_hex(32)
+    if token == nil or not entropy_hex_valid_for(token!, 32): return (nil, "Authentication unavailable", "")
+    val token_hash = _auth_token_hash(token!)
+    if token_hash.len() != 64: return (nil, "Authentication unavailable", "")
+    for lease in _auth_leases:
+        if constant_time_compare(lease.token_hash, token_hash):
+            return (nil, "Authentication unavailable", "")
+    val session = DashboardAuthSession.new(token!, fresh!.username)
+    # Only a one-way digest enters the registry. Comparison is best effort;
+    # no compiler/runtime constant-time guarantee is asserted.
+    _auth_leases.push(DashboardAuthLease(token_hash: token_hash, username: fresh!.username, expires_ms: issued + fresh!.ttl_ms))
+    (Some(session), "", "")
 
 fn auth_session_from_headers(headers: text) -> DashboardAuthSession?:
-    if headers.contains("llm_dashboard_session=local"):
-        return Some(DashboardAuthSession.new("local", "user"))
+    if headers.len() > 32768: return nil
+    var token = ""
+    var found = false
+    for line in headers.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(" ") or line.starts_with("\t"): return nil
+        val colon = line.index_of(":")
+        if colon > 0 and line[0:colon].lower() == "cookie":
+            for cookie in line[colon + 1:].split(";"):
+                val part = cookie.trim()
+                val equals = part.index_of("=")
+                if equals > 0 and part[0:equals] == "llm_dashboard_session":
+                    if found: return nil
+                    found = true
+                    token = part[equals + 1:]
+    if not found: return nil
+    auth_session_lookup(token)
+
+fn auth_session_lookup(session_id: text) -> DashboardAuthSession?:
+    val config = _auth_config()
+    val now = _auth_now()
+    if config == nil or now < 0 or not entropy_hex_valid_for(session_id, 32): return nil
+    _auth_prune(now)
+    val token_hash = _auth_token_hash(session_id)
+    if token_hash.len() != 64: return nil
+    for lease in _auth_leases:
+        if constant_time_compare(lease.token_hash, token_hash):
+            return Some(DashboardAuthSession.new(session_id, lease.username))
     nil
 
 fn auth_delete_session(session_id: text):
-    pass_dn
+    if not entropy_hex_valid_for(session_id, 32): return
+    val token_hash = _auth_token_hash(session_id)
+    if token_hash.len() != 64: return
+    var remaining: [DashboardAuthLease] = []
+    for lease in _auth_leases:
+        if not constant_time_compare(lease.token_hash, token_hash): remaining.push(lease)
+    _auth_leases = remaining
 
 fn auth_login_cookie_header(session: DashboardAuthSession) -> text:
-    "Set-Cookie: llm_dashboard_session=" + session.session_id + "; Path=/; HttpOnly; SameSite=Lax"
+    if auth_session_lookup(session.session_id) == nil: return auth_clear_cookie_header()
+    "Set-Cookie: llm_dashboard_session=" + session.session_id + "; Path=/; HttpOnly; SameSite=Strict"
 
 fn auth_clear_cookie_header() -> text:
-    "Set-Cookie: llm_dashboard_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+    "Set-Cookie: llm_dashboard_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
 
 fn auth_identity_html(session: DashboardAuthSession) -> text:
-    "<p>Signed in as " + session.username + "</p>"
+    "<p>Signed in as " + html_escape_core(session.username) + "</p>"
 
 export DashboardAuthSession
-export auth_ensure_bootstrap, auth_authenticate_form, auth_session_from_headers
+export auth_ensure_bootstrap, auth_authenticate_form, auth_session_from_headers, auth_session_lookup
 export auth_delete_session, auth_login_page, auth_login_cookie_header
 export auth_clear_cookie_header, auth_identity_html
