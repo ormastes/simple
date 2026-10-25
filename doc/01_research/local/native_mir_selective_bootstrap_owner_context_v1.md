@@ -80,3 +80,10 @@ Import requires a fresh empty unrevoked function owner and no active scope. It o
 Actual frontend/artifact unit controls are authored for all twenty map sections, six typed references, ambiguity/old-winner preservation, wrong repository/digest/selector, duplicate row, missing origin and budget refusal while preserving source input. A fresh native-process fixture exercises failed import followed by successful atomic install, exact live readback and refusal to replace an occupied owner. These controls remain UNRUN without a qualified self-hosted producer.
 
 Remaining integration: the new protected declaration registration helpers must be consumed before legacy values lose their origins; export does not infer or repair unknown rows. Callable/static transport and exact enum/composite replay are not implemented by this function-owner change. Ordinary declaration prescan writes global callable registries, so replay after installation must avoid re-registering imported rows; C owns that explicit worker policy. No bootstrap guard or portable-codec availability flag is changed, and no SOURCE, full bootstrap or parallel-worker acceptance is claimed.
+
+The transport fixtures construct snapshot and origin rows manually. They cover
+codec and reconstruction mechanics only; they do not prove actual registration
+or worker provenance. Callers must independently admit an immutable declaration
+repository and its provenance before using these private helpers. Availability
+remains false, and this candidate enables neither SOURCE nor bootstrap workers.
+All newly authored transport/runtime controls remain UNRUN.
