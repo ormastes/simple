@@ -210,3 +210,19 @@ eviction), perf #4693 `35fe920618d` (sha256 accelerator), MIR #4706
 
 **Still failing / under investigation:** HIR cache selfcheck (239/1495 hits);
 seed JIT fallback on `native_build_main`.
+
+**Evening update (16:06).**
+
+- Landing: the second lander force-landed after local gates (CI queued over 50
+  minutes): #4693 `35fe920618d`, #4684 `dd7cede08a3`, #4697 `7c1e83a584b`,
+  #4686 `14c1428c6c9`, #4698 `574b8bb6e70`, #4705 `31bafe03f9e`, #4706
+  `a853ac75861`, #4685 `73929c8bdc1`; P-H #4683 `bf4c14a31e1`.
+- Open: P-G7 #4696 (approved by lead reviewer comment), #4704 release_phase3
+  merge, #4708 batch MIR eviction.
+- Phase 3 at 16:06: the stage3 whole-program run is in staged codegen (batch
+  about 121 of about 187), 0 MIR errors, 28.8 GB RSS, single thread. Next: lld
+  link, sanity, MCP / caret / devhub, stage3 self-rebuild from the latest
+  release with P-H, then the per-file proof run (80 jobs) and the default flip.
+- Investigating: closure walk not following `use os.*` imports (selected 1 vs
+  5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
+  despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).
