@@ -64,6 +64,7 @@ static RtCoreDict* sd_find_locked(int64_t value,int64_t allowance,int64_t* error
     }
     RtCoreDict* d=(RtCoreDict*)ptr;
     if (d->kind!=RT_VALUE_HEAP_DICT || !(d->flags&RT_CORE_DICT_SOURCE_REGION_V1) ||
+        d->cap!=owner->capacity ||
         !d->entries || d->cap<8 || (d->cap&(d->cap-1)) ||
         d->len<0 || d->tombstones<0 || d->len>d->cap || d->tombstones>d->cap-d->len ||
         (uint64_t)d->cap>((uint64_t)INT64_MAX-sizeof(RtCoreSourceDictBackingV1))/sizeof(RtCoreDictEntry)) {
@@ -117,7 +118,7 @@ static int64_t sd_metrics_locked(int operation,const uint64_t* descriptor,
         if (!sd_descriptor_header(descriptor) || !rt_core_transient_array_scope_active ||
             rt_core_transient_array_scope_paused || !rt_transient_raw_owner_thread_allows())
             return SD_INCOMPLETE;
-        fields=18+8*4;
+        fields=19+8*4;
         bytes=sizeof(RtCoreDict)+sizeof(RtCoreSourceDictRegistrationV1)+
             offsetof(RtCoreSourceDictBackingV1,entries)+8*sizeof(RtCoreDictEntry);
         int64_t next=sd_registry_next();
@@ -165,9 +166,23 @@ int64_t rt_source_region_dict_bound_v1(int64_t operation,int64_t operand,
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     (void)operation;(void)operand;(void)observation;(void)metric; return SD_INCOMPLETE;
 #else
-    if (operation<13 || operation>16 || !sd_try_lock()) return SD_INCOMPLETE;
+    if (operation<13 || operation>17 || metric<0 || metric>2 || !sd_try_lock()) return SD_INCOMPLETE;
     int64_t error=0;
     RtCoreDict* d=operation==13 ? NULL : sd_find_locked(operand,observation,&error,NULL);
+    if (operation==17) {
+        int64_t required=sd_observation_locked();
+        uint64_t total=required>0 ? (uint64_t)required : 0;
+        int64_t result=error ? error : required;
+        if (!error && required>0 && !sd_descriptor(sd_backing(d)->descriptor)) result=SD_INCOMPLETE;
+        else if (!error && required>0 && !sd_add(&total,256)) result=SD_CAPACITY;
+        else if (!error && required>0) {
+            int64_t region=rt_source_region_bound_v1(9,0,0,0);
+            if (region<0) result=region;
+            else if (!sd_add(&total,(uint64_t)region)) result=SD_CAPACITY;
+            else result=metric==0 ? (int64_t)total : metric==1 || metric==2 ? 0 : SD_INCOMPLETE;
+        }
+        rt_core_immortal_registry_release(); return result;
+    }
     uint64_t native_work=0;
     int64_t result=error ? error : sd_metrics_locked((int)operation,
         (const uint64_t*)(uintptr_t)operand,d,(int)metric,&native_work);
@@ -226,7 +241,7 @@ static int sd_put_locked(RtCoreDict* d,RtCoreSourceDictRegistrationV1* owner,int
                 free(fresh); return 0;
             }
         if (!sd_insert(fresh->entries,next,key,value,sd_hash(key),&len,&tombs)) { free(fresh); return 0; }
-        owner->backing=fresh;
+        owner->backing=fresh; owner->capacity=next;
         d->entries=fresh->entries; d->cap=next; d->len=len; d->tombstones=tombs;
         if (d->read_backing==INT64_MAX) d->read_epoch=0; else ++d->read_backing;
         free(old);
@@ -277,7 +292,7 @@ int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,int64_t 
         (const uint64_t*)(uintptr_t)descriptor,d) : NULL;
     RtCoreSourceDictRegistrationV1* registration=(RtCoreSourceDictRegistrationV1*)
         rt_observed_calloc_v1(1,sizeof(*registration));
-    if (registration) { registration->dictionary=d; registration->backing=b; }
+    if (registration) { registration->dictionary=d; registration->backing=b; registration->capacity=8; }
     int64_t next=sd_registry_next();
     int ok=d && (uintptr_t)d<=INT64_MAX && !((uintptr_t)d&7) && b && registration &&
         !((uintptr_t)registration&7) && next>=0 &&
@@ -341,6 +356,32 @@ int64_t rt_source_region_dict_remove_v1(int64_t c,int64_t g,int64_t e,int64_t d,
 }
 int64_t rt_source_region_dict_get_v1(int64_t c,int64_t g,int64_t e,int64_t d,int64_t k,int64_t w) {
     return sd_operation(16,c,g,e,d,k,0,w);
+}
+
+int64_t rt_source_region_struct_dict_write_v1(int64_t c,int64_t g,int64_t destination,
+    int64_t slot,int64_t dictionary,int64_t work) {
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    (void)c;(void)g;(void)destination;(void)slot;(void)dictionary;(void)work;
+    return SD_INCOMPLETE;
+#else
+    /* Same order as dictionary mutation/retirement: native owner, then region
+     * owner. The current backing cannot rehash/retire while this lock is held. */
+    if (!sd_try_lock()) return SD_INCOMPLETE;
+    int64_t error=0;
+    RtCoreSourceDictRegistrationV1* owner=NULL;
+    RtCoreDict* d=sd_find_locked(dictionary,work,&error,&owner);
+    if (!error && !d) error=SD_INCOMPLETE;
+    int64_t observation=sd_observation_locked();
+    uint64_t native=observation>0 ? (uint64_t)observation : 0;
+    if (!error && (observation<0 || !sd_add(&native,256) || (uint64_t)work<native)) error=SD_CAPACITY;
+    RtCoreSourceDictBackingV1* b=!error ? owner->backing : NULL;
+    if (!error && (b->control!=c || b->generation!=g)) error=SD_FOREIGN;
+    if (!error && !sd_descriptor(b->descriptor)) error=SD_INCOMPLETE;
+    int64_t result=error;
+    if (!error) result=rt_source_region_native_struct_dict_write_v1(c,g,destination,
+        slot,dictionary,work-(int64_t)native);
+    rt_core_immortal_registry_release(); return result;
+#endif
 }
 
 static void rt_core_source_dict_retire_locked_v1(RtCoreDict* d,

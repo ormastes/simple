@@ -68,6 +68,13 @@ int64_t rt_source_region_dict_remove_v1(int64_t control,int64_t generation,
     int64_t epoch,int64_t dictionary,int64_t key,int64_t work);
 int64_t rt_source_region_dict_get_v1(int64_t control,int64_t generation,
     int64_t epoch,int64_t dictionary,int64_t key,int64_t work);
+/* Op17: paid Dictionary-owner -> region-owner bridge; no allocation. */
+int64_t rt_source_region_struct_dict_write_v1(int64_t control,int64_t generation,
+    int64_t destination,int64_t slot,int64_t dictionary,int64_t work);
+/* C OWNER ONLY, never admitted as raw SOURCE FFI. Dictionary lock/qualification
+ * must remain held from before this call through its return. */
+int64_t rt_source_region_native_struct_dict_write_v1(int64_t control,int64_t generation,
+    int64_t destination,int64_t slot,int64_t dictionary,int64_t work);
 
 /* C RUNTIME OWNER ONLY. Never SOURCE intrinsics or raw admitted FFI calls.
  * Enter requires the native owner lock and actual qualified destination

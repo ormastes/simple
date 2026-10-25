@@ -16,6 +16,9 @@ extern fn rt_source_region_dict_remove_v1(control: i64, generation: i64, epoch: 
 @unsafe(reason: "typed dictionary and authoritative saved epoch required", capabilities: [ffi, raw_ptr])
 extern fn rt_source_region_dict_get_v1(control: i64, generation: i64, epoch: i64,
     dictionary: i64, key: i64, work: i64) -> i64
+@unsafe(reason: "actual typed Struct-to-Dictionary edge required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_struct_dict_write_v1(control: i64, generation: i64,
+    destination: i64, slot: i64, dictionary: i64, work: i64) -> i64
 
 fn source_region_dictionary_live_v1(context: SourceRegionContextV1) -> Result<(), SourceRegionErrorV1>:
     if context == nil: return Err(SourceRegionErrorV1.Incomplete)
@@ -92,3 +95,16 @@ pub fn source_region_dict_get_v1(context: SourceRegionContextV1,
     val value = source_region_value_v1(raw)?
     if value == 0: return Ok(None)
     Ok(Some(value))
+
+@unsafe(reason: "actual born dictionary and exact containing-field recipe required", capabilities: [ffi, raw_ptr])
+pub fn source_region_struct_dict_write_v1(context: SourceRegionContextV1,
+        destination: i64, slot: i64, dictionary: i64) -> Result<i64, SourceRegionErrorV1>:
+    source_region_dictionary_live_v1(context)?
+    val work = unsafe(capabilities: [ffi, raw_ptr]):
+        source_region_dictionary_prepare_v1(context, 17, dictionary)?
+    # Native17 checks both owners and advances the epoch atomically. This
+    # returned mutation epoch never refreshes a retained consumer's view.
+    val raw = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_source_region_struct_dict_write_v1(context.native_control,
+            context.generation, destination, slot, dictionary, work)
+    source_region_value_v1(raw)
