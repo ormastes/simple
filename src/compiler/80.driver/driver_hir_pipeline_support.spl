@@ -37,6 +37,7 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
 use compiler.driver.driver_log_helpers.{log_phase}
+use compiler.driver.hir_admission_order_v1.{hir_admission_path_order_v1}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
@@ -417,21 +418,15 @@ fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
             initial.push(actual)
     # Canonical physical order removes dependence on Dict iteration and
     # shard completion order. Proofs become visible only next round.
-    var selected: {i64: bool} = {}
-    while pending.len() < initial.len():
-        var best = -1
-        var best_path = ""
-        var index = 0
-        while index < initial.len():
-            if not selected.contains_key(index):
-                val path = module_surface_canonical_path(initial[index].path)
-                if best < 0 or path < best_path:
-                    best = index
-                    best_path = path
-            index = index + 1
-        if best < 0: break
-        selected[best] = true
-        pending.push(initial[best])
+    # A full CLI contains thousands of modules. Selection-sorting this set
+    # normalized each remaining path again on every round (4,241,328 path
+    # allocations/resolutions for 2,912 modules). Cache the canonical keys
+    # once and use a stable O(n log n) index merge with O(n) scratch space.
+    var canonical_paths: [text] = []
+    for actual in initial:
+        canonical_paths.push(module_surface_canonical_path(actual.path))
+    for index in hir_admission_path_order_v1(canonical_paths):
+        pending.push(initial[index])
     var providers: [HirModule] = []
     var round = 0
     while pending.len() > 0 and round <= initial.len():
@@ -461,11 +456,14 @@ pub fn driver_nogc_param_effect_errors_v1(modules: Dict<text, HirModule>,
     driver_nogc_param_effect_admission_v1(modules, module_array, surfaces).errors
 
 pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [ModuleSurface]):
+    log_phase("phase3:hir:ownership_admission:start")
     val admission = driver_nogc_param_effect_admission_v1(ctx.hir_modules, ctx.validation_module_array, surfaces)
     for error in admission.errors: ctx.add_error(error)
     # Admission is transactional. No stale/partial report is published after
     # one module fails, and downstream MIR never consumes error-bearing HIR.
-    if admission.errors.len() != 0: return
+    if admission.errors.len() != 0:
+        log_phase("phase3:hir:ownership_admission:failed")
+        return
     var modules: Dict<text, HirModule> = ctx.hir_modules
     for actual in admission.modules:
         for key in modules.keys():
@@ -477,6 +475,7 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
                 ctx.bootstrap_entry_hir = actual
     ctx.hir_modules = modules
     ctx.validation_module_array = admission.modules
+    log_phase("phase3:hir:ownership_admission:done")
 
 # Bug native_build_hir_phase_scopes_2026_10_24: the closure-wide validators
 # below walk every module with no transient scope, so their scratch stays
