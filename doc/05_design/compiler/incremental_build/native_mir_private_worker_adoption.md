@@ -15,12 +15,15 @@ module, never an arbitrary pre-spawn job label.
 
 The parent observes the spawned process birth identity before polling/reaping.
 Each attempted spawn, timeout, replacement and fail-fast cancellation retains its
-owner, root, PID, birth, monotonic lifetime, original exit and confirmed stopped
+owner, root, PID, birth, monotonic lifetime, original exit and confirmed leader-reap
 state. Spawn failure retains PID -1 and empty birth; it never manufactures a
 process. Existing protocol_complete/recoverable_no_claim and all_stopped remain
 the outcome authority. The parent publishes immutable bounded canonical SDN at
 `worker-launches.parent.sdn`, including the original physical manifest order.
-These launch observations alone do not establish codegen overlap.
+These launch observations alone do not establish codegen overlap or descendant
+quiescence. Existing raw PID cancellation has no retained tool-tree terminal
+capability; coordinator admission remains blocked on the existing managed
+process-tree owner, as recorded in the lifecycle bug below.
 
 The separate object publication leaf accepts an actual frozen native capsule,
 validates it through its existing owner, then publishes a compact bounded SDN
@@ -51,3 +54,8 @@ birth refusal, and timeout/SIGKILL/cancel descendant quiescence. Synthetic codec
 and interval-accounting tests cannot qualify those claims. All runtime tests,
 including the real worker artifact adoption fixture, remain UNRUN pending a
 qualified self-hosted CLI/provider/runtime. No new runner or seed fallback.
+
+The lifecycle source defect and remaining admission blocker are recorded in
+`doc/08_tracking/bug/native_mir_raw_process_lifecycle_identity_gap_2026-10-25.md`.
+A successful wait now prevents subsequent PID probing/termination, but this
+source repair does not qualify cancellation or managed descendant cleanup.

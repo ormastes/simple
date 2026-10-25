@@ -890,7 +890,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val old_owner = env_get(owner_env) ?? ""
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
-            blocked_reason: "worker queue environment could not be installed", all_stopped: true,
+            blocked_reason: "worker queue environment could not be installed", all_leader_reaped: true,
             protocol_complete: false, recoverable_no_claim: false, owned_launches: [])
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
@@ -1010,20 +1010,21 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             started_ms = kept_started
             private_roots = kept_roots
             birth_identities = kept_births
-            # -1 is a wait error, not proof of exit. Even a false liveness
-            # probe also means invalid handle; require a real reap result.
-            var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
+            # A successful owned wait is terminal proof. Never probe that PID
+            # afterward: it may already be reused by an unrelated process.
+            # -1 remains unknown; it is not proof of exit or tree quiescence.
+            var owner_stopped = pid <= 0 or (code != -2 and code != -1)
             if not owner_stopped and pid > 0:
                 val _killed = process_kill(pid)
                 val reaped = native_build_normalize_exit_code(process_wait(pid, 5000))
-                owner_stopped = reaped != -2 and reaped != -1 and not process_is_running(pid)
+                owner_stopped = reaped != -2 and reaped != -1
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
             if private_envelope != nil:
                 owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owner,
                     private_root: reaped_root, pid: pid, birth_identity: reaped_birth,
-                    spawned_ms: reaped_started, reaped_ms: time_now_monotonic_ms(), exit_code: code, stopped: owner_stopped))
+                    spawned_ms: reaped_started, reaped_ms: time_now_monotonic_ms(), exit_code: code, leader_reaped: owner_stopped))
             val progress = hir_shard_recovery_progress(queue_dir, owner)
             total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
@@ -1050,7 +1051,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     if pids[remaining] > 0:
                         val _killed = process_kill(pids[remaining])
                         val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
-                        if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                        if reaped != -2 and reaped != -1:
                             cancelled_stopped = true
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
@@ -1060,7 +1061,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                         owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owners[remaining],
                             private_root: private_roots[remaining], pid: pids[remaining],
                             birth_identity: birth_identities[remaining], spawned_ms: started_ms[remaining],
-                            reaped_ms: time_now_monotonic_ms(), exit_code: -1, stopped: cancelled_stopped))
+                            reaped_ms: time_now_monotonic_ms(), exit_code: -1, leader_reaped: cancelled_stopped))
                     remaining = remaining + 1
                 break
         if fail_fast and failed_workers > 0:
