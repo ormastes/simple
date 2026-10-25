@@ -4,8 +4,32 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_root/../.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-provisional-image-resume.XXXXXX")
 trap 'result=$?; if [ "$result" -eq 0 ]; then rm -rf "$tmp"; else printf "evidence retained: %s\n" "$tmp" >&2; fi' EXIT
+# Exercise the real constructor beneath a whole-script owner. Each image must
+# retain its authenticated session and use its own task group for accounting.
+if [ "$(uname -s)" = Linux ] && [ "${PROVISIONAL_IMAGE_NESTED_FIXTURE:-0}" != 1 ]; then
+  PROVISIONAL_IMAGE_NESTED_FIXTURE=1 TMPDIR="$tmp" \
+    perl "$repo_root/scripts/resource/process-tree-rss-watchdog.pl" \
+      --max-rss-kib=2097152 --timeout-seconds=120 --receipt="$tmp/outer.env" -- \
+      sh "$0"
+  grep -qx 'quiescent=1' "$tmp/outer.env"
+  grep -qx 'status=complete' "$tmp/outer.env"
+  # A genuine foreign session must fail authenticated admission before payload.
+  SIMPLE_BOOTSTRAP_SESSION_ID=$(sed -n 's/^session_id=//p' "$tmp/outer.env")
+  SIMPLE_BOOTSTRAP_SESSION_EXEC=$(sed -n 's/^session_helper=//p' "$tmp/outer.env")
+  export SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+  status=0
+  TMPDIR="$tmp" setsid sh "$script_root/run-process-group-timeout.shs" 10 1 \
+    sh -c 'touch "$1"' sh "$tmp/foreign.payload" \
+    >"$tmp/foreign.log" 2>&1 || status=$?
+  [ "$status" -eq 89 ] && [ ! -e "$tmp/foreign.payload" ] || {
+    echo "FAIL: foreign session admitted (status=$status)" >&2; exit 1
+  }
+  grep -q 'invalid inherited session contract' "$tmp/foreign.log"
+  echo 'PASS: constructor nested beneath whole-script containment'
+  exit 0
+fi
 source_root="$tmp/source"
-mkdir -p "$source_root/src/app/bootstrap_builder" "$source_root/src/compiler" \
+mkdir -p "$source_root/src/app/buildrunner" "$source_root/src/app/bootstrap_builder" "$source_root/src/compiler" \
   "$source_root/src/lib" "$source_root/src/os" "$source_root/src/runtime" \
   "$source_root/src/package_ownership" "$source_root/src/plugins" \
   "$source_root/src/compositions" "$source_root/examples/10_tooling" \
@@ -18,6 +42,7 @@ for entry in manifest_main main linux_worker native_group_linux_main \
     native_group_provisional_main; do
   printf 'fn main() {}\n' >"$source_root/src/app/bootstrap_builder/$entry.spl"
 done
+printf 'fn main() {}\n' >"$source_root/src/app/buildrunner/main.spl"
 cat >"$tmp/producer" <<'SH'
 #!/bin/sh
 if [ "$1" != native-build ]; then exit 2; fi
@@ -87,6 +112,14 @@ grep -qx 'threads=40' "$authority_images/logs/provisional-authority.attempt1.std
 grep -q 'cap=1048576 mode=enforce' "$authority_images/logs/provisional-authority.attempt1.stdout.log" || {
   echo 'FAIL: image child lacked explicit RSS cap' >&2; exit 1
 }
+# The constructor's per-image guard must inherit the enclosing owner's SID,
+# keep a separate task group and prove cleanup before publishing the image.
+image_guard=$(find "$authority_images/tmp" -name 'simple-process-tree-rss.*.env' -type f)
+[ -n "$image_guard" ] && [ "$(printf '%s\n' "$image_guard" | wc -l)" -eq 1 ]
+grep -qx 'session_mode=inherit' "$image_guard"
+grep -qx "session_id=$SIMPLE_BOOTSTRAP_SESSION_ID" "$image_guard"
+grep -qx 'scope_group=1' "$image_guard"
+grep -qx 'quiescent=1' "$image_guard"
 printf 'authority\n' >"$tmp/authority/provisional-authority.receipt"
 manager_images="$tmp/output/manager-images"
 mkdir -p "$manager_images/images"
