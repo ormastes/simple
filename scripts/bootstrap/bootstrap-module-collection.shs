@@ -68,6 +68,56 @@ run_module_compile_inventory() (
   trap 'exit 143' 1 2 15
   # A failed binary remains failed; fail-fast must skip this entire inventory.
   mc_stopped=${MODULE_COMPILE_PRIOR_FAILURE:-0}
+  # Reuse the portable cache-lock owner identity implementation. Capture each
+  # child's kernel birth identity before its callback can exit or be killed.
+  mc_process_helper=${BOOTSTRAP_MODULE_PROCESS_HELPER:-${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-}}
+  if [ -z "$mc_process_helper" ]; then
+    if [ -f "$(dirname -- "$0")/../check/lib/portable-hardlink-lock.pl" ]; then
+      mc_process_helper=$(CDPATH= cd -- "$(dirname -- "$0")/../check/lib" && pwd -P)/portable-hardlink-lock.pl || return 2
+    else
+      mc_process_helper=scripts/check/lib/portable-hardlink-lock.pl
+    fi
+  fi
+  [ -f "$mc_process_helper" ] || return 2
+  mc_publish_next=1
+  mc_reap_finished() {
+    mc_remaining= mc_publish_validated=0
+    for mc_job in $mc_jobs; do
+      mc_live=0
+      if [ ! -s "$mc_attempt/${mc_job#*:}/row" ] && [ -s "$mc_attempt/${mc_job#*:}/owner" ]; then
+        mc_birth=$(sed -n 's/^start_hex=//p' "$mc_attempt/${mc_job#*:}/owner") || return 2
+        mc_state=$(perl "$mc_process_helper" process-state "${mc_job%:*}" "$mc_birth") || return 2
+        case "$mc_state" in live) mc_live=1 ;; gone) ;; *) return 2 ;; esac
+      elif [ ! -s "$mc_attempt/${mc_job#*:}/row" ]; then
+        # Allow bounded startup observation; a child killed before identity
+        # publication has no receipt. Then join the actual shell-owned child,
+        # never any unrelated process that recycled its numeric PID.
+        mc_start_wait=0
+        [ ! -f "$mc_attempt/${mc_job#*:}/startup-waits" ] || mc_start_wait=$(cat "$mc_attempt/${mc_job#*:}/startup-waits")
+        mc_start_wait=$((mc_start_wait + 1))
+        printf '%s\n' "$mc_start_wait" >"$mc_attempt/${mc_job#*:}/startup-waits" || return 2
+        [ "$mc_start_wait" -ge 5 ] || mc_live=1
+      fi
+      if [ "$mc_live" = 1 ]; then
+        mc_remaining="$mc_remaining $mc_job"
+      else
+        wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
+        : >"$mc_attempt/${mc_job#*:}/reaped" || return 2
+        mc_batch=$((mc_batch - 1))
+      fi
+    done
+    mc_jobs=$mc_remaining
+    while [ -f "$mc_attempt/$mc_publish_next/reaped" ]; do
+      if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -f "$mc_attempt/$mc_publish_next/launched" ] && [ -s "$mc_attempt/$mc_publish_next/row" ]; then
+        if [ "$mc_publish_validated" = 0 ]; then
+          MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
+          mc_publish_validated=1
+        fi
+        python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/$mc_publish_next/row" || return 2
+      fi
+      mc_publish_next=$((mc_publish_next + 1))
+    done
+  }
   while IFS= read -r mc_entry || [ -n "$mc_entry" ]; do
     [ -n "$mc_entry" ] || continue
     # Observe owner cancellation before allocating another attempt or child.
@@ -105,7 +155,13 @@ run_module_compile_inventory() (
     else
       mc_key=$(printf '%s\n' "$mc_entry" | hash_stream) || return 2
       mc_cache="$mc_cache_root/$mc_key"
+      : >"$mc_dir/launched" || return 2
       (
+        if ! perl "$mc_process_helper" owner-snapshot >"$mc_dir/owner.pending"; then
+          printf 'task=module_compile_%s|entry=%s|result=FAIL|status=process-identity-unavailable|log=-\n' "$mc_count" "$mc_entry" >"$mc_dir/row"
+          exit 2
+        fi
+        mv "$mc_dir/owner.pending" "$mc_dir/owner" || exit 2
         HOME="$mc_dir/home" TMPDIR="$mc_dir/tmp"
         export HOME TMPDIR
         mc_log="$mc_dir/compile.log" mc_output="$mc_dir/module.o"
@@ -133,31 +189,22 @@ run_module_compile_inventory() (
       mc_jobs="$mc_jobs $!:$mc_count"
       mc_batch=$((mc_batch + 1))
     fi
-    if [ "$mc_batch" -ge "$mc_workers" ]; then
-      for mc_job in $mc_jobs; do
-        wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
-      done
-      if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
-        MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-        for mc_job in $mc_jobs; do
-          python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
-        done
-      fi
-      mc_jobs= mc_batch=0
-      # An owner stop raised while a batch ran must prevent its next entry.
-      if mc_abort_requested; then break; fi
-    fi
-  done <"$mc_manifest"
-  for mc_job in $mc_jobs; do
-    wait "${mc_job%:*}" || mc_failed=1
-  done
-  if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -n "$mc_jobs" ]; then
-    MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-    for mc_job in $mc_jobs; do
-      python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
+    case " $mc_jobs " in
+      *":$mc_count "*) ;;
+      *) : >"$mc_dir/reaped" || return 2 ;;
+    esac
+    # Refill as soon as any worker terminates, rather than joining a wave.
+    while [ "$mc_batch" -ge "$mc_workers" ]; do
+      mc_reap_finished || return 2
+      [ "$mc_batch" -lt "$mc_workers" ] || sleep 1
     done
-  fi
-  # The last batch may be shorter than mc_workers; it has no in-loop join.
+    if mc_abort_requested; then break; fi
+  done <"$mc_manifest"
+  while [ "$mc_batch" -gt 0 ]; do
+    mc_reap_finished || return 2
+    [ "$mc_batch" -eq 0 ] || sleep 1
+  done
+  # Observe stop markers raised by a final partial set of workers.
   mc_abort_requested || :
   if [ "$mc_count" -eq 0 ] && [ "$mc_abort_rc" -ne 0 ]; then return "$mc_abort_rc"; fi
   if [ "$mc_count" -eq 0 ]; then

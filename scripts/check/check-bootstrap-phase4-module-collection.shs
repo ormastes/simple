@@ -63,6 +63,45 @@ calls() {
   [ "$actual_calls" -eq "$1" ] || die "expected $1 calls, got $actual_calls in $case_dir"
 }
 
+# Long + short + queued work must refill the short slot before the long ends.
+# Events are single short writes; the owner still publishes manifest order.
+refill_compile() {
+  refill_entry=${1##*/}
+  printf 'start %s\n' "$refill_entry" >>"$case_dir/events"
+  case "$refill_entry" in
+    a.spl) sleep 4; : >"$case_dir/long-ended" ;;
+    b.spl) printf 'end %s\n' "$refill_entry" >>"$case_dir/events"; return 124 ;;
+    c.spl) [ ! -e "$case_dir/long-ended" ] || return 98; : >"$case_dir/refilled" ;;
+  esac
+  printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\076\000' >"$3"
+  printf 'end %s\n' "$refill_entry" >>"$case_dir/events"
+}
+new_case slot_refill
+unset MODULE_PROGRESS_STATE SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE SIMPLE_MODULE_SYSTEMIC_STOP_FILE
+SIMPLE_COMPILE_FAIL_FAST=0 MODULE_COMPILE_PRIOR_FAILURE=0
+refill_rc=0
+run_module_compile_inventory "$scratch/manifest" "$case_dir/work" "$case_dir/cache" 2 1 refill_compile validate_stage4_compiler_snapshot "$summary" || refill_rc=$?
+[ "$refill_rc" -eq 1 ] && [ -f "$case_dir/refilled" ] || die 'short timeout stranded free slot'
+awk '$1 == "start" { active++; if (active > 2) exit 1 } $1 == "end" { active-- } END { if (active != 0) exit 1 }' "$case_dir/events" || die 'worker cap or quiescence violated'
+row a PASS 0; row b FAIL 124; row c PASS 0
+[ "$(sed 's/.*entry=\([^|]*\).*/\1/' "$summary")" = "$(cat "$scratch/manifest")" ] || die 'refill changed publication order'
+
+# A worker killed before writing its row must be reaped and leave no claim.
+killed_compile() {
+  case "$1" in */b.spl) exec sh -c 'kill -KILL $$' ;; esac
+  printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\076\000' >"$3"
+}
+new_case killed_worker
+# Simulate a recycled PID via the actual identity adapter: this unrelated live
+# shell PID cannot match the recorded birth token of the original child.
+[ "$(perl "$root/scripts/check/lib/portable-hardlink-lock.pl" process-state "$$" 00)" = gone ] || die 'recycled PID matched old process birth'
+killed_rc=0
+run_module_compile_inventory "$scratch/manifest" "$case_dir/work" "$case_dir/cache" 2 1 killed_compile validate_stage4_compiler_snapshot "$summary" || killed_rc=$?
+[ "$killed_rc" -eq 1 ] || die 'killed/recycled worker did not fail inventory'
+row a PASS 0; row c PASS 0
+# worker-failed has no trailing metadata after its status.
+grep -q 'entry=src/b.spl|result=FAIL|status=worker-failed|' "$summary" || die 'killed worker lost terminal row'
+
 if [ "${1:-}" != --orchestration-only ]; then
 # Local default survives a binary failure: both failing rows and later success.
 unset SIMPLE_COMPILE_FAIL_FAST
