@@ -9,38 +9,52 @@
 # stage directory, the child codegens that ONE COMDAT instance function into
 # its own object, through the same backend, target, CPU and storage snapshot
 # as the using module (so it carries the same COMDAT/weak linkage as the
-# per-module copy, P-D), and stages it under the key: first writer wins (temp +
-# atomic rename), so two consumers of one key stage one object. The
-# coordinator's single-flight job for the key (P-G6) reads the staged object
-# and publishes it into the producer-keyed, header-verified instance cache.
+# per-module copy, P-D), and stages the object FILE under the key: first
+# writer wins (byte copy + atomic rename), so two consumers of one key stage
+# one object. Assumption: codegen is deterministic for the same instance MIR
+# and producer, so whichever consumer's object lands first is THE instance.
+# The coordinator's single-flight job (P-G6) publishes the staged file into
+# the producer-keyed cache (raw bytes + sidecar header with the byte digest).
+#
+# Body identity: ConcreteTldrKey folds the template's interface, not its body.
+# The coordinator therefore caches under a BODY key: ConcreteTldrKey + the
+# sha256 of the template owner's current source. A body-only edit changes the
+# body key, so the old object is not reused, not retired against, and the
+# instance is rebuilt (the old body key is dropped).
 #
 # Extractable instances only: a function that reads or writes a module global
-# (LoadGlobal/StoreGlobal/GlobalAddr) is not staged -- its statics belong to
-# the using object -- so that key fails closed and nothing is retired.
+# (LoadGlobal/StoreGlobal/GlobalAddr), or names a constant, a static or a
+# non-instance function of the using module (a symbol that may be local to
+# that object), is not staged; its key fails closed and nothing is retired.
 # Instances of generic types (methods keyed by a `Name<args>` use) have no
 # symbol -> key mapping yet; their keys fail closed the same way.
 #
 # Retirement (P-G6 rule): only after a run in which EVERY needed key PASSED is
-# the needed set recorded as retirable. A later MIR child drops its COMDAT copy
-# of an instance only when its key is in that set AND its cached object still
-# verifies; the link step then links exactly those cached objects (body
-# extracted from the verified cache record). Linking an instance object next
-# to a surviving COMDAT copy is safe: both are COMDAT/weak.
+# the needed set recorded as retirable (body key + owner source path). Before
+# the next build the coordinator snapshots the rows whose owner source still
+# hashes to the recorded body digest AND whose cached object verifies. MIR
+# children drop exactly those COMDAT copies (by ConcreteTldrKey) and the link
+# links exactly those objects (byte copies, re-verified). Linking an instance
+# object next to a surviving COMDAT copy is safe: both are COMDAT/weak.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_create_all, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, file_copy,
+    dir_create_all, getpid}
 use compiler.hir.hir_types.{SymbolId}
-use compiler.mir.mir_data.{MirModule, MirFunction}
-use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirInstKind, MirOperandKind, MirConstValue}
+use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1, GenericSpecializationListV1}
 use compiler.driver.cache.generic_instance_build_plan_v1.{generic_instance_object_path_v1,
-    generic_instance_object_verify_v1}
+    generic_instance_header_path_v1, generic_instance_object_file_verified_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_artifact_module_id_v1}
 
 # Stage directory (coordinator -> MIR children): `<mir ledger>.instances/stage`.
 pub val GENERIC_INSTANCE_STAGE_ENV_V1 = "SIMPLE_FILE_WORKER_INSTANCE_STAGE"
-# Retire record (coordinator -> MIR children): keys whose COMDAT copies may go.
+# Retire list (coordinator -> MIR children): ConcreteTldrKeys whose COMDAT copies go.
 pub val GENERIC_INSTANCE_RETIRE_ENV_V1 = "SIMPLE_FILE_WORKER_INSTANCE_RETIRE"
 # Link list (coordinator -> link step): one linkable instance object per line.
 pub val GENERIC_INSTANCE_LINK_ENV_V1 = "SIMPLE_FILE_WORKER_INSTANCE_LINK"
+
+val _BODY_SEP_V1 = "\u001fbody:"
 
 # MIR child: mangled instance symbol -> ConcreteTldrKey, filled after mono.
 var generic_instance_key_of_symbol_v1: Dict<text, text> = {}
@@ -54,37 +68,131 @@ pub fn generic_instance_key_of_v1(symbol: text) -> text:
         return generic_instance_key_of_symbol_v1[symbol]
     ""
 
-fn _publish_v1(path: text, content: text) -> bool:
+fn _publish_text_v1(path: text, content: text) -> bool:
     val tmp = path + "." + "{getpid()}" + ".tmp"
     file_write(tmp, content) and file_rename(tmp, path)
 
-pub fn generic_instance_stage_path_v1(stage: text, key: text) -> text:
-    if stage == "" or key == "":
-        return ""
-    stage + "/" + sha256_text(key) + ".o"
+fn _copy_file_v1(src: text, dst: text) -> bool:
+    val tmp = dst + "." + "{getpid()}" + ".tmp"
+    file_copy(src, tmp) and file_rename(tmp, dst)
 
-# Stage one built instance object for `key`. First writer wins: an existing
-# staged object is kept (same key, same producer -> same instance).
-pub fn generic_instance_stage_publish_v1(stage: text, key: text, object_bytes: text) -> bool:
-    val path = generic_instance_stage_path_v1(stage, key)
-    if path == "" or object_bytes == "" or not dir_create_all(stage):
+# ---- body identity --------------------------------------------------------
+
+pub fn generic_instance_body_key_v1(concrete_key: text, body_digest: text) -> text:
+    concrete_key + _BODY_SEP_V1 + body_digest
+
+pub fn generic_instance_concrete_of_v1(body_key: text) -> text:
+    val at = body_key.index_of(_BODY_SEP_V1)
+    if at < 0: body_key else: body_key.substring(0, at)
+
+pub fn generic_instance_body_digest_of_v1(body_key: text) -> text:
+    val at = body_key.index_of(_BODY_SEP_V1)
+    if at < 0: "" else: body_key.substring(at + _BODY_SEP_V1.len())
+
+# Current body digest of a template owner: sha256 of its source ("" unknown).
+pub fn generic_instance_owner_digest_v1(owner_path: text) -> text:
+    if owner_path == "" or not file_exists(owner_path):
+        return ""
+    sha256_text(file_read(owner_path))
+
+# Module id -> source path for the build's modules.
+pub fn generic_instance_module_ids_v1(module_paths: [text]) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for p in module_paths:
+        out[module_artifact_module_id_v1(p)] = p
+    out
+
+# Owner source of a template symbol `<module id>.<name>` (longest module id).
+pub fn generic_instance_owner_path_of_v1(template_symbol: text, ids: Dict<text, text>) -> text:
+    var best = ""
+    for id in ids.keys():
+        val mid: text = id
+        if template_symbol.starts_with(mid + ".") and mid.len() > best.len():
+            best = mid
+    if best == "": "" else: ids[best]
+
+# Rewrite every spec's key to its body key. A spec whose owner source is
+# unknown makes its list incomplete (fail closed: no job, nothing retired).
+# Returns the rewritten lists and body key -> owner path.
+pub fn generic_instance_lists_with_body_v1(lists: [GenericSpecializationListV1?],
+        ids: Dict<text, text>) -> ([GenericSpecializationListV1?], Dict<text, text>):
+    var out: [GenericSpecializationListV1?] = []
+    var owners: Dict<text, text> = {}
+    var digests: Dict<text, text> = {}
+    for l in lists:
+        match l:
+            case Some(list):
+                var complete = list.complete
+                var specs: [RequiredSpecializationV1] = []
+                for s in list.specs:
+                    val owner = generic_instance_owner_path_of_v1(s.template_symbol, ids)
+                    if owner != "" and not digests.contains_key(owner):
+                        digests[owner] = generic_instance_owner_digest_v1(owner)
+                    val digest = if owner == "": "" else: digests[owner]
+                    if digest == "":
+                        complete = false
+                        continue
+                    var b = s
+                    b.concrete_key = generic_instance_body_key_v1(s.concrete_key, digest)
+                    owners[b.concrete_key] = owner
+                    specs.push(b)
+                out.push(Some(GenericSpecializationListV1(complete: complete, specs: specs)))
+            case nil:
+                out.push(nil)
+    (out, owners)
+
+# ---- staging (MIR child) --------------------------------------------------
+
+pub fn generic_instance_stage_path_v1(stage: text, concrete_key: text) -> text:
+    if stage == "" or concrete_key == "":
+        return ""
+    stage + "/" + sha256_text(concrete_key) + ".o"
+
+# Stage the built instance object FILE for `concrete_key` (byte copy). First
+# writer wins: an existing staged object is kept.
+pub fn generic_instance_stage_publish_v1(stage: text, concrete_key: text, object_file: text) -> bool:
+    val path = generic_instance_stage_path_v1(stage, concrete_key)
+    if path == "" or object_file == "" or not file_exists(object_file) or not dir_create_all(stage):
         return false
     if file_exists(path):
         return true
-    _publish_v1(path, object_bytes)
+    _copy_file_v1(object_file, path)
 
-# The coordinator's producer for a claimed key: the staged object bytes, or ""
-# (the key fails closed with a FAILED receipt).
+# The coordinator's producer for a claimed (body-keyed) spec: the staged
+# object file for its ConcreteTldrKey, or "" (the key fails closed).
 pub fn generic_instance_object_from_stage_v1(stage: text, spec: RequiredSpecializationV1) -> text:
-    val path = generic_instance_stage_path_v1(stage, spec.concrete_key)
+    val path = generic_instance_stage_path_v1(stage, generic_instance_concrete_of_v1(spec.concrete_key))
     if path == "" or not file_exists(path):
         return ""
-    file_read(path)
+    path
 
-# True when the function touches no module global, so it can live alone.
-pub fn generic_instance_function_extractable_v1(f: MirFunction) -> bool:
+fn _str_operand_v1(kind: MirOperandKind) -> text:
+    match kind:
+        case Const(value, _):
+            match value:
+                case Str(s): s
+                case _: ""
+        case _: ""
+
+# Names an instance must not reference to live alone: the using module's
+# constants, statics and non-instance functions (possibly object-local).
+fn _module_local_names_v1(module: MirModule, self_name: text) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    for c in module.constants.values():
+        out[c.name] = true
+    for s in module.statics.values():
+        out[s.name] = true
+    for f in module.functions.values():
+        val g: MirFunction = f
+        if not g.is_comdat and g.name != self_name:
+            out[g.name] = true
+    out
+
+# True when `f` touches no module global and names no module-local symbol.
+pub fn generic_instance_function_extractable_v1(module: MirModule, f: MirFunction) -> bool:
     if not f.is_comdat:
         return false
+    val local = _module_local_names_v1(module, f.name)
     for b in f.blocks:
         for inst in b.instructions:
             if inst.bootstrap_load_global_symbol_id() >= 0:
@@ -92,6 +200,15 @@ pub fn generic_instance_function_extractable_v1(f: MirFunction) -> bool:
             if inst.bootstrap_store_global_symbol_id() >= 0:
                 return false
             if inst.bootstrap_global_addr_symbol_id() >= 0:
+                return false
+            val named = match inst.kind:
+                case Call(_, callee, _): _str_operand_v1(callee.kind)
+                case Const(_, value, _):
+                    match value:
+                        case Str(s): s
+                        case _: ""
+                case _: ""
+            if named != "" and local.contains_key(named):
                 return false
     true
 
@@ -102,7 +219,7 @@ pub fn generic_instance_mir_module_of_v1(module: MirModule, name: text) -> MirMo
         val f: MirFunction = module.functions[sym]
         if f.name != name:
             continue
-        if not generic_instance_function_extractable_v1(f):
+        if not generic_instance_function_extractable_v1(module, f):
             return nil
         var only: Dict<SymbolId, MirFunction> = {}
         only[sym] = f
@@ -132,21 +249,56 @@ pub fn generic_instance_retire_path_v1(cache_root: text, producer: text) -> text
         return ""
     cache_root + "/generic_instances/" + sha256_text(producer) + "/retire"
 
-# Record (or clear, with ok=false) the retirable set after a run.
-pub fn generic_instance_retire_record_v1(cache_root: text, producer: text, keys: [text], ok: bool) -> bool:
+pub fn generic_instance_verified_v1(cache_root: text, producer: text, body_key: text) -> bool:
+    val path = generic_instance_object_path_v1(cache_root, producer, body_key)
+    generic_instance_object_file_verified_v1(path, generic_instance_header_path_v1(path), producer, body_key)
+
+# Record (ok) or clear the retirable rows after a run: body key + owner path.
+pub fn generic_instance_retire_record_v1(cache_root: text, producer: text, body_keys: [text],
+        owners: Dict<text, text>, ok: bool) -> bool:
     val path = generic_instance_retire_path_v1(cache_root, producer)
     if path == "":
         return false
-    if not ok or keys.len() == 0:
+    if not ok or body_keys.len() == 0:
         if file_exists(path):
             val _gone = file_delete(path)
         return true
+    var rows: [text] = []
+    for k in body_keys:
+        if not owners.contains_key(k):
+            return false
+        rows.push(k + "\t" + owners[k])
     val slash = path.rfind("/")
     if not dir_create_all(path.substring(0, slash)):
         return false
-    _publish_v1(path, keys.join("\n") + "\n")
+    _publish_text_v1(path, rows.join("\n") + "\n")
 
-pub fn generic_instance_retire_keys_of_v1(path: text) -> [text]:
+# Coordinator, before the workers start: the retirable body keys whose owner
+# source still hashes to the recorded body digest and whose cached object
+# verifies right now. Children retire only these; the link links them.
+pub fn generic_instance_retire_snapshot_v1(cache_root: text, producer: text) -> [text]:
+    var out: [text] = []
+    val path = generic_instance_retire_path_v1(cache_root, producer)
+    if path == "" or not file_exists(path):
+        return out
+    for line in file_read(path).split("\n"):
+        val cols = line.split("\t")
+        if cols.len() != 2:
+            continue
+        val body_key = cols[0]
+        val digest = generic_instance_body_digest_of_v1(body_key)
+        if digest == "" or generic_instance_owner_digest_v1(cols[1]) != digest:
+            continue
+        if generic_instance_verified_v1(cache_root, producer, body_key):
+            out.push(body_key)
+    out
+
+pub fn generic_instance_list_write_v1(path: text, lines: [text]) -> bool:
+    if path == "":
+        return false
+    _publish_text_v1(path, lines.join("\n") + "\n")
+
+pub fn generic_instance_list_read_v1(path: text) -> [text]:
     var out: [text] = []
     if path == "" or not file_exists(path):
         return out
@@ -155,9 +307,7 @@ pub fn generic_instance_retire_keys_of_v1(path: text) -> [text]:
             out.push(line)
     out
 
-# MIR child: drop the COMDAT copies whose key is in `retire` (the coordinator's
-# snapshot of retirable keys whose cached object verified before the workers
-# started). Returns the dropped keys; the link step links every snapshot key.
+# MIR child: drop the COMDAT copies whose ConcreteTldrKey is in `retire`.
 pub fn generic_instance_retire_in_module_v1(module: MirModule, retire: [text]) -> (MirModule, [text]):
     var out = module
     var dropped: [text] = []
@@ -174,64 +324,38 @@ pub fn generic_instance_retire_in_module_v1(module: MirModule, retire: [text]) -
     out.functions = kept
     (out, dropped)
 
-pub fn generic_instance_verified_v1(cache_root: text, producer: text, key: text) -> bool:
-    val path = generic_instance_object_path_v1(cache_root, producer, key)
-    path != "" and file_exists(path) and generic_instance_object_verify_v1(file_read(path), producer, key)
-
-# Coordinator, before the workers start: the retirable keys whose cached
-# object verifies right now. Children retire only these; the link links them.
-pub fn generic_instance_retire_snapshot_v1(cache_root: text, producer: text) -> [text]:
-    var out: [text] = []
-    for key in generic_instance_retire_keys_of_v1(generic_instance_retire_path_v1(cache_root, producer)):
-        if generic_instance_verified_v1(cache_root, producer, key):
-            out.push(key)
-    out
-
 # ---- link wiring ----------------------------------------------------------
 
-# Extract the linkable body of each verified cached object for `keys` into
-# `link_dir`. Returns (paths, ok); ok is false when any key has no verified
-# object -- the caller must then not link any instance object.
-pub fn generic_instance_link_objects_v1(cache_root: text, producer: text, keys: [text],
+# Byte-copy each verified cached object for `body_keys` into `link_dir` and
+# re-verify the copy. Returns (paths, ok); ok is false when any key has no
+# verified object -- the caller must then not link (retired copies need it).
+pub fn generic_instance_link_objects_v1(cache_root: text, producer: text, body_keys: [text],
         link_dir: text) -> ([text], bool):
     var paths: [text] = []
-    if keys.len() == 0:
+    if body_keys.len() == 0:
         return (paths, true)
     if link_dir == "" or not dir_create_all(link_dir):
         return ([], false)
-    for key in keys:
+    for key in body_keys:
         val src = generic_instance_object_path_v1(cache_root, producer, key)
-        if src == "" or not file_exists(src):
+        val hdr = generic_instance_header_path_v1(src)
+        if not generic_instance_object_file_verified_v1(src, hdr, producer, key):
             return ([], false)
-        val content = file_read(src)
-        if not generic_instance_object_verify_v1(content, producer, key):
-            return ([], false)
-        val body = content.substring(content.index_of("\n") + 1)
         val dst = link_dir + "/" + sha256_text(key) + ".o"
-        if not _publish_v1(dst, body):
+        if not _copy_file_v1(src, dst) or not generic_instance_object_file_verified_v1(dst, hdr, producer, key):
             return ([], false)
         paths.push(dst)
     (paths, true)
 
-pub fn generic_instance_link_list_write_v1(path: text, objects: [text]) -> bool:
-    if path == "":
-        return false
-    _publish_v1(path, objects.join("\n") + "\n")
-
-pub fn generic_instance_link_list_read_v1(path: text) -> [text]:
-    var out: [text] = []
-    if path == "" or not file_exists(path):
-        return out
-    for line in file_read(path).split("\n"):
-        if line != "":
-            out.push(line)
-    out
-
 export GENERIC_INSTANCE_STAGE_ENV_V1, GENERIC_INSTANCE_RETIRE_ENV_V1, GENERIC_INSTANCE_LINK_ENV_V1
 export generic_instance_key_record_v1, generic_instance_key_of_v1
+export generic_instance_body_key_v1, generic_instance_concrete_of_v1, generic_instance_body_digest_of_v1
+export generic_instance_owner_digest_v1, generic_instance_module_ids_v1, generic_instance_owner_path_of_v1
+export generic_instance_lists_with_body_v1
 export generic_instance_stage_path_v1, generic_instance_stage_publish_v1, generic_instance_object_from_stage_v1
 export generic_instance_function_extractable_v1, generic_instance_mir_module_of_v1
 export generic_instance_keyed_functions_v1
-export generic_instance_retire_path_v1, generic_instance_retire_record_v1, generic_instance_retire_keys_of_v1
-export generic_instance_retire_in_module_v1, generic_instance_verified_v1, generic_instance_retire_snapshot_v1
-export generic_instance_link_objects_v1, generic_instance_link_list_write_v1, generic_instance_link_list_read_v1
+export generic_instance_retire_path_v1, generic_instance_verified_v1, generic_instance_retire_record_v1
+export generic_instance_retire_snapshot_v1, generic_instance_retire_in_module_v1
+export generic_instance_list_write_v1, generic_instance_list_read_v1
+export generic_instance_link_objects_v1

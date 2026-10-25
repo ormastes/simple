@@ -93,3 +93,15 @@ Still open (keys fail closed, nothing retired for them):
   are not extracted.
 - Generic TYPE instances (methods keyed by a `Name<args>` use) have no
   symbol -> key mapping yet.
+
+### P-G7 review r1 fixes
+
+- Body identity: the cache key is ConcreteTldrKey + sha256 of the template
+  owner's current source (`generic_instance_lists_with_body_v1`), so a
+  body-only edit changes the key: the old object is dropped, the instance is
+  rebuilt, and the retire snapshot drops rows whose owner digest changed.
+- Bytes: instance objects are byte-copied (`file_copy`) at stage, cache and
+  link; the cache header is a sidecar `<object>.hdr` over the object's
+  `file_hash_sha256_or_empty` digest; link copies are re-verified.
+- Extraction also rejects instances that name a constant, static or
+  non-instance function of the using module.

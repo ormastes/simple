@@ -73,12 +73,15 @@ use compiler.driver.driver_build.native_file_worker_incremental_v1.{
     file_worker_inc_receipt_line_v1}
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_dir_v1, file_worker_inc_producer_v1,
     file_worker_inc_prepare_v1, file_worker_inc_finish_v1}
-use compiler.driver.driver_build.native_file_worker_instances_v1.{file_worker_instances_plan_of_tldr_v1,
+use compiler.driver.driver_build.native_file_worker_instances_v1.{file_worker_instances_plan_v1,
     file_worker_instances_run_v1, file_worker_instances_receipt_line_v1}
 use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_STAGE_ENV_V1,
     GENERIC_INSTANCE_RETIRE_ENV_V1, GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_object_from_stage_v1,
     generic_instance_retire_snapshot_v1, generic_instance_retire_record_v1, generic_instance_verified_v1,
-    generic_instance_link_objects_v1, generic_instance_link_list_write_v1}
+    generic_instance_link_objects_v1, generic_instance_list_write_v1, generic_instance_concrete_of_v1,
+    generic_instance_lists_with_body_v1, generic_instance_module_ids_v1}
+use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1}
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
     native_mir_selective_job_count_v1}
 use compiler.driver.driver_ice_boundary.{
@@ -1359,8 +1362,11 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     val instance_stage = "{mir_queue}.instances/stage"
     val retire_snapshot = generic_instance_retire_snapshot_v1(machine_cache_root(), inc_producer)
     val retire_path = "{mir_queue}.instances/retire"
+    var retire_concrete: [text] = []
+    for body_key in retire_snapshot:
+        retire_concrete.push(generic_instance_concrete_of_v1(body_key))
     val retire_written = dir_create_all("{mir_queue}.instances") and
-        generic_instance_link_list_write_v1(retire_path, retire_snapshot)
+        generic_instance_list_write_v1(retire_path, retire_concrete)
     val old_stage = env_get(GENERIC_INSTANCE_STAGE_ENV_V1) ?? ""
     val old_retire = env_get(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? ""
     env_set(GENERIC_INSTANCE_STAGE_ENV_V1, instance_stage)
@@ -1419,7 +1425,13 @@ fn run_file_worker_instances_v1(args: [text], mir_queue: text, producer: text,
         if inventory[i] != "":
             modules.push(inventory[i])
         i = i + 1
-    val plan = file_worker_instances_plan_of_tldr_v1(modules, frontend + "/tldr", machine_cache_root(), producer)
+    # Body keys: ConcreteTldrKey + the template owner's current source digest, so
+    # a body-only template edit rebuilds the instance (P-G7 review r1).
+    var lists: [GenericSpecializationListV1?] = []
+    for m in modules:
+        lists.push(generic_spec_list_of_module_v1(m, frontend + "/tldr"))
+    val (body_lists, owners) = generic_instance_lists_with_body_v1(lists, generic_instance_module_ids_v1(modules))
+    val plan = file_worker_instances_plan_v1(body_lists, machine_cache_root(), producer)
     val stage = "{mir_queue}.instances/stage"
     val run = file_worker_instances_run_v1(plan, machine_cache_root(), producer, "{mir_queue}.instances/jobs",
         "coordinator-{getpid()}", true, generic_instance_object_from_stage_v1(stage, _1))
@@ -1428,7 +1440,7 @@ fn run_file_worker_instances_v1(args: [text], mir_queue: text, producer: text,
     var needed: [text] = []
     for s in plan.needed:
         needed.push(s.concrete_key)
-    val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed,
+    val _recorded = generic_instance_retire_record_v1(machine_cache_root(), producer, needed, owners,
         run.complete and run.retire_comdat)
     # A retired key no module needs any more had its copy retired nowhere.
     var link_keys: [text] = []
@@ -1454,7 +1466,7 @@ fn file_worker_instances_link_v1(mir_queue: text, producer: text, keys: [text],
     if not ok:
         return (relink, false)
     val list_path = "{mir_queue}.instances/link.list"
-    if not generic_instance_link_list_write_v1(list_path, objects):
+    if not generic_instance_list_write_v1(list_path, objects):
         return (relink, false)
     env_set(GENERIC_INSTANCE_LINK_ENV_V1, list_path)
     print "[file-worker] instance objects linked={objects.len()}"
