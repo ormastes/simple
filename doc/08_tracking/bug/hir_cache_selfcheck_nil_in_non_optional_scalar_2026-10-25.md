@@ -1,7 +1,7 @@
 # HIR cache codec self-check rejects entries: nil_in_non_optional_scalar
 
 - Date: 2026-10-25
-- Status: FIX LANDED (pending stage-3 rerun confirmation)
+- Status: FIX 2 (first fix insufficient; pending stage-3 rerun confirmation)
 - Seen in: ad-hoc Stage 3 (frozen admitted Stage 2 compiling the
   `src/app/cli/bootstrap_main.spl` closure, 1453 modules, Windows
   x86_64-pc-windows-gnu), logs `build/s3-mine/build.log`,
@@ -59,3 +59,18 @@ self-check was not loosened. Spec:
 ("HIR codec Dict<_, bool> encode"). Not yet confirmed by a native stage
 rerun: no runnable pure-Simple binary was available on this host for the
 current source (the seed rejects current stdlib).
+
+## Fix 1 insufficient (2026-10-25, later)
+
+Stage 2 built at `d72188e68ec` (contains fix 1, `184d31e1c69`) still logged
+313 `SELFCHECK FAILED ... nil_in_non_optional_scalar token=N` in
+`wt-rel3-new/build/s3-perfile2/build.log` (hits=239/1495). The typed local
+still yields the int-decoded word 1/0, which `put_bool` renders as neither
+`true` nor `false` and writes as `N`. Fix 2: the generator branches on the
+value (`if dmK[dkK]: w.put_bool(true) else: w.put_bool(false)`), so only
+literals reach `put_bool`. The regenerate also picked up a stale-codec gap:
+`HirSymbol.generic_param_count` was not encoded at all (a hit silently lost
+it); the checked-in `hir_codec.spl` now matches generator output byte for
+byte. Self-check not loosened. Unconfirmed until a stage-3 rerun shows
+`selfcheck_failed` near 0 (whether these two Dict<_, bool> fields are the
+ONLY N source is not proven -- no failing entry is stored to decode).
