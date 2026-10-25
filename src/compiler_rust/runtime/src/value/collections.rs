@@ -46,6 +46,11 @@ struct TransientHeapScope {
     /// Two tracked objects share a header address; fall back to the exact
     /// original linear scans for this scope.
     index_ambiguous: bool,
+    /// Exact value bits promoted while the index is ambiguous. Compaction of
+    /// `objects` is deferred to ONE filter at scope end instead of a
+    /// per-promote `retain` (O(objects) per call -> O(N^2) for N promotes;
+    /// doc/05_design/compiler/memory/build_session_memory_model_v1.md §6, BSM P0).
+    promoted: super::heap::HeapPtrSet<u64>,
 }
 
 impl TransientHeapScope {
@@ -65,10 +70,9 @@ impl TransientHeapScope {
     fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
         self.sync_index();
         if self.index_ambiguous {
-            return self
-                .objects
-                .iter()
-                .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr);
+            return self.objects.iter().any(|object| {
+                object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
+            });
         }
         self.by_ptr.contains_key(&(root_ptr as usize))
     }
@@ -77,10 +81,14 @@ impl TransientHeapScope {
     fn release_reachable(&mut self, reachable: &super::heap::HeapPtrSet<u64>) {
         self.sync_index();
         if self.index_ambiguous {
-            self.objects.retain(|object| !reachable.contains(&object.0));
-            self.by_ptr.clear();
-            self.indexed = 0;
-            self.index_ambiguous = false;
+            // Deferred: rt_transient_array_scope_end filters once.
+            // Only tracked addresses are recorded, so the set stays bounded
+            // by `objects` however much persistent graph a promote walks.
+            let by_ptr = &self.by_ptr;
+            self.promoted.extend(reachable.iter().copied().filter(|bits| {
+                let value = RuntimeValue(*bits);
+                value.is_heap() && by_ptr.contains_key(&(value.as_heap_ptr() as usize))
+            }));
             return;
         }
         for bits in reachable.iter() {
@@ -2795,9 +2803,21 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
             by_ptr: Default::default(),
             indexed: 0,
             index_ambiguous: false,
+            promoted: Default::default(),
         });
         true
     })
+}
+
+/// Test hook: force the ambiguous-index fallback on this thread's scope.
+#[cfg(test)]
+pub(crate) fn transient_scope_force_index_ambiguous() {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.sync_index();
+            scope.index_ambiguous = true;
+        }
+    });
 }
 
 /// Read this thread's actual scope; no mutation, allocation or lease grant.
@@ -3125,9 +3145,15 @@ pub extern "C" fn rt_transient_array_scope_end() -> bool {
     // A promotion share window never outlives its scope.
     TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take());
     let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
-    let Some(scope) = scope else {
+    let Some(mut scope) = scope else {
         return false;
     };
+    // The ONE deferred compaction (BSM P0): drop objects promoted while the
+    // index was ambiguous. The common path already tombstoned them to NIL.
+    if !scope.promoted.is_empty() {
+        let promoted = std::mem::take(&mut scope.promoted);
+        scope.objects.retain(|object| !promoted.contains(&object.0));
+    }
     // One shard lock per 64K of that shard's objects (see `unregister_heap_ptrs_batch`):
     // the old per-object `free_transient_heap` took the registry mutex twice
     // per object, and each erase bumped the free epoch, so the next object's

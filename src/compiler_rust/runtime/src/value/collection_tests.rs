@@ -2570,6 +2570,154 @@ fn transient_heap_promotion_walks_unowned_root_with_owned_children() {
     super::rt_array_free(owned_child);
 }
 
+// BSM P0 (build_session_memory_model_v1.md §6): scope compaction is deferred
+// to scope end. Each case runs on both the indexed path and the forced
+// ambiguous-index fallback (the one that used to `retain` per promote).
+fn bsm_p0_promote_then_end_frees_only_unpromoted(ambiguous: bool) {
+    assert!(super::rt_transient_array_scope_begin());
+    let kept = super::rt_array_new(1);
+    let kept_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(kept, kept_child));
+    let dropped = super::rt_array_new(1);
+    let dropped_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(dropped, dropped_child));
+    if ambiguous {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(kept));
+    // Double promote is idempotent.
+    assert!(super::rt_transient_heap_promote(kept));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(super::rt_array_len(kept), 1);
+    assert_eq!(super::rt_array_len(kept_child), 0);
+    assert_eq!(super::rt_array_len(dropped), -1);
+    assert_eq!(super::rt_array_len(dropped_child), -1);
+    super::rt_array_free(kept_child);
+    super::rt_array_free(kept);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_indexed() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(false);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_ambiguous() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(true);
+}
+
+#[test]
+fn bsm_p0_ambiguous_unowned_root_keeps_owned_children() {
+    assert!(super::rt_transient_array_scope_begin());
+    let owned_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(owned_child, RuntimeValue::from_int(7)));
+    super::transient_scope_force_index_ambiguous();
+    assert!(super::rt_transient_array_scope_pause());
+    let unowned_root = crate::value::objects::rt_enum_new(1, 0, owned_child);
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_array_scope_end());
+    assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
+    assert_eq!(super::rt_array_len(owned_child), 1);
+    super::rt_array_free(owned_child);
+}
+
+/// The `bootstrap_hir_modules_promote_last` pattern
+/// (src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl): per module,
+/// one transient scope builds 7 rows (each an array of 50 small arrays); after
+/// pause each row is appended to its persistent outer array, then the row AND
+/// all 7 outer arrays are promoted. N from `BSM_BENCH_N` (default 200 to keep
+/// the debug suite bounded; the PR measurement uses 2000 in release).
+#[test]
+fn bsm_p0_promote_last_pattern_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let outers: Vec<RuntimeValue> = (0..7).map(|_| super::rt_array_new(0)).collect();
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let rows: Vec<RuntimeValue> = (0..7)
+            .map(|_| {
+                let row = super::rt_array_new(50);
+                for k in 0..50 {
+                    let leaf = super::rt_array_new(1);
+                    assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                    assert!(super::rt_array_push(row, leaf));
+                }
+                row
+            })
+            .collect();
+        assert!(super::rt_transient_array_scope_pause());
+        for (outer, row) in outers.iter().zip(rows.iter()) {
+            assert!(super::rt_array_push(*outer, *row));
+            assert!(super::rt_transient_heap_promote(*row));
+        }
+        for outer in &outers {
+            assert!(super::rt_transient_heap_promote(*outer));
+        }
+        assert!(super::rt_transient_array_scope_end());
+    }
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=promote_last n={} wall_ms={}", n, elapsed.as_millis());
+    bsm_p0_check_outers(&outers, n);
+}
+
+fn bsm_p0_check_outers(outers: &[RuntimeValue], n: usize) {
+    for outer in outers {
+        assert_eq!(super::rt_array_len(*outer), n as i64);
+        let last = super::rt_array_get(*outer, n as i64 - 1);
+        assert_eq!(super::rt_array_len(last), 50);
+    }
+}
+
+/// The path the deferred compaction targets: ONE scope tracking N rows of 50
+/// small arrays, ambiguous index, N separate promotes. Before BSM P0 every
+/// promote ran `objects.retain` over all ~51*N tracked objects (O(N^2)).
+#[test]
+fn bsm_p0_ambiguous_many_promotes_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    assert!(super::rt_transient_array_scope_begin());
+    let rows: Vec<RuntimeValue> = (0..n)
+        .map(|_| {
+            let row = super::rt_array_new(50);
+            for k in 0..50 {
+                let leaf = super::rt_array_new(1);
+                assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                assert!(super::rt_array_push(row, leaf));
+            }
+            row
+        })
+        .collect();
+    // A real header-address collision (free + same-size reuse inside the
+    // running scope) makes the index ambiguous for the rest of the scope.
+    let mut collided = false;
+    for _ in 0..64 {
+        let freed = super::rt_array_new(1);
+        let addr = freed.as_heap_ptr();
+        super::rt_array_free(freed);
+        let reused = super::rt_array_new(1);
+        if reused.as_heap_ptr() == addr {
+            collided = true;
+            break;
+        }
+    }
+    if !collided {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    for row in rows.iter().step_by(2) {
+        assert!(super::rt_transient_heap_promote(*row));
+    }
+    assert!(super::rt_transient_array_scope_end());
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=ambiguous_many_promotes n={} wall_ms={}", n, elapsed.as_millis());
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(super::rt_array_len(*row), if i % 2 == 0 { 50 } else { -1 });
+    }
+}
+
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
 /// now emit. Two things have to hold at once and they pull in opposite
 /// directions, which is why they are asserted together:
