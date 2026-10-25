@@ -1,0 +1,205 @@
+"""REQ-MC-006 / ASYNC-LOCK-ORDER: production static function and Mutex effects.
+
+These scenarios exercise the production parser/checker, not runtime TSan.
+Qualified compiled SSpec execution is required before claiming acceptance.
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset, core_frontend_parse_append}
+use compiler.core.parser.{parser_get_errors, parser_has_errors, parse_module}
+use compiler.core.ast.{module_get_decls, decl_get_name, decl_get_param_names}
+use compiler.frontend.core.static_lock_level.{check_lock_level_order, lock_level_error_line}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_annotation_value, lock_level_metadata_count, lock_level_metadata_reset, flat_lock_level_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_enc_i64, flat_pool_enc_scalar_i64}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_pools_dump_all, flat_pools_restore_all, build_module_from_flat_pool_blob}
+
+val LOCK_RESOURCES = "use std.nogc_sync_mut.concurrent.mutex.{mutex_new, mutex_with_lock, mutex_with_lock_keeping}\n@lock_level(1)\nval low = mutex_new(0)\n@lock_level(2)\nval high = mutex_new(0)\n"
+val LOCK_ASCENDING = "@lock_level(1)\nfn low():\n    high()\n@lock_level(2)\nfn high():\n    1\n"
+val LOCK_DESCENDING = "@lock_level(2)\nfn high():\n    low()\n@lock_level(1)\nfn low():\n    1\n"
+
+fn check_lock_level_source(source: text) -> text:
+    val parsed = core_frontend_parse_reset(source, "static_lock_level_case.spl")
+    if parsed: return ""
+    val errors = parser_get_errors()
+    if errors.len() == 0: return "parser failed without diagnostic"
+    errors.join("\n")
+
+fn expect_lock_level_error(source: text, code: text):
+    step("Declare ranked lock scopes")
+    step("Compile the acquisition sequence")
+    val diagnostic = check_lock_level_source(source)
+    step("Check the lock-order diagnostic")
+    expect(diagnostic).to_contain(code)
+
+fn expect_lock_level_success(source: text):
+    step("Declare ranked lock scopes")
+    step("Compile the acquisition sequence")
+    val diagnostic = check_lock_level_source(source)
+    step("Check the lock-order diagnostic")
+    expect(diagnostic).to_equal("")
+
+describe "REQ-MC-006 static lock-level ordering":
+    it "should accept ascending ranked function calls":
+        expect_lock_level_success(LOCK_ASCENDING)
+
+    it "should reject descending ranked function calls":
+        expect_lock_level_error(LOCK_DESCENDING, "E-LOCK-LEVEL-002")
+        expect(lock_level_error_line()).to_be_greater_than(0)
+
+    it "should propagate lower ranks through unannotated wrappers":
+        expect_lock_level_error("@lock_level(2)\nfn high():\n    wrapper()\nfn wrapper():\n    low()\n@lock_level(1)\nfn low():\n    1\n", "E-LOCK-LEVEL-002")
+
+    it "should release a sibling function scope before acquiring lower":
+        expect_lock_level_success("fn run():\n    high()\n    low()\n@lock_level(2)\nfn high():\n    2\n@lock_level(1)\nfn low():\n    1\n")
+
+    it "should accept equal distinct function ranks and zero":
+        expect_lock_level_success("@lock_level(0)\nfn first():\n    second()\n@lock_level(0)\nfn second():\n    0\n")
+
+    it "should reject a recursive ranked cycle through wrappers":
+        expect_lock_level_error("@lock_level(1)\nfn first():\n    wrapper()\nfn wrapper():\n    first()\n", "E-LOCK-LEVEL-003")
+
+    it "should reject unresolved imported or indirect function effects":
+        expect_lock_level_error("use unknown.lib.{call}\n@lock_level(1)\nfn ranked():\n    call()\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error("@lock_level(1)\nfn ranked(callback: fn() -> i64):\n    callback()\n", "E-LOCK-LEVEL-003")
+
+    it "should reject a parameter shadowing a direct function name":
+        expect_lock_level_error("fn target():\n    1\n@lock_level(1)\nfn ranked(target: fn() -> i64):\n    target()\n", "E-LOCK-LEVEL-003")
+
+    it "should reject lower ranks hidden in default arguments":
+        expect_lock_level_error("@lock_level(1)\nfn low():\n    1\nfn wrapper(x: i64 = low()):\n    x\n@lock_level(2)\nfn high():\n    wrapper()\n", "E-LOCK-LEVEL-003")
+
+    it "should accept primitive arithmetic and reject unproved operator effects":
+        expect_lock_level_success("@lock_level(1)\nfn scalar(x: i64):\n    x + 1\n")
+        expect_lock_level_error("class Value:\n    field: i64\n@lock_level(1)\nfn ranked(x: Value):\n    x + 1\n", "E-LOCK-LEVEL-003")
+
+    it "should preserve AST parameter names while collecting local bindings":
+        expect_lock_level_success("@lock_level(1)\nfn ranked(x: i64):\n    val local = 2\n    x + 1\n")
+        var found: i64 = 0
+        for did in module_get_decls():
+            if decl_get_name(did) == "ranked":
+                found = found + 1
+                expect(decl_get_param_names(did)).to_equal(["x"])
+        expect(found).to_equal(1)
+
+    it "should validate exact nonnegative decimal i64 annotation values":
+        expect(lock_level_annotation_value("0")).to_equal(0)
+        expect(lock_level_annotation_value("9223372036854775807")).to_equal(9223372036854775807)
+        for invalid in ["", "-1", "1+2", "9223372036854775808", "1_0", "x"]:
+            expect(lock_level_annotation_value(invalid)).to_equal(-1)
+
+    it "should reject malformed and duplicate annotations":
+        for annotation in ["@lock_level", "@lock_level()", "@lock_level(-1)", "@lock_level(1,2)", "@lock_level(n: 1)", "@lock_level(1+2)", "@lock_level(9223372036854775808)", "@lock_level(1)\n@lock_level(2)"]:
+            expect_lock_level_error(annotation + "\nfn ranked():\n    1\n", "E-LOCK-LEVEL-001")
+
+    it "should reject unsupported declaration placement and dangling member metadata":
+        expect_lock_level_error("@lock_level(1)\nstruct Item:\n    field: i64\nfn ordinary():\n    1\n", "E-LOCK-LEVEL-001")
+        expect_lock_level_error("class Item:\n    field: i64\n    @lock_level(1)\nfn ordinary():\n    1\n", "E-LOCK-LEVEL-001")
+        expect_lock_level_error("@lock_level(1)\n", "E-LOCK-LEVEL-001")
+
+    it "should reject suspension and source-only reviewed-exception claims":
+        expect_lock_level_error("@lock_level(1)\nasync fn ranked():\n    1\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error("@lock_order_exception(reason: \"reviewed\")\nfn ranked():\n    1\n", "E-LOCK-LEVEL-004")
+
+    it "should preserve stacked attributes and visibility without rank leakage":
+        expect_lock_level_success("@lock_level(1)\n@inline\npub fn ranked():\n    1\nfn ordinary():\n    unknown()\n")
+        expect(lock_level_metadata_count()).to_equal(1)
+
+    it "should keep prior ranked declarations during append parsing":
+        expect_lock_level_success("@lock_level(2)\nfn high():\n    low()\n@lock_level(2)\nfn low():\n    1\n")
+        expect(core_frontend_parse_append("fn ordinary():\n    1\n", "lock_append.spl")).to_equal(true)
+        expect(lock_level_metadata_count()).to_equal(2)
+
+    it "should acquire actual Mutex callbacks in ascending order":
+        expect_lock_level_success(LOCK_RESOURCES + "fn run():\n    low.with_lock(\\x: high.with_lock(\\y: y + 1))\n")
+
+    it "should reject descending actual Mutex callbacks":
+        expect_lock_level_error(LOCK_RESOURCES + "fn run():\n    high.with_lock(\\x: low.with_lock(\\y: y))\n", "E-LOCK-LEVEL-002")
+
+    it "should release a Mutex callback before a lower sibling acquisition":
+        expect_lock_level_success(LOCK_RESOURCES + "fn run():\n    high.with_lock(\\x: x)\n    low.with_lock(\\y: y)\n")
+
+    it "should accept distinct equal resources and reject same-resource reentry":
+        val equal = LOCK_RESOURCES.replace("@lock_level(2)", "@lock_level(1)")
+        expect_lock_level_success(equal + "fn run():\n    low.with_lock(\\x: high.with_lock(\\y: y))\n")
+        expect_lock_level_error(LOCK_RESOURCES + "fn run():\n    low.with_lock(\\x: low.with_lock(\\y: y))\n", "E-LOCK-LEVEL-003")
+
+    it "should apply the same order to canonical free helper wrappers":
+        expect_lock_level_success(LOCK_RESOURCES + "fn run():\n    mutex_with_lock(low, \\x: mutex_with_lock(high, \\y: y))\n")
+        expect_lock_level_error(LOCK_RESOURCES + "fn run():\n    mutex_with_lock(high, \\x: mutex_with_lock(low, \\y: y))\n", "E-LOCK-LEVEL-002")
+        expect_lock_level_error(LOCK_RESOURCES + "fn run():\n    mutex_with_lock_keeping(high, 0, \\: mutex_with_lock(low, \\y: y))\n", "E-LOCK-LEVEL-002")
+
+    it "should evaluate helper arguments before entering the new resource rank":
+        expect_lock_level_success(LOCK_RESOURCES + "fn run():\n    mutex_with_lock_keeping(high, low.with_lock(\\x: x), \\: 1)\n")
+
+    it "should reject manual operations and callback references":
+        for operation in ["low.lock()", "low.try_lock()", "low.unlock(0)", "low.with_lock(callback)"]:
+            expect_lock_level_error(LOCK_RESOURCES + "fn callback(x: i64):\n    x\nfn run():\n    " + operation + "\n", "E-LOCK-LEVEL-003")
+
+    it "should reject resource aliases and parameter or local shadowing":
+        expect_lock_level_error(LOCK_RESOURCES + "val alias = low\nfn run():\n    alias.with_lock(\\x: x)\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error(LOCK_RESOURCES + "fn run(low: i64):\n    low.with_lock(\\x: x)\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error(LOCK_RESOURCES + "fn run():\n    val mutex_with_lock = 1\n    mutex_with_lock(low, \\x: x)\n", "E-LOCK-LEVEL-003")
+
+    it "should reject callbacks that change the protected scalar invariant":
+        expect_lock_level_error(LOCK_RESOURCES + "class Value:\n    field: i64\nfn run(external: Value):\n    low.with_lock(\\x: external)\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error("class Value:\n    field: i64\n@lock_level(1)\nfn ranked(x: i64, external: Value):\n    val x = external\n    x + 1\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error(LOCK_RESOURCES + "class Value:\n    field: i64\nfn run(external: Value):\n    mutex_with_lock_keeping(low, external, \\: 0)\n", "E-LOCK-LEVEL-003")
+
+    it "should reject resource and canonical-import collisions":
+        expect_lock_level_error(LOCK_RESOURCES + "val low = 1\nfn run():\n    low.with_lock(\\x: x)\n", "E-LOCK-LEVEL-003")
+        expect_lock_level_error(LOCK_RESOURCES + "fn mutex_new(x: i64):\n    x\n", "E-LOCK-LEVEL-003")
+
+    it "should reject hidden acquisition effects in field defaults":
+        expect_lock_level_error(LOCK_RESOURCES + "class Holder:\n    value: i64 = low.lock()\n", "E-LOCK-LEVEL-003")
+
+    it "should reject mutable resources and noncanonical constructors":
+        expect_lock_level_error("@lock_level(1)\nvar low = 0\n", "E-LOCK-LEVEL-001")
+        expect_lock_level_error("fn mutex_new(x: i64):\n    x\n@lock_level(1)\nval low = mutex_new(0)\n", "E-LOCK-LEVEL-003")
+
+    it "should clear ranks on fresh parse and preserve them across cache restoration":
+        val module = parse_and_build_module(LOCK_ASCENDING, "lock_cache.spl")
+        val blob = flat_pools_dump_all()
+        expect(blob.len()).to_be_greater_than(0)
+        lock_level_metadata_reset()
+        expect(flat_pools_restore_all(blob)).to_equal(true)
+        expect(lock_level_metadata_count()).to_equal(2)
+        expect(check_lock_level_order()).to_equal("")
+        expect(build_module_from_flat_pool_blob(blob, LOCK_ASCENDING, "lock_cache.spl") != nil).to_equal(true)
+        expect_lock_level_success("fn ordinary():\n    unknown()\n")
+        expect(lock_level_metadata_count()).to_equal(0)
+
+    it "should refuse a descending cached AST and reject the fresh production bridge":
+        step("Restore an AST whose producer did not enforce lock order")
+        parse_module(LOCK_DESCENDING, "lock_invalid_cache.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val blob = flat_pools_dump_all()
+        expect(blob.len()).to_be_greater_than(0)
+        expect(build_module_from_flat_pool_blob(blob, LOCK_DESCENDING, "lock_invalid_cache.spl") == nil).to_equal(true)
+        step("Analyze the same source through the native frontend bridge")
+        val module = parse_and_build_module(LOCK_DESCENDING, "lock_invalid_bridge.spl")
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_get_errors().join("\n")).to_contain("E-LOCK-LEVEL-002")
+
+    it "should reject corrupt metadata IDs kinds duplicates and old cache versions":
+        expect_lock_level_success("use unknown.module.{other}\nfn ordinary():\n    1\nval data = 0\n")
+        for ids in [[999999], [0], [1, 1], [2]]:
+            var ranks: [i64] = []
+            for did in ids: ranks.push(1)
+            val blob = flat_pool_enc_i64(ids) + flat_pool_enc_i64(ranks) + flat_pool_enc_scalar_i64(-1)
+            val reader = FlatPoolReader.new_canonical(blob)
+            # DECL_VAL now supports resources; invalid resource is rejected by
+            # the production checker even when its metadata shape is valid.
+            if ids == [2]:
+                expect(flat_lock_level_pools_restore(reader)).to_equal(true)
+                expect(check_lock_level_order()).to_contain("E-LOCK-LEVEL-003")
+            else:
+                expect(flat_lock_level_pools_restore(reader)).to_equal(false)
+        expect(flat_pools_restore_all("spl-flatpool-v8-a5-refusal\n")).to_equal(false)
+
+    it "should fail closed when the finite graph proof budget is exceeded":
+        var source = ""
+        var i: i64 = 0
+        while i < 450:
+            source = source + "@lock_level(1)\nfn ranked_" + i.to_text() + "():\n    1\n"
+            i = i + 1
+        expect_lock_level_error(source, "E-LOCK-LEVEL-003")

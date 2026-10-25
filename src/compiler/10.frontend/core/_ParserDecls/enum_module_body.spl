@@ -47,6 +47,8 @@ use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
 use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 use compiler.frontend.core.flat_pool_codec.*
+use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
+use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -669,6 +671,10 @@ fn parser_parse_member_attribute() -> bool:
         return true
     val attr_name = par_text_get()
     parser_advance()
+    if attr_name == "lock_level" or lock_level_is_exception_attribute(attr_name):
+        lock_level_parse_attribute(attr_name)
+        parser_skip_newlines_and_semicolons()
+        return true
     if attr_name == "representation_boundary":
         representation_parse_attribute_v1(representation_start, representation_line, representation_col)
         parser_skip_newlines_and_semicolons()
@@ -841,7 +847,8 @@ pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
     rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
         rt_transient_heap_promote(ENUM_ATTRIBUTES) and
         rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
-        representation_parser_promote_transient_owner_v1()
+        representation_parser_promote_transient_owner_v1() and
+        lock_level_metadata_promote()
 
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
@@ -955,6 +962,7 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
+            lock_level_reject_non_function(190)
             representation_reject_pending_v1()
             break
         val pm_kind = par_kind_get()
@@ -974,6 +982,7 @@ fn parse_module_body():
             representation_reject_pending_v1()
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
+            lock_level_reject_non_function(par_kind_get())
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
@@ -987,6 +996,7 @@ fn parse_module_body():
                 module_add_decl(visible_decl)
                 parser_reset_pending_vhdl_decorators()
             continue
+        lock_level_reject_non_function(par_kind_get())
         if par_kind_get() == 182:
             # Stray dedent at module level -- skip it
             parser_advance()
@@ -1045,6 +1055,7 @@ fn parse_module_body():
             else:
                 representation_reject_pending_v1()
                 val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
+                lock_level_reject_non_function(-1)
                 if static_is_mut:
                     parser_advance()
                 val static_name = par_text_get()
@@ -1251,6 +1262,10 @@ fn parse_module_body():
                 # Capture its text and consume it so we don't mis-dispatch to AOP parser
                 decorator_name = par_text_get()
                 parser_advance()
+            if decorator_name == "lock_level" or lock_level_is_exception_attribute(decorator_name):
+                lock_level_parse_attribute(decorator_name)
+                parser_skip_newlines_and_semicolons()
+                continue
             if decorator_name == "representation_boundary":
                 representation_parse_attribute_v1(representation_start, representation_line, representation_col)
                 parser_skip_newlines_and_semicolons()
