@@ -55,7 +55,7 @@ fn prim_key(name: text) -> text:
 
 # What mono observes for `val p = make_pair(1, 2.0)`: the inferred Pair<i64, f64>.
 fn mono_infer_list(module_id: text) -> GenericSpecializationListV1:
-    generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], true, module_id,
+    generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], true, [], module_id,
         [pair_entry()], ctx_with(["make_pair", "Pair"]))
 
 fn empty_rr() -> ReverseReferenceReceiptReadV1:
@@ -87,7 +87,7 @@ fn list_of(keys: [[text]]) -> GenericSpecializationListV1:
     for k in keys:
         names.push("Pair")
         args.push(k)
-    generic_specializations_of_mono_v1(names, args, true, "app", [pair_entry()], ctx_with([]))
+    generic_specializations_of_mono_v1(names, args, true, [], "app", [pair_entry()], ctx_with([]))
 
 describe "generic-spec list from mono: inferred instantiation":
     it "lists the instance mono inferred and is complete":
@@ -105,9 +105,16 @@ describe "generic-spec list from mono: inferred instantiation":
         expect(t.specs.len()).to_equal(0)
 
     it "an unrenderable mono use makes the list incomplete":
-        val l = generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], false, "app",
+        val l = generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], false, [], "app",
             [pair_entry()], ctx_with([]))
         expect(l.complete).to_equal(false)
+
+    it "an imported generic function instance with no type use keeps the list incomplete":
+        # `id(1)`: mono places id$i64, but i64 carries no `Name<args>` type.
+        val l = generic_specializations_of_mono_v1([], [], true, ["t.id"], "app", [pair_entry()],
+            ctx_with(["id"]))
+        expect(l.complete).to_equal(false)
+        expect(l.specs.len()).to_equal(0)
 
     it "renders concrete HIR types in source spelling":
         expect(mono_type_source_text_v1(int_t(64), nil)).to_equal("i64")
@@ -119,7 +126,7 @@ describe "generic-spec list from mono: inferred instantiation":
 describe "generic-spec list from mono: planner":
     it "a complete mono list lets the planner rebuild exactly":
         val rr = rr_of_lists(["user_infer.spl", "user_none.spl"],
-            [mono_infer_list("user_infer"), generic_specializations_of_mono_v1([], [], true,
+            [mono_infer_list("user_infer"), generic_specializations_of_mono_v1([], [], true, [],
                 "user_none", [pair_entry()], ctx_with([]))])
         val mods = [module("pkg_a.spl", [], true), module("user_infer.spl", ["pkg_a.spl"], false),
             module("user_none.spl", ["pkg_a.spl"], false)]
@@ -134,7 +141,7 @@ describe "generic-spec list from mono: planner":
         expect(fb.complete).to_equal(false)
         expect(fb.specs.len()).to_equal(1)
         val rr = rr_of_lists(["user_text.spl", "user_none.spl"], [fb,
-            generic_specializations_of_mono_v1([], [], true, "user_none", [pair_entry()], ctx_with([]))])
+            generic_specializations_of_mono_v1([], [], true, [], "user_none", [pair_entry()], ctx_with([]))])
         val mods = [module("pkg_a.spl", [], true), module("user_text.spl", ["pkg_a.spl"], false),
             module("user_none.spl", ["pkg_a.spl"], false)]
         val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(

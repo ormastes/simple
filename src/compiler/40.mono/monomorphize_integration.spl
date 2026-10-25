@@ -37,7 +37,7 @@ use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
 use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys,
-    MonoObservedGenericUseV1, mono_generic_uses_of_type_v1}
+    MonoObservedGenericUseV1, mono_generic_uses_of_type_v1, mono_type_source_text_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use std.io_runtime.{env_get, time_now_monotonic_ms}
@@ -1531,6 +1531,17 @@ impl MonomorphizationPass:
         val sym = self.next_symbol
         self.next_symbol = self.next_symbol + 1
         self.spec_symbols[mangled] = sym
+        if self.module_scoped_v1 and spec_mod != self.module_scoped_target_v1:
+            # P-G5: an imported generic FUNCTION instance (`id(1)` -> id$i64)
+            # may carry no `Name<args>` type at all; record its identity so
+            # the generic-spec list cannot certify complete coverage without it.
+            var arg_texts: [text] = []
+            val symbols: SymbolTable? = self.module_symbols[self.current_module] ?? nil
+            for ta in completed_args:
+                val tat: HirType = ta
+                arg_texts = arg_texts.push(mono_type_source_text_v1(tat, symbols))
+            mono_scoped_generic_fn_instances_v1 = mono_scoped_generic_fn_instances_v1.push(
+                MonoObservedGenericUseV1(name: spec_mod + "." + func_name, arg_texts: arg_texts))
         var signature = self.template_signature_v1(func_name)
         if self.template_body_mode == MonoTemplateBodyModeV1.ArchiveRequests:
             # The archive consumer fulfills this request with
@@ -4958,12 +4969,19 @@ pub var mono_report_modules_owner: Dict<text, HirModule> = {}
 pub var mono_scoped_generic_uses_v1: [MonoObservedGenericUseV1] = []
 pub var mono_scoped_generic_uses_complete_v1: bool = true
 pub var mono_scoped_generic_uses_ready_v1: bool = false
+# Instances of generic FUNCTIONS declared in another module ("<module>.<fn>",
+# concrete argument spellings), requested by the last module-scoped run.
+pub var mono_scoped_generic_fn_instances_v1: [MonoObservedGenericUseV1] = []
 
 # (uses, complete, ready) of the last module-scoped run.
 fn mono_scoped_generic_uses_last_v1() -> ([MonoObservedGenericUseV1], bool, bool):
     (mono_scoped_generic_uses_v1, mono_scoped_generic_uses_complete_v1, mono_scoped_generic_uses_ready_v1)
 
+fn mono_scoped_generic_fn_instances_last_v1() -> [MonoObservedGenericUseV1]:
+    mono_scoped_generic_fn_instances_v1
+
 fn mono_scoped_generic_uses_reset_v1():
+    mono_scoped_generic_fn_instances_v1 = []
     mono_scoped_generic_uses_v1 = []
     mono_scoped_generic_uses_complete_v1 = true
     mono_scoped_generic_uses_ready_v1 = false

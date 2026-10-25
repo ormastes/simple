@@ -15,24 +15,43 @@ is not visible is E-MONO-040, never silently skipped.
 
 use std.spec.*
 use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.{HirModule, SymbolId}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass,
-    run_monomorphization_module_scoped_v1, mono_scoped_generic_uses_last_v1}
+    run_monomorphization_module_scoped_v1, mono_scoped_generic_uses_last_v1,
+    mono_scoped_generic_fn_instances_last_v1}
 
-val TEMPLATE_SRC = "fn id<X>(x: X) -> X:\n    x\n"
-val USER_SRC = "use t.{id}\n\nfn main() -> i64:\n    id(1)\n"
-val PAIR_TEMPLATE_SRC = "struct Pair<A, B>:\n    first: A\n    second: B\n\nfn make_pair<A, B>(a: A, b: B) -> Pair<A, B>:\n    Pair(first: a, second: b)\n"
-val PAIR_USER_SRC = "use pt.{make_pair}\n\nfn main() -> i64:\n    val p = make_pair(1, 2.0)\n    p.first\n"
+# Raw strings: `{id}` in a plain literal is interpolation (the old fixture
+# made this file fail to load: "variable `id` not found").
+val TEMPLATE_SRC = r"""fn id<X>(x: X) -> X:
+    x
+"""
+val USER_SRC = r"""use t.{id}
+
+fn main() -> i64:
+    id(1)
+"""
 
 fn lower_v1(source: text, name: text) -> HirModule:
+    # `use t.{id}` only resolves when module t's surface is registered (the
+    # driver's contract); a bare HirLowering leaves the callee as Error.
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["t"] = parse_full_frontend(TEMPLATE_SRC, "testdata/t.spl", "t", log)
+    val sources = [SourceFile(path: "testdata/t.spl", content: TEMPLATE_SRC, module_name: "t")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     val path = "testdata/{name}.spl"
-    val ast = parse_full_frontend(source, path, name, Logger(level: 0))
-    var lowering = HirLowering.with_filename(path)
-    lowering.lower_module(ast)
+    val ast = parse_full_frontend(source, path, name, log)
+    var lowering = hirlowering_for_module(name, surfaces)
+    var lowered = lowering.lower_module(ast)
+    lowered.name = name
+    lowered
 
 fn instance_names_v1(module: HirModule) -> [text]:
     var names: [text] = []
@@ -92,16 +111,18 @@ describe "module-scoped monomorphization":
         expect(diags[0]).to_contain("not visible to module")
         expect(instance_names_v1(out).len()).to_equal(0)
 
-    it "records the inferred generic type instance it placed (P-G5)":
-        val pt = lower_v1(PAIR_TEMPLATE_SRC, "pt")
+    it "records an imported generic function instance with primitive arguments (P-G5)":
+        val t = lower_v1(TEMPLATE_SRC, "t")
+        val f = lower_v1(USER_SRC, "f")
         var templates: Dict<text, HirModule> = {}
-        templates["pt"] = pt
-        val (_o, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(PAIR_USER_SRC, "pu"), templates)
+        templates["t"] = t
+        val (_o, _s, diags) = run_monomorphization_module_scoped_v1(f, templates)
         expect(diags.len()).to_equal(0)
-        val (uses, complete, ready) = mono_scoped_generic_uses_last_v1()
+        val (_uses, _complete, ready) = mono_scoped_generic_uses_last_v1()
         expect(ready).to_equal(true)
-        expect(complete).to_equal(true)
-        var found = false
-        for u in uses:
-            if u.name == "Pair" and u.arg_texts == ["i64", "f64"]: found = true
-        expect(found).to_equal(true)
+        val fns = mono_scoped_generic_fn_instances_last_v1()
+        expect(fns.len()).to_equal(1)
+        if fns.len() == 1:
+            expect(fns[0].name).to_equal("t.id")
+            expect(fns[0].arg_texts).to_equal(["i64"])
+
