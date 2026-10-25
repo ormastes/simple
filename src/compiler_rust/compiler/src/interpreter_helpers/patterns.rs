@@ -871,8 +871,8 @@ pub(crate) fn handle_method_call_with_self_update(
 /// in a single `lint` of driver_types.spl. Since the (owner, name) pair is
 /// known here, the write is recorded instead, and the cache patches just that
 /// name. Both stores are kept in step so a later rebuild cannot resurrect the
-/// pre-write value. When the executing module is unknown there is no owner to
-/// key a patch on, so that path keeps the blunt invalidation.
+/// pre-write value. An unknown executing module is the entry script, whose
+/// store is `"<entry>"`.
 pub(crate) fn sync_flat_global(name: &str, value: &Value) {
     let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
     if !present {
@@ -881,10 +881,15 @@ pub(crate) fn sync_flat_global(name: &str, value: &Value) {
     crate::interpreter::MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.to_string(), value.clone());
     });
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
-    }
+    // No executing module = the entry script's own top-level code (incl. a
+    // spec `it` block), whose functions own the `"<entry>"` store. Skipping
+    // it left that store at the value the frame's last call-out published,
+    // so every later write was invisible to the entry script's functions.
+    // `create == false`: only a name already global in that store is written.
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| std::sync::Arc::from("<entry>"));
+    crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
 }
 
 /// Park the global stores' copies of a module-global array and drop the frame's
