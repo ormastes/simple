@@ -1,0 +1,62 @@
+# Parent observations, separate from child self-reports and interval admission.
+use app.cli.native_mir_worker_private_paths_v1.{NativeMirWorkerOwnedLaunchV1}
+use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{NativeMirSelectiveLaunchEnvelopeV1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_publish_noreplace_raw,
+    file_read_regular_no_follow_bounded}
+
+pub fn native_mir_worker_launch_ledger_publish_v1(queue: text,
+        envelope: NativeMirSelectiveLaunchEnvelopeV1,
+        launches: [NativeMirWorkerOwnedLaunchV1]) -> Result<text, text>:
+    if queue == "" or launches.len() > 131072 or envelope.modules.len() > 65536:
+        return Err("MIR parent launch ledger count bounds refused")
+    var remaining: i64 = 32 * 1024 * 1024 - 2048
+    var modules: [SdnValue] = []
+    for module in envelope.modules:
+        val charge = sdn_encoded_text_size_v1(module) + 4
+        if charge > remaining: return Err("MIR parent launch ledger byte bound exceeded")
+        remaining = remaining - charge
+        modules.push(SdnValue.String(module))
+    var owners: Dict<text, bool> = {}
+    var records: [SdnValue] = []
+    for launch in launches:
+        if owners.has(launch.owner): return Err("MIR parent launch owner repeated")
+        owners[launch.owner] = true
+        val charge = sdn_encoded_text_size_v1(launch.owner) +
+            sdn_encoded_text_size_v1(launch.private_root) +
+            sdn_encoded_text_size_v1(launch.birth_identity) + 512
+        if charge > remaining: return Err("MIR parent launch ledger byte bound exceeded")
+        remaining = remaining - charge
+        var row: Dict<text, SdnValue> = {}
+        row["owner"] = SdnValue.String(launch.owner)
+        row["private_root"] = SdnValue.String(launch.private_root)
+        row["pid"] = SdnValue.Int(launch.pid)
+        row["birth_identity"] = SdnValue.String(launch.birth_identity)
+        row["spawned_ms"] = SdnValue.Int(launch.spawned_ms)
+        row["reaped_ms"] = SdnValue.Int(launch.reaped_ms)
+        row["exit_code"] = SdnValue.Int(launch.exit_code)
+        row["stopped"] = SdnValue.Bool(launch.stopped)
+        records.push(SdnValue.Dict(row))
+    var document: Dict<text, SdnValue> = {}
+    document["schema"] = SdnValue.String("simple/native-mir-owned-launches/v1")
+    document["invocation"] = SdnValue.String(sha256_text(queue))
+    document["source"] = SdnValue.String(envelope.source)
+    document["context"] = SdnValue.String(envelope.context)
+    document["manifest"] = SdnValue.String(envelope.manifest)
+    document["producer"] = SdnValue.String(envelope.producer)
+    document["physical_order"] = SdnValue.Array(modules)
+    document["launches"] = SdnValue.Array(records)
+    val blob = sdn_encode_canonical(SdnValue.Dict(document)) + "\n"
+    if blob.len() > 32 * 1024 * 1024: return Err("MIR parent launch ledger byte bound exceeded")
+    val staged = "{queue}/worker-launches.parent.sdn.staged"
+    val destination = "{queue}/worker-launches.parent.sdn"
+    if not file_write(staged, blob): return Err("MIR parent launch ledger staging failed")
+    val readback = file_read_regular_no_follow_bounded(staged, 32 * 1024 * 1024)?
+    if readback != blob: return Err("MIR parent launch ledger staging readback differs")
+    if file_publish_noreplace_raw(staged, destination) != 1:
+        return Err("MIR parent launch ledger publication failed")
+    val published = file_read_regular_no_follow_bounded(destination, 32 * 1024 * 1024)?
+    if published != blob: return Err("MIR parent launch ledger publication readback differs")
+    Ok(sha256_text(blob))

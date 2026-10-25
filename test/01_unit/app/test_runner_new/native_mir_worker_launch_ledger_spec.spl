@@ -1,0 +1,45 @@
+"""Parent observation retention tests, not process-overlap qualification."""
+use std.spec.*
+use app.io.env_ops.{env_get}
+use app.cli.native_mir_worker_private_paths_v1.*
+use app.cli.native_mir_worker_launch_ledger_v1.{native_mir_worker_launch_ledger_publish_v1}
+use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{NativeMirSelectiveLaunchEnvelopeV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+describe "Parent MIR launch observation retention":
+    it "records a failed spawn without manufacturing a live process identity":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val queue = secure_temp_dir_raw(temporary, "mir-launch-ledger-spec")
+        expect(queue != "").to_equal(true)
+        val envelope = NativeMirSelectiveLaunchEnvelopeV1(source: sha256_text("source"),
+            context: sha256_text("context"), manifest: sha256_text("manifest"),
+            producer: sha256_text("producer"), modules: ["app.한글"])
+        val launch = NativeMirWorkerOwnedLaunchV1(owner: "0/1@0", private_root: "",
+            pid: -1, birth_identity: "", spawned_ms: 100, reaped_ms: 101,
+            exit_code: -1, stopped: true)
+        val written = native_mir_worker_launch_ledger_publish_v1(queue, envelope, [launch])
+        expect(written.is_ok()).to_equal(true)
+        val read = file_read_regular_no_follow_bounded("{queue}/worker-launches.parent.sdn", 65536)
+        expect(read.is_ok()).to_equal(true)
+        expect(sha256_text(read.unwrap())).to_equal(written.unwrap())
+        expect(read.unwrap()).to_contain("pid: -1")
+        expect(read.unwrap()).to_contain("app.한글")
+        # A second publication never overwrites the immutable parent record.
+        expect(native_mir_worker_launch_ledger_publish_v1(queue, envelope, [launch]).is_err()).to_equal(true)
+        expect(dir_remove(queue, true)).to_equal(true)
+
+    it "restores parent environment after installing a worker native cache":
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        val queue = secure_temp_dir_raw(temporary, "mir-launch-environment-spec")
+        expect(queue != "").to_equal(true)
+        val paths = native_mir_worker_private_paths_v1(queue, 0, 1, 0).unwrap()
+        val before = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+        val entered = native_mir_worker_private_environment_enter_v1(paths)
+        expect(entered.is_ok()).to_equal(true)
+        expect(env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "").to_equal(paths.native_cache)
+        expect(env_get("TMPDIR") ?? "").to_equal(paths.temporary)
+        expect(native_mir_worker_private_environment_restore_v1(entered.unwrap())).to_equal(true)
+        expect(env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "").to_equal(before)
+        expect(dir_remove(queue, true)).to_equal(true)

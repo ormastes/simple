@@ -3,6 +3,12 @@
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
+use app.cli.native_mir_worker_launch_ledger_v1.{native_mir_worker_launch_ledger_publish_v1}
+use app.cli.native_mir_worker_private_paths_v1.{NativeMirWorkerOwnedLaunchV1,
+    native_mir_worker_private_paths_v1, native_mir_worker_private_environment_enter_v1,
+    native_mir_worker_private_environment_restore_v1}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_start_identity_checked}
+use std.common.crypto.sha256.{sha256_text}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
@@ -51,7 +57,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory, hir
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_has_unsupported_fallback_v1}
 use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{
-    native_mir_selective_job_count_v1}
+    NativeMirSelectiveLaunchEnvelopeV1, native_mir_selective_launch_envelope_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
     ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
@@ -874,16 +880,18 @@ struct LedgerShardRunV1:
     # Every started MIR worker explicitly identified the same recoverable
     # unsupported-lane case; never inferred from exit text or BLOCKED.
     recoverable_no_claim: bool
+    owned_launches: [NativeMirWorkerOwnedLaunchV1]
 
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
-        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
+        simple_bin: text, timeout_ms: i64,
+        private_envelope: NativeMirSelectiveLaunchEnvelopeV1? = nil) -> LedgerShardRunV1:
     val old_queue = env_get(queue_env) ?? ""
     val old_owner = env_get(owner_env) ?? ""
     if not env_set(queue_env, queue_dir):
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true,
-            protocol_complete: false, recoverable_no_claim: false)
+            protocol_complete: false, recoverable_no_claim: false, owned_launches: [])
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     val window_size = if parallel > 0: parallel else: count
     var pending: [i64] = []
@@ -899,6 +907,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var workers_finished: i64 = 0
     var recoverable_fallback_receipts: i64 = 0
     var total_claims: i64 = 0
+    var owned_launches: [NativeMirWorkerOwnedLaunchV1] = []
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
         # Slot pool, not waves: a worker starts as soon as any of the
@@ -910,6 +919,8 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var owners: [text] = []
         var indices: [i64] = []
         var started_ms: [i64] = []
+        var private_roots: [text] = []
+        var birth_identities: [text] = []
         while next_pending < pending.len() or pids.len() > 0:
             while pids.len() < window_size and next_pending < pending.len() and
                     not hir_shard_recovery_blocked(queue_dir):
@@ -919,11 +930,38 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 val owner_installed = env_set(owner_env, owner)
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
-                pids = pids.push(if owner_installed: process_spawn_async(simple_bin, shard_args) else: -1)
+                var pid: i64 = -1
+                var private_root = ""
+                var birth_identity = ""
+                val spawned = time_now_monotonic_ms()
+                if owner_installed and private_envelope != nil:
+                    val paths = native_mir_worker_private_paths_v1(queue_dir, index, count, generation)
+                    if paths.is_ok():
+                        val owned_paths = paths.unwrap()
+                        private_root = owned_paths.root
+                        val installed = native_mir_worker_private_environment_enter_v1(owned_paths)
+                        if installed.is_ok():
+                            pid = process_spawn_async(simple_bin, shard_args)
+                            if pid > 0:
+                                val birth = process_start_identity_checked(pid)
+                                if birth.is_ok(): birth_identity = birth.unwrap().to_text()
+                                else:
+                                    val _blocked = hir_shard_recovery_block(queue_dir, "worker birth identity unavailable")
+                            if not native_mir_worker_private_environment_restore_v1(installed.unwrap()):
+                                val _blocked = hir_shard_recovery_block(queue_dir, "private worker environment could not be restored")
+                        else:
+                            val _blocked = hir_shard_recovery_block(queue_dir, installed.unwrap_err())
+                    else:
+                        val _blocked = hir_shard_recovery_block(queue_dir, paths.unwrap_err())
+                elif owner_installed:
+                    pid = process_spawn_async(simple_bin, shard_args)
+                pids = pids.push(pid)
+                private_roots = private_roots.push(private_root)
+                birth_identities = birth_identities.push(birth_identity)
                 workers_started = workers_started + 1
                 owners = owners.push(owner)
                 indices = indices.push(index)
-                started_ms = started_ms.push(time_now_monotonic_ms())
+                started_ms = started_ms.push(spawned)
             if pids.len() == 0:
                 break
             # Reap the first live worker that exited, failed to wait, or ran
@@ -947,10 +985,15 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             val pid = pids[reap_at]
             val owner = owners[reap_at]
             val reaped_index = indices[reap_at]
+            val reaped_root = private_roots[reap_at]
+            val reaped_birth = birth_identities[reap_at]
+            val reaped_started = started_ms[reap_at]
             var kept_pids: [i64] = []
             var kept_owners: [text] = []
             var kept_indices: [i64] = []
             var kept_started: [i64] = []
+            var kept_roots: [text] = []
+            var kept_births: [text] = []
             i = 0
             while i < pids.len():
                 if i != reap_at:
@@ -958,11 +1001,15 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     kept_owners = kept_owners.push(owners[i])
                     kept_indices = kept_indices.push(indices[i])
                     kept_started = kept_started.push(started_ms[i])
+                    kept_roots = kept_roots.push(private_roots[i])
+                    kept_births = kept_births.push(birth_identities[i])
                 i = i + 1
             pids = kept_pids
             owners = kept_owners
             indices = kept_indices
             started_ms = kept_started
+            private_roots = kept_roots
+            birth_identities = kept_births
             # -1 is a wait error, not proof of exit. Even a false liveness
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
@@ -973,6 +1020,10 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 if not owner_stopped:
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
+            if private_envelope != nil:
+                owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owner,
+                    private_root: reaped_root, pid: pid, birth_identity: reaped_birth,
+                    spawned_ms: reaped_started, reaped_ms: time_now_monotonic_ms(), exit_code: code, stopped: owner_stopped))
             val progress = hir_shard_recovery_progress(queue_dir, owner)
             total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
@@ -995,14 +1046,21 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             if fail_fast and failed_workers > 0:
                 var remaining = 0
                 while remaining < pids.len():
+                    var cancelled_stopped = pids[remaining] <= 0
                     if pids[remaining] > 0:
                         val _killed = process_kill(pids[remaining])
                         val reaped = native_build_normalize_exit_code(process_wait(pids[remaining], 5000))
                         if reaped != -2 and reaped != -1 and not process_is_running(pids[remaining]):
+                            cancelled_stopped = true
                             val _sealed = hir_shard_recovery_seal(queue_dir, owners[remaining], "BLOCKED")
                         else:
                             all_stopped = false
                             val _blocked = hir_shard_recovery_block(queue_dir, "cancelled worker could not be reaped")
+                    if private_envelope != nil:
+                        owned_launches.push(NativeMirWorkerOwnedLaunchV1(owner: owners[remaining],
+                            private_root: private_roots[remaining], pid: pids[remaining],
+                            birth_identity: birth_identities[remaining], spawned_ms: started_ms[remaining],
+                            reaped_ms: time_now_monotonic_ms(), exit_code: -1, stopped: cancelled_stopped))
                     remaining = remaining + 1
                 break
         if fail_fast and failed_workers > 0:
@@ -1033,7 +1091,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     LedgerShardRunV1(code: code, failed_modules: failed_modules,
         total_claims: total_claims, blocked_reason: blocked_reason,
         all_stopped: all_stopped, protocol_complete: protocol_complete,
-        recoverable_no_claim: recoverable_no_claim)
+        recoverable_no_claim: recoverable_no_claim, owned_launches: owned_launches)
 
 # ===== MIR sharding =========================================================
 #
@@ -1126,24 +1184,46 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     var count = native_build_mir_shard_count(parallel)
+    var private_envelope: NativeMirSelectiveLaunchEnvelopeV1? = nil
     if selective:
         if export_dir == "": return ("fail", "")
-        val jobs = native_mir_selective_job_count_v1(export_dir)
+        val jobs = native_mir_selective_launch_envelope_v1(export_dir)
         if jobs.is_err():
             eprint "[mir-selective] physical emission schedule refused: {jobs.unwrap_err()}"
             return ("fail", "")
         # One process owns one physical emission and all of its logical
         # specialization bodies. No previous job's lazy canonical IDs or
         # promoted heap can affect the next emission's output or footprint.
-        count = jobs.unwrap()
+        val envelope = jobs.unwrap()
+        count = envelope.modules.len()
+        private_envelope = Some(envelope)
     print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
+    val old_invocation = env_get("SIMPLE_MIR_WORKER_INVOCATION") ?? ""
+    val old_producer = env_get("SIMPLE_MIR_WORKER_PRODUCER") ?? ""
+    if val envelope = private_envelope:
+        if not env_set("SIMPLE_MIR_WORKER_INVOCATION", sha256_text(queue_dir)) or
+                not env_set("SIMPLE_MIR_WORKER_PRODUCER", envelope.producer):
+            env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
+            env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)
+            env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+            return ("fail", "")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
-        simple_bin, timeout_ms)
-    env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+        simple_bin, timeout_ms, private_envelope)
+    val restored_invocation = env_set("SIMPLE_MIR_WORKER_INVOCATION", old_invocation)
+    val restored_producer = env_set("SIMPLE_MIR_WORKER_PRODUCER", old_producer)
+    val restored_export = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+    if not restored_invocation or not restored_producer or not restored_export:
+        eprint "[mir-shard] parent launch environment restoration failed"
+        return ("fail", "")
+    if val envelope = private_envelope:
+        val recorded = native_mir_worker_launch_ledger_publish_v1(queue_dir, envelope, run.owned_launches)
+        if recorded.is_err():
+            eprint "[mir-shard] parent launch observations could not be retained: {recorded.unwrap_err()}"
+            return ("fail", "")
     val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules,
         run.total_claims, run.all_stopped, run.protocol_complete,
         run.recoverable_no_claim)
