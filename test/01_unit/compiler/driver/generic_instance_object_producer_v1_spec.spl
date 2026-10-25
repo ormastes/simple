@@ -73,6 +73,11 @@ var import_iface_v1: text = "iface-1"
 fn fake_iface(path: text) -> text:
     if path == "pkg/shapes.spl": import_iface_v1 else: ""
 
+fn two_import_iface(path: text) -> text:
+    if path == "pkg/shapes.spl": "shape-iface"
+    elif path == "pkg/other.spl": "other-iface"
+    else: ""
+
 fn file_read_owner(root: text) -> text:
     owner_body_v1
 
@@ -256,3 +261,24 @@ describe "generic instance-object producer (P-G7)":
             case Some(l): expect(l.complete).to_equal(false)
             case nil: expect(false).to_equal(true)
         import_iface_v1 = "iface-1"
+
+    it "round-trips both owner imports through the retirement row separator":
+        val root = fresh_root("two-imports")
+        val (path, id) = owner(root, "fn id<T>(x: T) -> T: x\n")
+        val imports = ["pkg/shapes.spl", "pkg/other.spl"]
+        var deps: Dict<text, [text]> = {}
+        deps[path] = imports
+        val (lists, owners) = generic_instance_lists_with_body_v1(
+            [Some(GenericSpecializationListV1(complete: true, specs: [spec_of(id + ".id", "k:two")]))],
+            generic_instance_module_ids_v1([path]), deps, two_import_iface)
+        match lists[0]:
+            case Some(list):
+                expect(list.complete).to_equal(true)
+                expect(list.specs.len()).to_equal(1)
+                val row = owners[list.specs[0].concrete_key].split("\t")
+                expect(row.len()).to_equal(2)
+                val restored = row[1].split("\u001e")
+                expect(restored).to_equal(imports)
+                expect(generic_instance_owner_digest_v1(path, restored, two_import_iface)).to_equal(
+                    generic_instance_body_digest_of_v1(list.specs[0].concrete_key))
+            case nil: expect(false).to_equal(true)
