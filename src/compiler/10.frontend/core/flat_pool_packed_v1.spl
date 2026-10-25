@@ -55,7 +55,7 @@ use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{hash_algorithm_by_id_v1,
     HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_64_V1}
 use compiler.common.cache_contract.hash_algorithm_compute_v1.{hash_algorithm_name_v1,
-    hash_algorithm_computable_v1, hash_algorithm_digest_v1}
+    hash_algorithm_computable_v1, hash_algorithm_digest_v1, hash_algorithm_digest_native_v1}
 use std.nogc_async_mut.sosix.packed_blob_view.{PackedBlobView, packed_blob_map, packed_blob_unmap,
     packed_blob_view_ok, packed_blob_u8, packed_blob_u16, packed_blob_u32, packed_blob_u64}
 use std.nogc_sync_mut.io_runtime.{file_exists}
@@ -67,6 +67,9 @@ extern fn rt_is_interpreter_runtime() -> bool
 pub val SPAB_MAGIC_V1: text = "SPLARTF1"
 pub val SPAB_FORMAT_VERSION_V1: i64 = 1
 pub val SPAB_MIN_READER_VERSION_V1: i64 = 1
+# Miss reason when a hit-path digest has no native implementation here: the
+# reader never falls back to pure-Simple SHA-256 (packed_binary_ast_v1.md §8).
+pub val SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1: text = "native digest unavailable"
 val SPAB_HEADER_BYTES: i64 = 64
 val SPAB_ENTRY_BYTES: i64 = 32
 val SPAB_ALIGN: i64 = 64
@@ -926,7 +929,9 @@ pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
             return _miss(src, "unknown required section {id}")
         if not hash_algorithm_computable_v1(algo):
             return _miss(src, "section {id} checksum algorithm unavailable")
-        val sum = hash_algorithm_digest_v1(algo, _sl(src, at, len))
+        val sum = hash_algorithm_digest_native_v1(algo, _sl(src, at, len))
+        if sum.len() == 0:
+            return _miss(src, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
         var i = 0
         while i < 8 and i < sum.len():
             if _le(src, e + 24 + i, 1) != (sum[i] as i64):
@@ -953,7 +958,10 @@ pub fn flat_packed_view_src_v1(src: SpabSourceV1) -> SpabViewV1:
     var body_checked = 0
     for d in view.digests:
         if d.subject == SPAB_SUBJECT_BODY and hash_algorithm_computable_v1(d.algo):
-            if _bytes_hex(hash_algorithm_digest_v1(d.algo, body)) != d.hex:
+            val body_sum = hash_algorithm_digest_native_v1(d.algo, body)
+            if body_sum.len() == 0:
+                return _miss(src, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1)
+            if _bytes_hex(body_sum) != d.hex:
                 return _miss(src, "body digest mismatch ({hash_algorithm_name_v1(d.algo)})")
             body_checked = body_checked + 1
     if body_checked == 0:
@@ -1277,7 +1285,7 @@ pub fn flat_packed_store_v1(path: text, bytes: [u8]) -> bool:
         return false
     true
 
-export SPAB_MAGIC_V1, SPAB_FORMAT_VERSION_V1, SPAB_MIN_READER_VERSION_V1
+export SPAB_MAGIC_V1, SPAB_FORMAT_VERSION_V1, SPAB_MIN_READER_VERSION_V1, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1
 export SPAB_FLAG_DESUGARED, SPAB_FLAG_HAS_TLDR, SPAB_FLAG_STRINGS_UTF8, SPAB_FLAG_TARGET_DEPENDENT
 export SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER, SPAB_SUBJECT_BODY
 export SPAB_SECTION_DIGESTS, SPAB_SECTION_STRING_OFFSETS, SPAB_SECTION_STRING_BYTES

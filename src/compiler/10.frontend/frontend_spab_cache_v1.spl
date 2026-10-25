@@ -8,35 +8,60 @@
 # Every doubt is a MISS; the caller then tries the line cache and finally a
 # real parse.
 #
-# Opt-in (SIMPLE_FRONTEND_SPAB=1) until the whole-closure native gate passes on
-# a stage3 binary built with it; then the default flips and the line cache is
-# retired.
+# DEFAULT store + hit format since 2026-10-25 (SIMPLE_FRONTEND_SPAB=0 opts out to
+# the text .fpc line cache). What a hit still copies: digest inputs are sliced
+# out of the map, and pools are rebuilt from typed tokens (no line blob).
 #
 # Identity (§8): source = (xxh3-128, the cache key the line cache already uses),
 # compiler = (sha256, the front-end cache scope, which already folds the
 # producer identity). module_key = xxh3-128 of the module path.
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_scope,
-    frontend_parse_cache_dir}
+    frontend_parse_cache_dir, frontend_cache_note_native_digest_unavailable}
 use compiler.frontend.flat_ast_bridge.{build_module_from_packed_view_v1}
 use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_open_v1,
-    flat_packed_close_v1, flat_packed_admit_view_v1, flat_packed_store_v1, module_artifact_path_v1}
+    flat_packed_close_v1, flat_packed_admit_view_v1, flat_packed_store_v1, module_artifact_path_v1,
+    SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text_native_or_empty}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 use std.io_runtime.{env_get_opt}
 
-pub fn frontend_spab_enabled_v1() -> bool:
-    (env_get_opt("SIMPLE_FRONTEND_SPAB") ?? "") == "1" and frontend_parse_cache_enabled()
+extern fn rt_time_now_unix_micros() -> i64
 
-fn _identity(key: text) -> [SpabDigestV1]:
+# Default ON (2026-10-25): the packed entry is the store and hit format.
+# SIMPLE_FRONTEND_SPAB=0 opts back into the text `.fpc` line cache.
+pub fn frontend_spab_enabled_v1() -> bool:
+    frontend_spab_default_decision_v1(env_get_opt("SIMPLE_FRONTEND_SPAB") ?? "") and frontend_parse_cache_enabled()
+
+# Pure: the format decision for a SIMPLE_FRONTEND_SPAB value ("" = unset).
+pub fn frontend_spab_default_decision_v1(env_value: text) -> bool:
+    env_value != "0"
+
+# Compiler-identity digest of the cache scope, memoised: the scope is fixed for
+# the process, so the hit path does not re-hash it per module. "" when the
+# native SHA-256 is unavailable -- the caller then misses (never falls back).
+var _spab_scope_digest_memo: text = ""
+var _spab_scope_digest_for: text = "@@unset@@"
+
+fn _scope_digest() -> text:
+    val scope = frontend_parse_cache_scope()
+    if scope != _spab_scope_digest_for:
+        _spab_scope_digest_memo = sha256_text_native_or_empty(scope)
+        _spab_scope_digest_for = scope
+    _spab_scope_digest_memo
+
+fn _identity(key: text, scope_digest: text) -> [SpabDigestV1]:
     [SpabDigestV1(subject: 1, algo: HASH_ALGO_XXH3_128_V1, hex: key),
-     SpabDigestV1(subject: 2, algo: HASH_ALGO_SHA256_V1, hex: sha256_text(frontend_parse_cache_scope()))]
+     SpabDigestV1(subject: 2, algo: HASH_ALGO_SHA256_V1, hex: scope_digest)]
 
 pub fn frontend_spab_path_v1(key: text) -> text:
     if key.len() != 32:
         return ""
-    val ids = _identity(key)
+    val sd = _scope_digest()
+    if sd == "":
+        return ""
+    val ids = _identity(key, sd)
     module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[1])
 
 pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i64],
@@ -44,21 +69,52 @@ pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i6
     val path = frontend_spab_path_v1(key)
     if path == "" or blob == "" or trace.len() == 0:
         return false
-    val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key), xxh3_128_text(file_path))
+    val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key, _scope_digest()), xxh3_128_text(file_path))
     if packed.len() == 0:
         return false
     flat_packed_store_v1(path, packed)
 
+# Last hit-path split (microseconds) for SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE:
+# verify = map + structural validation + native section/body digests + admit;
+# build = token restore of the flat pools + module assembly.
+var _spab_last_verify_us: i64 = 0
+var _spab_last_build_us: i64 = 0
+
+pub fn frontend_spab_last_verify_us_v1() -> i64:
+    _spab_last_verify_us
+
+pub fn frontend_spab_last_build_us_v1() -> i64:
+    _spab_last_build_us
+
+fn _now_us() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+
 pub fn frontend_spab_load_v1(key: text, source: text, file_path: text) -> ParserModule?:
+    _spab_last_verify_us = 0
+    _spab_last_build_us = 0
+    if key.len() == 32 and _scope_digest() == "":
+        frontend_cache_note_native_digest_unavailable()
+        return nil
     val path = frontend_spab_path_v1(key)
     if path == "":
         return nil
+    val t0 = _now_us()
     val view = flat_packed_open_v1(path)
-    if not view.valid or flat_packed_admit_view_v1(view, _identity(key)) != "":
+    if not view.valid:
+        if view.reason == SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1:
+            frontend_cache_note_native_digest_unavailable()
         val _closed = flat_packed_close_v1(view)
         return nil
+    if flat_packed_admit_view_v1(view, _identity(key, _scope_digest())) != "":
+        val _closed = flat_packed_close_v1(view)
+        return nil
+    val t1 = _now_us()
     val built = build_module_from_packed_view_v1(view, source, file_path)
     val _closed = flat_packed_close_v1(view)
+    _spab_last_verify_us = t1 - t0
+    _spab_last_build_us = _now_us() - t1
     built
 
-export frontend_spab_enabled_v1, frontend_spab_path_v1, frontend_spab_store_v1, frontend_spab_load_v1
+export frontend_spab_enabled_v1, frontend_spab_default_decision_v1, frontend_spab_path_v1, frontend_spab_store_v1,
+    frontend_spab_load_v1, frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1
