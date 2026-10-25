@@ -704,6 +704,14 @@ fn _run_lint_with_linter_source(
                 case _:
                     val _ = 0
 
+    linter.semantic_markdown_sources = []
+    if file_path.ends_with(".md"):
+        match semantic_markdown_lint_sources_v1(policy.semantic_options):
+            case Ok(sources): linter.semantic_markdown_sources = sources
+            case Err(failure):
+                val _ = lint_fix_refused(file_path, failure.message, json_output)
+                return 1
+
     var analyzed_source: String? = nil
     var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
     match content:
@@ -779,6 +787,26 @@ fn _run_lint_with_linter_source(
                     if not_linted:
                         print("NOT LINTED: {file_path} - source did not parse, so no AST-based lint ran on it")
                     print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Semantic edits retain their revision-authenticated owner plan.
+                if file_path.ends_with(".md") and (fix_mode or fix_all or fix_dry_run):
+                    var semantic_enabled = false
+                    for finding in results:
+                        if finding.lint.code == "W-DOC-AST-001" and finding.lint.level != LintLevel.Allow:
+                            semantic_enabled = true
+                    if semantic_enabled:
+                        val generic_fixes = collect_easy_fixes(results, fix_all)
+                        if not generic_fixes.is_empty():
+                            val _ = lint_fix_refused(file_path, "mixed semantic and generic fixes require separate reviewed edits; no changes applied", json_output)
+                            return 1
+                        match analyzed_source:
+                            case Some(source):
+                                match apply_semantic_markdown_lint_fix_v1(file_path, source, linter.semantic_markdown_sources, fix_dry_run):
+                                    case Ok(_): pass_do_nothing("semantic owner validated all edits")
+                                    case Err(failure):
+                                        val _ = lint_fix_refused(file_path, failure.message, json_output)
+                                        return 1
+                            case nil: return 1
 
                 # Apply fixes if requested
                 if (fix_mode or fix_all or fix_dry_run) and fix_count > 0 and not not_linted:

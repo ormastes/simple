@@ -1,6 +1,6 @@
 # B3 semantic Markdown lint/fixer
 
-REQ-MC-008, original accepted plan section 5.4. Status CODED / UNRUN; higher-model source review and root CLI registration pending. Existing common Markdown helpers have no link destination byte spans; llm_process_gen only scans naive inline links. New scanner owns bounded destination spans rather than pretending either provides semantic authority.
+REQ-MC-008, original accepted plan section 5.4. Status CODED / UNRUN; root CLI registration has independent Sol source review GO (2026-10-25), with qualified runtime acceptance pending. Existing common Markdown helpers have no link destination byte spans; llm_process_gen only scans naive inline links. New scanner owns bounded destination spans rather than pretending either provides semantic authority.
 
 `SemanticMarkdownSourceV1(local_file, remote_file, document)` configures exact local/GitHub blob destination authority using B2's existing parsed snapshot. No inferred package/module, remote fetch, current Git revision, signature schema, or outline parser. Remote destination matches the entire configured blob URL including revision. Unknown/duplicate mappings remain diagnostics with no fix.
 
@@ -47,3 +47,14 @@ per bounded batch and reports the exact failing URI input row. Whole-source
 admission/revision failures use row -1. The Markdown wrapper maps a URI row to
 its original target byte interval; it never blames the first valid destination
 for a later failure or invents a location for a global admission error.
+
+
+## Shared root lint dispatch (2026-10-25)
+
+The canonical pure planner now lives in `compiler.semantics.symbol_id.semantic_markdown`; `app.doc.semantic_link_lint` re-exports the same types and functions for compatibility. Compiler tooling depends on the semantic owner, avoiding a compiler-to-document-app dependency. `semantic_markdown_lints.spl` adapts the planner to `Linter`, registered by `lint_checks.spl`. The existing `semantic_markdown_links` lint family supports allow/warn/deny; critical unresolved line destinations deny. There is no second scanner or resolver.
+
+Root `simple lint guide.md` checks destinations without inventing source identity. Fixes reuse the doc command's explicit `--source-file`, `--source-link`, optional `--remote-link`, `--package`, `--module`, and SHA256 `--revision` authority. Options are parsed once per command, bindings opened per Markdown input, and existing bounded source batches remain authoritative. Duplicate/missing authority fails closed before writes. Semantic fixes bypass generic EasyFix translation: the semantic owner revalidates the whole plan and source revisions; the adapter checks unchanged Markdown bytes, revalidates adjacent to same-filesystem atomic publication, and preserves prior bytes on refusal. Arbitrary external writers are not locked.
+
+The selected 06-3 requirement includes reviewed transient-report exceptions. No authoritative exception identity, registry, or review contract was found. No exception is inferred from a path or filename; this selected residual remains OPEN. Actual root-command acceptance and generated-manual refresh remain UNRUN until an admitted SPipe runtime is available; static source review does not establish runtime acceptance.
+
+Independent recovery review confirmed that mixed generic/semantic fixes refuse before either write and configured Allow findings cannot trigger semantic mutation. The root CLI's eager lint-main import predates this change; the authority option predicate adds no new full-lint dependency edge. No standalone option-module startup improvement is claimed.
