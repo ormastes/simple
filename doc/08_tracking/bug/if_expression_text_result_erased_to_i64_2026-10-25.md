@@ -15,9 +15,15 @@ failed. Same class as the struct if-expression in module_build.spl:571
 (doc generic_extern_enum_arg_boxed_as_int_2026-10-25).
 
 ## Workaround (this change)
-`var rt_dir: text = find_runtime_source_dir()` plus a statement-form override
-for the strict + configured-source-root case. Same values as before for all
-three branches. Stage-2 compiled object: defined-symbol set identical to the
+`var rt_dir: text` assigned in statement form: the strict + configured-source-root
+case calls `native_runtime_strict_source_dir_v1()?` directly (exactly once, so its
+real Err text still propagates), every other case uses `find_runtime_source_dir()`.
+Same values and errors as the original if-expression in all four cases. (The first
+port called find_runtime_source_dir() unconditionally first; review found that its
+Err->"" consumed the sticky authority failure, so the second `?` call reported
+only "managed runtime authority previously invalidated". Fixed before landing.)
+Evidence measured on the FIRST port (the review-fixed statement form is not
+yet Stage-2-compiled): Stage-2 compiled object: defined-symbol set identical to the
 run-27e object; Stage 3 hello world then links and runs ("hello stage3").
 
 ## Compiler fix (open)
