@@ -4677,32 +4677,26 @@ impl MirLowering:
                                 # #168 (it isn't specific to operator
                                 # overloading), but this new dispatch
                                 # site can register its own result.
-                                var binop_result_struct_name = ""
-                                if val binop_method_sym = self.symbols.get_symbol_raw(binop_method_id.id):
-                                    if val binop_method_sym_type = binop_method_sym.type_:
-                                        match binop_method_sym_type.kind:
-                                            case HirTypeKind.Function(_, binop_ret_hir_type, _):
-                                                match binop_ret_hir_type.kind:
-                                                    case Named(binop_ret_named_sym, _):
-                                                        if val binop_ret_struct_sym = self.symbols.get_symbol_raw(binop_ret_named_sym.id):
-                                                            binop_result_struct_name = binop_ret_struct_sym.name
-                                                    case _: ()
-                                            case _: ()
-                                # Arithmetic dunders (__add__/__sub__/__mul__/__div__) return
-                                # Self by convention (mirrors the newtype auto-derive shape:
-                                # `fn __add__(self, other: T) -> T`), so fall back to the
-                                # OPERAND's own struct name when the declared-return-type
-                                # resolution above didn't find a Named type (native path HIR
-                                # types are frequently Infer/nil).
-                                if binop_result_struct_name == "":
+                                var return_type_unresolved = true
+                                if val binop_hir_return_type = self.resolved_call_hir_return_type(binop_method_id):
+                                    self.remember_function_value_return(binop_result_local, binop_hir_return_type)
+                                    match binop_hir_return_type.kind:
+                                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                                            ()
+                                        case _:
+                                            return_type_unresolved = false
+                                # Only an actually unresolved return may use
+                                # the arithmetic same-owner convention. A
+                                # declared primitive or a different nominal
+                                # provider is authoritative and must never be
+                                # relabeled as the operand's layout.
+                                if return_type_unresolved:
                                     match op:
                                         case Add | Sub | Mul | Div:
-                                            # Method identity and field-layout
-                                            # identity have different spellings.
-                                            binop_result_struct_name = if binop_layout_name != "": binop_layout_name else: binop_struct_name
+                                            val fallback_layout = if binop_layout_name != "": binop_layout_name else: binop_struct_name
+                                            if fallback_layout != "":
+                                                self.struct_value_syms[binop_result_local.id] = fallback_layout
                                         case _: ()
-                                if binop_result_struct_name != "":
-                                    self.struct_value_syms[binop_result_local.id] = binop_result_struct_name
                                 return binop_result_local
                             var b_op2 = self.builder
                             val binop_temp = b_op2.new_temp(MirType.i64())
