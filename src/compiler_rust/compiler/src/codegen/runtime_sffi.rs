@@ -2504,6 +2504,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_insert", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),

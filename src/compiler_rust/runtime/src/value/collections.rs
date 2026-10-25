@@ -2587,6 +2587,46 @@ pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeVal
     }
 }
 
+/// Insert `value` BEFORE `index` IN PLACE (`index == len` appends). Returns
+/// true when inserted. A non-array receiver, a negative index or
+/// `index > len` is a NO-OP returning false — matching the interpreter's
+/// `insert` arm (interpreter_method/collections.rs), which leaves the array
+/// unchanged for `idx > len`. Never panics (extern "C").
+///
+/// Built on `rt_array_push` + `rt_array_get`/`rt_array_set` so growth and all
+/// three storage layouts (tagged, byte-packed, u64-packed) are handled by the
+/// existing primitives. The C lane twin in runtime_native.c is identical.
+#[no_mangle]
+pub extern "C" fn rt_array_insert(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
+    let len = rt_array_len(array);
+    if len < 0 || index < 0 || index > len {
+        return false;
+    }
+    if !rt_array_push(array, value) {
+        return false;
+    }
+    if index == len {
+        return true;
+    }
+    // One overlapping copy shifts the tail (inherent O(n), no per-element
+    // calls); the new slot is then written through rt_array_set so packed
+    // layouts store the value exactly as push did.
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let elem = if (*arr).is_byte_packed() {
+            1usize
+        } else if (*arr).is_u64_packed() {
+            std::mem::size_of::<u64>()
+        } else {
+            std::mem::size_of::<RuntimeValue>()
+        };
+        let base = (*arr).data as *mut u8;
+        let idx = index as usize;
+        std::ptr::copy(base.add(idx * elem), base.add((idx + 1) * elem), (len as usize - idx) * elem);
+    }
+    rt_array_set(array, index, value)
+}
+
 /// `remove`: receiver-dispatched, so a bare `.remove(k)` is safe on an untyped
 /// receiver.
 ///

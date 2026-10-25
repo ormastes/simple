@@ -11431,6 +11431,31 @@ int64_t rt_array_remove(int64_t array_value, int64_t index) {
     return removed;
 }
 
+/* Twin of rt_array_insert: insert `value` BEFORE `index` in place
+ * (index == len appends). Non-array receiver, negative index or index > len
+ * is a no-op returning 0, matching the Rust lane and the interpreter's
+ * `insert` arm. Built on push + get/set so growth and storage layouts are
+ * handled by the existing primitives, exactly as the Rust lane does. */
+int8_t rt_array_insert(int64_t array_value, int64_t index, int64_t value) {
+    SplArray* a = (SplArray*)(uintptr_t)array_value;
+    if (!rt_core_array_ptr(a)) return 0;
+    int64_t len = rt_array_len(a);
+    if (index < 0 || index > len) return 0;
+    /* push grows the buffer (and stores the value in the packed layout);
+     * then one memmove shifts the tail and the new slot is re-set, so the
+     * cost is the inherent O(n) shift with no per-element calls. */
+    if (!rt_array_push(a, value)) return 0;
+    if (index == len) return 1;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    size_t elem = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1
+                : (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? sizeof(uint64_t)
+                : sizeof(int64_t);
+    uint8_t* base = (uint8_t*)array->data;
+    memmove(base + (size_t)(index + 1) * elem, base + (size_t)index * elem,
+            (size_t)(len - index) * elem);
+    return rt_array_set(a, index, value);
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's

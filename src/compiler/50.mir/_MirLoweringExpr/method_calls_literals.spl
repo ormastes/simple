@@ -4943,6 +4943,28 @@ impl MirLowering:
                         if val removed_local = remove_result:
                             self.mark_runtime_value_local(removed_local.id)
                             return removed_local
+                    # `arr.insert(i, v)`: rt_array_insert grows the stable
+                    # handle in place (index == len appends; out of range is
+                    # a no-op) and returns an I8 status; the expression value
+                    # is the receiver, like clear/sort above.
+                    if method == "insert" and args.len() == 2:
+                        val insert_index_local = self.lower_expr(args[0].value)
+                        # Element slot is the tagged runtime ABI: box exactly
+                        # as lower_unresolved_array_push does.
+                        val insert_value_raw = self.lower_expr(args[1].value)
+                        self.note_container_elem_type(unresolved_receiver_local, insert_value_raw)
+                        val insert_value_tagged = self.box_runtime_value(insert_value_raw)
+                        val insert_value_op = self.aggregate_literal_operand(args[1].value, insert_value_raw, insert_value_tagged)
+                        val insert_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_array_insert"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
+                        ))
+                        var b_insert = self.builder
+                        b_insert.emit_call(insert_op, [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(insert_index_local), insert_value_op], MirType(kind: MirTypeKind.I8))
+                        self.builder = b_insert
+                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, unresolved_receiver_local)
+                        return unresolved_receiver_local
                     # `arr.copy()` / `arr.clone()`: a fresh shallow array,
                     # the same counted copy loop `val b = a` materializes.
                     if (method == "copy" or method == "clone") and args.len() == 0:
