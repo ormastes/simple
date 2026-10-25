@@ -21,10 +21,12 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule, SymbolId}
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass,
-    run_monomorphization_module_scoped_v1}
+    run_monomorphization_module_scoped_v1, mono_scoped_generic_uses_last_v1}
 
 val TEMPLATE_SRC = "fn id<X>(x: X) -> X:\n    x\n"
 val USER_SRC = "use t.{id}\n\nfn main() -> i64:\n    id(1)\n"
+val PAIR_TEMPLATE_SRC = "struct Pair<A, B>:\n    first: A\n    second: B\n\nfn make_pair<A, B>(a: A, b: B) -> Pair<A, B>:\n    Pair(first: a, second: b)\n"
+val PAIR_USER_SRC = "use pt.{make_pair}\n\nfn main() -> i64:\n    val p = make_pair(1, 2.0)\n    p.first\n"
 
 fn lower_v1(source: text, name: text) -> HirModule:
     val path = "testdata/{name}.spl"
@@ -89,3 +91,17 @@ describe "module-scoped monomorphization":
         expect(diags[0]).to_contain("E-MONO-040: template")
         expect(diags[0]).to_contain("not visible to module")
         expect(instance_names_v1(out).len()).to_equal(0)
+
+    it "records the inferred generic type instance it placed (P-G5)":
+        val pt = lower_v1(PAIR_TEMPLATE_SRC, "pt")
+        var templates: Dict<text, HirModule> = {}
+        templates["pt"] = pt
+        val (_o, _s, diags) = run_monomorphization_module_scoped_v1(lower_v1(PAIR_USER_SRC, "pu"), templates)
+        expect(diags.len()).to_equal(0)
+        val (uses, complete, ready) = mono_scoped_generic_uses_last_v1()
+        expect(ready).to_equal(true)
+        expect(complete).to_equal(true)
+        var found = false
+        for u in uses:
+            if u.name == "Pair" and u.arg_texts == ["i64", "f64"]: found = true
+        expect(found).to_equal(true)

@@ -60,7 +60,8 @@ use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
     build_generic_template_section_v1, generic_template_section_encode_v1}
 use compiler.driver.cache.generic_specialization_list_v1.{GenericSpecializationListV1,
     GenericSpecContextV1, GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
-    generic_specializations_of_source_v1, generic_templates_of_sections_v1,
+    generic_specializations_of_mono_v1, generic_specializations_text_fallback_v1,
+    generic_templates_of_sections_v1,
     generic_specialization_section_encode_v1}
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_v1}
 use compiler.frontend.parser_types.{ParserModule, ParserImport, ImportItem}
@@ -368,19 +369,41 @@ pub fn module_tldr_imported_generic_view_v1(imports: [ParserImport], source_path
                 names.push(item.name)
     (templates, names, unknown)
 
-# `generic-spec` section (P-G2): the concrete generic instances this module
+# Concrete generic type uses module-scoped mono observed for one module
+# (P-G5), as parallel name / argument-spelling lists.
+pub struct MonoGenericUsesV1:
+    names: [text]
+    args: [[text]]
+    complete: bool
+
+# `generic-spec` section: the concrete generic instances this module
 # requires, over its own and its imports' templates, keyed under the host
 # profile and this module's ActiveGuardRoot. "" when it provably needs none.
+# With mono data (P-G5) the list is what mono actually instantiated after
+# inference; without it (emit time, before mono) the text scan is a
+# fallback and the list is never complete.
 pub fn module_tldr_generic_spec_section_v1(source: text, module_id: text, own_sections: [text],
         imports: [ParserImport], source_path: text, tldr_root: text,
         guard_root: ActiveGuardRootV1) -> text:
+    module_tldr_generic_spec_section_mono_v1(source, module_id, own_sections, imports, source_path,
+        tldr_root, guard_root, nil)
+
+pub fn module_tldr_generic_spec_section_mono_v1(source: text, module_id: text, own_sections: [text],
+        imports: [ParserImport], source_path: text, tldr_root: text,
+        guard_root: ActiveGuardRootV1, mono: MonoGenericUsesV1?) -> text:
     val (own, own_ok) = generic_templates_of_sections_v1(own_sections)
     val (imported, names, unknown) = module_tldr_imported_generic_view_v1(imports, source_path, tldr_root)
     var templates = own
     for e in imported: templates.push(e)
     val ctx = GenericSpecContextV1(profile_digest: GENERIC_SPEC_HOST_PROFILE_DIGEST_V1,
         guard_root: guard_root, generic_import_names: names, generic_imports_unknown: unknown)
-    var list = generic_specializations_of_source_v1(source, module_id, templates, ctx)
+    var list = GenericSpecializationListV1(complete: false, specs: [])
+    match mono:
+        case Some(m):
+            list = generic_specializations_of_mono_v1(m.names, m.args, m.complete, module_id,
+                templates, ctx)
+        case nil:
+            list = generic_specializations_text_fallback_v1(source, module_id, templates, ctx)
     if not own_ok:
         list = GenericSpecializationListV1(complete: false, specs: list.specs)
     if list.complete and list.specs.len() == 0:
@@ -448,6 +471,43 @@ pub fn module_artifacts_emit_v1(source_path: text, tldr_root: text) -> text:
         return "tldr publish failed: {tldr_path}"
     ""
 
+# P-G5 updateTldr after module-scoped mono: replace the companion's
+# `generic-spec` section with the list mono actually instantiated, through the
+# same temp + atomic rename publish. The companion must already be fresh for
+# the source (emit ran); otherwise nothing is written and the error is returned.
+pub fn module_tldr_update_generic_spec_from_mono_v1(source_path: text, tldr_root: text,
+        mono: MonoGenericUsesV1) -> text:
+    if not file_exists(source_path):
+        return "source not found: {source_path}"
+    val source = file_read(source_path)
+    val tldr_path = module_tldr_companion_path_v1(tldr_root, source_path)
+    if not file_exists(tldr_path):
+        return "tldr companion missing: {tldr_path}"
+    val content = file_read(tldr_path)
+    if module_tldr_companion_body_v1(content, source) == "":
+        return "tldr companion stale: {tldr_path}"
+    val module_id = module_artifact_module_id_v1(source_path)
+    var sections: [text] = []
+    for s in module_tldr_companion_sections_v1(content, source):
+        if not s.starts_with("generic-spec|"):
+            sections.push(s)
+    val parsed = parse_full_frontend(source, source_path, module_id, Logger(level: 0))
+    val (_macro_source, guard_evals) = macro_module_source_from_parse_guarded_v1("", module_id,
+        source_path, source)
+    val spec_section = module_tldr_generic_spec_section_mono_v1(source, module_id, sections,
+        parsed.imports, source_path, tldr_root,
+        active_guard_root_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1, guard_evals), Some(mono))
+    if spec_section != "":
+        sections.push(spec_section)
+    val rendered = module_tldr_companion_render_sections_v1(module_id, source, sections)
+    if rendered == content:
+        return ""
+    if not module_artifact_publish_atomic_v1(tldr_path, rendered):
+        return "tldr publish failed: {tldr_path}"
+    ""
+
+export MonoGenericUsesV1, module_tldr_generic_spec_section_mono_v1
+export module_tldr_update_generic_spec_from_mono_v1
 export MODULE_TLDR_COMPANION_HEADER_V1
 export module_artifact_module_id_v1, module_tldr_companion_path_v1
 export module_tldr_companion_render_v1, module_tldr_companion_body_v1

@@ -1,0 +1,194 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Generic specialization list from actual mono instances (P-G5)
+
+The TLDR `generic-spec` list is produced from the concrete generic type uses
+module-scoped mono observed after type inference, keyed with the shared
+`concrete_tldr_key_for_v1` derivation, so inferred instantiations
+(`val p = make_pair(1, 2.0)` -> `Pair<i64, f64>`) are listed and the list can
+be complete; the incremental planner then rebuilds exactly. Without mono data
+the text scan is only a fallback and the list stays incomplete. The lists also
+drive the needed-instance set: each instance is built once per
+ConcreteTldrKey and reused; only added keys are built, removed ones dropped.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec
+use compiler.common.cache_contract.generic_tldr_view_v1.*
+use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1}
+use compiler.frontend.cache_artifact.generic_tldr_projector.*
+use compiler.driver.cache.generic_specialization_list_v1.*
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_sealed_manifest_v1}
+use compiler.driver.cache.generic_instance_build_plan_v1.*
+use compiler.driver.cache.reverse_reference_projection_v2.{SealedForwardManifestV2,
+    reverse_reference_project_generation_v2}
+use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceReceiptReadV1}
+use compiler.driver.cache.incremental_rebuild_plan_v1.*
+use compiler.mono.nominal_type_identity.{mono_type_source_text_v1, mono_generic_uses_of_type_v1}
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+
+fn guard() -> ActiveGuardRootV1:
+    active_guard_root_empty_v1("profile:default")
+
+fn pair_entry() -> GenericTemplateEntryV1:
+    val d = GenericDeclInputV1(module_path: "pkg_a", name: "Pair", params: ["A", "B"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE, GENERIC_PARAM_KIND_TYPE],
+        fields: [GenericFieldInputV1(name: "first", type_text: "A"),
+            GenericFieldInputV1(name: "second", type_text: "B")],
+        visibility_root: "vis:pub", active_guard_root: active_guard_root_empty_v1("").root_digest,
+        source_digest: "src:pair")
+    project_generic_template_v1(d).unwrap()
+
+fn ctx_with(names: [text]) -> GenericSpecContextV1:
+    GenericSpecContextV1(profile_digest: "profile:default", guard_root: guard(),
+        generic_import_names: names, generic_imports_unknown: false)
+
+fn prim_key(name: text) -> text:
+    generic_type_text_key_v1(GenericDeclInputV1(module_path: "app", name: "", params: [],
+        param_kinds: [], fields: [], visibility_root: "", active_guard_root: "",
+        source_digest: ""), name).unwrap()
+
+# What mono observes for `val p = make_pair(1, 2.0)`: the inferred Pair<i64, f64>.
+fn mono_infer_list(module_id: text) -> GenericSpecializationListV1:
+    generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], true, module_id,
+        [pair_entry()], ctx_with(["make_pair", "Pair"]))
+
+fn empty_rr() -> ReverseReferenceReceiptReadV1:
+    ReverseReferenceReceiptReadV1(false, "none", nil)
+
+fn rr_of_lists(modules: [text], lists: [GenericSpecializationListV1]) -> ReverseReferenceReceiptReadV1:
+    var manifests: [SealedForwardManifestV2] = []
+    var i = 0
+    while i < modules.len():
+        manifests.push(generic_spec_sealed_manifest_v1(modules[i], Some(lists[i])))
+        i = i + 1
+    val build = reverse_reference_project_generation_v2("gen:1", "root:1", manifests, empty_rr())
+    ReverseReferenceReceiptReadV1(build.ok, build.reason, build.receipt)
+
+fn module(path: text, imports: [text], iface_changed: bool) -> IncrementalModuleV1:
+    IncrementalModuleV1(path: path, old_source_digest: "s:" + path, new_source_digest: "s:" + path,
+        imports: imports, old_iface_digest: "i:" + path,
+        new_iface_digest: if iface_changed: "j:" + path else: "i:" + path)
+
+fn pair_change() -> [GenericTemplateChangeV1]:
+    [GenericTemplateChangeV1(module_path: "pkg_a.spl", template_symbol: "pkg_a.Pair")]
+
+fn int_t(bits: i64) -> HirType:
+    HirType(kind: HirTypeKind.Int(bits, true), span: Span.empty())
+
+fn list_of(keys: [[text]]) -> GenericSpecializationListV1:
+    var names: [text] = []
+    var args: [[text]] = []
+    for k in keys:
+        names.push("Pair")
+        args.push(k)
+    generic_specializations_of_mono_v1(names, args, true, "app", [pair_entry()], ctx_with([]))
+
+describe "generic-spec list from mono: inferred instantiation":
+    it "lists the instance mono inferred and is complete":
+        val l = mono_infer_list("app")
+        expect(l.complete).to_equal(true)
+        expect(l.specs.len()).to_equal(1)
+        val want = required_specialization_v1(pair_entry(), [prim_key("i64"), prim_key("f64")],
+            "profile:default", guard())
+        expect(l.specs[0].concrete_key).to_equal(want.concrete_key)
+
+    it "the text scan of the same source misses it and is incomplete":
+        val t = generic_specializations_of_source_v1("val p = make_pair(1, 2.0)\n", "app",
+            [pair_entry()], ctx_with(["make_pair", "Pair"]))
+        expect(t.complete).to_equal(false)
+        expect(t.specs.len()).to_equal(0)
+
+    it "an unrenderable mono use makes the list incomplete":
+        val l = generic_specializations_of_mono_v1(["Pair"], [["i64", "f64"]], false, "app",
+            [pair_entry()], ctx_with([]))
+        expect(l.complete).to_equal(false)
+
+    it "renders concrete HIR types in source spelling":
+        expect(mono_type_source_text_v1(int_t(64), nil)).to_equal("i64")
+        val unnamed = HirType(kind: HirTypeKind.Named(SymbolId(id: 999999), [int_t(64)]), span: Span.empty())
+        val (uses, ok) = mono_generic_uses_of_type_v1(unnamed, nil)
+        expect(ok).to_equal(false)
+        expect(uses.len()).to_equal(0)
+
+describe "generic-spec list from mono: planner":
+    it "a complete mono list lets the planner rebuild exactly":
+        val rr = rr_of_lists(["user_infer.spl", "user_none.spl"],
+            [mono_infer_list("user_infer"), generic_specializations_of_mono_v1([], [], true,
+                "user_none", [pair_entry()], ctx_with([]))])
+        val mods = [module("pkg_a.spl", [], true), module("user_infer.spl", ["pkg_a.spl"], false),
+            module("user_none.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: rr))
+        expect(out.exact).to_equal(true)
+        expect(out.plan.recompile).to_equal(["user_infer.spl"])
+
+    it "missing mono data falls back to an incomplete text list and a wide rebuild":
+        val fb = generic_specializations_text_fallback_v1("val x: Pair<i64, f64> = y\n", "user_text",
+            [pair_entry()], ctx_with([]))
+        expect(fb.complete).to_equal(false)
+        expect(fb.specs.len()).to_equal(1)
+        val rr = rr_of_lists(["user_text.spl", "user_none.spl"], [fb,
+            generic_specializations_of_mono_v1([], [], true, "user_none", [pair_entry()], ctx_with([]))])
+        val mods = [module("pkg_a.spl", [], true), module("user_text.spl", ["pkg_a.spl"], false),
+            module("user_none.spl", ["pkg_a.spl"], false)]
+        val out = incremental_rebuild_plan_generic_v1(mods, [], IncrementalGenericInputV1(
+            changes: pair_change(), generic_only_iface: ["pkg_a.spl"], rr: rr))
+        expect(out.exact).to_equal(false)
+        expect(out.plan.recompile).to_equal(["user_none.spl", "user_text.spl"])
+
+describe "needed generic instances: build once, reuse, diff":
+    it "unions every file's list into one needed set":
+        val a = list_of([["i64", "f64"]])
+        val b = list_of([["i64", "f64"], ["f64", "i64"]])
+        val (needed, complete) = generic_instance_needed_v1([Some(a), Some(b)])
+        expect(complete).to_equal(true)
+        expect(needed.len()).to_equal(2)
+
+    it "a new instance in a list builds exactly one instance":
+        val before = list_of([["i64", "f64"]])
+        val after = list_of([["i64", "f64"], ["f64", "i64"]])
+        val first = generic_instance_build_plan_v1([], [Some(before)], [])
+        expect(first.build.len()).to_equal(1)
+        var prev: [text] = []
+        for s in first.needed: prev.push(s.concrete_key)
+        val second = generic_instance_build_plan_v1(prev, [Some(after)], prev)
+        expect(second.build.len()).to_equal(1)
+        expect(second.reuse).to_equal(prev)
+        expect(second.drop.len()).to_equal(0)
+
+    it "unchanged lists build zero instances":
+        val l = list_of([["i64", "f64"], ["f64", "i64"]])
+        val first = generic_instance_build_plan_v1([], [Some(l), Some(l)], [])
+        expect(first.build.len()).to_equal(2)
+        var prev: [text] = []
+        for s in first.needed: prev.push(s.concrete_key)
+        val again = generic_instance_build_plan_v1(prev, [Some(l), Some(l)], prev)
+        expect(again.build.len()).to_equal(0)
+        expect(again.drop.len()).to_equal(0)
+        expect(again.complete).to_equal(true)
+
+    it "a removed instance is dropped, not rebuilt":
+        val both = list_of([["i64", "f64"], ["f64", "i64"]])
+        val one = list_of([["i64", "f64"]])
+        val first = generic_instance_build_plan_v1([], [Some(both)], [])
+        var prev: [text] = []
+        for s in first.needed: prev.push(s.concrete_key)
+        val next = generic_instance_build_plan_v1(prev, [Some(one)], prev)
+        expect(next.build.len()).to_equal(0)
+        expect(next.drop.len()).to_equal(1)
+
+    it "an unknown or incomplete list makes the plan incomplete":
+        val inc = generic_specializations_text_fallback_v1("val n = 1\n", "app", [pair_entry()], ctx_with([]))
+        expect(generic_instance_build_plan_v1([], [Some(inc)], []).complete).to_equal(false)
+        expect(generic_instance_build_plan_v1([], [nil], []).complete).to_equal(false)
+
+    it "caches each instance object by ConcreteTldrKey":
+        val p1 = generic_instance_object_path_v1("/c", "k1")
+        expect(p1 == generic_instance_object_path_v1("/c", "k1")).to_equal(true)
+        expect(p1 == generic_instance_object_path_v1("/c", "k2")).to_equal(false)
