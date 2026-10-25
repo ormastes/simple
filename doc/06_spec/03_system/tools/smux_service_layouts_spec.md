@@ -32,8 +32,13 @@ No children are allocated by this suite and no runtime PASS is claimed.
    Resizing the only pane updates its canvas and published rectangle.
 3. Refuse an invalid split, missing-pane close and invalid resize. Refusal
    preserves the existing named plan.
-4. Remove the final pane. The empty window refuses layout selection and
-   publishes no invented rectangles.
+4. Remove the final pane. Checked deletion removes its final window and session.
+   Layout selection fails; querying the former window reports its exact unknown
+   window error. Window/session inventories and published rectangles are empty.
+   An independent pure-state case constructs an empty-window snapshot, requires
+   `no panes in window: empty-window`, and preserves that snapshot's manual
+   metadata and empty rectangles. This does not imply deletion leaves a live
+   empty window. Both cases remain NOT_RUN pending admitted execution.
 
 5. Refuse dimensions which would wrap a 32-bit native ABI slot and canvases
    exceeding the service area limit. Retain the prior 80x24 pane and plan.

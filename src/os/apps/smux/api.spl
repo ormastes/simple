@@ -42,6 +42,8 @@ use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
     pane_capture_frame_state}
 use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, remove_window_state}
 use os.apps.smux.child_lifecycle.{close_owned_children}
+use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state,
+    pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
 use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new,
     smux_lease_admit, smux_lease_heartbeat, smux_lease_check, smux_lease_expiry_candidates,
@@ -69,6 +71,7 @@ var _client_leases: ClientLeaseState = ClientLeaseState(owner_nonce: "",
 var _split_checkpoints: [SplitCheckpoint] = []
 var _closing_sessions: [text] = []
 var _closing_windows: [text] = []
+var _closing_panes: [PaneClosePending] = []
 
 # =========================================================================
 # Test support
@@ -81,6 +84,7 @@ pub fn smux_reset_for_test():
     _split_checkpoints = []
     _closing_sessions = []
     _closing_windows = []
+    _closing_panes = []
     # Reap every attached child first: a reset must not leak processes.
     var i = 0
     while i < _svc.pane_count:
@@ -126,7 +130,7 @@ fn _window_idx(st: ServiceState, session_id: text, window_id: text) -> int:
     return idx
 
 pub fn smux_poll_output() -> int:
-    val updated = pane_poll_state(_svc, _closing_sessions, _closing_windows)
+    val updated = pane_poll_state(_svc, _closing_sessions, pane_close_poll_windows(_closing_panes, _closing_windows))
     if updated.commit: _svc = updated.state
     return updated.result
 
@@ -201,6 +205,7 @@ pub fn smux_kill_session(session_id: text) -> Result<bool, text>:
         return Err("unknown session: " + session_id)
     if not smux_session_closing(session_id):
         _closing_sessions.push(session_id)
+    _closing_panes = pane_close_forget(_closing_panes, session_id)
     val st = close_owned_children(_svc, session_id)
     val removed = remove_session_state(st, session_id)
     if removed.is_err():
@@ -387,6 +392,7 @@ pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
 
 pub fn smux_window_closing(session_id: text, window_id: text) -> bool:
     if smux_session_closing(session_id): return true
+    if pane_close_window_pending(_closing_panes, session_id, window_id): return true
     for closing in _closing_windows:
         if closing == window_id: return true
     return false
@@ -401,8 +407,9 @@ pub fn smux_kill_window(session_id: text, window_id: text) -> Result<bool, text>
         return smux_kill_session(session_id)
     if smux_session_closing(session_id):
         return Err("session is closing; retry kill-session: " + session_id)
-    if not smux_window_closing(session_id, window_id):
+    if not _closing_windows.contains(window_id):
         _closing_windows.push(window_id)
+    _closing_panes = pane_close_forget(_closing_panes, session_id, window_id)
     val st = close_owned_children(_svc, session_id, window_id)
     val removed = remove_window_state(st, session_id, window_id)
     if removed.is_err():
@@ -521,25 +528,22 @@ pub fn smux_rollback_split(session_id: text, window_id: text, added_pane_id: tex
     _svc = restored.unwrap()
     return Ok(true)
 
-# Remove the pane and request child teardown. The native provider retains any
-# cancellation/tree cleanup until its cleanup_pending sweep proves completion.
+# False preserves the native handle and freezes this window for close retry.
+# Only successful native teardown permits pane removal/geometry commit.
 pub fn smux_close_pane(session_id: text, window_id: text, pane_id: text) -> bool:
-    if smux_window_closing(session_id, window_id): return false
-    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
-    if idx < 0:
-        return false
-    val wi = _window_idx(_svc, session_id, window_id)
-    if wi < 0:
-        return false
-    val window = _svc.get_window(wi)
-    var remaining: [MuxRect] = []
-    for rect in window_layout_rects(_svc, session_id, window_id):
-        if rect.pane_id != pane_id:
-            remaining.push(rect)
-    _release_child(_svc.get_pane(idx))
-    # Closing leaves surviving rectangles in place; no implicit auto-grow.
-    _svc = _svc.remove_pane(idx).replace_window(wi, window.with_geometry(remaining, window.canvas_cols, window.canvas_rows))
-    return true
+    if _pane_idx(_svc, session_id, window_id, pane_id) < 0: return false
+    if smux_list_panes(session_id, window_id).len() == 1:
+        return smux_kill_window(session_id, window_id).is_ok()
+    if smux_session_closing(session_id) or _closing_windows.contains(window_id): return false
+    val updated = close_pane_state(_svc, _closing_panes, session_id, window_id, pane_id)
+    if updated.closed:
+        var kept: [SplitCheckpoint] = []
+        for saved in _split_checkpoints:
+            if saved.before.id != window_id: kept.push(saved)
+        _split_checkpoints = kept
+    _closing_panes = updated.pending
+    _svc = updated.state
+    return updated.closed
 
 pub fn smux_focus_pane(session_id: text, window_id: text, pane_id: text) -> bool:
     if smux_window_closing(session_id, window_id): return false
