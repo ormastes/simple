@@ -34,6 +34,12 @@ static void* foreign_thread(void* opaque) {
     assert(rt_source_region_stamp_v1(context[0],context[1],fuel(4)) == SR_INCOMPLETE);
     return NULL;
 }
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+static void* foreign_free(void* opaque) {
+    rt_free((uint8_t*)opaque);
+    return NULL;
+}
+#endif
 #endif
 
 int main(void) {
@@ -138,6 +144,17 @@ int main(void) {
     int64_t next_g, next=make_region(&next_g);
     assert(next_g != g);
     assert(rt_source_region_stamp_v1(next,g,fuel(4)) == SR_FOREIGN);
+#if !defined(_WIN32) && !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    /* The standalone allocator permits foreign raw free. Retirement must
+     * revoke the real owner even though public observations reject its TLS. */
+    int64_t cross_g,cross_region=make_region(&cross_g);
+    int64_t cross_node=make_node(cross_region,cross_g,1);
+    pthread_t reclaimer;
+    assert(!pthread_create(&reclaimer,NULL,foreign_free,(void*)(uintptr_t)cross_node));
+    assert(!pthread_join(reclaimer,NULL));
+    assert(rt_source_region_stamp_v1(cross_region,cross_g,fuel(4))==SR_CLOSED);
+    assert(rt_source_region_release_v1(cross_region,cross_g,fuel(11))==0);
+#endif
     int64_t realloc_g,realloc_region=make_region(&realloc_g);
     int64_t realloc_node=make_node(realloc_region,realloc_g,1);
     assert(rt_struct_receiver_valid(realloc_node,8,8));

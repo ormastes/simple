@@ -120,9 +120,12 @@ rejected; region attachment/adoption is absent from this ABI.
 
 ## Capability and evidence status
 
-Earlier raw-struct primitive revisions passed in standalone and composed
-native active-transient modes. Revised metadata/probe/tagged-edge version
-currently awaits exact source review and its final authorized execution. Native containers, pure and hosted provider admission
+Revised production source e7fc605f056 received independent SOURCE_GO with no
+P0/P1 findings. The composed native active-transient and standalone primitive
+binaries both passed under AddressSanitizer and UndefinedBehaviorSanitizer.
+Standalone additionally executed foreign-thread raw member retirement, proving
+that it revokes the original region and permits final control release. These
+are C primitive assertions, not SPipe or compiler/HIR acceptance. Native containers, pure and hosted provider admission
 remain UNRUN/OPEN. Full parser/HIR SOURCE acceptance remains UNRUN. None may
 advertise full closure from per-allocation epoch checks.
 Every unsupported provider must return Incomplete before authority or mutation.
@@ -141,3 +144,29 @@ Representation 2 is supported only for an exact compiler-certified Struct edge:
 require low tag bits exactly 1, normalize the owner lookup, and preserve the
 original tagged word in the store. Zero cannot be committed to a nonnullable
 Struct edge; zeroed constructor storage is not a completed published value.
+
+## Executed primitive evidence (2026-10-25)
+
+The final composed-native attempt used:
+
+```sh
+cc -std=gnu11 -O0 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -pthread test/01_unit/runtime/runtime_source_region_v1_test.c src/runtime/runtime_native.c -Wl,--gc-sections -ldl -lm -o /tmp/simple-c4-provider-native-reviewed-test
+/tmp/simple-c4-provider-native-reviewed-test
+```
+
+The final standalone attempt used the same sanitizers, linked the test's actual
+included memory owner without runtime_native.c, and produced
+`/tmp/simple-c4-provider-standalone-reviewed-test`. Both exited 0 with
+`C4 raw struct primitive: PASS (full SOURCE UNRUN)` and no sanitizer findings.
+
+The six-attempt budget is exhausted: five primitive passes across evolving
+revisions and one repaired intermediate compile error. Do not rerun green checks.
+Native active scope rejects a foreign raw free at its existing owner boundary;
+standalone permits that route and exercised the revised any-owner retirement.
+Actual forced same-address control reuse was not executed. Lifetime-generation
+mismatch was executed; lingering-member control-address ABA is covered by the
+reviewed generation-association checks, not an allocator-reuse execution claim.
+Ordinary compiler startup/RSS/store performance and full parser/HIR constructor
+acceptance remain UNRUN. Containers, immutable text certification, pure/hosted
+providers, guarded/hardened allocators and cross-thread borrowed-load confinement
+are OPEN. Nothing here upgrades whole SOURCE capability.
