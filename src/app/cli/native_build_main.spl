@@ -31,6 +31,7 @@ use app.bug.workaround_store.{refresh_workarounds}
 # name to mis-resolve, so the relay path no longer depends on that dispatch.
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists, file_delete, file_read}
 use std.io_runtime.{file_write}
@@ -813,8 +814,6 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
     if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 0:
         return 0
-    if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
-        return 0      # the HIR cache keys off the front-end cache scope
     # Sample after parse/closure preparation, immediately before HIR admission.
     # The producer HWM scales the default estimate with this workload; explicit
     # per-phase estimates remain deliberate overrides. The RSS guard enforces
@@ -1181,6 +1180,25 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
 # ineligible lane (MIR fallback) -- degrades to the unsharded in-process build,
 # so sharding can never turn a working capsule into a failing one by itself.
 # Opt-outs: SIMPLE_HIR_SHARDING=0, SIMPLE_MIR_SHARDING=0.
+# Publish ONE frontend/HIR cache scope before any shard is spawned so parse,
+# HIR and MIR children and the parent pipeline inherit the same identity.
+# Children are spawned before the parent's phase 2 publishes, so without this
+# no process had a scope (hir-cache disabled reason=no-compiler-scope). See
+# doc/08_tracking/bug/hir_cache_scope_never_published_shards_disabled_2026-10-25.md.
+fn native_build_publish_cache_scope_v1(simple_bin: text):
+    if (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
+        return
+    if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0" and (env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
+        return
+    # The scope hashes SIMPLE_BINARY; pin it to the running compiler first.
+    if (env_get("SIMPLE_BINARY") ?? "") == "":
+        env_set("SIMPLE_BINARY", simple_bin)
+    val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
+    if scope == "":
+        return
+    env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
+    print "[cache-scope] published source=orchestrator"
+
 pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_mir: bool) -> text:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
@@ -1195,6 +1213,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     if simple_bin == "" or not file_exists(simple_bin):
         eprint "[capsule-shard] disabled: running compiler path unavailable"
         return ""
+    native_build_publish_cache_scope_v1(simple_bin)
     val timeout_ms = native_build_timeout_ms(args)
     # Workers write no run evidence: the memory snapshot is O_EXCL (a worker
     # would take the parent's file); the phase profile and progress events belong to the
