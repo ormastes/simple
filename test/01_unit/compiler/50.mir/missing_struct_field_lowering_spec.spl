@@ -90,3 +90,39 @@ describe "missing struct field in MIR lowering":
             "    o.level"
         ]))
         expect(errs.contains("no field")).to_equal(false)
+
+describe "struct field initializer failure in MIR lowering":
+    it "reports a failed array-literal field initializer once, at its span":
+        # A field initializer whose own lowering already failed (here the
+        # tuple-array literal's element check) must not add a second,
+        # location-less "unsupported struct field initializer" cascade.
+        val log = Logger(level: 0)
+        val src = field_src_of([
+            "struct Resp:",
+            "    headers: [(text, text)]",
+            "    body: text",
+            "",
+            "fn redirect(url: text) -> Resp:",
+            "    Resp(headers: [(\"Location\", url)], body: \"\")"
+        ])
+        val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+        var modules: Dict<text, Module> = {}
+        modules["app.main"] = ast
+        val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        var lowering = hirlowering_for_module("app.main", surfaces)
+        val hir = lowering.lower_module(ast)
+        var hir_modules: Dict<text, HirModule> = {}
+        hir_modules["app.main"] = hir
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+        val _mir = mir_lowering.lower_module(hir)
+        var cascades = 0
+        var unlocated = 0
+        for e in mir_lowering.errors:
+            if e.message.starts_with("unsupported struct field initializer"):
+                cascades = cascades + 1
+            if e.span == nil:
+                unlocated = unlocated + 1
+        expect(cascades).to_equal(0)
+        expect(unlocated).to_equal(0)
