@@ -32,7 +32,7 @@ the Option box itself:
 Same shape: `driver_manifest_attr: driver_manifest` (same constructor) and
 `HirClass.export_attr` in `class_declaration_lowering.spl`.
 
-Stage 2 repro (src/app/zz_p3b6/r4a.spl, r4b.spl, compiled by `S/r27/stage2-simple`):
+Stage 2 repro (local scratch, not committed; the committed spec carries the same functions: src/app/zz_p3b6/r4a.spl, r4b.spl, compiled by `S/r27/stage2-simple`):
 
 | form | none | some |
 |---|---|---|

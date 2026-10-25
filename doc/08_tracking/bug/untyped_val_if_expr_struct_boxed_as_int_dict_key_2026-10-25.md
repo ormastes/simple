@@ -38,7 +38,7 @@ if-merge -> `lsl #3` + `rt_value_int_wide(fn_key)` -> `rt_dict_set(functions, BO
 The bootstrap path (`val fn_key: SymbolId = hir_fn.symbol`, annotated) passes the raw
 handle (0x15103e8, 0x1511b0c).
 
-Stage 2 repro (src/app/zz_p3b6/r.spl, r2.spl, compiled by `S/r27/stage2-simple`):
+Stage 2 repro (local scratch, not committed; the committed spec carries the same functions: src/app/zz_p3b6/r.spl, r2.spl, compiled by `S/r27/stage2-simple`):
 
 | form | extra `rt_value_int_wide` on the key | runs |
 |---|---|---|
