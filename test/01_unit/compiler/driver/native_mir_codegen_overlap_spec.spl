@@ -1,0 +1,61 @@
+# @req REQ-BOOTSTRAP-OBJECT-PROCESS-ACTUAL-OVERLAP
+# These unit intervals test accounting only. They are not real codegen/perf evidence.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_mir_codegen_interval_admission_v1.*
+use compiler.driver.driver_build.native_mir_codegen_overlap_v1.*
+
+fn codegen_overlap_frame_v1(index: i64, start: i64, end: i64) -> NativeMirCodegenIntervalV1:
+    NativeMirCodegenIntervalV1(invocation_identity: sha256_text("invocation"),
+        source_identity: sha256_text("source"), context_identity: sha256_text("context"),
+        physical_manifest_identity: sha256_text("physical"), producer_identity: sha256_text("producer"),
+        job_identity: sha256_text("job-{index}"), worker_owner: "{index}/12@0", module: "module_{index}",
+        birth_identity: "{1000 + index}", status: "PASS", pid: 2000 + index,
+        started_ms: start, ended_ms: end)
+
+fn codegen_overlap_admit_v1(frames: [NativeMirCodegenIntervalV1], workers: i64) -> NativeMirAdmittedCodegenIntervalsV1:
+    var blobs: [text] = []
+    var expected: [NativeMirCodegenIntervalExpectedV1] = []
+    for frame in frames:
+        blobs.push(native_mir_codegen_interval_encode_v1(frame).unwrap())
+        expected.push(NativeMirCodegenIntervalExpectedV1(frame: frame, spawned_ms: 1, reaped_ms: 10000))
+    native_mir_codegen_intervals_admit_ordered_v1(blobs, expected, sha256_text("ledger"), workers).unwrap()
+
+describe "actual codegen interval peak accounting after independent parent admission":
+    it "requires ten overlapping object intervals rather than a jobs argument":
+        var frames: [NativeMirCodegenIntervalV1] = []
+        for index in 0..10:
+            frames.push(codegen_overlap_frame_v1(index, 10 + index, 100 + index))
+        val batch = codegen_overlap_admit_v1(frames, 10)
+        expect(native_mir_codegen_admitted_peak_v1(batch).unwrap()).to_equal(10)
+        var serial: [NativeMirCodegenIntervalV1] = []
+        for index in 0..10:
+            serial.push(codegen_overlap_frame_v1(index, 10 + index * 10, 20 + index * 10))
+        expect(native_mir_codegen_admitted_peak_v1(codegen_overlap_admit_v1(serial, 10)).unwrap()).to_equal(1)
+
+    it "uses half open endpoints and does not count zero duration samples":
+        val frames = [codegen_overlap_frame_v1(0, 10, 20), codegen_overlap_frame_v1(1, 20, 30),
+            codegen_overlap_frame_v1(2, 15, 15)]
+        expect(native_mir_codegen_admitted_peak_v1(codegen_overlap_admit_v1(frames, 3)).unwrap()).to_equal(1)
+
+    it "handles manifest order that differs from real start order":
+        val frames = [codegen_overlap_frame_v1(0, 30, 50), codegen_overlap_frame_v1(1, 10, 40),
+            codegen_overlap_frame_v1(2, 20, 60)]
+        expect(native_mir_codegen_admitted_peak_v1(codegen_overlap_admit_v1(frames, 3)).unwrap()).to_equal(3)
+
+    it "refuses real observed overlap greater than configured capacity":
+        val frames = [codegen_overlap_frame_v1(0, 10, 40), codegen_overlap_frame_v1(1, 20, 50)]
+        expect(native_mir_codegen_admitted_peak_v1(codegen_overlap_admit_v1(frames, 1)).is_err()).to_equal(true)
+
+    it "refuses replacement of a frame after parent admission":
+        val frames = [codegen_overlap_frame_v1(0, 10, 40)]
+        var batch = codegen_overlap_admit_v1(frames, 1)
+        batch.intervals = [codegen_overlap_frame_v1(0, 10, 50)]
+        expect(native_mir_codegen_admitted_peak_v1(batch).unwrap_err()).to_equal("codegen overlap admitted frame digest differs")
+
+    it "refuses two physical jobs claiming one actual child process":
+        var duplicate = codegen_overlap_frame_v1(1, 20, 50)
+        duplicate.pid = 2000
+        duplicate.birth_identity = "1000"
+        val frames = [codegen_overlap_frame_v1(0, 10, 40), duplicate]
+        expect(native_mir_codegen_admitted_peak_v1(codegen_overlap_admit_v1(frames, 2)).is_err()).to_equal(true)
