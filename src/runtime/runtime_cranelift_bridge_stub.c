@@ -547,3 +547,11 @@ int64_t rt_cranelift_fdemote(int64_t ctx, int64_t to_type, int64_t value) {
     rt_trap_unimplemented("rt_cranelift_fdemote");
     return 0;
 }
+
+int64_t rt_cranelift_declare_readonly_words_v1(int64_t module, int64_t name_ptr, int64_t name_len, int64_t words_ptr, int64_t word_count, int64_t alignment, int64_t reloc_word_index, int64_t reloc_target_data_id, int64_t reloc_addend) {
+    (void)module; (void)name_ptr; (void)name_len; (void)words_ptr;
+    (void)word_count; (void)alignment; (void)reloc_word_index;
+    (void)reloc_target_data_id; (void)reloc_addend;
+    rt_trap_unimplemented("rt_cranelift_declare_readonly_words_v1");
+    return 0;
+}

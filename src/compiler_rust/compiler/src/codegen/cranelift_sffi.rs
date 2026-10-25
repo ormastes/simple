@@ -59,12 +59,16 @@ fn next_handle() -> i64 {
 
 /// Context for JIT compilation
 struct JITModuleContext {
+    readonly_words_v1: HashMap<i64, (DataId, usize)>,
+    exposed_handles: Vec<(bool, i64)>,
     module: JITModule,
     func_ids: HashMap<String, FuncId>,
 }
 
 /// Context for AOT compilation
 struct ObjectModuleContext {
+    readonly_words_v1: HashMap<i64, (DataId, usize)>,
+    exposed_handles: Vec<(bool, i64)>,
     module: ObjectModule,
     func_ids: HashMap<String, FuncId>,
     // The same ISA Arc passed to ObjectBuilder. V1 modules have no acceptance
@@ -405,6 +409,8 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
         JITModuleContext {
             module,
             func_ids: HashMap::new(),
+            readonly_words_v1: HashMap::new(),
+            exposed_handles: Vec::new(),
         },
     );
     handle
@@ -432,10 +438,40 @@ pub unsafe extern "C" fn rt_cranelift_finalize_module(module: i64) -> i64 {
 /// Free module resources.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_free_module(module: i64) {
-    if JIT_MODULES.lock().unwrap().remove(&module).is_some() {
-        return;
+    let jit = JIT_MODULES.lock().unwrap().remove(&module);
+    let handles = if let Some(ctx) = jit { ctx.exposed_handles } else {
+        AOT_MODULES.lock().unwrap().remove(&module)
+            .map(|ctx| ctx.exposed_handles).unwrap_or_default()
+    };
+    retire_exposed_handles(module, handles);
+}
+
+fn retire_exposed_handles(module: i64, handles: Vec<(bool, i64)>) {
+    for (function, handle) in handles {
+        if function { DECLARED_FUNCS.lock().unwrap().remove(&handle); }
+        else { DECLARED_DATA.lock().unwrap().remove(&handle); }
     }
-    AOT_MODULES.lock().unwrap().remove(&module);
+    STRING_DATA_CACHE.lock().unwrap().retain(|(owner, _), _| *owner != module);
+    FINISHED_FUNCS.lock().unwrap().retain(|_, function| function.module_handle != module);
+    // Detach builders before their backing allocations, as in registry reset.
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let owned: Vec<i64> = active.iter().filter_map(|(&handle, builder)|
+        (builder.module_handle == module).then_some(handle)).collect();
+    for handle in owned {
+        if let Some(mut builder) = active.remove(&handle) {
+            if let Some(builder) = builder.builder.take() { builder.finalize(); }
+        }
+        BUILDER_BACKINGS.lock().unwrap().remove(&handle);
+    }
+}
+
+fn record_exposed_handle(module: i64, function: bool, handle: i64) {
+    let mut jit = JIT_MODULES.lock().unwrap();
+    if let Some(ctx) = jit.get_mut(&module) { ctx.exposed_handles.push((function, handle)); return; }
+    drop(jit);
+    if let Some(ctx) = AOT_MODULES.lock().unwrap().get_mut(&module) {
+        ctx.exposed_handles.push((function, handle));
+    }
 }
 
 // ============================================================================
@@ -534,6 +570,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
         Some(id) => {
             let handle = next_handle();
             DECLARED_FUNCS.lock().unwrap().insert(handle, id);
+            record_exposed_handle(module, true, handle);
             handle
         }
         None => 0,
@@ -649,6 +686,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_string_data(module: i64, bytes_ptr
 
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    record_exposed_handle(module, false, handle);
     STRING_DATA_CACHE.lock().unwrap().insert(cache_key, handle);
     handle
 }
@@ -749,6 +787,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
 
     let handle = next_handle();
     DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    record_exposed_handle(module, false, handle);
     handle
 }
 
@@ -1802,6 +1841,8 @@ fn rt_cranelift_new_aot_module_impl(
         ObjectModuleContext {
             module,
             func_ids: HashMap::new(),
+            readonly_words_v1: HashMap::new(),
+            exposed_handles: Vec::new(),
             configured_isa_v2,
         },
     );
@@ -1834,6 +1875,8 @@ pub unsafe extern "C" fn rt_cranelift_emit_object_raw(module: i64, path_ptr: i64
 fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
     let mut aot_modules = AOT_MODULES.lock().unwrap();
     if let Some(ctx) = aot_modules.remove(&module) {
+        drop(aot_modules);
+        retire_exposed_handles(module, ctx.exposed_handles);
         let product = ctx.module.finish();
         let bytes = product.emit().unwrap_or_default();
         if bytes.is_empty() {
@@ -2055,6 +2098,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol(
         "rt_cranelift_declare_global_data",
         rt_cranelift_declare_global_data as *const u8,
+    );
+    builder.symbol(
+        "rt_cranelift_declare_readonly_words_v1",
+        rt_cranelift_declare_readonly_words_v1 as *const u8,
     );
     builder.symbol(
         "rt_cranelift_declare_global_data_v2",
@@ -2670,3 +2717,7 @@ mod tests {
         }
     }
 }
+
+#[path = "cranelift_readonly_words_v1.rs"]
+mod readonly_words_v1;
+pub use readonly_words_v1::rt_cranelift_declare_readonly_words_v1;
