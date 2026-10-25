@@ -518,3 +518,4 @@ programs never change layout. Rules to keep when editing:
   decodes an i64 hit a second time (5 -> 0; still open for `d.get(k) ?? x`).
   `d[k].?`, `if val x = d[k]` and `match d[k]` remain open.
   Bug: `doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md`.
+- **BSM P3 bootstrap MIR store:** the flat `_bootstrap_mir_*` / function-value / callable registries live on `BootstrapMirStore` (`_MirLowering/bootstrap_mir_store.spl`); never add a module-level registry var back — add a store field + forwarder, keep reads read-through (committed then pending), and publish only at `bootstrap_mir_registries_promote` (scope paused).
