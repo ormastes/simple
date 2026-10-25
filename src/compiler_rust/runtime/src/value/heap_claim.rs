@@ -166,15 +166,30 @@ fn claim(ptr: *mut HeapHeader, key: Option<ScopedAllocationKey>, expected: Optio
             result
         }
     };
+    finish_claim(result)
+}
+
+/// Complete accounting after all registry/pin guards have been released.
+pub(crate) fn finish_claim(result: ClaimResult) -> ClaimResult {
     if let ClaimResult::Claimed(ref allocation) = result {
         let kind = allocation.kind as u8;
         let bytes = allocation.size as u64;
-        super::super::dict_scope_read::unregistered(ptr as usize, kind);
+        super::super::dict_scope_read::unregistered(allocation.ptr as usize, kind);
         note_heap_free(kind, bytes);
-        note_attr_free(ptr as usize, bytes);
-        super::super::collections::transient_promote_share_forget(ptr as usize);
+        note_attr_free(allocation.ptr as usize, bytes);
+        super::super::collections::transient_promote_share_forget(allocation.ptr as usize);
     }
     result
+}
+
+/// The opaque pin-table borrow proves the caller retains its pin lock across
+/// the last-pin decision and canonical retirement. Do not re-lock pins here.
+pub(crate) fn claim_closure_release_locked(
+    ptr: *mut HeapHeader,
+    _pins: &super::super::objects::ClosurePins,
+) -> ClaimResult {
+    let mut registry = heap_allocation_registry().lock().unwrap();
+    claim_locked(&mut registry, ptr, None, Some(HeapObjectType::Closure), || false)
 }
 
 pub(crate) fn claim_free(ptr: *mut HeapHeader) -> ClaimResult {

@@ -249,7 +249,7 @@ struct ClosurePin {
     orphaned: bool,
 }
 
-struct ClosurePins {
+pub(crate) struct ClosurePins {
     entries: Vec<ClosurePin>,
     retains: i64,
     releases: i64,
@@ -301,30 +301,36 @@ pub extern "C" fn rt_closure_retain(closure: RuntimeValue) -> i64 {
 /// (never a double free).
 #[no_mangle]
 pub extern "C" fn rt_closure_release(closure: RuntimeValue) -> i64 {
-    if !closure.is_heap() {
-        return 0;
+    let (released, result) = release_closure_pin(closure);
+    if let super::heap::ClaimResult::Claimed(allocation) = super::heap::finish_claim(result) {
+        super::collections::dispose_claimed(allocation);
     }
+    i64::from(released)
+}
+
+/// Return retirement authority before dropping the pin guard. Separating
+/// storage disposal lets tests rotate canonical lifetime at a controlled address.
+pub(crate) fn release_closure_pin(closure: RuntimeValue) -> (bool, super::heap::ClaimResult) {
+    use super::heap::ClaimResult;
+    if !closure.is_heap() { return (false, ClaimResult::NotOwned); }
     let ptr = closure.as_heap_ptr();
-    let addr = ptr as usize;
-    let free_now = {
-        let mut table = closure_pins();
-        let Some(index) = table.entries.iter().position(|e| e.addr == addr) else {
-            return 0;
-        };
-        table.releases += 1;
-        table.entries[index].pins -= 1;
-        if table.entries[index].pins == 0 {
-            table.entries.swap_remove(index).orphaned
-        } else {
-            false
-        }
+    let mut table = closure_pins();
+    let Some(index) = table.entries.iter().position(|entry| entry.addr == ptr as usize) else {
+        return (false, ClaimResult::NotOwned);
     };
-    if free_now {
-        if let super::heap::ClaimResult::Claimed(allocation) = super::heap::claim_free(ptr) {
-            super::collections::dispose_claimed(allocation);
-        }
+    table.releases += 1;
+    table.entries[index].pins -= 1;
+    let result = if table.entries[index].pins == 0 && table.entries.swap_remove(index).orphaned {
+        // pin -> registry, with no unlock between recognizing the orphan and
+        // retiring it. An ordinary free cannot recycle this address in between.
+        super::heap::claim_closure_release_locked(ptr, &table)
+    } else { ClaimResult::NotOwned };
+    #[cfg(test)]
+    if matches!(result, ClaimResult::Claimed(_)) {
+        assert!(!super::heap::is_registered_heap_ptr(ptr), "last orphan is retired before pin unlock");
     }
-    1
+    drop(table);
+    (true, result)
 }
 
 /// Test hook (not runtime ABI): (retains, releases, live pinned closures).

@@ -122,3 +122,26 @@ fn scoped_bookkeeping_layout_reports_real_payload_cost() {
         std::mem::size_of::<(usize, ScopedAllocationKey)>(),
         std::mem::size_of::<(usize, usize)>());
 }
+
+#[test]
+fn final_orphan_release_claims_before_unlock_and_controlled_rebirth() {
+    use crate::value::objects::{release_closure_pin, rt_closure_new, rt_closure_retain};
+    let value = rt_closure_new(std::ptr::null(), 0);
+    let old = track_scoped_allocation(value.as_heap_ptr() as usize, new_scope_owner().unwrap()).unwrap();
+    assert_eq!(rt_closure_retain(value), 1);
+    assert!(matches!(claim_scoped_free(old), ClaimResult::Pinned));
+    // The last-pin operation returns an ALREADY retired allocation, while its
+    // implementation still held the pin guard at the registry serialization point.
+    let (released, result) = release_closure_pin(value);
+    assert!(released);
+    let allocation = claimed(finish_claim(result));
+    assert!(!is_registered_heap_ptr(allocation.ptr));
+    let next = rebirth(allocation, new_scope_owner().unwrap());
+    assert_eq!(old.ptr, next.ptr);
+    assert_ne!(old.birth, next.birth);
+    let (released, result) = release_closure_pin(value);
+    assert!(!released);
+    assert!(matches!(result, ClaimResult::NotOwned));
+    assert!(scoped_key_is_live(next));
+    dispose_claimed(claimed(claim_scoped_free(next)));
+}

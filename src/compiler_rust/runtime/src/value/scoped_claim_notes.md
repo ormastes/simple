@@ -24,7 +24,8 @@ non-closure frees use one registry lock. Untyped frees take pin -> registry from
 the first observation; scoped closure claims may inspect the registered type and
 then reacquire pin -> registry, rechecking the exact birth/owner. Pinned claims
 remove scoped authority and leave final disposal to the orphan's last release.
-No user cleanup runs under either lock.
+The last orphan release retains the same pin guard through canonical retirement,
+then drops it before accounting and disposal. No user cleanup runs under either lock.
 
 On a 64-bit host, ledger payload grows from 8 to 24 bytes per entry. Canonical
 scoped-map payload is 32 bytes per entry (address plus key), session owned-map

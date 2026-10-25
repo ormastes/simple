@@ -214,7 +214,7 @@ pub(crate) type HeapPtrSet<K> = HashSet<K, std::hash::BuildHasherDefault<ahash::
 
 #[path = "heap_claim.rs"]
 mod claim;
-pub(crate) use claim::{claim_free, claim_scoped_free, claim_typed_free, new_scope_owner,
+pub(crate) use claim::{claim_free, claim_scoped_free, claim_typed_free, claim_closure_release_locked, finish_claim, new_scope_owner,
     scoped_key_is_live, track_scoped_allocation, transfer_scoped_allocation,
     ClaimResult, ClaimedAllocation, ScopedAllocationKey};
 use claim::HeapRegistry;
