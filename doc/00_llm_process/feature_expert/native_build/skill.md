@@ -153,6 +153,31 @@ exactly (782). Trap: a mold-linked binary still lists dead-code UND entries
 in `.symtab`, so check `nm -D -u`, not `nm -u`. Bug:
 `doc/08_tracking/bug/stage4_live_projection_mold_ignores_gc_sections_2026-10-20.md`.
 
+## Phase 3 manual continuation traps (2026-10-25)
+
+Recipe: [Phase 3 manual continuation](../../../07_guide/tooling/bootstrap_failure_collection.md#phase-3-manual-continuation-recipe-measured-2026-10-25).
+Miscompile catalog: [Stage 2 native miscompile classes](../../../07_guide/compiler/robustness/stage2_native_miscompile_classes.md).
+
+- Never edit a worktree during its build: bootstrap snapshots source, and a
+  mid-run cherry-pick aborts admission.
+- `--source src/os` is required on the Phase 3 native-build argv since
+  `3dc4d69a57c`.
+- Memory: runs 27b-d used 20 MIR workers under the 110G cap and ended rc=143 (27d
+  with free memory near 7G); run 27e used 16 and finished. Observed
+  worker `rss_max` 6.5-7.8 GiB in the mon27 logs; see
+  `stage2_compiler_tests_frontend_shard_rss_2026-10-25.md` for shard RSS.
+- Phase-1 failure reasons print AFTER the `[ERROR] phase 1 FAILED` line; read
+  below it, not above.
+- Stage 3 built from `bootstrap_main.spl` is the bootstrap CLI only
+  (`compile`/`native-build`). A release needs a full-CLI Phase 3 link.
+- User policy: release goes Phase 3 -> Phase 3 (the working Phase 3 compiler
+  rebuilds itself and picks up the compiler-side fixes); no full bootstrap.
+- With < 30 go-to-end failures, compile the missing modules by hand and link
+  with trap stubs; the in-process bypass (positional `native-build`, no
+  `--entry`/`--source`) skips the worker child.
+- `bootstrap_main` crashes while printing any error (int-boxed text); read it
+  with gdb `x/s ($x0>>3)`.
+
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
 this skill with new open-bug links and concrete gotchas.

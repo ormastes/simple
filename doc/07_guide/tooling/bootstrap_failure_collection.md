@@ -515,6 +515,61 @@ actual platform execution and unavailable providers; Linux PASS cannot stand
 for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
 and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.
 
+### Phase 3 manual continuation recipe (measured 2026-10-25)
+
+Run-27e (Stage 2 `p2shard-17` copy as producer, `--go-to-end`) built 1,459
+objects and left 7 modules objectless. With fewer than 30 go-to-end failures the
+policy is to finish by hand (manual compile and link), not to rebuild Stage 2:
+source workarounds and compiler fixes are separate commits, and compiler fixes
+only take effect when the working Phase 3 compiler rebuilds itself.
+
+1. **Per-module tiny-entry compile.** Reproduce one failed module with a tiny
+   entry that imports only it, using the run's env, `--threads 4`, and a memory
+   cap (`systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=0`).
+   Check `free -g` first (>= 25G available). Keep the `.o`, delete the temp
+   cache.
+2. **`fixed_objs.txt`.** Append-only ledger of `<module> <abs .o>` lines.
+   Duplicates resolve last-line-wins (the relink awk keeps the final path per
+   module), so a later fix replaces an earlier one without editing the file.
+   Fixers only append; one relink owner links.
+3. **Relink from the object ledger.** Start from the run's object map, drop the
+   ledger object of every module that has a fixed object, add the fixed objects.
+   Pass 1 links to a probe to collect `undefined symbol` names; generate a C
+   file of trap stubs (abort with `STAGE3 TRAP: <sym>`, no-op for
+   `__simple_global_initialize_*`) for modules still missing (32 symbols over 7
+   modules in run-27e); pass 2 links with the stubs. Link inputs: the **backfill
+   archive (`libsimple_compiler_backfill.a`) only, never
+   `libsimple_native_all.a`** (it links a second, value-incompatible Rust
+   runtime), two `--defsym` aliases (`env_get`, `SdnBackendImpl.process_module`),
+   and a generated `main` shim that re-execs under a 1 GiB stack and runs the
+   `__module_init` calls. A runtime-object override list (one
+   `<basename.o> <abs .o>` per line) lets a patched `runtime_native.o` replace the
+   capsule's. Record the sha256 of every relinked binary (pu3 `49df0a2f`, pu5
+   `5072c3e9`, pu6 `45944812`, p3b6y `402b63c9`); never claim a fix without it.
+4. **In-process bypass.** The worker child (`simple.<tag> run
+   src/app/cli/native_build_worker.spl ...`) hides crashes. The positional form
+   `native-build <file>.spl --target ... --backend cranelift --runtime-bundle
+   core-c-bootstrap --threads 1 --cache-dir D --mode one-binary --runtime-path RT
+   -o OUT` with **no `--entry` and no `--source`** is routed by
+   `bootstrap_main.spl` (~line 336) straight into the in-process
+   `CompilerDriver`. Use it to walk a hello-world past each blocker (B1..B11 on
+   the 2026-10-25 board).
+5. **Debugging exec'd workers.** Preload a small `LD_PRELOAD` shim that installs a
+   SIGSEGV handler, walks the frame-pointer chain, and records the worker's
+   argv/env, then replay the exact argv under gdb. Hardware watchpoints on a
+   freed header found the transient-string free (B5).
+6. **Reading the error when `bootstrap_main` crashes printing it.** The error
+   list loop SEGVs in `spl_str_concat`/`strlen` because each text is an
+   int-boxed `RtCoreString` handle shifted left by 3. Break at the crash, then
+   `x/s ($x0>>3)` in frame 1 to print the real message.
+7. **Silent-pass check.** Treat an object that exists only because a failed
+   module was published PASS as a failure (see the go-to-end class in
+   [Stage 2 native miscompile classes](../compiler/robustness/stage2_native_miscompile_classes.md)).
+
+Phase 3 acceptance is hello-world through the exact new binary, then the
+self-host rebuild (`phase3s3`: the Stage 3 as compiler, same env plus
+`--source src/os`, 20 workers, 110G cap).
+
 ## Native staging and terminal consumers
 
 Use [native staging and terminal evidence](bootstrap_native_staging.md) for the
