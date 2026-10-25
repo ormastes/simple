@@ -5939,6 +5939,36 @@ stage4_verify_candidate_provenance \
     echo "error: Stage 4 candidate provenance did not re-verify" >&2
     exit 1
   }
+# Essential applications are required for every completed Stage 4 build.
+# Produce their runtime authorities before invoking the stage4-bound suites;
+# none of these rows may be skipped or deferred until after deployment.
+mkdir -p "${repo_root}/build/bootstrap-essential-apps"
+essential_apps_dir=$(mktemp -d "${repo_root}/build/bootstrap-essential-apps/run.XXXXXXXX") || exit 1
+essential_apps_dir=$(absolute_path "${essential_apps_dir}")
+run_logged stage4-essential-simple-core run_timeout_kill 1800 env \
+  SIMPLE_BINARY="${full_bin}" BUILD_DIR="${essential_apps_dir}/simple-core-smoke" \
+  SIMPLE_CORE_BUILD_DIR="${essential_apps_dir}/simple-core" \
+  SIMPLE_CORE_BACKEND="${backend}" TARGET="${platform}" \
+  SIMPLE_NATIVE_BUILD_THREADS="${jobs}" \
+  sh scripts/check/check-simple-core-runtime-smoke.shs
+run_logged stage4-essential-db-runtime run_timeout_kill 1800 \
+  sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+  --output "${essential_apps_dir}/db-runtime"
+run_logged stage4-essential-web-runtime run_timeout_kill 3600 env \
+  CARGO_BUILD_JOBS="${jobs}" \
+  sh scripts/check/build-host-gpu-runtime-capsule.shs \
+  --output "${essential_apps_dir}/web-runtime"
+run_logged stage4-essential-apps run_timeout_kill 7200 env \
+  SIMPLE_BINARY="${full_bin}" \
+  SIMPLE_NATIVE_BUILD_THREADS="${jobs}" \
+  SIMPLE_DB_RUNTIME_CAPSULE="${essential_apps_dir}/db-runtime" \
+  SIMPLE_WEB_RUNTIME_PATH="${essential_apps_dir}/web-runtime/cargo-target/bootstrap" \
+  SIMPLE_WEB_TLS_SUPPLEMENT_DIR="${essential_apps_dir}/web-runtime" \
+  sh scripts/check/check-bootstrap-essential-apps.shs \
+  "${full_bin}" "${stage4_provenance}" \
+  "${essential_apps_dir}/simple-core/libsimple_runtime.a" \
+  "${essential_apps_dir}/apps"
+
 stage3_acceptance_sanity=$(bootstrap_stage3_manifest_value \
   stage3_sanity_evidence_path "${stage3_provenance_manifest}") || {
   echo "error: Stage 3 acceptance lacks its sanity receipt" >&2
@@ -5969,6 +5999,9 @@ stage3_acceptance_tmp="${stage3_acceptance_receipt}.tmp.$$"
   echo "stage4_provenance_path=${stage4_provenance}"
   echo "stage4_provenance_sha256=$(bootstrap_stage3_hash_file "${stage4_provenance}")"
   echo "completed_gate=stage4-essential-tools-smoke"
+  echo "completed_gate=stage4-essential-apps"
+  echo "essential_apps_log_path=$(absolute_path "${log_dir}/stage4-essential-apps.log")"
+  echo "essential_apps_log_sha256=$(bootstrap_stage3_hash_file "${log_dir}/stage4-essential-apps.log")"
 } >"${stage3_acceptance_tmp}" || exit 1
 chmod 400 "${stage3_acceptance_tmp}" || exit 1
 mv "${stage3_acceptance_tmp}" "${stage3_acceptance_receipt}" || exit 1

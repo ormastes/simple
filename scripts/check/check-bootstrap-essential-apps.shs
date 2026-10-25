@@ -1,0 +1,128 @@
+#!/bin/sh
+# Required application builds and suites, after admitted Stage4 basic tools.
+# No deployment or live GUI qualification is performed here.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+usage() { echo "usage: $0 STAGE4_BINARY STAGE4_PROVENANCE SIMPLE_CORE_ARCHIVE NEW_OUTPUT_DIR" >&2; exit 2; }
+[ "$#" -eq 4 ] || usage
+P4=$1 PROVENANCE=$2 CORE=$3 OUT=$4
+fail() {
+    echo "essential_apps_error=$*" >&2
+    if [ "${STARTED:-0}" = 1 ]; then
+        printf 'status=FAIL\nreason=%s\nlive_gui=NOT_RUN\ndb_server_live_request=NOT_RUN\n' "$*" >"$OUT/result.env"
+    fi
+    exit 1
+}
+sha() { shasum -a 256 "$1" | awk '{print $1}'; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+for input in "$P4" "$PROVENANCE" "$CORE" "$OUT"; do
+    case "$input" in /*) ;; *) fail absolute_paths_required ;; esac
+    case "$input" in *'
+'*|*'	'*) fail unsupported_path_encoding ;; esac
+ done
+regular "$P4" && [ -x "$P4" ] || fail stage4_binary_missing_or_symlinked
+regular "$PROVENANCE" || fail stage4_provenance_missing_or_symlinked
+regular "$CORE" || fail simple_core_archive_missing_or_symlinked
+[ "$PROVENANCE" = "$P4.provenance.env" ] || fail stage4_provenance_not_adjacent
+[ ! -e "$OUT" ] && [ ! -L "$OUT" ] || fail output_directory_must_be_new
+[ -d "$(dirname -- "$OUT")" ] && [ ! -L "$(dirname -- "$OUT")" ] || fail output_parent_missing_or_symlinked
+[ -z "${SIMPLE_BINARY:-}" ] || [ "$SIMPLE_BINARY" = "$P4" ] || fail conflicting_simple_binary
+DB_RUNTIME=${SIMPLE_DB_RUNTIME_CAPSULE:-}
+WEB_RUNTIME=${SIMPLE_WEB_RUNTIME_PATH:-}
+TLS_DIR=${SIMPLE_WEB_TLS_SUPPLEMENT_DIR:-}
+[ -n "$DB_RUNTIME" ] && [ -d "$DB_RUNTIME" ] && [ ! -L "$DB_RUNTIME" ] || fail 'missing_SIMPLE_DB_RUNTIME_CAPSULE_run_normal_core_c_capsule_producer'
+[ -n "$WEB_RUNTIME" ] && [ -d "$WEB_RUNTIME" ] && [ ! -L "$WEB_RUNTIME" ] || fail 'missing_SIMPLE_WEB_RUNTIME_PATH_run_normal_host_gpu_capsule_producer'
+[ -n "$TLS_DIR" ] && [ -d "$TLS_DIR" ] && [ ! -L "$TLS_DIR" ] || fail 'missing_SIMPLE_WEB_TLS_SUPPLEMENT_DIR_run_normal_host_gpu_TLS_capsule_producer'
+for authority in "$DB_RUNTIME" "$WEB_RUNTIME" "$TLS_DIR"; do
+    case "$authority" in /*) ;; *) fail runtime_authority_paths_must_be_absolute ;; esac
+ done
+command -v shasum >/dev/null 2>&1 || fail shasum_required
+command -v perl >/dev/null 2>&1 || fail perl_required
+mkdir "$OUT" || fail output_directory_create_failed
+STARTED=1
+mkdir "$OUT/logs" "$OUT/home" "$OUT/tmp" "$OUT/cache"
+printf 'owner\texit_status\tlog\n' >"$OUT/rows.tsv"
+P4_SHA=$(sha "$P4") PROVENANCE_SHA=$(sha "$PROVENANCE") CORE_SHA=$(sha "$CORE")
+SOURCE_HEAD=$(git -C "$ROOT" rev-parse HEAD) || fail source_head_unavailable
+printf 'stage4=%s\nstage4_sha256=%s\nprovenance=%s\nprovenance_sha256=%s\ncore=%s\ncore_sha256=%s\nsource_head=%s\n' \
+    "$P4" "$P4_SHA" "$PROVENANCE" "$PROVENANCE_SHA" "$CORE" "$CORE_SHA" "$SOURCE_HEAD" >"$OUT/inputs.env"
+export SIMPLE_BINARY="$P4" SIMPLE_BIN="$P4" SIMPLE_RUNTIME="$P4" SIMPLE_LIB="$ROOT/src"
+export CARET_STAGE4_PROVENANCE="$PROVENANCE" SIMPLE_CORE_RUNTIME_PATH="$CORE" SIMPLE_SIMPLE_CORE_PATH="$CORE"
+export HOME="$OUT/home" TMPDIR="$OUT/tmp"
+unset SIMPLE_BOOTSTRAP SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_NATIVE_BUILD_RUST SIMPLE_TEST_RUNNER_RUST
+cd "$ROOT"
+verify_identity() {
+    [ "$(sha "$P4")" = "$P4_SHA" ] && [ "$(sha "$PROVENANCE")" = "$PROVENANCE_SHA" ] && \
+        [ "$(sha "$CORE")" = "$CORE_SHA" ] && [ "$(git -C "$ROOT" rev-parse HEAD)" = "$SOURCE_HEAD" ] || fail input_identity_changed
+}
+run_row() {
+    row=$1; shift
+    verify_identity
+    log="$OUT/logs/$row.log"
+    [ ! -e "$log" ] || fail duplicate_row
+    rc=0
+    "$@" >"$log" 2>&1 || rc=$?
+    printf '%s\t%s\t%s\n' "$row" "$rc" "$log" >>"$OUT/rows.tsv"
+    verify_identity
+    [ "$rc" -eq 0 ] || fail "$row-exit-$rc-see-$log"
+}
+require_text() { grep -Fqi "$2" "$1" || fail "$3-missing-positive-output"; }
+require_line() { grep -Fxq "$2" "$1" || fail "$3-missing-exact-positive-output"; }
+run_spec() {
+    id=$1 path=$2
+    regular "$ROOT/$path" || fail "$id-spec-missing"
+    run_row "$id" "$P4" test "$ROOT/$path" --mode=interpreter --unstable \
+        --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast --json
+    counts=$(perl "$ROOT/scripts/bootstrap/validate-test-runner-json.pl" "$OUT/logs/$id.log") || fail "$id-invalid-or-vacuous-result"
+    passed=$(printf '%s\n' "$counts" | cut -f1)
+    failed=$(printf '%s\n' "$counts" | cut -f2)
+    skipped=$(printf '%s\n' "$counts" | cut -f3)
+    case "$passed:$failed:$skipped" in *[!0-9:]*|:*|*:) fail "$id-invalid-counts" ;; esac
+    [ "$passed" -gt 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ] || fail "$id-required-suite-not-fully-executed"
+    printf '%s\t%s\n' "$id" "$counts" >>"$OUT/spec-counts.tsv"
+}
+run_row stage4-authority sh "$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE"
+require_line "$OUT/logs/stage4-authority.log" 'post_bootstrap_stage4_acceptance=true' stage4-authority
+run_row devhub-build "$P4" native-build --source "$ROOT/src/compiler" --source "$ROOT/src/app" --source "$ROOT/src/lib" \
+    --entry-closure --entry "$ROOT/src/app/devhub/main.spl" --runtime-bundle simple-core \
+    --cache-dir "$OUT/cache/devhub" --strip --output "$OUT/devhub"
+[ -x "$OUT/devhub" ] && regular "$OUT/devhub" || fail devhub_executable_missing
+run_row devhub-help "$OUT/devhub" --help
+require_text "$OUT/logs/devhub-help.log" devhub devhub-help
+run_spec devhub-system test/03_system/app/devhub/feature/devhub_terminal_ui_spec.spl
+run_row caret-build env SIMPLE_CARET_RUNTIME_PATH="$P4" SIMPLE_CARET_ARTIFACT_ROOT="$OUT/caret" \
+    sh "$ROOT/scripts/check/check-llm-caret-native-closure.shs"
+CARET="$OUT/caret/caret-native-closure"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) CARET="$CARET.exe" ;; esac
+[ -x "$CARET" ] && regular "$CARET" || fail caret_executable_missing
+run_row caret-help "$CARET" --help
+require_text "$OUT/logs/caret-help.log" 'Interactive LLM chat shell' caret-help
+for lane in provider-wrappers agent-primitives multi-manager local-torch; do
+    run_row "caret-$lane" sh "$ROOT/scripts/check/check-caret-suite-bootstrap.shs" --gate "$lane"
+    require_text "$OUT/logs/caret-$lane.log" 'STATUS: PASS' "caret-$lane"
+ done
+run_spec caret-gui-semantic test/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.spl
+run_row db-build sh "$ROOT/scripts/check/build-postgres-mimic-server-native.shs" "$P4" "$OUT/database/postgres_mimic_server" "$OUT/cache/database"
+[ -x "$OUT/database/postgres_mimic_server" ] && regular "$OUT/database/postgres_mimic_server" || fail db_executable_missing
+run_row db-help "$OUT/database/postgres_mimic_server" --help
+require_text "$OUT/logs/db-help.log" 'postgres-mimic-server' db-help
+# The mimic is a required binary, not a substitute for the SimpleDB SDN server.
+run_spec simpledb-server test/03_system/database/server/db_server_tier_spec.spl
+run_spec simpledb-durability test/03_system/database/server/db_durability_spec.spl
+run_spec simpledb-security test/03_system/database/server/secure_pure_simple_db_server_spec.spl
+run_row web-build sh "$ROOT/scripts/check/build-simple-web-server-native.shs" "$P4" "$OUT/web/simple_web_server" "$OUT/cache/web"
+[ -x "$OUT/web/simple_web_server" ] && regular "$OUT/web/simple_web_server" || fail web_executable_missing
+run_row web-config "$OUT/web/simple_web_server" --check --backend cpu
+require_text "$OUT/logs/web-config.log" 'configuration valid' web-config
+run_spec web-config-spec test/01_unit/app/simple_web_server/config_spec.spl
+run_spec web-security test/03_system/web/server/secure_pure_simple_web_server_spec.spl
+run_spec web-live-http test/03_system/web/server/http_dynamic_dispatch_live_socket_spec.spl
+run_row stage4-authority-final sh "$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE"
+require_line "$OUT/logs/stage4-authority-final.log" 'post_bootstrap_stage4_acceptance=true' stage4-authority-final
+verify_identity
+for artifact in "$OUT/devhub" "$CARET" "$OUT/database/postgres_mimic_server" "$OUT/web/simple_web_server"; do
+    printf '%s\t%s\n' "$artifact" "$(sha "$artifact")" >>"$OUT/artifacts.tsv"
+ done
+printf 'schema=bootstrap-essential-apps-v1\nstatus=PASS\nrequired_builds_and_suites=PASS\nweb_live_http_spec=PASS\ndb_server_live_request=NOT_RUN\nweb_built_binary_live_request=NOT_RUN\nlive_gui=NOT_RUN\ndeployment=NOT_ATTEMPTED\n' >"$OUT/result.env"
+echo 'bootstrap_essential_apps=true'
+echo 'STATUS: PASS bootstrap essential app builds and required suites; live GUI and built-server wire acceptance remain NOT_RUN'

@@ -1,0 +1,93 @@
+#!/bin/sh
+# Shared native host/provider contract. No compiler or linker is run here.
+host_gpu_host_init() {
+    HOST_GPU_OS=$(uname -s) || return 1
+    case "$HOST_GPU_OS" in
+        Darwin) HOST_GPU_CRYPTO_NAME=libcrypto.dylib ;;
+        Linux) HOST_GPU_CRYPTO_NAME=libcrypto.so ;;
+        *) echo "unsupported hosted web runtime host: $HOST_GPU_OS (Darwin/Linux required)" >&2; return 1 ;;
+    esac
+}
+
+host_gpu_sha256_rows() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$@"
+    else echo 'SHA-256 tool required' >&2; return 1
+    fi
+}
+
+host_gpu_hash_file() {
+    hg_hash_row=$(host_gpu_sha256_rows "$1") || return 1
+    printf '%s\n' "$hg_hash_row" | awk '{print $1}'
+}
+
+host_gpu_canonical_file() {
+    [ -f "$1" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then realpath "$1"
+    else python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$1"
+    fi
+}
+
+# nm -g is supported by Apple and GNU nm. Only real defined symbol types
+# qualify; an undefined/weak-undefined declaration is not an implementation.
+host_gpu_require_symbols() (
+    hg_object=$1; shift
+    hg_nm_output=$(mktemp "${TMPDIR:-/tmp}/host-gpu-nm.XXXXXXXX") || exit 1
+    trap 'rm -f "$hg_nm_output"' EXIT HUP INT TERM
+    "${HOST_NM:-nm}" -g "$hg_object" >"$hg_nm_output" 2>/dev/null || exit 1
+    for hg_symbol in "$@"; do
+        awk -v wanted="$hg_symbol" -v host="$HOST_GPU_OS" '
+            NF >= 2 {
+                name=$NF; kind=$(NF-1)
+                if (host == "Darwin") sub(/^_/, "", name)
+                if (name == wanted && kind ~ /^[ABCDGIRSTVWabcdgirst]$/) found=1
+            }
+            END { exit(found ? 0 : 1) }
+        ' "$hg_nm_output" || exit 1
+    done
+)
+
+# Resolve a real shared provider, then link those exact bytes by path. An
+# explicit library/include pair is supported; otherwise use installed package
+# metadata, Homebrew's advertised prefix, or the host driver's normal search.
+host_gpu_resolve_crypto() {
+    CRYPTO_PROVIDER=${SIMPLE_WEB_CRYPTO_LIBRARY:-}
+    CRYPTO_INCLUDE_DIR=${SIMPLE_WEB_OPENSSL_INCLUDE_DIR:-}
+    hg_libdir= hg_includedir=
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libcrypto; then
+        hg_libdir=$(pkg-config --variable=libdir libcrypto) || return 1
+        hg_includedir=$(pkg-config --variable=includedir libcrypto) || return 1
+    elif command -v brew >/dev/null 2>&1; then
+        hg_prefix=$(brew --prefix openssl@3 2>/dev/null) || hg_prefix=
+        if [ -n "$hg_prefix" ]; then
+            hg_libdir=$hg_prefix/lib
+            hg_includedir=$hg_prefix/include
+        fi
+    fi
+    if [ -z "$CRYPTO_PROVIDER" ] && [ -n "$hg_libdir" ] && [ -f "$hg_libdir/$HOST_GPU_CRYPTO_NAME" ]; then
+        CRYPTO_PROVIDER=$hg_libdir/$HOST_GPU_CRYPTO_NAME
+    fi
+    if [ -z "$CRYPTO_INCLUDE_DIR" ] && [ -n "$hg_includedir" ]; then
+        CRYPTO_INCLUDE_DIR=$hg_includedir
+    fi
+    if [ -z "$CRYPTO_PROVIDER" ]; then
+        CRYPTO_PROVIDER=$("${HOST_CC:-cc}" "-print-file-name=$HOST_GPU_CRYPTO_NAME") || return 1
+    fi
+    case "$CRYPTO_PROVIDER" in
+        /*) ;;
+        *) echo 'cannot resolve libcrypto; set SIMPLE_WEB_CRYPTO_LIBRARY and SIMPLE_WEB_OPENSSL_INCLUDE_DIR' >&2; return 1 ;;
+    esac
+    CRYPTO_PROVIDER=$(host_gpu_canonical_file "$CRYPTO_PROVIDER") || return 1
+    # Colon separates SIMPLE_LINK_OBJECTS; newlines delimit receipt fields.
+    case "$CRYPTO_PROVIDER$CRYPTO_INCLUDE_DIR" in *:*|*'
+'*|*''*) echo 'unsupported provider path delimiter' >&2; return 1 ;; esac
+    if [ -n "$CRYPTO_INCLUDE_DIR" ]; then
+        case "$CRYPTO_INCLUDE_DIR" in /*) ;; *) return 1 ;; esac
+        [ -f "$CRYPTO_INCLUDE_DIR/openssl/evp.h" ] &&
+            [ -f "$CRYPTO_INCLUDE_DIR/openssl/rand.h" ] || {
+            echo 'OpenSSL EVP/RAND headers missing from selected include root' >&2; return 1;
+        }
+        CRYPTO_INCLUDE_DIR=$(CDPATH= cd -- "$CRYPTO_INCLUDE_DIR" && pwd -P) || return 1
+    fi
+    CRYPTO_PROVIDER_SHA256=$(host_gpu_hash_file "$CRYPTO_PROVIDER") || return 1
+}
