@@ -1,0 +1,75 @@
+# Thin shared-lint adapter; syntax, identity, resolution and edit authority live
+# in the compiler semantic Markdown owner, also re-exported by app.doc.
+use compiler.tools.lint.main.*
+use compiler.semantics.symbol_id.semantic_markdown.{SemanticMarkdownSourceV1, plan_semantic_markdown_links_v1, apply_semantic_markdown_links_v1}
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
+use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write}
+
+pub fn semantic_markdown_authority_option_v1(arg: text) -> bool:
+    ["--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision"].contains(arg)
+
+pub fn semantic_markdown_lint_sources_v1(options: Dict<text, text>) -> Result<[SemanticMarkdownSourceV1], SemanticLinkErrorV1>:
+    if options.keys().is_empty():
+        return Ok([])
+    for required in ["--source-file", "--source-link", "--package", "--module", "--revision"]:
+        if not options.contains_key(required) or options[required] == "":
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "explicit semantic source identity/revision required: " + required))
+    val document = open_semantic_link_document_v1(options["--package"], options["--module"], options["--source-file"], options["--revision"])?
+    val remote = if options.contains_key("--remote-link"): options["--remote-link"] else: ""
+    Ok([SemanticMarkdownSourceV1(local_file: options["--source-link"], remote_file: remote, document: document)])
+
+fn semantic_markdown_position_v1(content: text, offset: i64) -> (i64, i64):
+    var line = 1
+    var column = 0
+    for index in 0..offset:
+        if content.slice(index, index + 1) == "\n":
+            line = line + 1
+            column = 0
+        else:
+            column = column + 1
+    (line, column)
+
+impl Linter:
+    me check_semantic_markdown_links_v1(path: text, content: text, config: LintConfig):
+        if not path.ends_with(".md"):
+            return
+        val critical = match config.profile:
+            case Some(profile): profile == LintProfile.Critical
+            case nil: false
+        match plan_semantic_markdown_links_v1(content, self.semantic_markdown_sources, critical):
+            case Err(failure):
+                val lint = LintDiag.new("W-DOC-AST-001", LintLevel.Deny, LintCategory.Correctness,
+                    "semantic document check refused: " + failure.message)
+                self.results.push(LintRunResult.new(path, 1, 0, lint))
+            case Ok(plan):
+                for diagnostic in plan.diagnostics:
+                    val position = semantic_markdown_position_v1(content, diagnostic.start)
+                    val level = if diagnostic.severity == "deny": LintLevel.Deny else: LintLevel.Warn
+                    val lint = LintDiag.new(diagnostic.rule, level, LintCategory.Correctness,
+                        diagnostic.target + ": " + diagnostic.message)
+                        .with_fix("Use --fix with explicit --source-file, --source-link, --package, --module and --revision authority")
+                    self.results.push(LintRunResult.new(path, position.0, position.1, lint))
+
+pub fn apply_semantic_markdown_lint_fix_v1(path: text, content: text, sources: [SemanticMarkdownSourceV1], dry_run: bool) -> Result<bool, SemanticLinkErrorV1>:
+    # Never translate semantic edits to unchecked generic EasyFix replacements.
+    # The owner re-authenticates every target and source immediately before the
+    # bounded read and atomic publication; external writers are not locked.
+    val plan = plan_semantic_markdown_links_v1(content, sources, false)?
+    if plan.diagnostics.is_empty():
+        return Ok(true)
+    val replacement = apply_semantic_markdown_links_v1(content, plan)?
+    val current = match file_read_regular_no_follow_bounded(path, 1048576):
+        case Ok(value): value
+        case Err(message): return Err(semantic_link_error_v1(SemanticLinkFailureV1.IoFailed, message))
+    if current != content:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "Markdown changed before semantic fix publication"))
+    if dry_run:
+        return Ok(true)
+    # Revalidate the source snapshots after the Markdown read, adjacent to write.
+    val verified = apply_semantic_markdown_links_v1(current, plan)?
+    if verified != replacement:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "semantic replacement changed"))
+    if not file_atomic_write(path, verified):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.IoFailed, "atomic semantic Markdown fix failed"))
+    Ok(true)
