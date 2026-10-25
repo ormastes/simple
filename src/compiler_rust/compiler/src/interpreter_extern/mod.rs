@@ -1638,6 +1638,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_io_file_seek", io_file::rt_io_file_seek);
     insert_simple!("rt_io_file_flush", io_file::rt_io_file_flush);
     insert_simple!("rt_io_file_close", io_file::rt_io_file_close);
+    insert_simple!("rt_io_file_close_value", io_file::rt_io_file_close_value);
     insert_simple!("rt_io_file_meta_size", io_file::rt_io_file_meta_size);
     insert_simple!("rt_io_file_meta_flags", io_file::rt_io_file_meta_flags);
     insert_simple!("rt_io_file_meta_modified", io_file::rt_io_file_meta_modified);

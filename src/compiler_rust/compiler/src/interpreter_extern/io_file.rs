@@ -382,9 +382,30 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
         drop(file);
         Ok(Value::Bool(ok))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if fd <= 0 {
+            return Ok(Value::Bool(false));
+        }
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { File::from_raw_handle(fd as *mut std::ffi::c_void) };
+        let ok = file.sync_all().is_ok();
+        drop(file);
+        Ok(Value::Bool(ok))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Value::Bool(false))
+    }
+}
+
+/// i64 twin of `rt_io_file_close` (`fd -> 0/1`), the form `std` calls
+/// (`sffi/fs.spl` `io_file_close`). Without it every interpreter-mode
+/// `file_read` failed with `unknown extern function: rt_io_file_close_value`.
+pub fn rt_io_file_close_value(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_io_file_close(args)? {
+        Value::Bool(true) => Ok(Value::Int(1)),
+        _ => Ok(Value::Int(0)),
     }
 }
 
@@ -480,6 +501,21 @@ pub fn rt_io_file_exists(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_file_delete(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     Ok(Value::Bool(std::fs::remove_file(&path).is_ok()))
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod close_value_tests {
+    use super::*;
+
+    #[test]
+    fn close_value_reports_one_for_an_open_fd() {
+        let path = std::env::temp_dir().join(format!("rt_io_close_value_{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let fd = rt_io_file_open(&[Value::text(path.clone()), Value::Int(1)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0));
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[cfg(all(test, unix))]
