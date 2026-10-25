@@ -1,5 +1,6 @@
 # Compiler-owned per-function replay request. No saved/fabricated lowering owner.
-use compiler.hir.hir_types.{SymbolId, HirType}
+use compiler.hir.hir_types.{SymbolId, HirType, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_definitions.{HirFunction}
 use compiler.mir.mir_types.{MirType, MirSignature}
 use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
@@ -9,6 +10,7 @@ use compiler.mir.source_region_facade_symbols_v1.{SourceRegionFacadeSymbolsV1}
 use compiler.mir.source_region_specialize_module_v1.{SourceRegionResultConstructionV1}
 use compiler.mir.source_region_specialize_module_v1.{SourceRegionSpecializationV1}
 use compiler.mir.source_region_current_function_v1.*
+use compiler.mir.source_region_call_closure_v1.{source_region_resolved_call_closure_v1}
 use compiler.mir.mir_types.{MirTypeKind}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
 use std.common.crypto.sha256.{sha256_text}
@@ -36,7 +38,10 @@ impl MirLowering:
         # lower_function resets metadata BEFORE this function, not afterwards.
         # The codec therefore observes this function's real locals/container/
         # tuple/struct provenance until the next lower_function invocation.
+        val errors_before = self.errors.len()
         val lowered = self.lower_function(original)
+        if self.errors.len() != errors_before:
+            return Err("SOURCE-REQUEST: actual function replay reported lowering errors")
         if lowered.symbol.id != original.symbol.id:
             return Err("SOURCE-REQUEST: current function identity differs")
         self.specialize_current_function(original, lowered, plan)
@@ -47,6 +52,46 @@ impl MirLowering:
             return Err("SOURCE-REQUEST: incomplete closure replay order")
         if not plan.specialized_symbols.has(entry):
             return Err("SOURCE-REQUEST: entry is outside the resolved closure")
+        # Revalidate the proposed map against canonical C3 discovery once at
+        # the request boundary, before any lowering or publication mutation.
+        val closure = source_region_resolved_call_closure_v1(plan.module, entry)?
+        if plan.closure_digest != closure.input_digest or order.len() != closure.functions.len():
+            return Err("SOURCE-REQUEST: proposed closure input identity differs")
+        if plan.call_targets.len() != closure.targets_by_name.len():
+            return Err("SOURCE-REQUEST: proposed call target set differs")
+        for name in closure.targets_by_name.keys():
+            if not plan.call_targets.has(name) or plan.call_targets[name].id != closure.targets_by_name[name].id:
+                return Err("SOURCE-REQUEST: proposed resolved call target differs")
+        var existing_names: Dict<text, bool> = {}
+        for symbol in plan.module.functions.keys():
+            existing_names[plan.module.functions[symbol].name] = true
+        var target_ids: Dict<i64, bool> = {}
+        var target_names: Dict<text, bool> = {}
+        for index in 0..order.len():
+            val symbol = order[index]
+            if symbol.id != closure.functions[index].id or not plan.originals.has(symbol):
+                return Err("SOURCE-REQUEST: proposed replay order/original differs")
+            if (not plan.specialized_symbols.has(symbol) or not plan.specialized_names.has(symbol) or
+                    not plan.specialized_signatures.has(symbol)):
+                return Err("SOURCE-REQUEST: specialization mapping is incomplete")
+            val target = plan.specialized_symbols[symbol]
+            val name = plan.specialized_names[symbol]
+            if (target.id < 0 or target_ids.has(target.id) or name == "" or target_names.has(name) or
+                    plan.module.functions.has(target) or existing_names.has(name)):
+                return Err("SOURCE-REQUEST: specialization would collide with an existing function")
+            if plan.originals[symbol].symbol.id != symbol.id:
+                return Err("SOURCE-REQUEST: HIR declaration identity differs")
+            val allocated = self.symbols.get_symbol_raw(target.id)
+            if allocated == nil:
+                return Err("SOURCE-REQUEST: specialization lacks actual allocator ownership")
+            if val actual = allocated:
+                if actual.name != name:
+                    return Err("SOURCE-REQUEST: allocated specialization name differs")
+                match actual.kind:
+                    case SymbolKind.Function: ()
+                    case _: return Err("SOURCE-REQUEST: allocated specialization is not a function")
+            target_ids[target.id] = true
+            target_names[name] = true
         val context_symbol = match plan.context_type.kind:
             case MirTypeKind.Struct(symbol): symbol
             case _: return Err("SOURCE-REQUEST: resolved context declaration required")
@@ -59,6 +104,8 @@ impl MirLowering:
                 return Err("SOURCE-REQUEST: duplicate or missing original function")
             seen[symbol] = true
             var function = self.lower_source_region_function_v1(plan.originals[symbol], plan)?
+            if function.symbol.id != plan.specialized_symbols[symbol].id or function.name != plan.specialized_names[symbol]:
+                return Err("SOURCE-REQUEST: rewritten function identity differs from allocated target")
             if function.source_region_context_local_v1 < 0:
                 return Err("SOURCE-REQUEST: rewritten function lacks context local")
             # The final digest binds actual emitted codec locals/descriptors,
