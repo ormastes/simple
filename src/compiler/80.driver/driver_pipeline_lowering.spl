@@ -361,17 +361,25 @@ impl CompilerDriver:
     # MIR Lowering
     # --------------------------------------------------------------------------
 
-    me go_to_end_record_mir_failure_v1(name: text, lowering_errors: [MirError],
+    me go_to_end_record_mir_failure_v1(name: text, source_path: text, lowering_errors: [MirError],
             lowering_start: i64, ctx_start: i64):
         """go-to-end (driver_build/go_to_end.spl): record one module whose MIR
         lowering failed, with the fatal errors IT produced, and keep it out of
-        ctx.mir_modules so codegen only sees modules that lowered."""
+        ctx.mir_modules so codegen only sees modules that lowered. The module
+        also gets one ICE receipt row (phase mir_lower) carrying its errors:
+        a MIR shard child's go-to-end ledger dies with the child, and the
+        receipt parts are the cross-process channel the owner merges."""
         var recorded = 0
+        var first_message = ""
+        var already_in_receipt = false
         var index = lowering_start
         while index >= 0 and index < lowering_errors.len():
             val err: MirError = lowering_errors[index]
             if driver_mir_error_is_fatal_v1(err):
-                self.go_to_end.record("mir", name, _format_mir_error(err))
+                val formatted = _format_mir_error(err)
+                self.go_to_end.record("mir", name, formatted)
+                if recorded == 0:
+                    first_message = formatted
                 recorded = recorded + 1
             index = index + 1
         var ctx_index = ctx_start
@@ -379,10 +387,19 @@ impl CompilerDriver:
             val message = self.ctx.error_message_at(ctx_index)
             if message != "":
                 self.go_to_end.record("mir", name, message)
+                # _driver_mir_ice_continue already wrote this module's row.
+                if message.starts_with("ICE["):
+                    already_in_receipt = true
+                if recorded == 0:
+                    first_message = message
                 recorded = recorded + 1
             ctx_index = ctx_index + 1
         if recorded == 0:
-            self.go_to_end.record("mir", name, "MIR lowering failed")
+            first_message = "MIR lowering failed"
+            self.go_to_end.record("mir", name, first_message)
+        if not already_in_receipt:
+            val receipt_message = if recorded > 1: "{first_message} (+{recorded - 1} more MIR error(s))" else: first_message
+            val _ice_line = ice_boundary_fail(name, source_path, "mir_lower", "", receipt_message)
         self.go_to_end.exclude(name)
         log_phase("aot:lower_to_mir:go_to_end_failed module={name} errors={recorded}")
 
@@ -1526,7 +1543,7 @@ impl CompilerDriver:
                 if go_to_end_active and module_mir_failed:
                     # go-to-end: record the module with its own errors and never
                     # publish its (broken) MIR, so codegen sees only good modules.
-                    self.go_to_end_record_mir_failure_v1(name_direct,
+                    self.go_to_end_record_mir_failure_v1(name_direct, src_direct.path,
                         direct_lowering.errors, module_lowering_errors_before,
                         module_context_errors_before)
                 else:
