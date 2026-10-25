@@ -14,8 +14,9 @@ typedef struct RtSourceRegionV1 {
     uintptr_t destination;
     uint64_t slot;
     int64_t error;
-    uint8_t closed;
+    _Atomic uint8_t closed;
     uintptr_t execution_owner;
+    RtSourceControlMetadataV1* control_metadata;
 } RtSourceRegionV1;
 
 /* A single monotonic identity counter under the existing owner lock. It is
@@ -68,7 +69,7 @@ static RtSourceRegionV1* sr_control(int64_t token) {
 static int64_t sr_validate(RtSourceRegionV1* r, int64_t generation) {
     if (!r) return SR_INCOMPLETE;
     if (generation <= 0 || r->generation != (uint64_t)generation) return SR_FOREIGN;
-    if (r->closed) return SR_CLOSED;
+    if (atomic_load_explicit(&r->closed,memory_order_acquire)) return SR_CLOSED;
     return r->error;
 }
 
@@ -104,6 +105,10 @@ static int sr_descriptor(const uint64_t* d, int64_t capacity) {
 /* Guarded/hardened allocator variants need their own bound qualification. */
 static int sr_allocator_ready(void) {
     if (sizeof(uintptr_t) != 8) return 0;
+#if ATOMIC_CHAR_LOCK_FREE != 2
+    /* No hidden lock-backed atomic provider is qualified for SOURCE. */
+    return 0;
+#endif
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     return rt_transient_raw_owner_thread_allows() &&
         !rt_mem_harden_enabled() && rt_mem_guard_rate() <= 0;
@@ -142,8 +147,8 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
             work += cap * next + cap + next;
         }
         if (operation == 1) {
-            bytes += sizeof(RtSourceRegionV1)+sizeof(RtSourceAllocationMetadataV1);
-            fields += 16;
+            bytes += sizeof(RtSourceRegionV1)+sizeof(RtSourceControlMetadataV1);
+            fields += 18;
             work += cap;
         }
     }
@@ -240,7 +245,9 @@ int64_t rt_source_region_create_v1(int64_t fuel) {
     }
     /* Control state is explicitly retained, outside the observed graph. */
     RtSourceRegionV1* r = (RtSourceRegionV1*)rt_observed_calloc_v1(1, sizeof(*r));
-    RtSourceAllocationMetadataV1* metadata=(RtSourceAllocationMetadataV1*)rt_observed_calloc_v1(1,sizeof(*metadata));
+    RtSourceControlMetadataV1* control_metadata=(RtSourceControlMetadataV1*)
+        rt_observed_calloc_v1(1,sizeof(*control_metadata));
+    RtSourceAllocationMetadataV1* metadata=control_metadata ? &control_metadata->allocation : NULL;
     size_t metadata_bits=0;
     int ok = r && rt_struct_source_metadata_bits_v1(metadata,&metadata_bits) &&
         (rt_struct_alloc_cap || rt_struct_alloc_resize(256));
@@ -257,6 +264,8 @@ int64_t rt_source_region_create_v1(int64_t fuel) {
     r->generation = rt_source_region_next_generation_v1++;
     r->epoch = 1;
     r->execution_owner = (uintptr_t)&sr_execution_owner_v1;
+    r->control_metadata=control_metadata;
+    atomic_init(&r->closed,0);
     metadata->region=(uintptr_t)r; metadata->generation=r->generation;
     rt_source_region_registry_changed_v1();
     rt_struct_alloc_lock_release(); return (int64_t)(uintptr_t)r;
@@ -409,7 +418,7 @@ int64_t rt_source_region_close_v1(int64_t c, int64_t g, int64_t f) {
     if (!sr_allow(10, 0, 0, f)) return sr_allow_failure_v1;
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = !r ? SR_INCOMPLETE : r->generation != (uint64_t)g ? SR_FOREIGN : 0;
-    if (!error) { r->closed = 1; r->ticket = 0; r->destination = 0; }
+    if (!error) { atomic_store_explicit(&r->closed,1,memory_order_release); r->ticket = 0; r->destination = 0; }
     rt_struct_alloc_lock_release(); return error;
 }
 
@@ -417,7 +426,7 @@ int64_t rt_source_region_release_v1(int64_t c, int64_t g, int64_t f) {
     if (!sr_allow(11, 0, 0, f)) return sr_allow_failure_v1;
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = !r ? SR_INCOMPLETE : r->generation != (uint64_t)g ? SR_FOREIGN :
-        !r->closed || r->lease || r->ticket || r->members ? SR_CONFLICT : 0;
+        !atomic_load_explicit(&r->closed,memory_order_acquire) || r->lease || r->ticket || r->members ? SR_CONFLICT : 0;
     if (!error) {
         RtStructAllocation* entry = sr_find((uintptr_t)c);
         RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
@@ -437,9 +446,85 @@ static void rt_source_region_retire_locked_v1(RtSourceAllocationMetadataV1* meta
          * than silently discarding its association. No fresh authority issued. */
         RtSourceRegionV1* r = sr_control_any_owner((int64_t)metadata->region);
         if (r && r->generation == metadata->generation) {
-            r->closed=1;
+            atomic_store_explicit(&r->closed,1,memory_order_release);
             if (!metadata->control && r->members) --r->members;
         }
     }
     free(metadata);
+}
+
+/* These operations are UNSAFE until a compiler-affine lifetime receipt proves
+ * that the operand remains a genuinely pinned control. No registry lookup can
+ * be substituted for that proof, and a facade live boolean cannot provide it. */
+int64_t rt_source_region_live_cleanup_bound_v1(int64_t operation,int64_t metric) {
+    if (operation<1 || operation>3 || metric<0 || metric>2) return SR_INCOMPLETE;
+    if (metric) return 0;
+    return operation==1 ? 16 : operation==2 ? 24 : 64;
+}
+
+static int64_t sr_live_identity_unsafe_v1(int64_t control,int64_t generation,
+    RtSourceRegionV1** out) {
+    if (!control) return SR_INCOMPLETE;
+    RtSourceRegionV1* r=(RtSourceRegionV1*)(uintptr_t)control;
+    if (generation<=0 || r->generation!=(uint64_t)generation) return SR_FOREIGN;
+    if (r->execution_owner!=(uintptr_t)&sr_execution_owner_v1) return SR_INCOMPLETE;
+    *out=r;
+    return 0;
+}
+
+int64_t rt_source_region_revoke_live_v1(int64_t control,int64_t generation,
+    int64_t prepaid_work) {
+    if (prepaid_work<16) return SR_CAPACITY;
+    RtSourceRegionV1* r;
+    int64_t error=sr_live_identity_unsafe_v1(control,generation,&r);
+    if (error) return error;
+    /* Only the atomic flag changes: foreign retirement may run under the
+     * existing registry lock, and plain ticket/member fields are untouched. */
+    atomic_store_explicit(&r->closed,1,memory_order_release);
+    return 0;
+}
+
+int64_t rt_source_region_read_end_live_v1(int64_t control,int64_t generation,
+    int64_t lease,int64_t prepaid_work) {
+    if (prepaid_work<24) return SR_CAPACITY;
+    RtSourceRegionV1* r;
+    int64_t error=sr_live_identity_unsafe_v1(control,generation,&r);
+    if (error) return error;
+    /* The owner-thread lease pin prevents release. Foreign retirement writes
+     * atomic closed and lock-protected membership, never this lease field.
+     * Compiler confinement forbids callbacks/another mutable lease owner. */
+    if (lease<=0 || r->lease!=(uint64_t)lease) return SR_CONSUMED;
+    r->lease=0;
+    return 0;
+}
+
+int64_t rt_source_region_release_live_v1(int64_t control,int64_t generation,
+    int64_t prepaid_work) {
+    if (prepaid_work<64) return SR_CAPACITY;
+    RtSourceRegionV1* r;
+    int64_t error=sr_live_identity_unsafe_v1(control,generation,&r);
+    if (error) return error;
+    if (!sr_try_lock()) return SR_INCOMPLETE; /* consumed attempt; owner retained */
+    RtSourceControlMetadataV1* metadata=r->control_metadata;
+    size_t slot=metadata->registry_slot;
+    if (slot>=rt_struct_alloc_cap) error=SR_INCOMPLETE;
+    RtStructAllocation* entry=!error ? &rt_struct_allocs[slot] : NULL;
+    if (!error && (entry->ptr!=(uintptr_t)r ||
+        rt_struct_source_metadata_v1(entry)!=&metadata->allocation ||
+        !metadata->allocation.control || metadata->allocation.region!=(uintptr_t)r ||
+        metadata->allocation.generation!=(uint64_t)generation ||
+        metadata->allocation.bytes!=sizeof(*r))) error=SR_INCOMPLETE;
+    if (!error && (!atomic_load_explicit(&r->closed,memory_order_acquire) ||
+        r->members || r->lease)) error=SR_CONFLICT;
+    if (!error) {
+        /* Atomic revocation already invalidated the writer. Discard its plain
+         * retained fields only while holding the existing owner lock. */
+        r->ticket=0; r->destination=0;
+        *entry=(RtStructAllocation){.ptr=RT_STRUCT_ALLOC_TOMBSTONE};
+        --rt_struct_alloc_len; ++rt_struct_alloc_tombs;
+        rt_source_region_registry_changed_v1();
+        free(metadata); free(r);
+    }
+    rt_struct_alloc_lock_release();
+    return error;
 }
