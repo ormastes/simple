@@ -1,0 +1,220 @@
+# Bounded SDN-table transport shared by the three actual bootstrap owners.
+# This is comparison evidence only; no record or budget grants admission.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+val BOOTSTRAP_OWNER_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
+val BOOTSTRAP_OWNER_MAX_ROWS_V1: i64 = 1000000
+val BOOTSTRAP_OWNER_ALLOCATION_BYTES_V1: i64 = 512 * 1024 * 1024
+
+struct BootstrapOwnerSnapshotV1:
+    body: text
+    digest: text
+    bytes: i64
+    rows: i64
+
+class BootstrapOwnerBudgetV1:
+    var remaining: i64
+    var ok: bool
+
+    static fn create() -> BootstrapOwnerBudgetV1:
+        BootstrapOwnerBudgetV1.create_bounded(BOOTSTRAP_OWNER_ALLOCATION_BYTES_V1)
+
+    static fn create_bounded(bytes: i64) -> BootstrapOwnerBudgetV1:
+        BootstrapOwnerBudgetV1(remaining: bytes,
+            ok: bytes >= 0 and bytes <= BOOTSTRAP_OWNER_ALLOCATION_BYTES_V1)
+
+    me reserve(bytes: i64) -> bool:
+        if not self.ok or bytes < 0 or bytes > self.remaining:
+            self.ok = false
+            return false
+        self.remaining = self.remaining - bytes
+        true
+
+    me release_unused(bytes: i64):
+        if bytes < 0 or bytes > BOOTSTRAP_OWNER_ALLOCATION_BYTES_V1 - self.remaining:
+            self.ok = false
+            return
+        self.remaining = self.remaining + bytes
+
+class BootstrapOwnerWireWriterV1:
+    var parts: [text]
+    var bytes: i64
+    var rows: i64
+    budget: BootstrapOwnerBudgetV1
+
+    static fn create(kind: text, authority: text, repository: text,
+            budget: BootstrapOwnerBudgetV1) -> BootstrapOwnerWireWriterV1:
+        val header = "# simple/bootstrap-owner/{kind}/v1\n# authority {authority}\n# repository {repository}\n|registry, name, value|\n"
+        BootstrapOwnerWireWriterV1(parts: [header], bytes: text_byte_len(header), rows: 0, budget: budget)
+
+    me append(registry: text, name: text, value: SdnValue) -> bool:
+        # Callers prepay fixed SDN nodes before constructing each value. The
+        # second reservation prepays string escaping and canonical rendering.
+        val strings = bootstrap_owner_value_text_bytes_v1(value, 0)
+        if strings < 0: return false
+        val input = strings + sdn_encoded_text_size_v1(registry) + sdn_encoded_text_size_v1(name) + 8
+        if input > 1048574: return false
+        if not self.budget.reserve(input * 16 + 512): return false
+        val encoded = sdn_encode_canonical(SdnValue.Array([
+            SdnValue.String(registry), SdnValue.String(name), value]))
+        val end = encoded.len() - 1
+        val line = encoded.substring(1, end) + "\n"
+        val bytes = text_byte_len(line)
+        if bytes > BOOTSTRAP_OWNER_MAX_BYTES_V1 - self.bytes: return false
+        self.parts.push(line)
+        self.bytes = self.bytes + bytes
+        true
+
+    me finish() -> Result<BootstrapOwnerSnapshotV1, text>:
+        if not self.budget.ok or not self.budget.reserve(self.bytes * 3 + 256):
+            return Err("bootstrap owner output allocation bound")
+        val body = self.parts.join("")
+        Ok(BootstrapOwnerSnapshotV1(body: body, digest: sha256_text(body),
+            bytes: text_byte_len(body), rows: self.rows))
+
+# Reject compound input before any unbounded canonical serializer recursion.
+fn bootstrap_owner_value_text_bytes_v1(value: SdnValue, depth: i64) -> i64:
+    if depth > 8: return -1
+    match value:
+        case SdnValue.String(text): sdn_encoded_text_size_v1(text)
+        case SdnValue.Int(_): 24
+        case SdnValue.Bool(_): 5
+        case SdnValue.Array(values):
+            if values.len() > 65536: return -1
+            var total: i64 = 2
+            for item in values:
+                val bytes = bootstrap_owner_value_text_bytes_v1(item, depth + 1)
+                if bytes < 0 or bytes > 1048576 - total: return -1
+                total = total + bytes + 2
+            total
+        case SdnValue.Dict(fields):
+            # Reference dictionaries have at most sixteen fixed fields.
+            val keys = fields.keys()
+            if keys.len() > 16: return -1
+            var total: i64 = 2
+            for key in keys:
+                val bytes = bootstrap_owner_value_text_bytes_v1(fields[key], depth + 1)
+                val key_bytes = sdn_encoded_text_size_v1(key)
+                if bytes < 0 or bytes > 1048576 - total - key_bytes - 4: return -1
+                total = total + bytes + key_bytes + 4
+            total
+        case _: -1
+
+class BootstrapOwnerWireReaderV1:
+    lines: [text]
+    var position: i64
+    budget: BootstrapOwnerBudgetV1
+
+    static fn create(blob: text, kind: text, authority: text, repository: text,
+            budget: BootstrapOwnerBudgetV1) -> Result<BootstrapOwnerWireReaderV1, text>:
+        val bytes = text_byte_len(blob)
+        if bytes <= 0 or bytes > BOOTSTRAP_OWNER_MAX_BYTES_V1 or not blob.ends_with("\n"):
+            return Err("bootstrap owner frame bound")
+        var line_count: i64 = 1
+        for character in blob:
+            if character == "\n": line_count = line_count + 1
+        if line_count > BOOTSTRAP_OWNER_MAX_ROWS_V1 + 25:
+            return Err("bootstrap owner row bound")
+        # Split storage and retained input are prepaid before splitting.
+        if not budget.reserve(bytes * 4 + line_count * 64 + 8192):
+            return Err("bootstrap owner input allocation bound")
+        val lines = blob.split("\n")
+        if (lines.len() < 5 or lines[0] != "# simple/bootstrap-owner/{kind}/v1" or
+                lines[1] != "# authority {authority}" or lines[2] != "# repository {repository}" or
+                lines[3] != "|registry, name, value|"):
+            return Err("bootstrap owner authority or schema differs")
+        Ok(BootstrapOwnerWireReaderV1(lines: lines, position: 4, budget: budget))
+
+    me next() -> Result<[SdnValue], text>:
+        if self.position >= self.lines.len() - 1: return Err("bootstrap owner truncated")
+        val line = self.lines[self.position]
+        self.position = self.position + 1
+        val bytes = text_byte_len(line)
+        if bytes > 1048576 or not self.budget.reserve(1024):
+            return Err("bootstrap owner row allocation bound")
+        val shape = bootstrap_owner_row_preflight_v1(line)
+        if shape < 0 or not self.budget.reserve(bytes * 16 + shape * 256):
+            return Err("bootstrap owner row structural allocation bound")
+        val parsed = parse_untrusted("[" + line + "]")
+        if parsed.is_err(): return Err("bootstrap owner malformed row")
+        val value = parsed.unwrap()
+        # Check the fixed metadata shape before invoking a canonical encoder
+        # whose dictionary ordering would otherwise accept large nested maps.
+        if bootstrap_owner_value_text_bytes_v1(value, 0) < 0:
+            return Err("bootstrap owner compound row bound")
+        # Reject duplicate fields, alternate spellings and trailing material.
+        if sdn_encode_canonical(value) != "[" + line + "]":
+            return Err("bootstrap owner noncanonical row")
+        match value:
+            case SdnValue.Array(fields):
+                if fields.len() == 3: return Ok(fields)
+            case _: ()
+        Err("bootstrap owner row shape")
+
+    fn finished() -> bool:
+        self.position == self.lines.len() - 1 and self.lines[self.position] == ""
+
+# Fixed metadata grammar preflight precedes SDN allocation/canonical sorting.
+# All nesting, field counts and separators are counted outside quoted text.
+fn bootstrap_owner_row_preflight_v1(line: text) -> i64:
+    var kinds: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    var counts: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    var depth: i64 = 0
+    var quoted = false
+    var escaped = false
+    var columns: i64 = 0
+    var nodes: i64 = 3
+    var index: i64 = 0
+    val bytes = text_byte_len(line)
+    while index < bytes:
+        val byte = line.byte_at(index)
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        elif byte == 34: quoted = true
+        elif byte == 39: return -1
+        elif byte == 123 or byte == 91:
+            if depth >= 8: return -1
+            kinds[depth] = byte
+            counts[depth] = 0
+            depth = depth + 1
+            nodes = nodes + 1
+        elif byte == 125 or byte == 93:
+            if depth == 0: return -1
+            val expected = if byte == 125: 123 else: 91
+            if kinds[depth - 1] != expected: return -1
+            depth = depth - 1
+        elif byte == 58:
+            if depth == 0 or kinds[depth - 1] != 123: return -1
+            counts[depth - 1] = counts[depth - 1] + 1
+            if counts[depth - 1] > 16: return -1
+            nodes = nodes + 2
+        elif byte == 44:
+            if depth == 0:
+                columns = columns + 1
+                if columns > 2: return -1
+            else:
+                if kinds[depth - 1] == 91:
+                    counts[depth - 1] = counts[depth - 1] + 1
+                    if counts[depth - 1] >= 65536: return -1
+            nodes = nodes + 1
+        index = index + 1
+    if quoted or escaped or depth != 0 or columns != 2: return -1
+    nodes
+
+fn bootstrap_owner_field_v1(value: SdnValue, name: text) -> SdnValue:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.has(name): return fields[name]
+        case _: ()
+    SdnValue.Null
+
+export BootstrapOwnerSnapshotV1, BootstrapOwnerBudgetV1
+export BootstrapOwnerWireWriterV1, BootstrapOwnerWireReaderV1
+export BOOTSTRAP_OWNER_MAX_ROWS_V1, BOOTSTRAP_OWNER_MAX_BYTES_V1
+export bootstrap_owner_field_v1

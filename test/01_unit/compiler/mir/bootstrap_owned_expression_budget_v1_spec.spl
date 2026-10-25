@@ -1,0 +1,79 @@
+# Real codec/envelope mechanics on actual frontend expressions. The local
+# fixture producer label is not a compiler-lineage or SOURCE admission token.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1,
+    hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_budgeted_v1}
+use compiler.mir.hir_expression_artifact_v1.{MirHirExpressionArtifactV1,
+    mir_hir_expression_encode_v1, mir_hir_expression_key_v1,
+    mir_hir_expression_load_budgeted_in_owned_scope_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+
+fn owned_budget_actual_expression_v1() -> HirExpr:
+    val source = "fn expression_budget(value: i64 = 7) -> i64:\n    value\n"
+    val ast = parse_full_frontend(source, "expression_budget.spl", "expression_budget", Logger(level: 0))
+    var frontend = HirLowering.with_filename("expression_budget.spl")
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    val function: HirFunction = module.functions.values()[0]
+    expect(function.params[0].has_default).to_equal(true)
+    function.params[0].default
+
+describe "caller-budgeted actual owned expression decoding":
+    it "refuses insufficient allocation before touching a missing input":
+        val context = HirOwnedArtifactContextV1(directory: "build/unit/no-owned-budget-input",
+            producer_header: "unit-budget-mechanics", enabled: true)
+        expect(transient_scope_begin()).to_equal(true)
+        defer transient_scope_end()
+        val result = hir_owned_artifact_load_blob_budgeted_v1(context,
+            sha256_text("missing-budget-input"), 1)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("owned artifact read allocation bound")
+        expect(context.directory).to_equal("build/unit/no-owned-budget-input")
+
+    it "reads a real envelope and reconstructs the exact actual default within one budget":
+        val expression = owned_budget_actual_expression_v1()
+        val blob = mir_hir_expression_encode_v1(expression).unwrap()
+        expect(dir_create_all("build/unit/bootstrap-owner-budget")).to_equal(true)
+        val directory = secure_temp_dir_raw("build/unit/bootstrap-owner-budget", "expression")
+        expect(directory != "").to_equal(true)
+        defer dir_remove(directory, true)
+        val context = HirOwnedArtifactContextV1(directory: directory,
+            producer_header: "unit-budget-mechanics-" + sha256_text(blob), enabled: true)
+        var record = MirHirExpressionArtifactV1(
+            final_repository_authority: sha256_text("unit-budget-authority"),
+            final_archive_key: sha256_text("unit-budget-body-key"),
+            final_body_digest: sha256_text("unit-budget-body"),
+            module_name: "expression_budget", source_path: "expression_budget.spl",
+            category: "parameter-default", declaration_symbol: 0, member_index: 0,
+            member_name: "value", expression_digest: sha256_text(blob),
+            archive_key: "", stage: "mir-hir-declaration-expression-v1")
+        record.archive_key = mir_hir_expression_key_v1(record)
+        expect(record.archive_key.len()).to_equal(64)
+        expect(transient_scope_begin()).to_equal(true)
+        defer transient_scope_end()
+        expect(hir_owned_artifact_store_blob_v1(context, record.archive_key, blob).is_ok()).to_equal(true)
+        val limit: i64 = 64 * 1024 * 1024
+        val decoded = mir_hir_expression_load_budgeted_in_owned_scope_v1(context, record,
+            record.final_repository_authority, record.final_archive_key,
+            record.final_body_digest, limit)
+        expect(decoded.is_ok()).to_equal(true)
+        val value = decoded.unwrap()
+        expect(value[1]).to_be_greater_than(0)
+        expect(value[1] <= limit).to_equal(true)
+        expect(mir_hir_expression_encode_v1(value[0]).unwrap()).to_equal(blob)
+        match value[0].kind:
+            case HirExprKind.IntLit(number, _): expect(number).to_equal(7)
+            case _: panic("budgeted expression lost actual integer default")
+        val refused = mir_hir_expression_load_budgeted_in_owned_scope_v1(context, record,
+            sha256_text("wrong-unit-authority"), record.final_archive_key,
+            record.final_body_digest, limit)
+        expect(refused.is_err()).to_equal(true)
+        expect(record.expression_digest).to_equal(sha256_text(blob))

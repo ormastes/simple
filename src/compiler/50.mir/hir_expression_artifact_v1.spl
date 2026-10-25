@@ -11,7 +11,8 @@ use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_expr, hc_dec_hir_expr}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1,
-    hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_v1}
+    hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_v1,
+    hir_owned_artifact_load_blob_budgeted_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.common.encoding.utf8.{text_byte_len}
@@ -122,3 +123,55 @@ fn mir_hir_expression_load_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
     if encoded.is_err(): return Err(encoded.unwrap_err())
     if encoded.unwrap() != blob: return Err("MIR expression artifact is not stable")
     Ok(expression)
+
+# Budget-reporting sibling for private bootstrap reconstruction. The caller
+# reserves allocation_limit first and keeps the returned charge until its
+# arena ends. Legacy callers and portable-codec availability are unchanged.
+fn mir_hir_expression_load_budgeted_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
+        record: MirHirExpressionArtifactV1, authority: text, final_key: text,
+        body_digest: text, allocation_limit: i64) -> Result<(HirExpr, i64), text>:
+    if transient_array_scope_state_v1() != 1 or
+            record.final_repository_authority != authority or record.final_archive_key != final_key or
+            record.final_body_digest != body_digest or record.archive_key == "" or
+            mir_hir_expression_key_v1(record) != record.archive_key:
+        return Err("MIR expression final-stage authority or scope mismatch")
+    val loaded = hir_owned_artifact_load_blob_budgeted_v1(context, record.archive_key, allocation_limit)
+    if loaded.is_err(): return Err(loaded.unwrap_err())
+    val owned = loaded.unwrap()
+    val blob = owned[0]
+    val envelope_charge = owned[1]
+    if text_byte_len(blob) > 8 * 1024 * 1024 or sha256_text(blob) != record.expression_digest:
+        return Err("MIR expression artifact bytes mismatch")
+    val allowance = allocation_limit - envelope_charge
+    if allowance <= 0: return Err("MIR expression decode allocation bound")
+    var reader = FlatPoolReader.new_bounded(blob, 8 * 1024 * 1024,
+        allowance, 65536, 128, 1000000)
+    if reader.next() != mir_hir_expression_header_v1():
+        return Err("MIR expression artifact codec header mismatch")
+    val expression: HirExpr = hc_dec_hir_expr(reader)
+    if not reader.ok or not reader.finish_canonical_frame():
+        return Err("MIR expression artifact is incomplete")
+    val remaining = allowance - reader.live_reserved_bytes
+    var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024,
+        remaining, 1000000 - reader.charged_work_units)
+    writer.canonical = false
+    hc_enc_hir_expr(writer, expression)
+    val encoded = writer.finish_with_header(mir_hir_expression_header_v1())
+    if not writer.ok or encoded != blob: return Err("MIR expression stable reencode refused")
+    Ok((expression, envelope_charge + reader.live_reserved_bytes + writer.charged_allocation_bytes))
+
+export mir_hir_expression_load_budgeted_in_owned_scope_v1
+
+fn mir_hir_expression_encode_budgeted_v1(expression: HirExpr,
+        allocation_limit: i64) -> Result<(text, i64), text>:
+    if allocation_limit < 8 * 1024 * 1024:
+        return Err("MIR expression encode allocation bound")
+    var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024,
+        allocation_limit, 1000000)
+    writer.canonical = false
+    hc_enc_hir_expr(writer, expression)
+    val blob = writer.finish_with_header(mir_hir_expression_header_v1())
+    if not writer.ok: return Err("MIR expression artifact codec refused")
+    Ok((blob, writer.charged_allocation_bytes))
+
+export mir_hir_expression_encode_budgeted_v1

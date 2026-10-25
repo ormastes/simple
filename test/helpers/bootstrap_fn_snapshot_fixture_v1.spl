@@ -1,0 +1,127 @@
+# Actual frontend -> real immutable declaration-expression artifacts. These
+# are local codec mechanics, not fabricated compiler/Source admission receipts.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_project_module_in_owned_scope_v1}
+use compiler.mir.hir_declaration_codec_v1.{mir_hir_declaration_repository_digest_v1}
+use compiler.mir.bootstrap_fn_registry_state_v1.{BootstrapFnRegistryStateV1}
+use compiler.mir.bootstrap_fn_registration_origin_v1.{BootstrapFnRegistrationOriginV1,
+    bootstrap_fn_registration_storage_key_v1}
+use compiler.mir.bootstrap_fn_reference_resolver_v1.{BootstrapFnResolvedReferenceV1}
+use compiler.mir.bootstrap_fn_reference_values_v1.{bootstrap_fn_str_mir_value_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1,
+    transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+class BootstrapFnSnapshotFixtureV1:
+    directory: text
+    actual: HirModule
+    repository: MirHirDeclarationRepositoryV1
+    function_index: i64
+
+fn bootstrap_fn_snapshot_fixture_scope_cleanup_v1():
+    if transient_array_scope_state_v1() != 0: transient_array_scope_end_v1()
+
+fn bootstrap_fn_snapshot_fixture_v1(domain: text) -> BootstrapFnSnapshotFixtureV1:
+    val source = "val LIMIT: i64 = 9\n\nfn snapshot_words(value: i64 = LIMIT) -> text:\n    \"{domain}\"\n"
+    val ast = parse_full_frontend(source, "snapshot_fixture.spl", "snapshot_fixture", Logger(level: 0))
+    var frontend = HirLowering.with_filename("snapshot_fixture.spl")
+    val actual = frontend.lower_module(ast)
+    if frontend.errors.len() != 0: panic("actual snapshot frontend failed")
+    val body = hir_module_encode(actual)
+    if body == "": panic("actual snapshot body encoding failed")
+    if not dir_create_all("build/unit/bootstrap-fn-snapshot"): panic("snapshot fixture directory unavailable")
+    val directory = secure_temp_dir_raw("build/unit/bootstrap-fn-snapshot", "owner")
+    if directory == "": panic("snapshot fixture private directory unavailable")
+    val context = HirOwnedArtifactContextV1(directory: directory,
+        producer_header: "unit-snapshot-codec-" + sha256_text(source), enabled: true)
+    val authority = sha256_text("unit-final-records:" + body)
+    val source_binding = MirHirDeclarationSourceV1(logical_key: "unit.snapshot",
+        physical_path: actual.path, source_digest: sha256_text(source), source_bytes: text_byte_len(source),
+        input_archive_key: sha256_text("unit-parsed-input:" + source))
+    if not transient_array_scope_begin_v1(): panic("snapshot fixture scope refused")
+    defer bootstrap_fn_snapshot_fixture_scope_cleanup_v1()
+    val projected = mir_hir_project_module_in_owned_scope_v1(context, actual, authority,
+        sha256_text("unit-final-key:" + body), sha256_text(body), Some(source_binding))
+    if projected.is_err(): panic(projected.unwrap_err())
+    val module = projected.unwrap()
+    val first = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: authority, ordered_modules: ["unit.snapshot"],
+        modules: {"unit.snapshot": module}, authority: "")
+    val identity = mir_hir_declaration_repository_digest_v1(first)
+    if identity.len() != 64: panic("actual snapshot repository seal failed")
+    val repository = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: authority, ordered_modules: ["unit.snapshot"],
+        modules: {"unit.snapshot": module}, authority: identity)
+    if not transient_array_scope_pause_v1(): panic("snapshot fixture pause refused")
+    if not transient_heap_promote_v1(repository): panic("snapshot fixture promotion refused")
+    if not transient_array_scope_end_v1(): panic("snapshot fixture end refused")
+    val retained: MirHirModuleDeclarationsV1 = repository.modules["unit.snapshot"]
+    var position: i64 = 0
+    while position < retained.functions.len():
+        if retained.functions[position].name == "snapshot_words":
+            return BootstrapFnSnapshotFixtureV1(directory: directory, actual: actual,
+                repository: repository, function_index: position)
+        position = position + 1
+    panic("actual snapshot declaration was not projected")
+
+fn bootstrap_fn_snapshot_fixture_state_v1(fixture: BootstrapFnSnapshotFixtureV1) -> BootstrapFnRegistryStateV1:
+    val module: MirHirModuleDeclarationsV1 = fixture.repository.modules["unit.snapshot"]
+    val function: MirHirFunctionDeclarationV1 = module.functions[fixture.function_index]
+    var actual_function: HirFunction = nil
+    for raw in fixture.actual.functions.values():
+        val candidate: HirFunction = raw
+        if candidate.symbol.id == function.symbol.id: actual_function = candidate
+    if actual_function == nil: panic("actual source function missing")
+    val reference = BootstrapFnResolvedReferenceV1(module: module, function: Some(function), event: 1, items: [])
+    var state = BootstrapFnRegistryStateV1.empty()
+    state.fn_ret_types["unit.row"] = bootstrap_fn_str_mir_value_v1(reference).unwrap()
+    state.fn_ret_hir_types["unit.row"] = function.return_type
+    state.fn_ret_hir_ambig["unit.masked_return"] = true
+    state.fn_ret_shapes["unit.shape"] = "unit.Owner"
+    state.fn_ret_shape_ambig["unit.masked_shape"] = true
+    state.fn_ret_array_element_shapes["unit.array"] = "unit.Element"
+    state.fn_ret_array_element_identities["unit.array"] = "unit.ElementIdentity"
+    state.fn_ret_array_element_shape_ambig["unit.masked_array"] = true
+    state.fn_ret_ok_shapes["unit.ok"] = "unit.Ok"
+    state.fn_ret_ok_shape_ambig["unit.masked_ok"] = true
+    state.fn_ret_err_shapes["unit.err"] = "unit.Err"
+    state.fn_ret_opt_shapes["unit.opt"] = "unit.Opt"
+    state.fn_ret_opt_shape_ambig["unit.masked_opt"] = true
+    state.fn_param_hir_types["unit.row"] = [function.params[0].type_]
+    state.fn_param_hir_rejected["unit.rejected"] = true
+    state.fn_param_defaults["unit.row"] = actual_function.params
+    state.fn_param_defaults_ambig["unit.row"] = true
+    val owner = _hir_symbol_owner_module(module.name)
+    state.fn_param_default_owners["unit.row"] = owner
+    state.default_provider_symbols[owner] = module.symbols
+    state.default_provider_globals[owner] = fixture.actual.constants.values()
+    var event: i64 = 1
+    for pair in [("return_mir", "return_str_mir"), ("return_hir", "return_type"),
+            ("parameter_hir", "parameter_types"), ("parameter_defaults", "parameter_defaults"),
+            ("provider_symbols", "symbols"), ("provider_globals", "globals")]:
+        val registry = pair[0]
+        val provider = registry == "provider_symbols" or registry == "provider_globals"
+        val row = if provider: owner else: "unit.row"
+        val origin = BootstrapFnRegistrationOriginV1(bound: true, registry: registry, row_name: row,
+            repository_authority: module.final_repository_authority, module_key: "unit.snapshot",
+            declaration_digest: module.declaration_digest,
+            function_digest: if provider: "" else: function.complete_function_digest,
+            function_symbol: if provider: -1 else: function.symbol.id, selector: pair[1], write_event: event)
+        state.origins[bootstrap_fn_registration_storage_key_v1(registry, row)] = origin
+        event = event + 1
+    state
+
+export BootstrapFnSnapshotFixtureV1, bootstrap_fn_snapshot_fixture_v1, bootstrap_fn_snapshot_fixture_state_v1

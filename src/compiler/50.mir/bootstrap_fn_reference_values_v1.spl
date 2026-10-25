@@ -1,0 +1,239 @@
+# The six typed factories resolve immutable declaration fields. No HIR/MIR
+# body codec is introduced; defaults use the existing exact artifact owner.
+use compiler.mir.bootstrap_fn_reference_resolver_v1.{BootstrapFnReferenceResolverV1,
+    BootstrapFnResolvedReferenceV1}
+use compiler.mir.bootstrap_owner_snapshot_v1.{BootstrapOwnerBudgetV1}
+use compiler.mir.hir_declaration_types_v1.*
+use compiler.mir.hir_declaration_reference_key_v1.{mir_hir_reference_module_key_v1}
+use compiler.mir.hir_expression_artifact_v1.{MirHirExpressionArtifactV1,
+    mir_hir_expression_load_budgeted_in_owned_scope_v1, mir_hir_expression_encode_budgeted_v1}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, hir_type_metadata_symbol_free}
+use compiler.hir.hir_definitions.{HirParam, HirConst, HirExpr}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_symbol_table, hc_enc_hir_type}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text}
+
+fn bootstrap_fn_str_mir_value_v1(reference: BootstrapFnResolvedReferenceV1) -> Result<MirType, text>:
+    if reference.function == nil: return Err("bootstrap return reference has no callable")
+    val function = reference.function.unwrap()
+    match function.return_type.kind:
+        case HirTypeKind.Str:
+            Ok(MirType(kind: MirTypeKind.Tuple([
+                MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                MirType(kind: MirTypeKind.U64)])))
+        case _: Err("bootstrap MIR return reference is not the declared string ABI")
+
+fn bootstrap_fn_str_mir_matches_v1(actual: MirType) -> bool:
+    if actual == nil: return false
+    match actual.kind:
+        case MirTypeKind.Tuple(elements):
+            if elements.len() != 2: return false
+            match elements[0].kind:
+                case MirTypeKind.Ptr(element, mutable):
+                    if mutable: return false
+                    match element.kind:
+                        case MirTypeKind.U8: ()
+                        case _: return false
+                case _: return false
+            match elements[1].kind:
+                case MirTypeKind.U64: true
+                case _: false
+        case _: false
+
+fn bootstrap_fn_return_hir_value_v1(reference: BootstrapFnResolvedReferenceV1) -> Result<HirType, text>:
+    if reference.function == nil: return Err("bootstrap return reference has no callable")
+    val function: MirHirFunctionDeclarationV1 = reference.function.unwrap()
+    if not hir_type_metadata_symbol_free(function.return_type):
+        return Err("bootstrap unowned return metadata contains a local symbol")
+    Ok(function.return_type)
+
+fn bootstrap_fn_parameter_hir_value_v1(reference: BootstrapFnResolvedReferenceV1,
+        budget: BootstrapOwnerBudgetV1) -> Result<[HirType], text>:
+    if reference.function == nil: return Err("bootstrap parameter reference has no callable")
+    val function = reference.function.unwrap()
+    if function.params.len() > 1000000 or not budget.reserve(function.params.len() * 32 + 64):
+        return Err("bootstrap parameter allocation bound")
+    var result: [HirType] = []
+    for param in function.params:
+        if not hir_type_metadata_symbol_free(param.type_):
+            return Err("bootstrap unowned parameter metadata contains a local symbol")
+        result.push(param.type_)
+    Ok(result)
+
+fn bootstrap_fn_load_expression_v1(resolver: BootstrapFnReferenceResolverV1,
+        module: MirHirModuleDeclarationsV1, artifact: MirHirExpressionArtifactV1) -> Result<HirExpr, text>:
+    val allowance = resolver.budget.remaining
+    if not resolver.budget.reserve(allowance): return Err("bootstrap expression allocation bound")
+    val loaded = mir_hir_expression_load_budgeted_in_owned_scope_v1(
+        resolver.repository.artifact_context, artifact, module.final_repository_authority,
+        module.final_archive_key, module.final_body_digest, allowance)
+    if loaded.is_err(): return Err(loaded.unwrap_err())
+    val result = loaded.unwrap()
+    if result[1] < 0 or result[1] > allowance: return Err("bootstrap expression accounting refused")
+    resolver.budget.release_unused(allowance - result[1])
+    if not resolver.budget.ok: return Err("bootstrap expression accounting refused")
+    Ok(result[0])
+
+fn bootstrap_fn_parameters_value_v1(resolver: BootstrapFnReferenceResolverV1,
+        reference: BootstrapFnResolvedReferenceV1) -> Result<[HirParam], text>:
+    if reference.function == nil: return Err("bootstrap defaults reference has no callable")
+    val function = reference.function.unwrap()
+    val cache_key = reference.module.declaration_digest + ":" + function.complete_function_digest
+    if resolver.parameter_cache.has(cache_key): return Ok(resolver.parameter_cache[cache_key])
+    if function.params.len() > 1000000 or not resolver.budget.reserve(function.params.len() * 256 + 1024):
+        return Err("bootstrap default parameter allocation bound")
+    var result: [HirParam] = []
+    for param in function.params:
+        var expression: HirExpr = nil
+        if param.has_default:
+            if val artifact = param.default_artifact:
+                val loaded = bootstrap_fn_load_expression_v1(resolver, reference.module, artifact)
+                if loaded.is_err(): return Err(loaded.unwrap_err())
+                expression = loaded.unwrap()
+            else: return Err("bootstrap default expression missing")
+        elif param.default_artifact != nil:
+            return Err("bootstrap absent default has an artifact")
+        result.push(HirParam(symbol: param.symbol, name: param.name, type_: param.type_,
+            has_default: param.has_default, default: expression, span: param.span, is_mutable: param.is_mutable))
+    resolver.parameter_cache[cache_key] = result
+    Ok(result)
+
+fn bootstrap_fn_symbols_value_v1(reference: BootstrapFnResolvedReferenceV1) -> SymbolTable:
+    reference.module.symbols
+
+fn bootstrap_fn_globals_value_v1(resolver: BootstrapFnReferenceResolverV1,
+        reference: BootstrapFnResolvedReferenceV1) -> Result<[HirConst], text>:
+    if not resolver.budget.reserve(reference.items.len() * 384 + 1024):
+        return Err("bootstrap global value allocation bound")
+    val cache_key = reference.module.declaration_digest + ":" + sha256_text(sdn_encode_canonical(SdnValue.Array(reference.items)))
+    if resolver.globals_cache.has(cache_key): return Ok(resolver.globals_cache[cache_key])
+    var seen: Dict<i64, bool> = {}
+    var result: [HirConst] = []
+    for item in reference.items:
+        val symbol = item.as_i64() ?? -1
+        if symbol < 0 or seen.has(symbol): return Err("bootstrap global selector duplicate or malformed")
+        seen[symbol] = true
+        val module = reference.module
+        val key = mir_hir_reference_module_key_v1(module)
+        val identity = "{key.len()}:{key}:{symbol}"
+        if not resolver.global_positions.has(identity): return Err("bootstrap global selector missing")
+        val global: MirHirGlobalDeclarationV1 = module.globals[resolver.global_positions[identity]]
+        val loaded = bootstrap_fn_load_expression_v1(resolver, module, global.initializer)
+        if loaded.is_err(): return Err(loaded.unwrap_err())
+        result.push(HirConst(symbol: global.symbol, name: global.name, type_: global.type_,
+            value: loaded.unwrap(), is_mutable: global.is_mutable, visibility: global.visibility,
+            is_public: global.is_public, is_volatile: global.is_volatile,
+            has_fixed_address: global.has_fixed_address, fixed_address: global.fixed_address, span: global.span))
+    resolver.globals_cache[cache_key] = result
+    Ok(result)
+
+fn bootstrap_fn_spans_equal_v1(left: Span, right: Span) -> bool:
+    if left == nil or right == nil: return left == nil and right == nil
+    (left.start == right.start and left.end == right.end and left.line == right.line and
+        left.col == right.col and left.file == right.file and left.length == right.length)
+
+fn bootstrap_fn_hir_digest_v1(type_: HirType, budget: BootstrapOwnerBudgetV1) -> Result<text, text>:
+    val allowance = budget.remaining
+    if allowance < 8 * 1024 * 1024 or not budget.reserve(allowance):
+        return Err("bootstrap type seal allocation bound")
+    var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024, allowance, 1000000)
+    writer.canonical = false
+    hc_enc_hir_type(writer, type_)
+    val bytes = writer.finish()
+    if not writer.ok: return Err("bootstrap type seal refused")
+    budget.release_unused(allowance - writer.charged_allocation_bytes)
+    if not budget.ok: return Err("bootstrap type accounting refused")
+    Ok(sha256_text(bytes))
+
+fn bootstrap_fn_hir_value_matches_v1(left: HirType, right: HirType, budget: BootstrapOwnerBudgetV1) -> bool:
+    val left_digest = bootstrap_fn_hir_digest_v1(left, budget)
+    if left_digest.is_err(): return false
+    val right_digest = bootstrap_fn_hir_digest_v1(right, budget)
+    right_digest.is_ok() and left_digest.unwrap() == right_digest.unwrap()
+
+fn bootstrap_fn_hir_types_equal_v1(left: [HirType], right: [HirType], budget: BootstrapOwnerBudgetV1) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if not bootstrap_fn_hir_value_matches_v1(left[index], right[index], budget): return false
+        index = index + 1
+    true
+
+fn bootstrap_fn_expression_matches_v1(actual: HirExpr, artifact: MirHirExpressionArtifactV1,
+        budget: BootstrapOwnerBudgetV1) -> bool:
+    val allowance = budget.remaining
+    if not budget.reserve(allowance): return false
+    val encoded = mir_hir_expression_encode_budgeted_v1(actual, allowance)
+    if encoded.is_err(): return false
+    val value = encoded.unwrap()
+    if value[1] < 0 or value[1] > allowance: return false
+    budget.release_unused(allowance - value[1])
+    budget.ok and sha256_text(value[0]) == artifact.expression_digest
+
+fn bootstrap_fn_params_match_v1(actual: [HirParam], reference: BootstrapFnResolvedReferenceV1,
+        budget: BootstrapOwnerBudgetV1) -> bool:
+    if reference.function == nil: return false
+    val function = reference.function.unwrap()
+    if actual.len() != function.params.len(): return false
+    var index = 0
+    while index < actual.len():
+        val left: HirParam = actual[index]
+        if left == nil: return false
+        val right: MirHirParamDeclarationV1 = function.params[index]
+        if (left.symbol.id != right.symbol.id or left.name != right.name or
+                not bootstrap_fn_hir_value_matches_v1(left.type_, right.type_, budget) or left.has_default != right.has_default or
+                left.is_mutable != right.is_mutable or not bootstrap_fn_spans_equal_v1(left.span, right.span)):
+            return false
+        if right.has_default:
+            if val artifact = right.default_artifact:
+                if not bootstrap_fn_expression_matches_v1(left.default, artifact, budget): return false
+            else: return false
+        elif left.default != nil: return false
+        index = index + 1
+    true
+
+fn bootstrap_fn_symbol_digest_v1(symbols: SymbolTable, budget: BootstrapOwnerBudgetV1) -> Result<text, text>:
+    val allowance = budget.remaining
+    if allowance < 8 * 1024 * 1024 or not budget.reserve(allowance):
+        return Err("bootstrap symbols allocation bound")
+    var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024, allowance, 1000000)
+    writer.canonical = false
+    hc_enc_symbol_table(writer, symbols)
+    val bytes = writer.finish()
+    if not writer.ok: return Err("bootstrap symbol table seal refused")
+    budget.release_unused(allowance - writer.charged_allocation_bytes)
+    if not budget.ok: return Err("bootstrap symbol accounting refused")
+    Ok(sha256_text(bytes))
+
+fn bootstrap_fn_globals_match_v1(actual: [HirConst], reference: BootstrapFnResolvedReferenceV1,
+        resolver: BootstrapFnReferenceResolverV1) -> bool:
+    if actual.len() != reference.items.len(): return false
+    val key = mir_hir_reference_module_key_v1(reference.module)
+    var index = 0
+    while index < actual.len():
+        val left: HirConst = actual[index]
+        if left == nil: return false
+        if reference.items[index].as_i64() != Some(left.symbol.id): return false
+        val identity = "{key.len()}:{key}:{left.symbol.id}"
+        if not resolver.global_positions.has(identity): return false
+        val right: MirHirGlobalDeclarationV1 = reference.module.globals[resolver.global_positions[identity]]
+        if (left.name != right.name or not bootstrap_fn_hir_value_matches_v1(left.type_, right.type_, resolver.budget) or
+                left.is_mutable != right.is_mutable or left.visibility != right.visibility or
+                left.is_public != right.is_public or left.is_volatile != right.is_volatile or
+                left.has_fixed_address != right.has_fixed_address or left.fixed_address != right.fixed_address or
+                not bootstrap_fn_spans_equal_v1(left.span, right.span) or
+                not bootstrap_fn_expression_matches_v1(left.value, right.initializer, resolver.budget)):
+            return false
+        index = index + 1
+    true
+
+export bootstrap_fn_str_mir_value_v1, bootstrap_fn_str_mir_matches_v1
+export bootstrap_fn_return_hir_value_v1, bootstrap_fn_parameter_hir_value_v1
+export bootstrap_fn_parameters_value_v1, bootstrap_fn_symbols_value_v1, bootstrap_fn_globals_value_v1
+export bootstrap_fn_hir_types_equal_v1, bootstrap_fn_hir_value_matches_v1, bootstrap_fn_params_match_v1
+export bootstrap_fn_symbol_digest_v1, bootstrap_fn_globals_match_v1
