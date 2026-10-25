@@ -70,8 +70,23 @@ fn _skel_header_v1(lines: [text], index: i64) -> (i64, bool):
         end = end + 1
     (-1, true)
 
+# For each line, whether it STARTS inside a triple-quoted string (`"""` or
+# `r"""`). Without this, a function whose body embeds column-0 string content
+# (GPU kernel source in `r"""` literals) was cut at the first column-0 content
+# line, and the leaked content was parsed as code (P4-RAWSTR).
+fn _skel_string_continuations_v1(lines: [text]) -> [bool]:
+    var inside = false
+    var out: [bool] = []
+    for line in lines:
+        out.push(inside)
+        val quotes = line.split("\"\"\"").len() - 1
+        if quotes % 2 == 1:
+            inside = not inside
+    out
+
 pub fn module_surface_skeleton_v1(source: text) -> text:
     val lines = source.replace("\r\n", "\n").split("\n")
+    val in_string = _skel_string_continuations_v1(lines)
     var out: [text] = []
     var i = 0
     while i < lines.len():
@@ -82,11 +97,11 @@ pub fn module_surface_skeleton_v1(source: text) -> text:
         if indent == 0 and (trimmed.starts_with("trait ") or trimmed.starts_with("pub trait ")):
             out.push(line)
             i = i + 1
-            while i < lines.len() and (lines[i].trim() == "" or _skel_indent_v1(lines[i]) > 0):
+            while i < lines.len() and (lines[i].trim() == "" or _skel_indent_v1(lines[i]) > 0 or in_string[i]):
                 out.push(lines[i])
                 i = i + 1
             continue
-        if trimmed == "" or trimmed.starts_with("#"):
+        if in_string[i] or trimmed == "" or trimmed.starts_with("#"):
             out.push(line)
             i = i + 1
             continue
@@ -101,7 +116,7 @@ pub fn module_surface_skeleton_v1(source: text) -> text:
             h = h + 1
         var k = header_end + 1
         var stubbed = false
-        while k < lines.len() and (lines[k].trim() == "" or _skel_indent_v1(lines[k]) > indent):
+        while k < lines.len() and (lines[k].trim() == "" or _skel_indent_v1(lines[k]) > indent or in_string[k]):
             if keep_body:
                 out.push(lines[k])
             elif lines[k].trim() == "" or stubbed:

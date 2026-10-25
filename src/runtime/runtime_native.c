@@ -2204,8 +2204,116 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     }
 }
 
+/* Fork-child overlay (twin of HeapRegistry in
+ * src/compiler_rust/runtime/src/value/heap.rs). A copy-on-write fork child
+ * inherits the parent's whole table; writing it privatizes it page by page and
+ * its first growth allocates a fresh 2x table per child. After
+ * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
+ * read-only: the child's objects use the (now empty) live table and an erase
+ * of an inherited pointer is recorded in the erased set. Bug:
+ * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
+static uintptr_t* rt_core_immortal_frozen = NULL;
+static size_t rt_core_immortal_frozen_cap = 0;
+static uintptr_t* rt_core_immortal_erased = NULL;
+static size_t rt_core_immortal_erased_cap = 0;
+static size_t rt_core_immortal_erased_len = 0;
+static size_t rt_core_immortal_erased_tombs = 0;
+
+static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
+    if (cap == 0) return 0;
+    size_t mask = cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = table[i];
+        if (e == 0) return 0;
+        if (e == p) return 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(uintptr_t p) {
+    return core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap, p) &&
+        (rt_core_immortal_erased_len == 0 ||
+         !core_ptr_table_has(rt_core_immortal_erased, rt_core_immortal_erased_cap, p));
+}
+
+/* caller holds the lock; p is not in the erased set */
+static int core_immortal_erased_add(uintptr_t p) {
+    if ((rt_core_immortal_erased_len + rt_core_immortal_erased_tombs + 1) * 10
+            >= rt_core_immortal_erased_cap * 7) {
+        size_t new_cap = rt_core_immortal_erased_cap == 0 ? 64 : rt_core_immortal_erased_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
+        if (!fresh) return 0;
+        for (size_t k = 0; k < rt_core_immortal_erased_cap; k++) {
+            uintptr_t e = rt_core_immortal_erased[k];
+            if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+            size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+            while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
+            fresh[j] = e;
+        }
+        free(rt_core_immortal_erased);
+        rt_core_immortal_erased = fresh;
+        rt_core_immortal_erased_cap = new_cap;
+        rt_core_immortal_erased_tombs = 0;
+    }
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (rt_core_immortal_erased[i] != 0 && rt_core_immortal_erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+        i = (i + 1) & mask;
+    }
+    if (rt_core_immortal_erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) rt_core_immortal_erased_tombs--;
+    rt_core_immortal_erased[i] = p;
+    rt_core_immortal_erased_len++;
+    return 1;
+}
+
+/* caller holds the lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(uintptr_t p) {
+    if (rt_core_immortal_erased_cap == 0) return 0;
+    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = rt_core_immortal_erased[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            rt_core_immortal_erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            rt_core_immortal_erased_len--;
+            rt_core_immortal_erased_tombs++;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* Called in the child right after fork() (single-threaded there). A nested
+ * fork keeps the first frozen layer and inherits the small live table. */
+void spl_immortal_registry_freeze_for_fork_child_v1(void) {
+    rt_core_immortal_registry_acquire();
+    if (!rt_core_immortal_frozen) {
+        rt_core_immortal_frozen = rt_core_immortal_registry;
+        rt_core_immortal_frozen_cap = rt_core_immortal_registry_cap;
+        rt_core_immortal_registry = NULL;
+        rt_core_immortal_registry_cap = 0;
+        rt_core_immortal_registry_len = 0;
+        rt_core_immortal_registry_tombs = 0;
+    }
+    rt_core_immortal_registry_release();
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p);
+
 /* caller holds the lock; returns 1 if an entry was erased */
 static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
+    if (core_immortal_live_erase_raw(p)) return 1;
+    if (!rt_core_immortal_frozen || !core_immortal_frozen_live(p)) return 0;
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    return core_immortal_erased_add(p);
+}
+
+static int core_immortal_live_erase_raw(uintptr_t p) {
     if (rt_core_immortal_registry_cap == 0) return 0;
     size_t mask = rt_core_immortal_registry_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
@@ -2245,6 +2353,16 @@ static int rt_core_immortal_registry_resize(size_t new_cap) {
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_immortal_registry_acquire();
+    if (rt_core_immortal_frozen &&
+            core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap,
+                (uintptr_t)ptr)) {
+        /* Inherited address: present, or re-registered after its erase. */
+        if (core_immortal_erased_drop((uintptr_t)ptr)) {
+            atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        }
+        rt_core_immortal_registry_release();
+        return 1;
+    }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
     if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
@@ -2285,6 +2403,7 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
             i = (i + 1) & mask;
         }
     }
+    if (!found && rt_core_immortal_frozen) found = core_immortal_frozen_live((uintptr_t)ptr);
     rt_core_immortal_registry_release();
     return found;
 }
@@ -2892,6 +3011,28 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
         return 1;
     }
 #endif
+    /* @workaround bug=transient_promote_misses_raw_text_data_pointer_2026-10-25
+     * Stage-2-compiled code decodes a text read out of an array/dict to its
+     * raw char* buffer (rt_interp_cstr) and stores THAT in struct fields, so a
+     * retained ParserModule holds untagged pointers to RtCoreString data.
+     * Without this the owning transient string classified as "not heap", was
+     * skipped by promotion, and was freed at scope end (Stage 3 hello world:
+     * "unresolved name: <reused bytes>"). Membership is checked before any
+     * dereference, so an arbitrary aligned word is never read. */
+    if (!rt_core_is_heap(value) && (((uint64_t)value) & RT_VALUE_TAG_MASK) == 0 &&
+            (uint64_t)value > 0x10000 + offsetof(RtCoreString, data)) {
+        RtCoreString* raw_text = (RtCoreString*)(uintptr_t)(
+            (uint64_t)value - offsetof(RtCoreString, data));
+        if (rt_core_is_registered_immortal_ptr(raw_text) &&
+                rt_core_registered_object_kind(raw_text) == RT_VALUE_HEAP_STRING) {
+            if ((raw_text->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                    (raw_text->reserved & RT_CORE_STRING_FLAG_SHARED) == 0) {
+                *node = (RtCoreTransientNode){raw_text, RT_CORE_TRANSIENT_STRING, 0};
+                return 1;
+            }
+            return 0;
+        }
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -15869,15 +16010,16 @@ int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
 
-int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
+/* LLVM-lane tuple facades. Since the pure-Simple MIR registers the process
+ * owners in text_arg_indices (text_extern_abi.spl), cmd reaches every backend
+ * already split into (ptr, len) -- the same words the C owners take -- so the
+ * facades only re-pack the result into the rt_alloc'd 3-word block the LLVM
+ * Tuple destructure loads. */
+int64_t* rt_process_run_tuple(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return rt_process_result_to_tuple(rt_process_run_array(cmd, cmd_len, args));
 }
 
-int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_timeout_tuple(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
     // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
     // rt_process_run{,_timeout}"); it still returns an SplArray* handle
@@ -15887,7 +16029,7 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // compile -- which broke the LLVM native-link step of EVERY native-build,
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd, cmd_len, args, timeout_ms));
 }
 
 /* Same (ptr, len) vs single-text-value ABI split as the facades above, for
@@ -15903,11 +16045,9 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
  * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
  * here so both backends keep their own destructure contract. */
-int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                                    int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+int64_t* rt_process_run_owned_observed_bounded_text(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                    int64_t timeout_ms, int64_t max_output_bytes) {
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd, cmd_len, args,
                                                                   timeout_ms, max_output_bytes);
     if (!handle) return NULL;
     int64_t tuple_value = (int64_t)(uintptr_t)handle;
@@ -15920,12 +16060,20 @@ int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args,
     return block;
 }
 
-int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                      int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                      int64_t timeout_ms, int64_t max_output_bytes) {
     return rt_process_result_to_tuple(rt_process_run_bounded(
-        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
@@ -18295,6 +18443,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     rt_tuple_set(tuple, 2, rt_value_int((int64_t)regs.c));
     rt_tuple_set(tuple, 3, rt_value_int((int64_t)regs.d));
     return tuple;
+}
+
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
 }
 
 int64_t rt_xgetbv(int32_t index) {

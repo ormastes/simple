@@ -1,42 +1,30 @@
-# Module-scoped mono raises no E-MONO-040 when the template is not visible
+# Module-scoped mono: E-MONO-040 not raised for imported generics (2026-10-25)
 
-**Status:** open. Owner: P-G3 (#4598).
-**Filed by:** P-G5 (#4628), at the lead reviewer's request.
+Status: FIXED (branch work/mono-generic-marker)
 
 ## Symptom
+`test/01_unit/compiler/mono/mono_module_scoped_spec.spl` case "fails closed with
+E-MONO-040 when the template is not visible" failed (3/4): with no visible
+templates, a call to an imported generic (`use t.{id}`; `id(1)`) produced no
+diagnostic, so the per-file lane could emit objects with unresolved generic calls.
 
-`run_monomorphization_module_scoped_v1(f, {})` returns **0** diagnostics for a module whose
-`main` calls the imported generic `id(1)` when the templates dict is empty. The expected result
-is exactly one `E-MONO-040: template id not visible to module ...`.
+## Root cause
+HIR import registration stores no signature type for generic callables
+(`declared_imported_surface_callable_type` returns nil when `type_params` is
+non-empty). `module_scoped_visibility_check_v1` only counted a non-nil,
+non-concrete `type_` as generic evidence, so a nil type read as "not generic".
 
-The per-file lane relies on this diagnostic. Without it:
+## Fix
+- `HirSymbol.generic_param_count: i64 = 0` — explicit generic marker.
+- Import registration sets it from `ModuleSurfaceCallable.type_params.len()`
+  (`SymbolTable.mark_generic_callable`); `rename_symbol` preserves it.
+- Mono reads the marker first. A missing type is still NOT treated as generic.
 
-- `native_file_worker_missing_templates_v1` finds no missing template;
-- the reader, widen and MONO-PENDING fallback (`native_file_worker_mono_fallback_reader_v1`)
-  never fires;
-- an object that still contains an unresolved generic call could be emitted instead of failing closed.
+## Known limit
+The generated HIR codec (`20.hir/generated/hir_codec.spl`) does not serialize the
+field; cache-decoded symbols default to 0. Regenerate the codec to carry it.
 
-## Repro
-
-`test/01_unit/compiler/mono/mono_module_scoped_spec.spl`, case
-`fails closed with E-MONO-040 when the template is not visible`. It fails with
-`array index out of bounds: index is 0 but length is 0`, because `diags.len()` is 0.
-
-This case was never executed before P-G5. Its fixtures were plain string literals, so
-`"use t.{id}"` was interpolated, and the whole file failed to load with
-`variable 'id' not found`. P-G5 made the fixtures raw strings. Since then the other three
-P-G3 cases pass and this one fails.
-
-Host: Windows, seed `bin/simple.exe` interpreter.
-
-## Where to look
-
-`MonomorphizationPass.module_scoped_visibility_check_v1` in
-`src/compiler/40.mono/monomorphize_integration.spl`:
-
-- `callee_local_plain` or the `sym_names` lookup may treat the unresolved imported `id` as local;
-- the evidence probe may find a concrete signature row.
-
-Either way, the call site never reaches the `E-MONO-040` push.
-
-Do not skip or weaken the case.
+## Evidence
+mono_module_scoped_spec 4/4 (was 3/4). generic_template_spec 20/20.
+instantiation_missing_template_spec 0/1 and generic_fn_specialization_breadth_spec
+5/6 fail identically on the unpatched base (pre-existing).

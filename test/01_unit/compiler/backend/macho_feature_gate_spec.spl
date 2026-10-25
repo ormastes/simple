@@ -1,0 +1,46 @@
+# @cover src/compiler/70.backend/linker/macho_feature.spl 100%
+"""Mach-O support is a build tag: compiled only for os=macos or feature=macho."""
+use std.spec.*
+use std.spec.step
+use compiler.core.cfg_platform.{cfg_detect_os, cfg_feature_enabled}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+use compiler.backend.linker.macho_feature.{MACHO_NOT_BUILT_ERROR, macho_support_built}
+use compiler.backend.linker.native_freestanding.{
+    NativeFreestandingFormat, NativeFreestandingLinkConfig, link_freestanding_to_native_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+val GATED = "@when(os = \"macos\" or feature = \"macho\"):\nfn macho_path() -> i64:\n    1\n@else:\nfn no_macho_path() -> i64:\n    0\n@end\n"
+
+describe "Mach-O build tag":
+    it "keeps the Mach-O branch only for a macOS target":
+        step("Preprocess the gate for windows, linux and macos targets")
+        val win = _pp_preprocess_conditionals_target_receipted_v1(GATED, "windows", "x86_64")
+        val linux = _pp_preprocess_conditionals_target_receipted_v1(GATED, "linux", "x86_64")
+        val mac = _pp_preprocess_conditionals_target_receipted_v1(GATED, "macos", "aarch64")
+        expect(win.is_ok() and linux.is_ok() and mac.is_ok()).to_equal(true)
+        if win.is_err() or linux.is_err() or mac.is_err(): return
+        if not cfg_feature_enabled("macho"):
+            expect(win.unwrap().source.contains("fn macho_path")).to_equal(false)
+            expect(win.unwrap().source.contains("fn no_macho_path")).to_equal(true)
+            expect(linux.unwrap().source.contains("fn macho_path")).to_equal(false)
+        expect(mac.unwrap().source.contains("fn macho_path")).to_equal(true)
+        expect(mac.unwrap().source.contains("fn no_macho_path")).to_equal(false)
+
+    it "reports whether this compiler was built with Mach-O":
+        expect(macho_support_built()).to_equal(
+            cfg_detect_os() == "macos" or cfg_feature_enabled("macho"))
+
+    it "names the rebuild tag in the dispatch error":
+        expect(MACHO_NOT_BUILT_ERROR).to_contain("Mach-O support not built in this compiler")
+        expect(MACHO_NOT_BUILT_ERROR).to_contain("rebuild with feature macho")
+
+    it "fails the Mach-O freestanding dispatch cleanly without the tag":
+        step("Route a Mach-O link through the freestanding dispatch point")
+        if macho_support_built(): return
+        val config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.MachO,
+            target: RelocArch.X86_64, entry: "_start", output_byte_limit: 1048576,
+            executable: false)
+        val linked = link_freestanding_to_native_v1([], [], "build/macho_feature_gate/out", config)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_equal(MACHO_NOT_BUILT_ERROR)

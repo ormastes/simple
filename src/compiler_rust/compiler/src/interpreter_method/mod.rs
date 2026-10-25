@@ -545,6 +545,8 @@ pub(crate) fn evaluate_method_call(
             | "to_end_with"
             | "to_not_equal"
             | "to_not_contain"
+            | "not_to_contain"
+            | "not_to_include"
             | "to_not_include"
             | "to_not_be_nil"
             | "to"
@@ -829,7 +831,7 @@ pub(crate) fn evaluate_method_call(
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
-        "to_not_contain" | "to_not_include" => {
+        "to_not_contain" | "to_not_include" | "not_to_contain" | "not_to_include" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let contains = match &recv_val {
                 Value::Str(s) => {

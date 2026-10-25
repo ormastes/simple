@@ -22,7 +22,10 @@ template module T into user module F must name only F-valid ids:
 use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.{HirFunction}
@@ -32,16 +35,25 @@ use compiler.mono.mono_template_symbol_relocation_v1.{mono_template_relocation_p
 use compiler.monomorphize.hir_subst.body_subst.{collect_body_symbol_refs_v1, collect_body_relocation_refs_v1}
 
 val HELPER_SRC = "fn helper(x: i64) -> i64:\n    x\n\nfn wrap<X>(v: X) -> i64:\n    helper(1)\n"
-val USER_SRC = "use t.{wrap}\n\nfn main() -> i64:\n    wrap(2)\n"
-val CLASH_USER_SRC = "use t.{wrap}\n\nfn helper(x: i64) -> i64:\n    x\n\nfn main() -> i64:\n    wrap(2)\n"
+val USER_SRC = 'use t.{wrap}' + "\n\nfn main() -> i64:\n    wrap(2)\n"
+val CLASH_USER_SRC = 'use t.{wrap}' + "\n\nfn helper(x: i64) -> i64:\n    x\n\nfn main() -> i64:\n    wrap(2)\n"
 val METHOD_SRC = "struct Box:\n    v: i64\n\nimpl Box:\n    fn get() -> i64:\n        self.v\n    static fn make() -> Box:\n        Box(v: 3)\n\nfn wrap<X>(v: X) -> i64:\n    Box.make().get()\n"
 val NESTED_SRC = "struct Box:\n    v: i64\n\nfn wrap<X>(v: X) -> i64:\n    val items: [Box?] = [Some(Box(v: 1))]\n    items.len()\n"
 
-fn lower_pb(source: text, name: text) -> HirModule:
+fn lower_pb(source: text, name: text, provider: text) -> HirModule:
+    # `use t.{wrap}` only resolves when module t's surface is registered
+    # (the driver's contract); a bare HirLowering leaves the callee as Error.
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["t"] = parse_full_frontend(provider, "testdata/t.spl", "t", log)
+    val sources = [SourceFile(path: "testdata/t.spl", content: provider, module_name: "t")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     val path = "testdata/{name}.spl"
-    val ast = parse_full_frontend(source, path, name, Logger(level: 0))
-    var lowering = HirLowering.with_filename(path)
-    lowering.lower_module(ast)
+    val ast = parse_full_frontend(source, path, name, log)
+    var lowering = hirlowering_for_module(name, surfaces)
+    var lowered = lowering.lower_module(ast)
+    lowered.name = name
+    lowered
 
 fn instance_pb(module: HirModule) -> HirFunction?:
     for key in module.functions.keys():
@@ -66,8 +78,8 @@ fn names_of_pb(module: HirModule, ids: [i64]) -> [text]:
 
 fn place_pb(template_src: text, user_src: text) -> (HirModule, [text]):
     var templates: Dict<text, HirModule> = {}
-    templates["t"] = lower_pb(template_src, "t")
-    val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_pb(user_src, "f"), templates)
+    templates["t"] = lower_pb(template_src, "t", template_src)
+    val (out, _s, diags) = run_monomorphization_module_scoped_v1(lower_pb(user_src, "f", template_src), templates)
     (out, diags)
 
 describe "template-symbol relocation P-B":
@@ -75,14 +87,14 @@ describe "template-symbol relocation P-B":
         val (out, diags) = place_pb(HELPER_SRC, USER_SRC)
         expect(diags.len()).to_equal(0)
         val inst = instance_pb(out).unwrap()
-        val t = lower_pb(HELPER_SRC, "t")
+        val t = lower_pb(HELPER_SRC, "t", HELPER_SRC)
         val helper = function_pb(t, "helper").unwrap()
         val refs = collect_body_symbol_refs_v1(inst.body)
         expect(names_of_pb(out, refs)).to_contain("helper")
         expect(refs).not_to_contain(helper.symbol.id)
 
     it "keeps the module-qualified spelling under an entry-closure build":
-        val t = lower_pb(HELPER_SRC, "t")
+        val t = lower_pb(HELPER_SRC, "t", HELPER_SRC)
         val helper = function_pb(t, "helper").unwrap()
         val key = "{helper.symbol.id}"
         val closure = mono_template_relocation_plan_v2(t, "t", 900000, true, {})
@@ -119,7 +131,7 @@ describe "template-symbol relocation P-B":
             expect(n).not_to_contain("<missing")
 
     it "rejects an unplanned template function reference":
-        val t = lower_pb(HELPER_SRC, "t")
+        val t = lower_pb(HELPER_SRC, "t", HELPER_SRC)
         val wrap = function_pb(t, "wrap").unwrap()
         val plan = mono_template_relocation_plan_v2(t, "t", 900000, false, {})
         val reject = mono_template_reject_unplanned_refs_v1(t, plan, [wrap.symbol.id], {})

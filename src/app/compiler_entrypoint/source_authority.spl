@@ -3,14 +3,19 @@
 use app.io.env_ops.{env_get, env_set}
 use app.io.file_ops.{path_absolute}
 use app.io.mod.{file_read_regular_no_follow_bounded}
-use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_traced_cost_v1}
+use app.compiler_entrypoint.inventory_trace.{inventory_trace_cost_create_v1, inventory_trace_cost_emit_v1}
+use std.scv.compile_cost_v1.{scv_cost_now_v1, scv_cost_elapsed_v1}
 use app.compiler_entrypoint.inventory_families.{compiler_inventory_family_v1}
 use app.compiler_entrypoint.source_manifest_membership.{compiler_source_manifest_membership_v1}
 use app.compiler_entrypoint.derived_composition.{compiler_source_authority_selectors_v1,
     compiler_source_selector_relative_v1}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end, transient_promote}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
-    scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1}
+    scv_compile_snapshot_acquire_cost_v1, scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
 use std.scv.compile_source_inventory.{CompileSourceInventoryReadV1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
@@ -84,6 +89,42 @@ fn compiler_source_authority_validate_v1(
     root: text, cache_root: text, snapshot: ScvCompileSnapshotV1,
     expected_digest: text, expected_generation: i64, inherited: bool
 ) -> CompilerSourceAuthorityV1:
+    # Decoded inventory, manifest rows and membership scratch do not escape.
+    # An existing active OR paused scope remains entirely caller-owned. A
+    # refused begin keeps the original validation behavior without retirement.
+    if transient_array_scope_state_v1() != 0:
+        return compiler_source_authority_validate_unscoped_v1(
+            root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    if not transient_scope_begin():
+        return compiler_source_authority_validate_unscoped_v1(
+            root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    val result = compiler_source_authority_validate_unscoped_v1(
+        root, cache_root, snapshot, expected_digest, expected_generation, inherited)
+    # The validation call graph contains no unconditional pause/end. Its only
+    # nested begin (entry validation) ends scratch only when it owns that begin.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 1:
+        # A paused scope still belongs to this successful begin. Retire it
+        # before allocating the invalid result. State 0 is already retired.
+        if scope_state == 2:
+            val ended = transient_scope_end()
+        return compiler_source_authority_invalid_v1("source-authority-scratch-state-invalid")
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return compiler_source_authority_invalid_v1("source-authority-scratch-pause-failed")
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    # Construct failure results AFTER retirement; result may now be dangling.
+    if not retained:
+        return compiler_source_authority_invalid_v1("source-authority-scratch-promote-failed")
+    if not ended:
+        return compiler_source_authority_invalid_v1("source-authority-scratch-end-failed")
+    result
+
+fn compiler_source_authority_validate_unscoped_v1(
+    root: text, cache_root: text, snapshot: ScvCompileSnapshotV1,
+    expected_digest: text, expected_generation: i64, inherited: bool
+) -> CompilerSourceAuthorityV1:
     # Read only the generation the parent admitted; CURRENT may have advanced.
     # Both fresh and inherited snapshots must remain owned by this checkout.
     if compile_source_inventory_snapshot_cache_root_v1(
@@ -117,12 +158,25 @@ fn compiler_source_authority_acquire_v1(
         if not inventory_roots.contains("test"): inventory_roots = inventory_roots.push("test")
         if not inventory_roots.contains("examples/10_tooling"):
             inventory_roots = inventory_roots.push("examples/10_tooling")
-    val refresh = compiler_inventory_refresh_v1(root, cache_root, inventory_roots, cold_init)
-    if not refresh.valid: return compiler_source_authority_invalid_v1(refresh.reason)
-    val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, selectors)
-    if not snapshot.valid: return compiler_source_authority_invalid_v1(snapshot.reason)
-    compiler_source_authority_validate_v1(root, cache_root, snapshot,
+    val trace_token = env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? ""
+    val cost = inventory_trace_cost_create_v1(trace_token)
+    val inventory_started = scv_cost_now_v1(cost)
+    val refresh = compiler_inventory_refresh_traced_cost_v1(
+        root, cache_root, inventory_roots, cold_init, trace_token, cost)
+    if cost != nil: cost!.inventory_ns = scv_cost_elapsed_v1(cost, inventory_started)
+    if not refresh.valid:
+        inventory_trace_cost_emit_v1(trace_token, cost)
+        return compiler_source_authority_invalid_v1(refresh.reason)
+    val snapshot_started = scv_cost_now_v1(cost)
+    val snapshot = scv_compile_snapshot_acquire_cost_v1(root, cache_root, selectors, cost)
+    if cost != nil: cost!.snapshot_ns = scv_cost_elapsed_v1(cost, snapshot_started)
+    if not snapshot.valid:
+        inventory_trace_cost_emit_v1(trace_token, cost)
+        return compiler_source_authority_invalid_v1(snapshot.reason)
+    val result = compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)
+    inventory_trace_cost_emit_v1(trace_token, cost)
+    result
 
 fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]) -> [text]:
     # The event protocol admits only the closed canonical families. Snapshot roots are

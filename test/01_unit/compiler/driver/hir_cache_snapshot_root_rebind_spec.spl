@@ -1,0 +1,143 @@
+# A HIR cache entry stored under one SCV snapshot root must decode under the
+# next run's root (bug post_hir_rt_criticality_census_reencode_2026_10_25, snapshot-root section).
+# Entries are keyed repo-relative, but the blob embeds the storing run's
+# absolute snapshot path in module.path and every Span.file. Before the fix a
+# hit under a new root rebound only module.path and left every span (and the
+# replayed warnings) pointing at the old root.
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_load_parsed_v1,
+    hir_cache_parser_binding_v1,
+    hir_cache_rebased_hits_v1, hir_cache_last_warnings, hir_cache_snapshot_root_rebind_v1,
+    hir_cache_rejected}
+use compiler.hir.hir_codec.{hir_module_encode}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirFunction, HirBlock}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+val ROOT_A = "/work/build/scv/snapshots/scv-revision-v1-aaaa/"
+val ROOT_B = "/work/build/scv/snapshots/scv-revision-v1-bbbb/"
+val REL = "src/x/answer.spl"
+val OTHER_REL = "src/x/other.spl"
+val OUTSIDE = "/opt/vendor/outside.spl"
+
+fn file_span(file: text, line: i64) -> Span:
+    Span(start: 0, end: 4, line: line, col: 1, file: file, length: 4)
+
+# Hand-built: the seed runner cannot
+# encode a fully lowered module (missing rt_enum_id extern).
+fn rooted_module(root: text) -> HirModule:
+    val unit_type = HirType(kind: HirTypeKind.Unit, span: file_span(root + OTHER_REL, 7))
+    val value = HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type, span: file_span(OUTSIDE, 3))
+    val fn_ = HirFunction(
+        symbol: SymbolId(id: 9401), name: "answer", type_params: [], params: [],
+        return_type: unit_type,
+        body: HirBlock(stmts: [], has: true, value: value, span: file_span(root + REL, 2)),
+        effects: [], visibility: Visibility.Public,
+        is_async: false, is_static: false, is_public: true, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: file_span(root + REL, 1))
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[fn_.symbol] = fn_
+    HirModule(name: "answer", path: root + REL, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: functions,
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [])
+
+describe "HIR cache hit across SCV snapshot roots":
+    it "rebinds module.path, spans and warnings to the consuming root":
+        val dir = "build/hir_snapshot_root_rebind_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_be(true)
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_roundtrip = env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? ""
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "snapshot-root-rebind-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_be(true)
+        expect(env_set("SIMPLE_HIR_CODEC_ROUNDTRIP", "")).to_be(true)
+        val source = "fn answer() -> ():\n    ()\n"
+        val stored = rooted_module(ROOT_A)
+        val key = sha256_text("snapshot-root-rebind")
+        # The parser binding is repo-relative, so both roots share it.
+        val binding = hir_cache_parser_binding_v1(key, "answer", ROOT_A + REL, sha256_text(source))
+        expect(binding).to_equal(hir_cache_parser_binding_v1(key, "answer", ROOT_B + REL, sha256_text(source)))
+        expect(hir_cache_store(key, stored, [ROOT_A + REL + ":1:1: warning: w"], "bodyful:" + binding)).to_be(true)
+
+        val rebased_before = hir_cache_rebased_hits_v1()
+        val loaded = hir_cache_load_parsed_v1(key, binding, ROOT_B + REL)
+        expect(loaded != nil).to_be(true)
+        val module = loaded.unwrap()
+        expect(hir_cache_rebased_hits_v1()).to_equal(rebased_before + 1)
+        # Diagnostics point at the consuming snapshot, not the storing one.
+        expect(module.path).to_equal(ROOT_B + REL)
+        val fn_ = module.functions[SymbolId(id: 9401)]
+        expect(fn_.span.file).to_equal(ROOT_B + REL)
+        expect(fn_.body.span.file).to_equal(ROOT_B + REL)
+        expect(fn_.return_type.span.file).to_equal(ROOT_B + OTHER_REL)
+        # A path outside the snapshot root is not rewritten.
+        expect(fn_.body.value.span.file).to_equal(OUTSIDE)
+        expect(hir_cache_last_warnings()).to_equal([ROOT_B + REL + ":1:1: warning: w"])
+        # The decoded module is exactly the module as lowered under the new root.
+        expect(hir_module_encode(module)).to_equal(hir_module_encode(rooted_module(ROOT_B)))
+        expect(hir_module_encode(module).contains(ROOT_A)).to_be(false)
+
+        # A spelling with another repo-relative identity is not rebased; only
+        # module.path is rebound.
+        val loaded_rel = hir_cache_load_parsed_v1(key, binding, "elsewhere/answer.spl")
+        expect(loaded_rel != nil).to_be(true)
+        expect(loaded_rel.unwrap().path).to_equal("elsewhere/answer.spl")
+        expect(hir_cache_rebased_hits_v1()).to_equal(rebased_before + 1)
+
+        val _rt_restored = env_set("SIMPLE_HIR_CODEC_ROUNDTRIP", old_roundtrip)
+        val _dir_restored = env_set("SIMPLE_HIR_CACHE_DIR", old_dir)
+        val _scope_restored = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)
+        val _removed = rt_dir_remove_all(dir)
+
+    it "refuses relative and filesystem-root roots so ordinary text values are never rewritten":
+        val head = "spl-hircodec-header\nanswer\n"
+        # Positive control: two absolute snapshot roots rebase.
+        expect(hir_cache_snapshot_root_rebind_v1(head + ROOT_A + REL + "\n0\n", ROOT_B + REL)).to_equal([ROOT_A, ROOT_B])
+        # Absolute stored root may be stripped to a relative consuming path.
+        expect(hir_cache_snapshot_root_rebind_v1(head + ROOT_A + REL + "\n0\n", REL)).to_equal([ROOT_A, ""])
+        # Relative stored roots never rebase.
+        expect(hir_cache_snapshot_root_rebind_v1(head + "../x/" + REL + "\n0\n", REL)).to_equal([])
+        expect(hir_cache_snapshot_root_rebind_v1(head + "../x/" + REL + "\n0\n", ROOT_B + REL)).to_equal([])
+        expect(hir_cache_snapshot_root_rebind_v1(head + "build/scv/r1/" + REL + "\n0\n", ROOT_B + REL)).to_equal([])
+        # A relative non-empty consuming root never rebases either.
+        expect(hir_cache_snapshot_root_rebind_v1(head + ROOT_A + REL + "\n0\n", "../y/" + REL)).to_equal([])
+        # `/` alone would prefix every absolute text value.
+        expect(hir_cache_snapshot_root_rebind_v1(head + "/" + REL + "\n0\n", ROOT_B + REL)).to_equal([])
+        expect(hir_cache_snapshot_root_rebind_v1(head + ROOT_A + REL + "\n0\n", "/" + REL)).to_equal([])
+
+    it "does not rebase a relative stored root through a real store and load":
+        val dir = "build/hir_snapshot_root_relative_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_be(true)
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "snapshot-root-relative-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_be(true)
+        val source = "fn answer() -> ():\n    ()\n"
+        val key = sha256_text("snapshot-root-relative")
+        val binding = hir_cache_parser_binding_v1(key, "answer", REL, sha256_text(source))
+        expect(hir_cache_store(key, rooted_module("../x/"), [], "bodyful:" + binding)).to_be(true)
+        val rebased_before = hir_cache_rebased_hits_v1()
+        val rebase_rejects_before = hir_cache_rejected("rebase")
+        val loaded = hir_cache_load_parsed_v1(key, binding, REL)
+        expect(loaded != nil).to_be(true)
+        expect(hir_cache_rebased_hits_v1()).to_equal(rebased_before)
+        expect(hir_cache_rejected("rebase")).to_equal(rebase_rejects_before)
+        # Spans keep the stored spelling: nothing was rewritten.
+        expect(loaded.unwrap().functions[SymbolId(id: 9401)].span.file).to_equal("../x/" + REL)
+        val _dir_restored = env_set("SIMPLE_HIR_CACHE_DIR", old_dir)
+        val _scope_restored = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)
+        val _removed = rt_dir_remove_all(dir)

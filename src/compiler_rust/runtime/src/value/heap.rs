@@ -223,12 +223,113 @@ const HEAP_REGISTRY_SHARDS: usize = 64;
 
 #[repr(align(128))]
 struct HeapRegistryShard {
-    set: Mutex<HeapPtrSet<usize>>,
+    set: Mutex<HeapRegistry>,
     /// Bumped (under this shard's lock) by every erase in this shard.
     epoch: AtomicU64,
 }
 
 static HEAP_ALLOCATION_REGISTRY: OnceLock<Box<[HeapRegistryShard]>> = OnceLock::new();
+
+/// Live-heap membership set (one per registry shard), fork-aware.
+///
+/// A copy-on-write fork child (`rt_fork_shared_heap_v1`, the MIR fork
+/// workers) inherits a registry holding every parent object. Writing that
+/// inherited table privatizes it page by page, and its first growth allocates
+/// a fresh 2x table: measured on a 2-worker probe, each child mapped a new
+/// 147,460 kB private table (2^24 buckets) and freed the inherited 2^23 one;
+/// on the 1471-module Phase 3 closure the same step is ~4.8 GB per child, in
+/// lockstep across all workers (bug
+/// doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md).
+/// After `freeze_for_fork_child` the inherited table is read-only: the
+/// child's own objects go into `live`, and an erase of an inherited object is
+/// recorded in `frozen_erased`. Membership is unchanged.
+#[derive(Default)]
+pub(crate) struct HeapRegistry {
+    live: HeapPtrSet<usize>,
+    frozen: Option<HeapPtrSet<usize>>,
+    frozen_erased: HeapPtrSet<usize>,
+}
+
+impl HeapRegistry {
+    #[inline]
+    fn frozen_has(&self, addr: usize) -> bool {
+        match &self.frozen {
+            Some(frozen) => {
+                frozen.contains(&addr) && (self.frozen_erased.is_empty() || !self.frozen_erased.contains(&addr))
+            }
+            None => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, addr: &usize) -> bool {
+        self.live.contains(addr) || self.frozen_has(*addr)
+    }
+
+    /// True when `addr` was not registered before this call.
+    #[inline]
+    pub(crate) fn insert(&mut self, addr: usize) -> bool {
+        if let Some(frozen) = &self.frozen {
+            if frozen.contains(&addr) {
+                // An inherited address re-registered after its erase.
+                return self.frozen_erased.remove(&addr);
+            }
+        }
+        self.live.insert(addr)
+    }
+
+    /// True when THIS call erased `addr`.
+    #[inline]
+    pub(crate) fn remove(&mut self, addr: &usize) -> bool {
+        if self.live.remove(addr) {
+            return true;
+        }
+        match &self.frozen {
+            Some(frozen) if frozen.contains(addr) => self.frozen_erased.insert(*addr),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        let inherited = self.frozen.as_ref().map_or(0, |frozen| frozen.len());
+        self.live.len() + inherited - self.frozen_erased.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &usize> + '_ {
+        self.frozen
+            .iter()
+            .flat_map(|frozen| frozen.iter())
+            .filter(|addr| !self.frozen_erased.contains(*addr))
+            .chain(self.live.iter())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.live.clear();
+        self.frozen = None;
+        self.frozen_erased.clear();
+    }
+
+    /// Freeze the inherited table in a fork child. A nested fork keeps the
+    /// first frozen layer and inherits the (small) overlay unchanged.
+    fn freeze_for_fork_child(&mut self) {
+        if self.frozen.is_none() {
+            self.frozen = Some(std::mem::take(&mut self.live));
+        }
+    }
+}
+
+/// Called in the child immediately after `fork()` (single-threaded there).
+/// Freezes every shard's inherited table; membership (and so every shard's
+/// free epoch) is unchanged.
+pub(crate) fn heap_registry_freeze_for_fork_child() {
+    for shard in heap_registry_shards() {
+        shard
+            .set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .freeze_for_fork_child();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Byte-level accounting (header bytes only).
@@ -371,7 +472,7 @@ fn heap_registry_shards() -> &'static [HeapRegistryShard] {
     HEAP_ALLOCATION_REGISTRY.get_or_init(|| {
         (0..HEAP_REGISTRY_SHARDS)
             .map(|_| HeapRegistryShard {
-                set: Mutex::new(HeapPtrSet::default()),
+                set: Mutex::new(HeapRegistry::default()),
                 // Starts at 1 so the zeroed validation cache never matches.
                 epoch: AtomicU64::new(1),
             })
@@ -380,9 +481,14 @@ fn heap_registry_shards() -> &'static [HeapRegistryShard] {
 }
 
 #[inline]
-fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+pub(crate) fn heap_registry_shard_index(addr: usize) -> usize {
     let mixed = ((addr >> 3) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    &heap_registry_shards()[(mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)]
+    (mixed >> 58) as usize & (HEAP_REGISTRY_SHARDS - 1)
+}
+
+#[inline]
+fn heap_registry_shard(addr: usize) -> &'static HeapRegistryShard {
+    &heap_registry_shards()[heap_registry_shard_index(addr)]
 }
 
 /// A pointer that a locked probe found registered at its shard's epoch E is
@@ -492,6 +598,106 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         super::collections::transient_promote_share_forget(ptr as usize);
     }
     removed
+}
+
+/// Candidates erased per registry lock hold in `unregister_heap_ptrs_batch`.
+/// Bounds how long other threads' registrations and validations wait
+/// (~50 ns/candidate measured => a few ms per chunk).
+pub(crate) const HEAP_UNREGISTER_BATCH_CHUNK: usize = 1 << 16;
+
+/// Batch `unregister_heap_ptr_checked` for a transient scope end: one shard
+/// lock and one shard epoch bump per `HEAP_UNREGISTER_BATCH_CHUNK` of that
+/// shard's candidates, instead of a lock round-trip (plus a validation probe
+/// that always misses, because every per-object erase bumps the shard epoch)
+/// per object.
+///
+/// For each candidate that passes the same address checks as
+/// `RuntimeValue::heap_type` and is registered, `select` is asked, under the
+/// lock, whether to erase it; `select` sees a live header (registered ==
+/// live, and every free erases under this lock first) and must not take any
+/// lock. Erased pointers are pushed to `out` with their kind; exactly one
+/// caller ever erases a given pointer, so each is the caller's to free.
+///
+/// The caller must free `out` only after this returns, never between
+/// chunks: an erased-but-unfreed address cannot be recycled by another
+/// thread, so a stale duplicate of it later in `candidates` (an object freed
+/// and its address reused mid-scope) finds it unregistered and is skipped.
+/// Accounting and the share-window erase run after the last lock release, as
+/// in the single-pointer path.
+pub(crate) fn unregister_heap_ptrs_batch(
+    candidates: &[super::core::RuntimeValue],
+    mut select: impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    let start = out.len();
+    // The registry is sharded by address, so candidates are bucketed by shard
+    // (scope order kept within a bucket) and each shard is locked once per
+    // chunk of its own bucket, bumping only that shard's epoch. Every copy of
+    // an address lands in the same bucket, so the stale-duplicate argument
+    // above holds per shard.
+    let mut buckets: Vec<Vec<super::core::RuntimeValue>> = vec![Vec::new(); HEAP_REGISTRY_SHARDS];
+    for value in candidates {
+        if value.is_heap() {
+            buckets[heap_registry_shard_index(value.as_heap_ptr() as usize)].push(*value);
+        }
+    }
+    let shards = heap_registry_shards();
+    for (index, bucket) in buckets.iter().enumerate() {
+        let shard = &shards[index];
+        for chunk in bucket.chunks(HEAP_UNREGISTER_BATCH_CHUNK) {
+            let chunk_start = out.len();
+            // Poisoned: keep the rest of this shard registered (leaked, never
+            // freed), as the single-pointer path does; what earlier chunks
+            // erased is still ours.
+            let Ok(mut registry) = shard.set.lock() else {
+                break;
+            };
+            erase_selected(&mut registry, chunk, &mut select, out);
+            if out.len() != chunk_start {
+                shard.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+    for &(ptr, kind) in &out[start..] {
+        // Erased by this call and not yet freed, so the header is readable.
+        let bytes = unsafe { (*ptr).size as u64 };
+        note_heap_free(kind as u8, bytes);
+        note_attr_free(ptr as usize, bytes);
+        super::collections::transient_promote_share_forget(ptr as usize);
+    }
+}
+
+/// One locked chunk of `unregister_heap_ptrs_batch`, over the registry it is
+/// given (the live one, or a test's frozen fork-child registry).
+fn erase_selected(
+    registry: &mut HeapRegistry,
+    chunk: &[super::core::RuntimeValue],
+    select: &mut impl FnMut(super::core::RuntimeValue, *mut HeapHeader) -> bool,
+    out: &mut Vec<(*mut HeapHeader, HeapObjectType)>,
+) {
+    for value in chunk {
+        if !value.is_heap() {
+            continue;
+        }
+        let ptr = value.as_heap_ptr();
+        let addr = ptr as usize;
+        if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+            continue;
+        }
+        // Erase first (one probe for the common case); a declined object
+        // goes straight back. Nobody can observe the gap: the caller holds
+        // the lock. In a fork child an inherited erase is an erased-set
+        // insert and the put-back its removal, so the frozen table is never
+        // written.
+        if !registry.remove(&addr) {
+            continue;
+        }
+        if !select(*value, ptr) {
+            registry.insert(addr);
+            continue;
+        }
+        out.push((ptr, unsafe { (*ptr).object_type }));
+    }
 }
 
 #[inline]
@@ -1057,5 +1263,102 @@ mod validated_cache_tests {
         assert!(is_registered_heap_ptr(ptr), "re-registered address validates again");
         assert!(unregister_heap_ptr_checked(ptr));
         unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
+    }
+}
+
+#[cfg(test)]
+mod fork_registry_tests {
+    use super::HeapRegistry;
+
+    #[test]
+    fn frozen_registry_keeps_membership_and_is_never_written() {
+        let mut registry = HeapRegistry::default();
+        for addr in (1..=1000usize).map(|i| i * 16) {
+            assert!(registry.insert(addr));
+        }
+        registry.freeze_for_fork_child();
+        let frozen_len = registry.frozen.as_ref().unwrap().len();
+        let frozen_cap = registry.frozen.as_ref().unwrap().capacity();
+        assert_eq!(registry.len(), 1000);
+        assert!(registry.contains(&16) && registry.contains(&16000));
+
+        // Child-owned objects live in the overlay.
+        for addr in (1..=5000usize).map(|i| 1_000_000 + i * 16) {
+            assert!(registry.insert(addr));
+            assert!(!registry.insert(addr), "duplicate insert");
+        }
+        assert!(!registry.insert(32), "inherited address is already present");
+        for addr in (1..=5000usize).map(|i| 1_000_000 + i * 16) {
+            assert!(registry.remove(&addr));
+            assert!(!registry.remove(&addr), "double erase refused");
+            assert!(!registry.contains(&addr));
+        }
+
+        // Erasing an inherited object succeeds exactly once.
+        assert!(registry.remove(&48));
+        assert!(!registry.remove(&48));
+        assert!(!registry.contains(&48));
+        assert_eq!(registry.len(), 999);
+        assert_eq!(registry.iter().count(), 999);
+        assert!(!registry.iter().any(|addr| *addr == 48));
+        // Re-registering the recycled address restores it once.
+        assert!(registry.insert(48));
+        assert!(!registry.insert(48));
+        assert!(registry.contains(&48));
+        assert!(!registry.remove(&999_999), "never registered");
+
+        let frozen = registry.frozen.as_ref().unwrap();
+        assert_eq!(frozen.len(), frozen_len, "inherited table untouched");
+        assert_eq!(frozen.capacity(), frozen_cap, "inherited table never regrown");
+
+        // A nested fork keeps the first frozen layer.
+        registry.freeze_for_fork_child();
+        assert_eq!(registry.len(), 1000);
+        registry.clear();
+        assert_eq!(registry.len(), 0);
+        assert!(!registry.contains(&16));
+    }
+
+    /// The scope-end batch over a fork child's frozen registry: inherited and
+    /// child-owned objects are erased exactly once, a declined inherited
+    /// object stays a member, and the inherited table is never written.
+    #[test]
+    fn batch_erase_over_frozen_registry_never_writes_inherited_table() {
+        use super::{erase_selected, HeapHeader, HeapObjectType};
+        use crate::value::core::RuntimeValue;
+        // 8-aligned storage, as every real heap object has.
+        let headers: Vec<*mut HeapHeader> = (0..4)
+            .map(|_| {
+                let slot = Box::into_raw(Box::new([0u64; 2])) as *mut HeapHeader;
+                unsafe { slot.write(HeapHeader::new(HeapObjectType::Tuple, 16)) };
+                slot
+            })
+            .collect();
+        let addr = |i: usize| headers[i] as usize;
+        let value = |i: usize| RuntimeValue(addr(i) as u64 | crate::value::tags::TAG_HEAP);
+        let mut registry = HeapRegistry::default();
+        for i in 0..3 {
+            assert!(registry.insert(addr(i)));
+        }
+        registry.freeze_for_fork_child();
+        let frozen_cap = registry.frozen.as_ref().unwrap().capacity();
+        assert!(registry.insert(addr(3)), "child-owned object");
+
+        // 0 inherited + erased (listed twice: second is a stale duplicate),
+        // 1 inherited + declined, 2 inherited + not listed, 3 child + erased.
+        let candidates = [value(0), value(1), value(3), value(0)];
+        let mut out = Vec::new();
+        erase_selected(&mut registry, &candidates, &mut |_, ptr| ptr as usize != addr(1), &mut out);
+        let erased: Vec<usize> = out.iter().map(|(ptr, _)| *ptr as usize).collect();
+        assert_eq!(erased, vec![addr(0), addr(3)]);
+        assert!(out.iter().all(|(_, kind)| *kind == HeapObjectType::Tuple));
+        assert!(!registry.contains(&addr(0)) && !registry.contains(&addr(3)));
+        assert!(registry.contains(&addr(1)) && registry.contains(&addr(2)));
+        assert_eq!(registry.len(), 2);
+        let frozen = registry.frozen.as_ref().unwrap();
+        assert_eq!((frozen.len(), frozen.capacity()), (3, frozen_cap), "inherited table untouched");
+        for header in headers {
+            drop(unsafe { Box::from_raw(header as *mut [u64; 2]) });
+        }
     }
 }

@@ -33,7 +33,7 @@ use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenState
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
@@ -713,7 +713,14 @@ impl CompilerDriver:
                     self.native_staged_codegen.module_objects[name]
                 else:
                     ""
-                val module_passed = (outcome_label == "OK" and has_object) or (outcome_label == "" and not has_object)
+                # A go-to-end MIR failure has no outcome and no object, the
+                # same shape as an objectless facade: the ledger is the only
+                # thing that tells them apart. Left unchecked it published
+                # PASS and the coordinator never counted it (run-27e).
+                val go_to_end_failed = go_to_end_enabled_v1() and self.go_to_end.is_excluded(name)
+                if go_to_end_failed:
+                    print "[mir-shard] go-to-end failed module={name} owner={owner}: sealed FAILED, not published"
+                val module_passed = native_mir_shard_module_passed_v1(outcome_label, has_object, go_to_end_failed)
                 val functions = if module_functions.contains_key(name): module_functions[name] else: 0
                 val statics = if module_statics.contains_key(name): module_statics[name] else: 0
                 val capsule_identity = if self.ctx.cold_hir_native_capsule_identities.has(name): self.ctx.cold_hir_native_capsule_identities[name] else: ""

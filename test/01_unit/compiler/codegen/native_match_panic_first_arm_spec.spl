@@ -1,0 +1,112 @@
+"""
+# Native `--entry-closure`: a match EXPRESSION whose first arm is `panic(...)`
+
+**Category:** Codegen / MIR match lowering
+**Bug:** doc/08_tracking/bug/match_expr_panic_first_arm_drops_result_2026-10-25.md
+
+`panic(...)` lowers to `rt_panic` + `Abort`, then lowering continues in a
+fresh `after_panic` block and returns a Unit temp. The match-arm merges copied
+that Unit temp into the result and inferred the result type from it (first arm
+wins), so the merge retyped the result to Unit and every later arm's value was
+dropped: the result read as `iconst 0`. A struct payload SEGVed on its first
+field load; an i64 payload read 0.
+
+Measured red on Stage 2 (2026-10-25): `vf` printed `1` (want 42), and the
+struct form SEGVed. Native-only: the defect is in the MIR lowering that only
+the native `--entry-closure` lane compiles.
+
+Each probe uses a value that cannot be confused with the const-0 placeholder.
+Ok-first and return-first controls guard against an over-eager fix.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# No `{...}` interpolation in the embedded source: the spec's own lexer would
+# resolve it.
+val PANIC_FIRST_SOURCE: text = ("struct Adm:\n" +
+    "    id: i64\n" +
+    "    name: text\n" +
+    "\n" +
+    "fn admit(ok: bool) -> Result<Adm, text>:\n" +
+    "    if not ok:\n" +
+    "        return Err(\"no\")\n" +
+    "    Ok(Adm(id: 7, name: \"legacy-ref\"))\n" +
+    "\n" +
+    "fn admit_i64(ok: bool) -> Result<i64, text>:\n" +
+    "    if not ok:\n" +
+    "        return Err(\"no\")\n" +
+    "    Ok(41)\n" +
+    "\n" +
+    "fn struct_panic_first() -> i64:\n" +
+    "    val a: Adm = match admit(true):\n" +
+    "        case Err(reason): panic(\"struct failed\")\n" +
+    "        case Ok(value): value\n" +
+    "    a.id + a.name.len()\n" +
+    "\n" +
+    "fn i64_panic_first() -> i64:\n" +
+    "    val n = match admit_i64(true):\n" +
+    "        case Err(reason): panic(\"i64 failed\")\n" +
+    "        case Ok(value): value\n" +
+    "    n + 1\n" +
+    "\n" +
+    "fn i64_ok_first() -> i64:\n" +
+    "    val n = match admit_i64(true):\n" +
+    "        case Ok(value): value\n" +
+    "        case Err(reason): panic(\"ok-first failed\")\n" +
+    "    n + 2\n" +
+    "\n" +
+    "fn i64_return_first() -> i64:\n" +
+    "    val n = match admit_i64(true):\n" +
+    "        case Err(reason): return -1\n" +
+    "        case Ok(value): value\n" +
+    "    n + 3\n" +
+    "\n" +
+    "fn scalar_panic_first(k: i64) -> i64:\n" +
+    "    val n = match k:\n" +
+    "        case 0: panic(\"scalar failed\")\n" +
+    "        case _: k * 10\n" +
+    "    n + 5\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    print(\"BEGIN\")\n" +
+    "    print(struct_panic_first())\n" +
+    "    print(i64_panic_first())\n" +
+    "    print(i64_ok_first())\n" +
+    "    print(i64_return_first())\n" +
+    "    print(scalar_panic_first(4))\n" +
+    "    print(\"END\")\n" +
+    "    0\n")
+
+fn native_build_and_run_panic_first() -> text:
+    val dir = "build/test-artifacts/native_match_panic_first_arm"
+    val src = dir + "/panic_first_repro.spl"
+    val bin_out = dir + "/panic_first_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, PANIC_FIRST_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a match expression whose first arm panics keeps the later arms' value (native)":
+
+    it "yields the Ok payload for struct, i64 and scalar matches":
+        # One example = one native-build; spec globals do not persist.
+        step("Build the fixture once and run it")
+        val out = native_build_and_run_panic_first()
+
+        step("Refuse to pass on a build or run that produced nothing")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("BEGIN")
+        expect(out).to_contain("END")
+
+        step("struct payload after a panic-first arm: 7 + len(legacy-ref) = 17, not a SEGV")
+        step("i64 payload after a panic-first arm: 41 + 1 = 42, not 0 + 1")
+        step("controls: Ok-first 43, return-first 44, scalar panic-first 45")
+        expect(out).to_contain("BEGIN\n17\n42\n43\n44\n45\nEND")

@@ -1,7 +1,7 @@
 # @cover src/compiler/70.backend/backend/llvm_backend_tools.spl
 
 use compiler.backend.backend.backend_types.{OptimizationLevel}
-use compiler.backend.llvm_backend_tools.{llvm_llc_opt_flag}
+use compiler.backend.llvm_backend_tools.{llvm_llc_opt_flag, llvm_clang_object_args}
 
 describe "LLVM llc optimization argument policy":
     it "uses only numeric optimization levels accepted by llc":
@@ -12,3 +12,16 @@ describe "LLVM llc optimization argument policy":
         expect(llvm_llc_opt_flag(OptimizationLevel.Speed)).to_equal("-O2")
         expect(llvm_llc_opt_flag(OptimizationLevel.Standard)).to_equal("-O2")
         expect(llvm_llc_opt_flag(OptimizationLevel.Aggressive)).to_equal("-O3")
+
+describe "clang fallback when llc is absent":
+    it "compiles IR with clang, keeping the opt level and dropping -fPIC on Windows":
+        val win = llvm_clang_object_args("x86_64-w64-windows-gnu", "x86-64", false, "",
+            "-O2", false, "m.o", "m.ll")
+        expect(win).to_equal(["-c", "-x", "ir", "-ffunction-sections", "-fdata-sections",
+            "-O2", "--target=x86_64-w64-windows-gnu", "-o", "m.o", "m.ll"])
+        val linux = llvm_clang_object_args("x86_64-unknown-linux-gnu", "x86-64", true,
+            "+avx2", "-O3", true, "m.o", "m.ll")
+        expect(linux).to_contain("-fPIC")
+        expect(linux).to_contain("--target=x86_64-unknown-linux-gnu")
+        expect(linux).to_contain("-march=x86-64")
+        expect(linux).to_contain("+avx2")

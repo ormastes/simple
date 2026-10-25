@@ -1,6 +1,11 @@
 # Parser Sharing — Measured Audit and Next Shared Seam (contract v1)
 
 **Date:** 2026-09-05 · **Status:** audit complete; Seam 1 and Seam 3 landed in this worktree, Seam 2 proposed
+
+> Superseded 2026-10-25: "landed in this worktree" is historical wording. On
+> `origin/release/1.0.0` @ `57a129fb2b9` core frontend dispatch crosses
+> `ParserProviderV1`, with legacy as the only executable provider and oracle;
+> `FlatAstBridge` migration is open. Shared parser ownership for item 1: PARTIAL.
 **Worktree:** `/home/yoon/dev/simple-parser-sharing` — a LINKED git worktree
 (shared object store), detached at `67859c96792`, which was `main`'s tip at
 2026-09-05 15:10 and has since advanced

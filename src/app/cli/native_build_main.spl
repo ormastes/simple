@@ -9,6 +9,8 @@ use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
     compiler_source_authority_open_published_v1}
 use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1}
+use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
+    native_build_mir_output_requires_full_set_v1}
 use app.cli.native_build_mir_selective_admission.{native_mir_selective_admission_v1,
     native_mir_selective_disk_bytes_v1, native_mir_selective_requested_workers_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
@@ -42,13 +44,15 @@ use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_labe
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
-    shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for}
+    shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
+    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1}
 use app.io.sysinfo_ops.{process_peak_rss_kb}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
+    hir_shard_recovery_failed_rows_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
@@ -641,7 +645,7 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces():
         return 0      # streaming parse has no front-end parse cache to warm
-    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_PARSE_SHARD_WORKER_KB", 1650000))
+    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_PARSE_SHARD_WORKER_KB", SHARD_PARSE_WORKER_KB_V1))
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -840,7 +844,7 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
     val parent_peak = if measured_peak > 0: measured_peak else: 0
     if parent_peak == 0:
         eprint "[hir-shard] parent peak unavailable; using unqualified phase estimate"
-    val worker_budget = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", 3000000, parent_peak)
+    val worker_budget = shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1, parent_peak)
     val requested = native_build_requested_shard_threads(args)
     # Serial isolation is admitted too: never revive a rejected child as N=1.
     val isolation_request = if requested > 0: requested else: 1
@@ -1042,6 +1046,10 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         eprint "[{label}] inventory incomplete rows={unfinished} policy_fail_fast={fail_fast}"
     val failed_modules = hir_shard_recovery_failure_count(queue_dir)
     print "[{label}] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} ledger={queue_dir}"
+    # Name every failed row: a count alone hid eight go-to-end MIR failures in
+    # run-27e. Their errors are in the ICE receipt rows (phase mir_lower).
+    for failed_row in hir_shard_recovery_failed_rows_v1(queue_dir):
+        print "[{label}] failed module: {failed_row}"
     val blocked = hir_shard_recovery_blocked(queue_dir)
     val blocked_reason = if blocked: file_read("{queue_dir}/BLOCKED") else: ""
     val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
@@ -1089,6 +1097,12 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
         return if selective: -1 else: 0
     if selective:
         return native_build_mir_selective_parallel_v1(args)
+    # Ordinary workers cannot evict MIR for Both/SMF output. Screen the known
+    # output intent before budgeting or spawning a worker that must refuse it.
+    if native_build_mir_output_requires_full_set_v1(args, selective,
+            (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
+        eprint "[mir-shard] disabled: output format re-reads MIR set"
+        return 0
     val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
     if requested > 0: requested else: 1
 
@@ -2017,21 +2031,6 @@ fn native_build_has_help(args: [text]) -> bool:
 # (scripts/bootstrap/bootstrap-from-scratch.sh, 6/6 sites) -- all pass an
 # entry, via `--entry <file>` or a bare positional -- so no legitimate
 # caller depends on reaching the worker without one.
-fn native_build_is_value_consuming_flag(arg: text) -> bool:
-    arg == "--backend" or arg == "--backend-plugin" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path"
-        or arg == "--linker-script" or arg == "--entry" or arg == "--source"
-        or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode"
-        or arg == "--cache-dir" or arg == "--input-manifest"
-        or arg == "--target" or arg == "--cpu"
-        or arg == "--opt-level" or arg == "--timeout" or arg == "--threads"
-        or arg == "--jobs" or arg == "-j" or arg == "--log"
-        or arg == "--parser-impl" or arg == "--parser-prefer"
-        or arg == "--parser-require" or arg == "--host-cpu-max"
-        or arg == "--frontend-offload"
-        or arg == "--frontend-offload-fallback"
-        or arg == "--collection-profile" or arg == "--collection-workload"
-        or arg == "--collection-target"
-        or arg == "--collection-policy" or arg == "--collection-memory-budget"
 
 fn native_build_manifest_requested(args: [text]) -> bool:
     for arg in args:

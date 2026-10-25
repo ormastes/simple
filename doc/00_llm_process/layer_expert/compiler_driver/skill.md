@@ -273,3 +273,13 @@ Generic archive signatures retain declaration linkage metadata in digest v2.
 Driver archive transport must preserve this field through specialization;
 caller display qualifiers cannot establish the native callee owner. The
 source-reviewed repair requires a fresh generation for native qualification.
+
+## MIR shard PASS must consult the go-to-end ledger (2026-10-25)
+
+`aot_compile_mir_shard_v1` publishes PASS per claimed module. "No outcome,
+no object" means an objectless facade only when the child's go-to-end ledger
+did not exclude the module (`native_mir_shard_module_passed_v1`). The ledger
+is in-process and dies with the child, so cross-process failure detail goes
+through the ledger terminals (FAILED) and the ICE receipt part rows
+(`mir_lower`). Bug:
+`doc/08_tracking/bug/mir_shard_go_to_end_failure_published_as_pass_2026-10-25.md`.

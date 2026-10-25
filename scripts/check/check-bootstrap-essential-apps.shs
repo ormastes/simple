@@ -2,9 +2,11 @@
 # Required application builds and suites, after admitted Stage4 basic tools.
 # No deployment or live GUI qualification is performed here.
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
-usage() { echo "usage: $0 STAGE4_BINARY STAGE4_PROVENANCE SIMPLE_CORE_ARCHIVE NEW_OUTPUT_DIR" >&2; exit 2; }
-[ "$#" -eq 4 ] || usage
+OWNER_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+usage() { echo "usage: $0 STAGE4_BINARY STAGE4_PROVENANCE SIMPLE_CORE_ARCHIVE NEW_OUTPUT_DIR [SOURCE_ROOT]" >&2; exit 2; }
+[ "$#" -eq 4 ] || [ "$#" -eq 5 ] || usage
+ROOT=${5:-$OWNER_ROOT}
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd -P) || exit 2
 P4=$1 PROVENANCE=$2 CORE=$3 OUT=$4
 fail() {
     echo "essential_apps_error=$*" >&2
@@ -81,7 +83,7 @@ run_spec() {
     [ "$passed" -gt 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ] || fail "$id-required-suite-not-fully-executed"
     printf '%s\t%s\n' "$id" "$counts" >>"$OUT/spec-counts.tsv"
 }
-run_row stage4-authority sh "$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE"
+run_row stage4-authority sh "$OWNER_ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE" "$ROOT"
 require_line "$OUT/logs/stage4-authority.log" 'post_bootstrap_stage4_acceptance=true' stage4-authority
 run_row devhub-build "$P4" native-build --source "$ROOT/src/compiler" --source "$ROOT/src/app" --source "$ROOT/src/lib" \
     --entry-closure --entry "$ROOT/src/app/devhub/main.spl" --runtime-bundle simple-core \
@@ -98,7 +100,7 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) CARET="$CARET.exe" ;; esac
 run_row caret-help "$CARET" --help
 require_text "$OUT/logs/caret-help.log" 'Interactive LLM chat shell' caret-help
 for lane in provider-wrappers agent-primitives multi-manager local-torch; do
-    run_row "caret-$lane" sh "$ROOT/scripts/check/check-caret-suite-bootstrap.shs" --gate "$lane"
+    run_row "caret-$lane" sh "$OWNER_ROOT/scripts/check/check-caret-suite-bootstrap.shs" --source-root "$ROOT" --gate "$lane"
     require_text "$OUT/logs/caret-$lane.log" 'STATUS: PASS' "caret-$lane"
  done
 run_spec caret-gui-semantic test/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.spl
@@ -117,7 +119,7 @@ require_text "$OUT/logs/web-config.log" 'configuration valid' web-config
 run_spec web-config-spec test/01_unit/app/simple_web_server/config_spec.spl
 run_spec web-security test/03_system/web/server/secure_pure_simple_web_server_spec.spl
 run_spec web-live-http test/03_system/web/server/http_dynamic_dispatch_live_socket_spec.spl
-run_row stage4-authority-final sh "$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE"
+run_row stage4-authority-final sh "$OWNER_ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$P4" "$PROVENANCE" "$ROOT"
 require_line "$OUT/logs/stage4-authority-final.log" 'post_bootstrap_stage4_acceptance=true' stage4-authority-final
 verify_identity
 for artifact in "$OUT/devhub" "$CARET" "$OUT/database/postgres_mimic_server" "$OUT/web/simple_web_server"; do

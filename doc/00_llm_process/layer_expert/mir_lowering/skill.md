@@ -500,3 +500,21 @@ programs never change layout. Rules to keep when editing:
 - Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
   wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
   correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.
+
+## 2026-10-25 — diverging arms and nil-tested dict reads (Phase 3 run-27e)
+
+- `panic(...)` returns a **Unit** temp from a fresh `after_panic` block, so
+  `current_block_has_explicit_terminator()` is FALSE after it. Any value merge
+  (match arm, if arm, default) must also skip a Unit-typed arm result
+  (`local_is_unit`), or the first-wins type inference retypes the shared result
+  to Unit and every later arm's value reads as `iconst 0`. `lower_if` had this
+  guard; all 8 match merge sites in `switch_operators_calls.spl` now do too.
+  Bug: `doc/08_tracking/bug/match_expr_panic_first_arm_drops_result_2026-10-25.md`.
+- The `??` left operand goes through `lower_optional_probe_operand`. A `d[k]`
+  read there returns the UNDECODED `rt_dict_get` word (`nil_probe` ->
+  `raw_probe`), so `rt_is_some` sees the miss word 3, and the `??` present
+  branch is the single decode. Do NOT reuse the `as_option` (`d.get`) lane for
+  this: it decodes and then marks the result as a runtime value, so `??`
+  decodes an i64 hit a second time (5 -> 0; still open for `d.get(k) ?? x`).
+  `d[k].?`, `if val x = d[k]` and `match d[k]` remain open.
+  Bug: `doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md`.

@@ -59,7 +59,7 @@ unsafe fn dict_alloc_slots(capacity: u64) -> *mut RuntimeValue {
     data
 }
 
-unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
+pub(super) unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
     if data.is_null() {
         return;
     }

@@ -9,7 +9,8 @@
 
 use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_path_probe};
 use crate::value::collections::{
-    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_new, rt_tuple_set,
+    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_get, rt_tuple_new,
+    rt_tuple_set,
 };
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
@@ -1870,6 +1871,61 @@ pub extern "C" fn rt_cpuid_tuple(leaf: i32, subleaf: i32) -> RuntimeValue {
         rt_tuple_set(tuple, index as u64, RuntimeValue::from_int(value as i64));
     }
     tuple
+}
+
+/// Leak `words` as a raw word block: the pure-Simple native lanes destructure
+/// a tuple result by loading words 0/8/16/... instead of calling rt_tuple_get.
+fn raw_result_block(words: &[i64]) -> *mut i64 {
+    Box::into_raw(words.to_vec().into_boxed_slice()) as *mut i64
+}
+
+/// Raw 4-word CPUID block (C twin: `rt_cpuid_tuple_block`, runtime_native.c).
+#[no_mangle]
+pub extern "C" fn rt_cpuid_tuple_block(leaf: i32, subleaf: i32) -> *mut i64 {
+    let regs = rt_cpuid(leaf, subleaf);
+    raw_result_block(&[regs.a as i64, regs.b as i64, regs.c as i64, regs.d as i64])
+}
+
+/// Raw 3-word block (stdout bytes, stderr bytes, untagged status) for
+/// `rt_process_run_bounded_bytes` (C twin: `rt_process_run_bounded_bytes_tuple`).
+///
+/// # Safety
+/// Same contract as [`rt_process_run_bounded_bytes`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_bytes_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+    max_output_bytes: i64,
+) -> *mut i64 {
+    process_result_block(rt_process_run_bounded_bytes(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
+}
+
+/// Raw 3-word block (stdout, stderr, untagged status) for
+/// `rt_process_run_bounded` (C twin: `rt_process_run_bounded_tuple`).
+///
+/// # Safety
+/// Same contract as [`rt_process_run_bounded`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+    max_output_bytes: i64,
+) -> *mut i64 {
+    process_result_block(rt_process_run_bounded(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
+}
+
+/// Repack a (stdout, stderr, status) result tuple: slots 0/1 keep their
+/// runtime values, slot 2 is untagged (C twin: `rt_process_result_to_tuple`).
+fn process_result_block(tuple: RuntimeValue) -> *mut i64 {
+    raw_result_block(&[
+        rt_tuple_get(tuple, 0).to_raw() as i64,
+        rt_tuple_get(tuple, 1).to_raw() as i64,
+        rt_tuple_get(tuple, 2).as_int(),
+    ])
 }
 
 /// 1 when this runtime was built for x86_64, else 0 (C twin: `rt_cpu_is_x86_64`).

@@ -69,6 +69,36 @@ pub fn llvm_llc_opt_flag(opt_level: OptimizationLevel) -> text:
         case OptimizationLevel.Aggressive: "-O3"
         case _: "-O0"
 
+pub fn llvm_clang_object_args(triple: text, cpu: text, has_features: bool,
+        features: text, opt_flag: text, target_args: bool, obj_path: text,
+        input_path: text) -> [text]:
+    """clang equivalent of compile_ir_to_object_path's llc argv.
+
+    Same CPU/feature arguments as llc. The opt level and --target are always
+    passed: llc defaults to -O2 and the module's triple, clang to -O0 and its
+    own default target. -fPIC is dropped for Windows (COFF) targets.
+    """
+    var args = ["-c", "-x", "ir", "-ffunction-sections", "-fdata-sections", opt_flag,
+        "--target={triple}"]
+    if not triple.contains("windows"):
+        args.push("-fPIC")
+    if target_args:
+        if triple.starts_with("x86_64") or triple.starts_with("i686"):
+            args.push("-march={cpu}")
+        else:
+            args.push("-mcpu={cpu}")
+        if has_features:
+            for feature in features.split(","):
+                if feature != "":
+                    args.push("-Xclang")
+                    args.push("-target-feature")
+                    args.push("-Xclang")
+                    args.push(feature)
+    args.push("-o")
+    args.push(obj_path)
+    args.push(input_path)
+    args
+
 fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
     """Extract defined symbols from an object file using nm.
 
@@ -375,8 +405,10 @@ pub fn compile_ir_to_object_path(
     val ir_path = stage_dir + "/module.ll"
     val bitcode_path = stage_dir + "/module.bc"
     val staged_obj_path = stage_dir + "/module.o"
+    # No llc (llvm-mingw ships none): clang compiles the same IR to an object.
     val llc = find_llc()
-    if llc == "":
+    val clang = if llc == "": find_clang() else: ""
+    if llc == "" and clang == "":
         return llvm_object_stage_fail(
             stage_dir, diagnostic_path, "llc not found", 1)
     val bootstrap_io = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
@@ -430,8 +462,14 @@ pub fn compile_ir_to_object_path(
     args.push("-o")
     args.push(staged_obj_path)
     args.push(compile_input_path)
-    val (llc_out, llc_err, llc_code) = process_run(llc, args)
-    if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, llc, compile_input_path) != "":
+    val tool = if llc != "": llc else: clang
+    if llc == "":
+        args = llvm_clang_object_args(frozen_target_triple, cpu,
+            config.features.len() > 0, config.to_feature_string(), opt_flag,
+            retain_target_arguments or not bootstrap_io, staged_obj_path,
+            compile_input_path)
+    val (llc_out, llc_err, llc_code) = process_run(tool, args)
+    if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
         return llvm_object_stage_fail(stage_dir, diagnostic_path,
             "llc failed (exit {llc_code}):\n{llc_out}{llc_err}",
             1)

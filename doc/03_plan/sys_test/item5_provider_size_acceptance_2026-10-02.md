@@ -43,6 +43,8 @@ Mandatory subcases within these eight rows:
 - V06/V08: final bootstrap/compiler/core/lib/MCP/LSP and real app gates bind the actual producer; no source-only marker, cross-link or C microbenchmark substitutes for application execution or physical-target performance.
 
 Status: planned, not executed. Requirements remain the user-selected 2026-09-02
+
+Superseded 2026-10-25: P01-P07 specs exist as `@tag:in-development` scaffolds (`9a970f7051d`); no case has executed on an admitted self-hosted runtime. Still not executed.
 contract; no budgets or supported hosts are removed.
 
 Each executable SSpec scenario uses step descriptions, REQ/NFR tags, real

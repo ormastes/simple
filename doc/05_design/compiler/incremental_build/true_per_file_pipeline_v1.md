@@ -75,6 +75,22 @@ template's module" coupling. Design detail: `build_runner_fiber_scheduler_v1.md`
 
 ## 6. Work packages (parallel worktrees off release/1.0.0, PR each)
 
+**Superseded 2026-10-25 (status column below):** verified against
+`origin/release/1.0.0`. P0 DONE #4565 `700a2f742a4`. P1 DONE #4566
+`ae96dd0bb6e` (staged codegen batch default 8, not 1). P2 DONE #4557
+`4ce52b4d99f` + #4562 `5e8ad7e3638` (lazy validation blobs). P3 DONE (opt-in)
+#4576 `106ab239fff`, #4584, #4585, #4588 (P-A), #4594 (P-E planner + object
+cache). P4 DONE (opt-in) #4575, #4580, #4597 (P-B), #4598 (P-G3, no global
+mono pass on this lane), #4603 (P-D). P5 PARTIAL — #4585/#4588 limit HIR to the
+claimed module's import closure; TLDR specialization list + `.rr` producers (P-G2) DONE
+#4600 `73c4aef632a`. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568). Default
+flip (P-F #4592 `1c6ccfb61c4`) is prepared but **not flipped**:
+`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` in
+`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`; enable with
+`SIMPLE_FILE_WORKERS=1`. The §2 overlap proof (`obj_done(A) < hir_start(B)`) has
+a checker (`scripts/check/check-per-file-overlap-receipt.shs`) but **no native
+receipt yet**; §7's limit still holds.
+
 | # | Package | Owner | Status |
 |---|---|---|---|
 | P0 | Cache identity published before spawn; explicit-policy lane gets a digest; HIR cache decoupled from `.fpc` on/off | WP-A agent | PR in progress |
