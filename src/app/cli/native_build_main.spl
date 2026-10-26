@@ -653,6 +653,13 @@ fn native_build_last_diagnostic_line(output: text) -> text:
 # the real build parses them itself, exactly as it would have without
 # sharding. Sharding is a pure optimisation and must never be able to turn a
 # working build into a broken one.
+# Any shard/unit child (parse, HIR or MIR role) is one process and never fans
+# out parse shards. Checking only SIMPLE_PARSE_SHARD let every HIR/MIR unit
+# child spawn its own parse shards (phase 3: 21 workers each "[shard]
+# threads=14", 69.5 GB tree, 0 objects).
+pub fn native_build_shard_child_env_v1(parse: text, hir: text, mir: text) -> bool:
+    parse != "" or hir != "" or mir != ""
+
 fn native_build_parse_shard_count(args: [text]) -> i64:
     # Shard children do not install collection feedback. Their unprofiled
     # parser cache is bypassed by the real profiled build, so warming it wastes
@@ -660,7 +667,8 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
     for arg in args:
         if arg == "--collection-profile" or arg.starts_with("--collection-profile="):
             return 0
-    if (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
+    if native_build_shard_child_env_v1(env_get("SIMPLE_PARSE_SHARD") ?? "",
+            env_get("SIMPLE_HIR_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD") ?? ""):
         return 0      # already a shard child; never recurse
     if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
         return 0      # nothing to warm
