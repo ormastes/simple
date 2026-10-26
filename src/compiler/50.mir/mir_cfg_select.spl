@@ -1,0 +1,130 @@
+# Target-explicit @cfg arm selection for MIR lowering.
+#
+# HIR keeps every @cfg arm (target-neutral); MIR lowering picks the arm that
+# matches its MirTargetContext. Unlike the parser preprocessor this reads NO
+# environment and NO globals: the same condition text and the same target
+# always give the same answer, so one HIR serves every target.
+# Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
+
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_os_is_unix}
+use compiler.core.parser_preprocessor.{_pp_tokenize_condition, _pp_os_name, _pp_arch_name}
+
+struct MirCfgStep:
+    value: bool
+    pos: i64
+    ok: bool
+
+fn _mcs_tok(tokens: [text], pos: i64) -> text:
+    if pos < tokens.len(): tokens[pos] else: ""
+
+# Atom vocabulary is the preprocessor's exact alias tables (_pp_os_name /
+# _pp_arch_name), so both lanes accept and reject the same atoms.
+fn _mcs_os_match(wanted: text, target: MirTargetContext) -> bool:
+    if wanted == "unix": return cfg_os_is_unix(target.os)
+    # MirTargetContext spells bare-metal `*-none` triples as "baremetal".
+    if wanted == "none": return target.os == "none" or target.os == "baremetal"
+    wanted == target.os
+
+# Thumb/armv sub-arch atoms only match when the context carries that exact
+# arch; MirTargetContext normalizes them to "arm" today (plan risk item).
+fn _mcs_arch_match(wanted: text, target: MirTargetContext) -> bool:
+    wanted == _pp_arch_name(target.arch) or wanted == target.arch
+
+fn _mcs_atom(token: text, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    val t = cfg_strip_quotes(token).trim()
+    val lowered = t.lower()
+    if lowered == "true": return MirCfgStep(value: true, pos: 0, ok: true)
+    if lowered == "false": return MirCfgStep(value: false, pos: 0, ok: true)
+    if _pp_os_name(t) != "": return MirCfgStep(value: _mcs_os_match(_pp_os_name(t), target), pos: 0, ok: true)
+    if _pp_arch_name(t) != "": return MirCfgStep(value: _mcs_arch_match(_pp_arch_name(t), target), pos: 0, ok: true)
+    val parts = if t.contains("=="): t.split("==") else: t.split("=")
+    if parts.len() == 2:
+        val key = cfg_strip_quotes(parts[0]).trim()
+        val value = cfg_strip_quotes(parts[1]).trim()
+        if key == "os" or key == "platform" or key == "target_os":
+            val wanted_os = _pp_os_name(value)
+            if wanted_os != "": return MirCfgStep(value: _mcs_os_match(wanted_os, target), pos: 0, ok: true)
+        if key == "family" or key == "target_family":
+            val fam = value.lower()
+            if fam == "unix": return MirCfgStep(value: cfg_os_is_unix(target.os), pos: 0, ok: true)
+            if fam == "windows": return MirCfgStep(value: target.os == "windows", pos: 0, ok: true)
+        if key == "arch" or key == "target_arch" or key == "cpu":
+            val wanted = _pp_arch_name(value)
+            if wanted != "": return MirCfgStep(value: _mcs_arch_match(wanted, target), pos: 0, ok: true)
+        # `features` = the TargetSpec's enabled feature tags (build features
+        # and cpu features), compared case-insensitively.
+        if key == "feature" or key == "target_feature":
+            val want = value.lower()
+            for f in features:
+                if f.lower() == want: return MirCfgStep(value: true, pos: 0, ok: true)
+            return MirCfgStep(value: false, pos: 0, ok: true)
+    # Unknown atoms are an error, never a silent false.
+    MirCfgStep(value: false, pos: 0, ok: false)
+
+fn _mcs_primary(tokens: [text], pos: i64, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    if _mcs_tok(tokens, pos) == "(":
+        val inner = _mcs_or(tokens, pos + 1, target, features)
+        if not inner.ok or _mcs_tok(tokens, inner.pos) != ")":
+            return MirCfgStep(value: false, pos: inner.pos, ok: false)
+        return MirCfgStep(value: inner.value, pos: inner.pos + 1, ok: true)
+    if pos >= tokens.len(): return MirCfgStep(value: false, pos: pos, ok: false)
+    var atom = tokens[pos]
+    var p = pos + 1
+    var eq = ""
+    while _mcs_tok(tokens, p) == "=" or _mcs_tok(tokens, p) == "==":
+        eq = eq + tokens[p]
+        p = p + 1
+    if eq != "":
+        if p >= tokens.len(): return MirCfgStep(value: false, pos: p, ok: false)
+        atom = atom + eq + tokens[p]
+        p = p + 1
+    val r = _mcs_atom(atom, target, features)
+    MirCfgStep(value: r.value, pos: p, ok: r.ok)
+
+fn _mcs_not(tokens: [text], pos: i64, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    val tok = _mcs_tok(tokens, pos)
+    if tok == "not" or tok == "!":
+        val r = _mcs_not(tokens, pos + 1, target, features)
+        return MirCfgStep(value: not r.value, pos: r.pos, ok: r.ok)
+    _mcs_primary(tokens, pos, target, features)
+
+fn _mcs_and(tokens: [text], pos: i64, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    var left = _mcs_not(tokens, pos, target, features)
+    while left.ok and (_mcs_tok(tokens, left.pos) == "and" or _mcs_tok(tokens, left.pos) == "&&"):
+        val right = _mcs_not(tokens, left.pos + 1, target, features)
+        left = MirCfgStep(value: left.value and right.value, pos: right.pos, ok: right.ok)
+    left
+
+fn _mcs_or(tokens: [text], pos: i64, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    var left = _mcs_and(tokens, pos, target, features)
+    while left.ok and (_mcs_tok(tokens, left.pos) == "or" or _mcs_tok(tokens, left.pos) == "||"):
+        val right = _mcs_and(tokens, left.pos + 1, target, features)
+        left = MirCfgStep(value: left.value or right.value, pos: right.pos, ok: right.ok)
+    left
+
+# Evaluate one @cfg condition against an explicit target. Returns
+# (matched, ok); ok=false means a malformed or unknown condition.
+pub fn mir_cfg_eval_for_target(condition: text, target: MirTargetContext, features: [text]) -> MirCfgStep:
+    val tokens = _pp_tokenize_condition(condition)
+    if tokens.len() == 0: return MirCfgStep(value: false, pos: 0, ok: false)
+    val r = _mcs_or(tokens, 0, target, features)
+    if r.ok and r.pos != tokens.len():
+        return MirCfgStep(value: false, pos: r.pos, ok: false)
+    r
+
+# Pick the arm of a target-neutral @cfg select: first arm whose condition
+# matches, else the `else` arm (condition ""), else -1. -2 = malformed arm.
+pub fn mir_cfg_select_arm(conditions: [text], target: MirTargetContext, features: [text]) -> i64:
+    var else_idx = -1
+    var i = 0
+    while i < conditions.len():
+        val c = conditions[i]
+        if c.trim() == "":
+            if else_idx < 0: else_idx = i
+        else:
+            val r = mir_cfg_eval_for_target(c, target, features)
+            if not r.ok: return -2
+            if r.value: return i
+        i = i + 1
+    else_idx
