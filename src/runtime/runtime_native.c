@@ -2089,7 +2089,12 @@ static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
 
 #define RT_CORE_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
 #define RT_CORE_TRANSIENT_RAW_OWNED_BIT ((size_t)1 << (sizeof(size_t) * CHAR_BIT - 1))
+#if UINTPTR_MAX == UINT64_MAX
 #define RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT (RT_CORE_TRANSIENT_RAW_OWNED_BIT >> 1)
+#else
+/* The copy-frame provider is native64-only; preserve ordinary 32-bit sizes. */
+#define RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT ((size_t)0)
+#endif
 #define RT_CORE_TRANSIENT_RAW_SIZE_MASK (~(RT_CORE_TRANSIENT_RAW_OWNED_BIT | RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT))
 
 static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
@@ -2261,6 +2266,7 @@ int8_t rt_transient_raw_copy_scope_pinned_v1(void) {
 }
 static int core_source_copy_share_clear_v1(void);
 int64_t rt_transient_raw_copy_scope_v1(void) {
+    if (sizeof(uintptr_t) != 8) return -1;
     return rt_transient_raw_owner_thread_allows() && core_source_copy_share_clear_v1() && rt_core_transient_array_scope_active &&
         !rt_core_transient_array_scope_paused ? (int64_t)rt_core_transient_array_scope_id : -1;
 }

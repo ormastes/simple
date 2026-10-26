@@ -9,7 +9,7 @@
 #define SR_CONFLICT (-6)
 #define SR_CONSUMED (-7)
 
-enum { SR_COPY_EMPTY, SR_COPY_PREPARED, SR_COPY_READY, SR_COPY_LIVE, SR_COPY_CLEANED };
+enum { SR_COPY_EMPTY, SR_COPY_PREPARED, SR_COPY_READY, SR_COPY_ATTEMPTED, SR_COPY_LIVE, SR_COPY_CLEANED };
 typedef struct RtSourceCopyFrameV1 {
     uint64_t state, words, birth, lease, raw_revision, raw_capacity, module;
     uintptr_t raw;

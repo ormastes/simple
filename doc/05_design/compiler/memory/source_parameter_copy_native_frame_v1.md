@@ -51,9 +51,10 @@ The raw entry's existing ownership bit remains separate from the private pin.
 
 ## Lifecycle and refusal semantics
 
-Prepared -> Ready (actual ReadBegin) -> Live (allocation) -> Cleaned -> Empty
-(successful ReadEnd). Ready -> Cleaned handles nil/no-copy and checked allocation
-failure. Prepared + lease0 cleanup cancels once if ReadBegin did not succeed.
+Prepared -> Ready (actual ReadBegin) -> Attempted -> Live (allocation) -> Cleaned -> Empty
+(successful ReadEnd). Ready -> Cleaned handles nil/no-copy. The prepaid allocator attempt is consumed
+before calling rt_alloc; failed allocation stays Attempted and can only clean,
+never retry the allocation without a new prepared frame. Prepared + lease0 cleanup cancels once if ReadBegin did not succeed.
 Cleanup errors preserve raw/frame/lease. ReadEnd refuses Prepared/Ready/Live;
 revoke/close/release refuse every nonempty frame. Cleaned stays pinned until
 ReadEnd clears frame and lease together. Ordinary no-frame lifecycle is unchanged.
@@ -86,8 +87,9 @@ finite physical latency promise. Guard/harden and noncomposed/non64 modes refuse
 
 The new actual-owner C fixture covers one-short work/fields/bytes, pending cancel,
 lease/generation mismatch, a distinct copied value37, module/raw teardown and
-ordinary free/realloc/promotion refusal, foreign thread and busy lock, failed
+ordinary free/realloc/promotion refusal, native64-only pin bit preserving ordinary
+32-bit raw sizes, foreign thread and busy lock, failed
 exact cleanup claim retaining the copy, actual frozen-table growth/compaction
-refusal, stale preparation, injected canonical allocation failure before store,
+refusal, stale preparation, injected canonical allocation failure before store and refused second attempt,
 no-copy cleanup, exactly-once cleanup and absent/paused module rejection.
 These controls are native prerequisite evidence only and currently UNRUN.

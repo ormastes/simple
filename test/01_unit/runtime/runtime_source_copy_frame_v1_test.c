@@ -9,7 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 static int fail_next_calloc;
+static size_t copy_fixture_calloc_calls;
 static void* copy_fixture_calloc(size_t count,size_t size) {
+    ++copy_fixture_calloc_calls;
     if (fail_next_calloc) { fail_next_calloc=0; return NULL; }
     return calloc(count,size);
 }
@@ -128,7 +130,10 @@ int main(void) {
     prepare(); lease=begin();
     fail_next_calloc=1;
     assert(rt_source_region_copy_alloc_live_v1(control,generation,lease)==SR_CAPACITY);
-    assert(!fail_next_calloc && region->copy.state==SR_COPY_READY && !region->copy.raw);
+    assert(!fail_next_calloc && region->copy.state==SR_COPY_ATTEMPTED && !region->copy.raw);
+    size_t calls_after_failure=copy_fixture_calloc_calls;
+    assert(rt_source_region_copy_alloc_live_v1(control,generation,lease)==SR_CONSUMED);
+    assert(copy_fixture_calloc_calls==calls_after_failure && !region->copy.raw);
     end(lease); /* allocation-error edge cleanup; no generated store occurred */
     prepare(); lease=begin(); end(lease); /* nil/null ordinary no-copy branch */
     assert(rt_source_region_revoke_live_v1(control,generation,16)==0);

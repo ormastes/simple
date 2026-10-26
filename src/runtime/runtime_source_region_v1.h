@@ -63,7 +63,8 @@ int64_t rt_source_region_release_live_v1(int64_t pinned_control,
  * fabricated, stale, published, cross-thread or arbitrary raw tokens.
  * Ordinary ReadBegin binds the prepared frame to its actual lease. Allocation
  * returns a canonical UNTAGGED raw pointer or a negative error, and generated
- * stores require its checked success edge. No allocation/alias elision.
+ * stores require its checked success edge. One allocator attempt per prepared
+ * frame, including allocation failure; retry refuses. No allocation/alias elision.
  * Cleanup on every consumer exit precedes ReadEnd. lease0 cancels only a
  * prepared frame before a successful read; otherwise use its actual lease.
  * Failure retains frame+lease. ReadEnd/revoke/release refuse unfinished frames.

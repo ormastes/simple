@@ -90,6 +90,9 @@ int64_t rt_source_region_copy_alloc_live_v1(int64_t control,int64_t generation,i
         rt_transient_raw_source_revision_v1()!=(int64_t)r->copy.raw_revision)) error=SR_STALE;
     uint8_t* raw=NULL;
     if (!error) {
+        /* One prepaid allocator attempt, including OOM. A failed attempt is
+         * retained for cleanup but cannot spend this frame's credit twice. */
+        r->copy.state=SR_COPY_ATTEMPTED;
         raw=rt_alloc((int64_t)(r->copy.words*8));
         if (!raw) error=SR_CAPACITY;
         else {
