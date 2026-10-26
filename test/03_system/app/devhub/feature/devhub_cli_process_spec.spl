@@ -1,0 +1,76 @@
+# @cover src/app/devhub/main.spl
+# codex-system-test
+# @evidence-display: links
+# @req REQ-CLI-001 REQ-CLI-002
+"""
+Exercise the production DevHub executable as a child process.
+DEVHUB_SYSTEM_BIN must name the source-matched native DevHub artifact.
+Missing artifacts are failures. These offline scenarios never contact a backend.
+"""
+use std.spec.*
+use std.spec.step
+use std.process.run
+use std.env.env_get
+
+describe "DevHub actual CLI process":
+    describe "REQ-CLI-001: offline discovery":
+        it "should print help from the production executable":
+            step("Select the built production DevHub executable")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            step("Launch DevHub help as a child process")
+            val result = run(binary, ["--help"])
+            step("Check successful exit and the advertised command surface")
+            expect(result.exit_code).to_equal(0)
+            expect(result.stdout).to_contain("Usage: devhub <command> [flags]")
+            expect(result.stdout).to_contain("messenger")
+            expect(result.stdout).to_contain("lifecycle")
+
+        it "should print usage when launched without arguments":
+            step("Launch the production executable with no command")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            val result = run(binary, [])
+            step("Check the default command completes with useful help")
+            expect(result.exit_code).to_equal(0)
+            expect(result.stdout).to_contain("Usage: devhub <command> [flags]")
+
+        it "should return machine readable version output":
+            step("Request the production executable's JSON version")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            val result = run(binary, ["--json", "--version"])
+            step("Check JSON output and successful exit")
+            expect(result.exit_code).to_equal(0)
+            expect(result.stdout.trim()).to_equal("{\"command\":\"itf\",\"status\":\"ok\",\"version\":\"0.1.0\"}")
+
+    describe "REQ-CLI-002: invalid command failure":
+        it "should reject an unknown command with a nonzero exit":
+            step("Launch an unknown DevHub command")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            val result = run(binary, ["unknown-system-test-command"])
+            step("Check the process reports failure and recovery help")
+            expect(result.exit_code).to_equal(1)
+            expect(result.stdout).to_contain("Unknown command: unknown-system-test-command")
+            expect(result.stdout).to_contain("Usage: devhub <command> [flags]")
+
+        it "should reject an invalid log mode before dispatching version":
+            step("Launch DevHub with an unsupported global log mode")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            val result = run(binary, ["--log-mode=invalid-system-test-mode", "--version"])
+            step("Check invalid global options fail before command output")
+            expect(result.exit_code).to_equal(1)
+            expect(result.stdout.contains("devhub 0.1.0")).to_equal(false)
+            expect(result.stdout + result.stderr).to_contain("invalid --log-mode")
+
+        it "should reject an invalid output surface before dispatching help":
+            step("Launch DevHub with an unsupported output surface")
+            val binary = env_get("DEVHUB_SYSTEM_BIN")
+            expect(binary == "").to_equal(false)
+            val result = run(binary, ["--surface=invalid-system-test-surface", "--help"])
+            step("Check invalid global options fail before help output")
+            expect(result.exit_code).to_equal(1)
+            expect(result.stdout.contains("Usage: devhub <command> [flags]")).to_equal(false)
+            expect(result.stdout + result.stderr).to_contain("invalid --surface")

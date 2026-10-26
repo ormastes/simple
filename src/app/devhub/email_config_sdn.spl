@@ -1,6 +1,6 @@
 # One shared SDN authority for DevHub and the compiled mail CLI bridge.
 # Errors deliberately contain no input fragments, account names, or secrets.
-use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.parser.{parse_with_issues, SdnIssue}
 use std.common.sdn.value.{SdnValue}
 use std.common.json.value.{JsonValue, json_value_object_empty, json_value_object_set}
 
@@ -22,40 +22,42 @@ fn parse_email_sdn_json(content: text) -> Result<JsonValue, text>:
         case Err(_):
             return Err("MAIL_CONFIG_SYNTAX")
         case Ok(parsed):
-            val email = parsed.0.get("email")
+            val root: SdnValue = parsed.0
+            val issues: [SdnIssue] = parsed.1
+            val email: SdnValue? = root.get("email")
             if email != nil:
-                for issue in parsed.1:
+                for issue in issues:
                     if issue.path == "email" or issue.path.starts_with("email."):
                         return Err("MAIL_CONFIG_DUPLICATE")
-                val selected = email ?? SdnValue.Null
+                val selected: SdnValue = email ?? SdnValue.Null
                 if not selected.is_dict():
                     return Err("MAIL_CONFIG_EMAIL")
                 return email_sdn_root_json(selected, "email")
-            if parsed.1.len() > 0:
+            if issues.len() > 0:
                 return Err("MAIL_CONFIG_DUPLICATE")
-            return email_sdn_root_json(parsed.0, "standalone")
+            return email_sdn_root_json(root, "standalone")
 
 fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<JsonValue, text>:
     if not root.is_dict():
         return Err("MAIL_CONFIG_ROOT")
-    val entries = root.get("accounts") ?? SdnValue.Null
+    val entries: SdnValue = root.get("accounts") ?? SdnValue.Null
     if not entries.is_dict():
         return Err("MAIL_CONFIG_ACCOUNTS")
-    val default_value = root.get("default_account") ?? SdnValue.String("")
+    val default_value: SdnValue = root.get("default_account") ?? SdnValue.String("")
     if not default_value.is_string():
         return Err("MAIL_CONFIG_DEFAULT")
     var accounts = json_value_object_empty()
-    val account_map = entries.as_dict() ?? {}
+    val account_map: Dict<text, SdnValue> = entries.as_dict() ?? {}
     for name in account_map.keys():
         if name == "":
             return Err("MAIL_CONFIG_ACCOUNT")
-        val entry = account_map[name]
+        val entry: SdnValue = account_map[name]
         if not entry.is_dict():
             return Err("MAIL_CONFIG_ACCOUNT")
         var fields = json_value_object_empty()
-        val field_map = entry.as_dict() ?? {}
+        val field_map: Dict<text, SdnValue> = entry.as_dict() ?? {}
         for key in field_map.keys():
-            val value = field_map[key]
+            val value: SdnValue = field_map[key]
             var scalar = ""
             if value.is_string():
                 scalar = value.as_str() ?? ""
@@ -82,10 +84,10 @@ fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<JsonValue, text>:
     root_fields = json_value_object_set(root_fields, "default_account", JsonValue.Str(default_value.as_str() ?? ""))
     root_fields = json_value_object_set(root_fields, "accounts", accounts)
     root_fields = json_value_object_set(root_fields, "_mail_config_scope", JsonValue.Str(scope))
-    val root_map = root.as_dict() ?? {}
+    val root_map: Dict<text, SdnValue> = root.as_dict() ?? {}
     for key in root_map.keys():
         if key != "accounts" and key != "default_account" and key != "_mail_config_scope":
-            val value = root_map[key]
+            val value: SdnValue = root_map[key]
             if not value.is_string():
                 return Err("MAIL_CONFIG_FIELD_TYPE")
             root_fields = json_value_object_set(root_fields, key, JsonValue.Str(value.as_str() ?? ""))
