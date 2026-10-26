@@ -16,7 +16,6 @@ use std.spec
 use std.spec.step
 use app.simple_lsp_mcp.tools.{handle_tool_call}
 use app.simple_lsp_mcp.session_state.{lsp_reset_location}
-use app.cli.query_engine.{engine_find_definition_lines}
 
 val PROBE_ALIAS = "test/01_unit/language/accessor_forwarding/probe_alias.spl"
 val PROBE_SETTER = "test/01_unit/language/accessor_forwarding/probe_setter.spl"
@@ -51,13 +50,12 @@ describe "lsp forwarding resolution":
         val d = call("6", "lsp_definition", PROBE_SETTER, 29, 7)
         expect(d).to_contain(PROBE_SETTER + ":8: [method] Temp.set_celsius")
 
-    it "a plain field access is not hijacked and matches the engine path":
-        step("lsp_definition on b.level = 5 equals engine_find_definition_lines")
+    it "a plain field access resolves to the field, not a setter":
+        step("lsp_definition on b.level = 5 names the Both.level field declaration")
+        # REQ-LSP-MEMBER-001: plain members now resolve through the receiver type
+        # (the bare-name engine path would pick the first `level` anywhere).
         val d = call("7", "lsp_definition", PROBE_SETTER, 36, 7)
-        val (engine_lines, _code) = engine_find_definition_lines(PROBE_SETTER, "level")
-        expect(engine_lines.len() > 0).to_equal(true)
-        # first engine line only: the trailing search-budget note carries run-dependent counts
-        expect(d).to_contain(engine_lines[0])
+        expect(d).to_contain(PROBE_SETTER + ":21: [field] Both.level")
         expect(d.contains("forwarded")).to_equal(false)
         expect(d.contains("set_level")).to_equal(false)
 
@@ -70,9 +68,9 @@ describe "lsp forwarding resolution":
         expect(d).to_contain(PROBE_ALIAS + ":11: [method] English.greet")
 
     it "an explicit outer method is not forwarded to the alias target":
-        step("lsp_definition on l.greet (probe_alias line 32) equals the engine path")
+        step("lsp_definition on l.greet (probe_alias line 32) names LoudHost.greet")
+        # REQ-LSP-MEMBER-001: the receiver's own method, not the engine's first `greet`.
         val d = call("10", "lsp_definition", PROBE_ALIAS, 31, 34)
-        val (engine_lines, _code) = engine_find_definition_lines(PROBE_ALIAS, "greet")
-        expect(d).to_contain(engine_lines[0])
+        expect(d).to_contain(PROBE_ALIAS + ":25: [method] LoudHost.greet")
         expect(d.contains("forwarded")).to_equal(false)
         expect(d.contains("English.greet")).to_equal(false)
