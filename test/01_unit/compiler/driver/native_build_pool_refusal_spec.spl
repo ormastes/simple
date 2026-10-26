@@ -1,0 +1,41 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
+
+describe "native-build per-file pool refusal is fail-closed":
+    val hir_kb = 9000000
+    val mir_kb = 9000000
+
+    it "admits when 2 or more workers fit":
+        expect(file_worker_pool_refusal_v1(2, 2, 33554432, hir_kb, mir_kb)).to_equal("")
+        expect(file_worker_pool_refusal_v1(8, 3, 99999999, hir_kb, mir_kb)).to_equal("")
+
+    it "low free memory is an error, not a skip or fallback":
+        val msg = file_worker_pool_refusal_v1(1, 0, 1048576, hir_kb, mir_kb)
+        expect(msg.starts_with("error:")).to_be_true()
+        expect(msg.contains("Free memory=1048576 kB")).to_be_true()
+        expect(msg.contains("per-worker budget=")).to_be_true()
+        expect(msg.contains("SIMPLE_MIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("SIMPLE_HIR_SHARD_WORKER_KB")).to_be_true()
+        expect(msg.contains("No fallback")).to_be_true()
+
+    it "refuses when either phase admits fewer than 2 workers":
+        expect(file_worker_pool_refusal_v1(4, 1, 33554432, hir_kb, mir_kb) != "").to_be_true()
+        expect(file_worker_pool_refusal_v1(0, 4, 33554432, hir_kb, mir_kb) != "").to_be_true()
+
+    it "reports the needed free amount for two workers":
+        val msg = file_worker_pool_refusal_v1(0, 0, 0, 6000000, 9000000)
+        expect(msg.contains("need >= 30000000 kB free")).to_be_true()
+
+    it "names HIR sharding disabled, not memory":
+        val msg = file_worker_pool_refusal_v1(0, 4, 33554432, hir_kb, mir_kb, 8, "SIMPLE_HIR_CACHE=0")
+        expect(msg.contains("SIMPLE_HIR_CACHE=0")).to_be_true()
+        expect(msg.contains("not enough free memory")).to_be_false()
+
+    it "names a single requested worker, not memory":
+        val msg = file_worker_pool_refusal_v1(4, 0, 33554432, hir_kb, mir_kb, 1, "")
+        expect(msg.contains("only 1 worker was requested")).to_be_true()
+        expect(msg.contains("not enough free memory")).to_be_false()
+
+    it "names memory only when threads and HIR sharding allow 2":
+        val msg = file_worker_pool_refusal_v1(1, 1, 1048576, hir_kb, mir_kb, 8, "")
+        expect(msg.contains("not enough free memory")).to_be_true()
