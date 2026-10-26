@@ -1,0 +1,81 @@
+# @req: REQ-COMP-HIR-CFG-SELECT-001 - HIR keeps every @cfg arm; MIR picks per target.
+"""
+## Purpose and audience
+Purpose: Pin the HirExprKind.CfgSelect node (step 2 of the target-neutral HIR plan):
+it carries every arm with its condition text, survives the HIR codec byte-for-byte
+regardless of SIMPLE_TARGET_OS, feeds mir_cfg_select_arm directly, and the old
+parser-preprocessor stripping is unchanged. Audience: COMP maintainers.
+Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
+"""
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+
+val CONDS: [text] = ["os = \"linux\"", "os = \"windows\""]
+
+fn tgt(arch: text, os: text) -> MirTargetContext:
+    MirTargetContext(arch: arch, os: os, abi: "gnu", backend: "llvm", version: 1)
+
+# alpha's body is reused as the three arms (linux / windows / else).
+fn module_with_cfg_select() -> HirModule:
+    val module = fixture_hir_module_v1(false)
+    val keys = module.functions.keys()
+    var f = module.functions[keys[0]]
+    val base = f.body
+    val kind = HirExprKind.CfgSelect(CONDS, [base, base], Some(base))
+    val sel = HirExpr(kind: kind, has_type_: false, type_: f.return_type, span: base.span)
+    f.body = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(sel), span: base.span)], has: false, value: base.value, span: base.span)
+    module.functions[keys[0]] = f
+    module
+
+fn first_select(module: HirModule) -> HirExprKind:
+    val keys = module.functions.keys()
+    val f = module.functions[keys[0]]
+    match f.body.stmts[0].kind:
+        case HirStmtKind.Expr(e): e.kind
+        case _: HirExprKind.Error
+
+
+fn strip_under_os(os: text, source: text) -> text:
+    val old = env_get("SIMPLE_TARGET_OS")
+    env_set("SIMPLE_TARGET_OS", os)
+    val out = _pp_preprocess_conditionals(source)
+    env_set("SIMPLE_TARGET_OS", old)
+    out
+
+describe "HIR CfgSelect keeps every arm":
+    it "holds 3 arms (2 conditions + else) in HIR":
+        match first_select(module_with_cfg_select()):
+            case HirExprKind.CfgSelect(conds, arms, else_):
+                expect(conds.len()).to_equal(2)
+                expect(arms.len()).to_equal(2)
+                expect(else_.?).to_equal(true)
+            case _:
+                expect("CfgSelect").to_equal("other")
+
+    it "feeds mir_cfg_select_arm directly, picking per target in MIR":
+        val no_feat: [text] = []
+        val with_else = CONDS + [""]
+        expect(mir_cfg_select_arm(with_else, tgt("x86_64", "linux"), no_feat)).to_equal(0)
+        expect(mir_cfg_select_arm(with_else, tgt("x86_64", "windows"), no_feat)).to_equal(1)
+        expect(mir_cfg_select_arm(with_else, tgt("aarch64", "macos"), no_feat)).to_equal(2)
+        expect(mir_cfg_select_arm(CONDS, tgt("aarch64", "macos"), no_feat)).to_equal(-1)
+
+    it "treats a malformed condition as a hard error (-2)":
+        val no_feat: [text] = []
+        expect(mir_cfg_select_arm(["os = \"linux\" and (", ""], tgt("x86_64", "linux"), no_feat)).to_equal(-2)
+
+describe "flag off: parser preprocessor stripping is unchanged":
+    it "still deletes non-matching @when arms by ambient target":
+        val src = "@when(os = \"linux\")\nLIN\n@elif(os = \"windows\")\nWIN\n@else\nOTHER\n@end\n"
+        val lin = strip_under_os("linux", src)
+        val win = strip_under_os("windows", src)
+        expect(lin.contains("LIN")).to_equal(true)
+        expect(lin.contains("WIN")).to_equal(false)
+        expect(win.contains("WIN")).to_equal(true)
+        expect(win.contains("LIN")).to_equal(false)

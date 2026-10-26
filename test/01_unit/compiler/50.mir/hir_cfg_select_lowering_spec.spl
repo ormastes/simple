@@ -1,0 +1,97 @@
+# @req: REQ-COMP-HIR-CFG-SELECT-001 - MIR lowering of HirExprKind.CfgSelect picks the arm per target.
+"""
+## Purpose and audience
+Purpose: Prove MirLowering.lower_cfg_select picks a different arm for x86_64 vs aarch64 from the
+SAME HIR, drops the select when nothing matches and there is no else (-1), and reports a fatal
+error for a malformed condition (-2). Audience: COMP maintainers.
+"""
+# @tag: unit, compiler, mir, hir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.common.mir_target_context.{MirTargetContext}
+
+val SRC = "fn pick() -> i64:\n    0\n\nfn arm_x() -> i64:\n    4101\n\nfn arm_a() -> i64:\n    4202\n\nfn arm_e() -> i64:\n    4303\n"
+
+fn tgt(arch: text) -> MirTargetContext:
+    MirTargetContext(arch: arch, os: "linux", abi: "gnu", backend: "llvm", version: 1)
+
+fn find_fn(hir: HirModule, name: text) -> HirFunction?:
+    for f in hir.functions.values():
+        if f.name == name or f.name.ends_with("." + name):
+            return Some(f)
+    nil
+
+# `pick` becomes: CfgSelect(conds, [arm_x.body, arm_a.body], else?)
+fn module_with_select(conds: [text], use_else: bool) -> HirModule:
+    val parsed = parse_full_frontend(SRC, "testdata/cfg_select.spl", "cfg_select", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/cfg_select.spl")
+    val hir = hl.lower_module(parsed)
+    val bx = find_fn(hir, "arm_x")!.body
+    val ba = find_fn(hir, "arm_a")!.body
+    val be = find_fn(hir, "arm_e")!.body
+    var pick = find_fn(hir, "pick")!
+    var arms: [HirBlock] = [bx, ba]
+    if conds.len() == 1:
+        arms = [bx]
+    val else_arm: HirBlock? = if use_else: Some(be) else: nil
+    val kind = HirExprKind.CfgSelect(conds, arms, else_arm)
+    val sel = HirExpr(kind: kind, has_type_: false, type_: pick.return_type, span: pick.body.span)
+    pick.body = HirBlock(stmts: [], has: true, value: sel, span: pick.body.span)
+    hir.functions[pick.symbol] = pick
+    hir
+
+struct Lowered:
+    consts: [text]
+    errors: [MirError]
+
+fn lower_pick(hir: HirModule, arch: text) -> Lowered:
+    var lowering = MirLowering.new_for_target(hir.symbols, tgt(arch))
+    val mir = lowering.lower_module(hir)
+    var consts: [text] = []
+    for function in mir.functions.values():
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Const(_, v, _): consts = consts.push("{v}")
+                        case _: pass
+    Lowered(consts: consts, errors: lowering.errors)
+
+fn has_const(l: Lowered, needle: text) -> bool:
+    for c in l.consts:
+        if c.contains(needle): return true
+    false
+
+val CONDS2: [text] = ["arch = \"x86_64\"", "arch = \"aarch64\""]
+
+describe "MirLowering.lower_cfg_select":
+    it "picks a different arm per target from the same HIR":
+        val hir = module_with_select(CONDS2, true)
+        val x = lower_pick(hir, "x86_64")
+        val a = lower_pick(hir, "aarch64")
+        val r = lower_pick(hir, "riscv64")
+        expect(has_const(x, "4101")).to_equal(true)
+        expect(has_const(x, "4202")).to_equal(false)
+        expect(has_const(a, "4202")).to_equal(true)
+        expect(has_const(a, "4101")).to_equal(false)
+        expect(has_const(r, "4303")).to_equal(true)
+
+    it "drops the select when nothing matches and there is no else (-1)":
+        val l = lower_pick(module_with_select(CONDS2, false), "riscv64")
+        expect(has_const(l, "4101")).to_equal(false)
+        expect(has_const(l, "4202")).to_equal(false)
+        expect(l.errors.len()).to_equal(0)
+
+    it "reports a fatal error for a malformed condition (-2)":
+        val l = lower_pick(module_with_select(["bogus_atom"], true), "x86_64")
+        var fatal = false
+        for e in l.errors:
+            if e.fatal and e.message.contains("malformed @cfg"): fatal = true
+        expect(fatal).to_equal(true)

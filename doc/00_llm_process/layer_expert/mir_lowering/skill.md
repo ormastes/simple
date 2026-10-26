@@ -519,3 +519,12 @@ programs never change layout. Rules to keep when editing:
   `d[k].?`, `if val x = d[k]` and `match d[k]` remain open.
   Bug: `doc/08_tracking/bug/dict_index_coalesce_decodes_before_nil_test_2026-10-25.md`.
 - **BSM P3 bootstrap MIR store:** the flat `_bootstrap_mir_*` / function-value / callable registries live on `BootstrapMirStore` (`_MirLowering/bootstrap_mir_store.spl`); never add a module-level registry var back — add a store field + forwarder, keep reads read-through (committed then pending), and publish only at `bootstrap_mir_registries_promote` (scope paused).
+
+## 2026-10-26 - HirCfgSelect lowering picks the arm (target-neutral HIR step 2)
+
+- `HirExprKind.CfgSelect(conds, arms, else_)` reaches MIR via `lower_cfg_select`
+  (`_MirLowering/asm_and_targets.spl`). It calls `mir_cfg_select_arm` with
+  `self.target_context` and `cfg_enabled_features()`; the else arm is appended
+  as condition `""`. `-2` = `error_fatal` (never a silent false); `-1` with no
+  else lowers to a unit temp (arm dropped). No env is read: the same HIR lowers
+  per target. Plan: `doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md`.
