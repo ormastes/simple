@@ -33,6 +33,14 @@ extern int8_t rt_transient_raw_owner_query(
     void* ptr, uint64_t* bytes, int8_t* owned);
 extern void rt_transient_raw_owner_unregister(void* ptr);
 extern int8_t rt_transient_raw_owner_thread_allows(void);
+extern int8_t rt_transient_raw_copy_is_pinned_v1(void* ptr);
+extern int8_t rt_transient_raw_copy_scope_pinned_v1(void);
+extern int64_t rt_transient_raw_copy_scope_v1(void);
+extern int64_t rt_transient_raw_copy_capacity_v1(void);
+extern int64_t rt_transient_raw_copy_scope_pin_v1(int64_t module);
+extern int64_t rt_transient_raw_copy_scope_unpin_v1(int64_t module);
+extern int64_t rt_transient_raw_copy_pin_v1(void* ptr,uint64_t bytes,int64_t module);
+extern int64_t rt_transient_raw_copy_claim_v1(void* ptr,uint64_t bytes,int64_t module,int64_t capacity);
 #endif
 
 #if defined(_MSC_VER)
@@ -170,6 +178,9 @@ int32_t rt_transient_raw_scope_begin(void) {
 }
 
 int32_t rt_transient_raw_scope_pause(void) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (rt_transient_raw_copy_scope_pinned_v1()) return 0;
+#endif
     if (!rt_transient_raw_active) return 0;
     rt_transient_raw_paused = 1;
     return 1;
@@ -227,6 +238,9 @@ int32_t rt_transient_raw_promote(uintptr_t ptr) {
 }
 
 int32_t rt_transient_raw_scope_end(void) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (rt_transient_raw_copy_scope_pinned_v1()) return 0;
+#endif
     if (!rt_transient_raw_active) return 0;
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     for (size_t i = 0; i < rt_transient_raw_cap; i++) {
@@ -643,7 +657,7 @@ void* rt_realloc(void* ptr, int64_t size) {
      * foreign-thread resize while its owner may trace or reclaim the pointer;
      * ownership may be transferred safely after scope end. */
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (!rt_transient_raw_owner_thread_allows()) return NULL;
+    if (!rt_transient_raw_owner_thread_allows() || rt_transient_raw_copy_is_pinned_v1(ptr)) return NULL;
 #endif
     if (size == 0) {
         rt_free((uint8_t*)ptr);
@@ -724,37 +738,32 @@ void* rt_realloc(void* ptr, int64_t size) {
     return next;
 }
 
-void rt_free(uint8_t* ptr) {
-    if (!ptr) return;
-    /* See rt_realloc: a rejected foreign free is a deliberate no-op, keeping
-     * the allocation live for its scope owner instead of creating a stale TLS
-     * registry entry and a later double free. */
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (!rt_transient_raw_owner_thread_allows()) return;
-#endif
-    rt_struct_alloc_unregister(ptr);
+/* Shared canonical disposal after ownership/registrations were consumed. The
+ * private SOURCE frame may use this only for its exact never-struct-registered
+ * raw birth. No independent libc-free implementation is permitted. */
+static void rt_dispose_unregistered_raw_v1(uint8_t* ptr) {
     if (rt_mem_guard_is_slot(ptr)) {
-        /* Guard slots are never transient-scope-owned and never enter the
-         * harden quarantine -- guard_free_sampled already PROT_NONEs the
-         * whole mapping, which is the stronger (page-fault) protection. */
-        rt_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return;
     }
     if (rt_mem_harden_enabled()) {
-        if (rt_mem_quarantine_contains(ptr)) {
-            /* Double free of a quarantined block: refused, not acted on. */
-            return;
-        }
-        rt_transient_raw_erase(ptr);
         uint8_t* base = ptr - RT_MEM_HARDEN_HEADER_BYTES;
         size_t size = *(size_t*)base;
         memset(ptr, RT_MEM_HARDEN_POISON_BYTE, size);
         rt_mem_quarantine_push(ptr, base, size);
         return;
     }
-    rt_transient_raw_erase(ptr);
     free(ptr);
+}
+void rt_free(uint8_t* ptr) {
+    if (!ptr) return;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_owner_thread_allows() || rt_transient_raw_copy_is_pinned_v1(ptr)) return;
+#endif
+    rt_struct_alloc_unregister(ptr);
+    if (!rt_mem_guard_is_slot(ptr) && rt_mem_harden_enabled() && rt_mem_quarantine_contains(ptr)) return;
+    rt_transient_raw_erase(ptr);
+    rt_dispose_unregistered_raw_v1(ptr);
 }
 
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
