@@ -256,6 +256,24 @@ does not establish canonical Stage 3 source-bound admission. Its explicit
 `SIMPLE_FILE_WORKERS=0` preserves the old producer's compatibility route;
 the new source default cannot hot-patch that executable.
 
+A later filesystem audit corrected the interpretation of progress: 209 objects
+written since this main invocation are under the cache's parent
+`wt-rel3-new/build/s3-wp/`, not the requested output directory. The newest was
+written at 11:20:02 KST; MIR continued after that without new object emission.
+The staged counter remained 232 and therefore must not be reported as 232
+new object files or evidence of ongoing codegen. The reason for the suppressed
+later batches is under investigation. Existing objects and their receipts
+remain preserved; counts and timestamps alone cannot admit them for linking.
+
+Boundary analysis subsequently found the first real MIR failure at module
+256: `lib.common.plugin.iface_id`, with MIR succeeded=255 and failed=1.
+The staged logger passes a hardcoded zero failure count, so its `failed=0`
+does not establish zero MIR failures. Batch 29 emitted objects; batch 30 and
+later stopped entering native cache/codegen while MIR continued. The exact
+producer's persistent lowering-failure gate and CLI/environment go-to-end
+propagation are being checked. Earlier progress reports that inferred zero
+failures from the staged line are superseded by this MIR evidence.
+
 The local configuration requests 80 jobs. Native codegen in this old
 in-process route reports sequential execution; requested jobs are not proof
 of 80-way utilization. The separate canonical Phase 2 refresh resolves 80
