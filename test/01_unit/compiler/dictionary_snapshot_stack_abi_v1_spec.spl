@@ -1,0 +1,24 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.common.dictionary_snapshot_stack_abi_v1.*
+
+describe "Private dictionary snapshot stack ABI":
+    it "uses actual native64 record sizes and aligned stack allocations":
+        expect(dictionary_snapshot_observation_bytes_v1()).to_equal(64)
+        expect(dictionary_snapshot_witness_bytes_v1()).to_equal(40)
+        expect(dictionary_snapshot_stack_alignment_v1()).to_equal(8)
+        val lines = dictionary_snapshot_llvm_stack_v1("%observation", "%witness")
+        expect(lines[0]).to_equal("  %observation = alloca [64 x i8], align 8")
+        expect(lines[1]).to_equal("  %witness = alloca [40 x i8], align 8")
+
+    it "passes real pointer operands to observe and new instead of Simple records":
+        expect(dictionary_snapshot_llvm_observe_v1("%status", "%dict", "%work", "%obs")).to_equal("  %status = call i64 @rt_dict_snapshot_observe_v1(i64 %dict, i64 %work, ptr %obs)")
+        expect(dictionary_snapshot_llvm_new_v1("%status", "%length", "%work", "%fields", "%bytes", "%out")).to_equal("  %status = call i64 @rt_array_snapshot_new_v1(i64 %length, i64 %work, i64 %fields, i64 %bytes, ptr %out)")
+
+    it "publishes only the actual fill_publish return and never loads witness.array":
+        expect(dictionary_snapshot_llvm_fill_publish_v1("%array", "%dict", "%obs", "%out", "%work")).to_equal("  %array = call i64 @rt_dict_snapshot_fill_publish_v1(i64 %dict, ptr %obs, ptr %out, i64 %work)")
+        expect(dictionary_snapshot_fill_publish_succeeded_v1(4096)).to_equal(true)
+        expect(dictionary_snapshot_fill_publish_succeeded_v1(0)).to_equal(false)
+        expect(dictionary_snapshot_fill_publish_succeeded_v1(-1)).to_equal(false)
+
+    it "keeps disposal status explicit for the actual scope abort owner":
+        expect(dictionary_snapshot_llvm_dispose_v1("%status", "%out", "%credit")).to_equal("  %status = call i64 @rt_array_snapshot_dispose_v1(ptr %out, i64 %credit)")
