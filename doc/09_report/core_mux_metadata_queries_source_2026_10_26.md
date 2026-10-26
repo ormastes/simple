@@ -1,0 +1,30 @@
+# CoreMux metadata query source candidate
+
+Status: **WARN / NOT_RUN**. Cycle 2 has eighteen focused production-helper cases authored; zero compiled or executed. No compiler, build, product, native helper or SSpec launch occurred. No API/service/provider/shared-contract file was edited, staged or committed. Independent cycle-2 exact-freeze review is pending; v1 acceptance was suspended by the retained allocation-failure amendment.
+
+Approved exports in `src/os/apps/smux/core_mux_metadata_queries.spl`:
+
+- `core_mux_metadata_snapshot_v1(snapshot: MuxSnapshotV1, namespace: text, handle: MuxHandleV1, scope: MuxScopeV1, visibility: MuxVisibilityV1) -> Result<MuxSnapshotV1, MuxErrorV1>`
+- `core_mux_current_context_v1(snapshot: MuxSnapshotV1, namespace: text, handle: MuxHandleV1, client_ref: MuxObjectRefV1) -> Result<MuxContextV1, MuxErrorV1>`
+
+The expected namespace and complete owner/generation/lease handle are compared before accepting the snapshot graph. Frozen wire graph validation establishes shape, reference kinds, uniqueness, declared bounds, ancestry and context membership. It does not authenticate the supplied handle or certify a native observation; the live owner must authenticate before invocation. Exact scope/client references must already belong to that validated graph. Errors are typed NotApplied with no affected objects or invented cleanup authority.
+
+Namespace/session/window projection retains the requested subtree and required ancestors, preserving input order. Identity maps are built from already validated references, avoiding repeated whole-pane membership scans during filtering. Visibility removes only the independent hidden flag and explicitly supplied Exited variant. Unknown remains Unknown; Running is neither fabricated nor queried. Remaining rectangles retain their exact coordinates and canvas. Optional references to excluded objects become nil; an excluded zoom target clears its paired restore layout. No focus, replacement pane, reflow or implicit context is synthesized. Limits, capability descriptors, child observations and metadata/content revisions remain verbatim. The completed result is graph-validated again; unrepresentable output refuses.
+
+Client selection uses the original requested scope: namespace includes all, session requires exact context.session, window requires exact context.window. The derived ancestor session is not an additional client filter. During pre-freeze inspection, Astra identified that the first draft incorrectly required both context.window and context.session for Window scope. That finding is corrected before this freeze, with a regression retaining an exact-window client whose optional session context is nil.
+
+CurrentContext returns the matched client's existing context rather than global session focus. The frozen DTO permits nil context.client; the query response binds that one field to the already matched client identity. Missing session/window/pane fields remain nil. This is not creation of a new reference or authority.
+
+The four owned files are this report, the production module, `test/01_unit/os/apps/smux/core_mux_metadata_queries_spec.spl`, and its same-named Markdown manual under `doc/06_spec/01_unit/os/apps/smux/`. The spec's `metadata_setup`/`metadata_check_snapshot` helpers assert independent concrete results. Child DTO values and empty capabilities are deliberately not native or full-provider evidence. Capture, request-status, events, exact-target resolution, API publication and router integration stay with their assigned owners; no placeholder query router or default success was added.
+
+Root's serialized interim Phase2 execution is pending. A legacy-profile result must record its actual producer/runtime/source identities and cannot establish unsupported explicit library-mode selection, admitted Phase3, or full system qualification. Exact source pins and the case count are retained in `build/review/coremux-metadata-source-v1.sdn`. Source whitespace inspection is not a test execution or verification PASS.
+
+## Cycle 2: retain-or-refuse collection construction
+
+The configured core owner `src/runtime/simple_core/core_array.spl` implements array growth at lines 883–913: reserve failure returns zero without length growth. `rt_dict_set` at lines 573–589 similarly returns zero before inserting a new key or incrementing length. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` array-push lowering discards the I8 status. An unchecked append of a detached namespace client or layout rectangle could therefore omit data while the resulting graph still validates; unchecked membership insertion could omit an entire selected subtree.
+
+Every one of the five projection append sites now requires exactly one element of growth. Each of the three membership insertion sites requires one new key in the length and presence of that exact key before any downstream filtering can trust it. Failure returns Unavailable / NotApplied with no partial snapshot. The layout helper returns Result and both current/restore layout paths propagate it. All additions remain in this module's approved ownership; no runtime or shared validator was edited.
+
+Two added production-helper cases cover normal growth beyond initial capacities with twelve complete ordered object sets and twelve exact layout rectangles. Fixture lengths are asserted before calling the production helper, so failed fixture construction cannot reduce expected coverage silently. No allocator fault injection or simulated allocation-success hook was added. The new failure branches, as well as all 18 authored scenarios, remain NOT_RUN. These local retention guards do not qualify allocation behavior inside the reused shared wire graph validator, whose internal maps remain a separate owner dependency.
+
+Historical v1 freeze and its amendment are preserved. Exact current four-path pins are in `build/review/coremux-metadata-source-v2.sdn`; review must inspect this correction before acceptance. No execution or landing is claimed.
