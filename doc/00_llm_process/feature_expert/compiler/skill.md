@@ -43,3 +43,11 @@ identity-map integrity, and truthful container constructor explanations.
 The identity map is not a settlement authority. Typed container lowering and
 the collision-profile regression remain open. Do not repeat unchanged green
 checks or reset exhausted three-cycle allowances by renaming a task.
+
+## Target-neutral HIR cfg select (2026-10-26)
+
+`HirExprKind.CfgSelect` + MIR arm selection landed (step 2 slice); parser/
+preprocessor emission and declaration-level arms remain. Codec specs need a
+runtime registering `rt_tuple_len`. See the plan
+`doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md` and the
+mir_lowering / compiler layer-expert notes.

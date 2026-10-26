@@ -1,0 +1,60 @@
+# @req: REQ-COMP-HIR-CFG-SELECT-001 - CfgSelect survives the HIR codec, target-independently.
+"""
+## Purpose and audience
+Purpose: HirExprKind.CfgSelect encodes/decodes losslessly and its bytes do not depend on
+SIMPLE_TARGET_OS. Audience: COMP maintainers.
+NOTE: needs a runtime that registers rt_tuple_len (enum_wire.spl); the deployed
+bin/simple.exe of 2026-10-25 does not, which fails every hir_module_encode spec
+(e.g. driver/hir_module_encode_retained_scope_spec.spl) identically.
+"""
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+
+val CONDS: [text] = ["os = \"linux\"", "os = \"windows\""]
+
+fn module_with_cfg_select() -> HirModule:
+    val module = fixture_hir_module_v1(false)
+    val keys = module.functions.keys()
+    var f = module.functions[keys[0]]
+    val base = f.body
+    val kind = HirExprKind.CfgSelect(CONDS, [base, base], Some(base))
+    val sel = HirExpr(kind: kind, has_type_: false, type_: f.return_type, span: base.span)
+    f.body = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(sel), span: base.span)], has: false, value: base.value, span: base.span)
+    module.functions[keys[0]] = f
+    module
+
+fn first_select(module: HirModule) -> HirExprKind:
+    val keys = module.functions.keys()
+    val f = module.functions[keys[0]]
+    match f.body.stmts[0].kind:
+        case HirStmtKind.Expr(e): e.kind
+        case _: HirExprKind.Error
+
+fn encode_under_os(os: text) -> text:
+    val old = env_get("SIMPLE_TARGET_OS")
+    env_set("SIMPLE_TARGET_OS", os)
+    val blob = hir_module_encode(module_with_cfg_select())
+    env_set("SIMPLE_TARGET_OS", old)
+    blob
+
+describe "HIR CfgSelect codec":
+    it "round-trips through the HIR codec":
+        val blob = hir_module_encode(module_with_cfg_select())
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        expect(hir_module_encode(decoded!)).to_equal(blob)
+        match first_select(decoded!):
+            case HirExprKind.CfgSelect(conds, arms, else_):
+                expect(conds[0]).to_equal(CONDS[0])
+                expect(conds[1]).to_equal(CONDS[1])
+                expect(arms.len()).to_equal(2)
+                expect(else_.?).to_equal(true)
+            case _:
+                expect("CfgSelect").to_equal("other")
+
+    it "encodes byte-identically under SIMPLE_TARGET_OS=linux and windows":
+        expect(encode_under_os("linux")).to_equal(encode_under_os("windows"))

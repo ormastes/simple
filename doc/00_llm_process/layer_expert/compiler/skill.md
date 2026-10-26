@@ -58,3 +58,12 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   regenerate through `compiler_schema`, and bind both cache codec versions.
   This candidate has failing MIR/interpreter checks and P1 filter admission
   parity findings; see the collection-planner feature expert before resuming.
+
+- 2026-10-26 HIR keeps every `@cfg` arm: `HirExprKind.CfgSelect` is APPENDED
+  last (codec ordinals are positional) and the visitor/children/hash/codec files
+  are regenerated with `compiler_schema` (`visitors`, `codec`) - never hand-edit.
+  Hand-written exhaustive walkers (mono preflight 09, semantics checkers,
+  subst/rewrite passes) each need a `CfgSelect` arm that walks ALL arms. The
+  parser still strips arms unless the (not yet landed) opt-in emission exists;
+  declaration-level `@cfg` has no HIR carrier yet. Specs:
+  `test/01_unit/compiler/20.hir/hir_cfg_select_*_spec.spl`.

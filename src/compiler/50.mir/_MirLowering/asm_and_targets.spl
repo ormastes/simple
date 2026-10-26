@@ -19,6 +19,8 @@ use compiler.mir._MirLowering.function_lowering.*
 # - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
+use compiler.core.cfg_platform.{cfg_enabled_features}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
@@ -105,6 +107,32 @@ impl MirLowering:
         if have_note:
             return "note"
         "matched"
+
+    me lower_cfg_select(conds: [text], arms: [HirBlock], else_: HirBlock?) -> LocalId?:
+        """Lower a target-neutral @cfg select: pick the arm for THIS target.
+
+        HIR keeps every arm; the selection lives here via mir_cfg_select_arm
+        (first matching condition, else the `else` arm, else drop the select).
+        A malformed condition is a hard error, never a silent false.
+        """
+        var conditions: [text] = []
+        for c in conds:
+            conditions.push(c)
+        var has_else = false
+        if else_.?:
+            conditions.push("")
+            has_else = true
+        val idx = mir_cfg_select_arm(conditions, self.target_context, cfg_enabled_features())
+        if idx == -2:
+            self.error_fatal("malformed @cfg/@when condition in cfg select", nil)
+            return self.builder.new_temp(MirType.unit())
+        if idx < 0:
+            return self.builder.new_temp(MirType.unit())
+        if idx < arms.len():
+            return self.lower_block(arms[idx]) ?? self.builder.new_temp(MirType.unit())
+        if has_else:
+            return self.lower_block(else_!) ?? self.builder.new_temp(MirType.unit())
+        self.builder.new_temp(MirType.unit())
 
     me lower_inline_asm_match(arms: [HirAsmMatchArm]) -> LocalId?:
         """Lower target-qualified asm match by resolving against current target.
