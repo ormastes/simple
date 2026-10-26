@@ -682,6 +682,20 @@ impl Lowerer {
                     }
                 }
 
+                if let ast::ast::Expr::FieldAccess { receiver, field } = &assign.target {
+                    if compound_assign_binop(assign.op).is_none() {
+                        if let Some(setter) = self.setter_forward_name(receiver, field, ctx) {
+                            let call = ast::ast::Expr::MethodCall {
+                                receiver: receiver.clone(),
+                                method: setter,
+                                args: vec![ast::ast::Argument::new(None, assign.value.clone())],
+                                generic_args: vec![],
+                            };
+                            return Ok(vec![HirStmt::Expr(self.lower_expr(&call, ctx)?)]);
+                        }
+                    }
+                }
+
                 let target = self.lower_expr(&assign.target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
 
