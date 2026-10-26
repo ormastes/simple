@@ -40,9 +40,11 @@ duration of one link.
 
 Two causes, both fixed with specs:
 
-1. Every library member was materialized and parsed per closure call. The
-   closure now reads each archive's linker-member index and parses only the
-   member that defines a still-undefined name (`coff_lazy_archive_spec.spl`).
+1. Every library member was materialized and parsed per closure call. Each
+   closure call now reads every archive's linker-member index and parses only
+   the members that define a still-undefined name (`coff_lazy_archive_spec.spl`).
+   The view is rebuilt per closure call (not cached across the prepare and
+   default-library rounds).
 2. The dominant cost was not parsing at all: per-symbol linear scans that
    copy symbol/relocation records under `@no_gc` -
    `coff_symbol_at_table_index` per relocation, `coff_weak_primary_for_fallback`
