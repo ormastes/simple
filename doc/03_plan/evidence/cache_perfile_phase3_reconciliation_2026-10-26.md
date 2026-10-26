@@ -265,14 +265,18 @@ new object files or evidence of ongoing codegen. The reason for the suppressed
 later batches is under investigation. Existing objects and their receipts
 remain preserved; counts and timestamps alone cannot admit them for linking.
 
-Boundary analysis subsequently found the first real MIR failure at module
-256: `lib.common.plugin.iface_id`, with MIR succeeded=255 and failed=1.
+Boundary analysis subsequently found a real MIR failure by progress module
+256 (succeeded=255, failed=1). The displayed `lib.common.plugin.iface_id` is
+the progress cursor, not the proven failed owner. The first failure is within
+batch 30, scheduled modules 233–240; attribution still requires the recorded
+error context.
 The staged logger passes a hardcoded zero failure count, so its `failed=0`
 does not establish zero MIR failures. Batch 29 emitted objects; batch 30 and
 later stopped entering native cache/codegen while MIR continued. The exact
 producer's persistent lowering-failure gate and CLI/environment go-to-end
 propagation are being checked. Earlier progress reports that inferred zero
 failures from the staged line are superseded by this MIR evidence.
+The exact producer environment key is `SIMPLE_NATIVE_GO_TO_END=1`.
 
 The local configuration requests 80 jobs. Native codegen in this old
 in-process route reports sequential execution; requested jobs are not proof
