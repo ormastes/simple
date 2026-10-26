@@ -87,17 +87,32 @@ class CacheSingleFlightV1:
     # Only the key's leader may complete it; nil completes a failed production
     # (waiters then produce in process). Returns false otherwise.
     me complete(key: text, request_id: text, blob: [u8]?) -> bool:
+        self.complete_flight(key, request_id, blob) >= 0
+
+    # As complete, but returns the completed flight id (-1 when `request_id`
+    # is not the key's leader). Retention rule: the leader produced the result
+    # and needs no copy, so only WAITERS keep one. A flight completed with no
+    # waiters retains nothing (no join can reach it any more: flight_of is
+    # cleared). With waiters, `participants` becomes the waiter count and the
+    # entries live until the last future() read, or until forget().
+    me complete_flight(key: text, request_id: text, blob: [u8]?) -> i64:
         if not self.flight_of.contains_key(key) or self.leader_of(key) != request_id:
-            return false
+            return -1
         val flight = self.flight_of[key]
         val id = "{flight}"
-        self.done[id] = blob
-        self.woken[id] = self.waiters[id]
+        val queue = self.waiters[id]
+        if queue.len() == 0:
+            self.participants.remove(id)
+        else:
+            self.done[id] = blob
+            self.woken[id] = queue
+            self.participants[id] = queue.len()
         self.waiters.remove(id)
         self.started_ms.remove(id)
         self.flight_of.remove(key)
         self.leaders.remove(key)
-        true
+        flight
+
 
     # The waiters to answer for a completed flight, exactly once.
     me take_woken(flight: i64) -> [text]:
@@ -108,13 +123,14 @@ class CacheSingleFlightV1:
         self.woken.remove(id)
         out
 
-    # Release a completed flight's retained result and participant count once
-    # every consumer has been answered (daemon waiters are answered through
-    # take_woken, never future(), so nothing else would ever drop them).
+    # Release a completed flight's retained entries for consumers that never
+    # call future() (daemon waiters are answered through take_woken; in-process
+    # users whose waiters re-read their own table). No-op when already released.
     me forget(flight: i64):
         val id = "{flight}"
         self.done.remove(id)
         self.participants.remove(id)
+        self.woken.remove(id)
 
     # Re-drive abandoned leaders: entries "<flight>\u0000<new leader request>"
     # for promoted waiters. A waiter-less abandoned flight is dropped.
