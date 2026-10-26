@@ -1,0 +1,112 @@
+# Native copy-frame prerequisite. Actual request/context/account identity,
+# independently checked ordinary parameter-copy sites, live-pin confinement,
+# checked allocation success before stores and all-exit cleanup are REQUIRED.
+# Bookkeeping below is correlation, never caller-authored SOURCE authority.
+# Native absence/unsupported profiles refuse; pure/hosted parity is unqualified.
+use compiler.common.source_region_context_v1.*
+
+@unsafe(reason: "compiler-private native copy owner observations", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_copy_bound_v1(words: i64, metric: i64) -> i64
+@unsafe(reason: "actual request account and checked plain-word parameter recipe required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_copy_prepare_v1(control: i64, generation: i64, words: i64,
+    work: i64, fields: i64, bytes: i64) -> i64
+@unsafe(reason: "actual retained control and successful read lease required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_copy_alloc_live_v1(control: i64, generation: i64, lease: i64) -> i64
+@unsafe(reason: "actual affine copy frame and retained request owner required", capabilities: [ffi, raw_ptr])
+extern fn rt_source_region_copy_cleanup_live_v1(control: i64, generation: i64, lease: i64) -> i64
+
+fn source_copy_context_live_v1(context: SourceRegionContextV1) -> Result<(), SourceRegionErrorV1>:
+    if context == nil or context.account == nil: return Err(SourceRegionErrorV1.Incomplete)
+    if not context.live_ or context.release_attempted_: return Err(SourceRegionErrorV1.Closed)
+    Ok(())
+
+impl SourceRegionContextV1:
+    @unsafe(reason: "actual same-account request and checked parameter-copy recipe required", capabilities: [ffi, raw_ptr])
+    me prepare_parameter_copy_v1(words: i64) -> Result<i64, SourceRegionErrorV1>:
+        source_copy_context_live_v1(self)?
+        if self.revoked_ or self.account.is_closed(): return Err(SourceRegionErrorV1.Closed)
+        if words <= 0: return Err(SourceRegionErrorV1.Incomplete)
+        if self.copy_frame_state_ != 0 or self.pending_lease_ != 0 or self.pending_ticket_ != 0:
+            return Err(SourceRegionErrorV1.Conflict)
+        # Reserve observations before reading provider dimensions. Then reserve
+        # the complete native prepare/allocation/cleanup/end envelope on THIS
+        # context's actual account before ReadBegin or native frame publication.
+        source_region_reserve_v1(self.account, 3)?
+        val work = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_bound_v1(words, 0))?
+        val fields = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_bound_v1(words, 1))?
+        val bytes = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_bound_v1(words, 2))?
+        # A missing provider's zero result is not successful preparation.
+        if work <= 0 or fields <= 0 or bytes <= 0: return Err(SourceRegionErrorV1.Incomplete)
+        source_region_reserve_v1(self.account, work, fields, bytes)?
+        val prepared = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_prepare_v1(self.native_control,
+                self.generation, words, work, fields, bytes))?
+        if prepared != 0: return Err(SourceRegionErrorV1.Incomplete)
+        self.copy_frame_state_ = 1
+        self.copy_cleanup_attempted_ = false
+        Ok(0)
+
+    @unsafe(reason: "actual checked copy site under the retained request lease required", capabilities: [ffi, raw_ptr])
+    me allocate_parameter_copy_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        source_copy_context_live_v1(self)?
+        if self.revoked_ or self.account.is_closed(): return Err(SourceRegionErrorV1.Closed)
+        if self.copy_frame_state_ != 1 or self.pending_lease_ <= 0:
+            return Err(SourceRegionErrorV1.Consumed)
+        # The native frame also consumes its allocator attempt before calloc.
+        # Keep an error cleanup-able without reusing the prepaid attempt.
+        self.copy_frame_state_ = 2
+        val allocated = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_alloc_live_v1(self.native_control,
+                self.generation, self.pending_lease_))?
+        if allocated <= 0: return Err(SourceRegionErrorV1.Incomplete)
+        # Strict positive untagged pointer, never a typed Struct conversion.
+        # Backend stores/publication require the actual Result Ok edge.
+        Ok(allocated)
+
+    @unsafe(reason: "actual retained request frame and all-exit cleanup proof required", capabilities: [ffi, raw_ptr])
+    me cleanup_parameter_copy_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        source_copy_context_live_v1(self)?
+        if self.copy_frame_state_ == 0 or self.copy_frame_state_ == 3: return Ok(0)
+        if self.copy_frame_state_ != 1 and self.copy_frame_state_ != 2:
+            return Err(SourceRegionErrorV1.Incomplete)
+        if self.copy_cleanup_attempted_:
+            # Explicit recovery only: ONE new attempt, no retry loop or refund.
+            # Native cleanup scans frozen raw capacity, never payload words;
+            # copy_bound(1,work) conservatively covers that cleanup for any
+            # positive field count under the admitted plain native64 profile.
+            source_region_reserve_v1(self.account, 1)?
+            val retry_work = unsafe(capabilities: [ffi, raw_ptr]):
+                source_region_value_v1(rt_source_region_copy_bound_v1(1, 0))?
+            if retry_work <= 0: return Err(SourceRegionErrorV1.Incomplete)
+            source_region_reserve_v1(self.account, retry_work)?
+        # Consume the first pre-reserved or freshly charged attempt BEFORE FFI.
+        # Any failure retains state and actual lease, so teardown must refuse.
+        self.copy_cleanup_attempted_ = true
+        val cleaned = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_value_v1(rt_source_region_copy_cleanup_live_v1(self.native_control,
+                self.generation, self.pending_lease_))?
+        if cleaned != 0: return Err(SourceRegionErrorV1.Incomplete)
+        if self.pending_lease_ == 0:
+            # ReadBegin never succeeded: cancel the actual prepared frame.
+            self.copy_frame_state_ = 0
+            self.copy_cleanup_attempted_ = false
+        else:
+            # Native frame/module pin remains until successful ReadEnd.
+            self.copy_frame_state_ = 3
+        Ok(0)
+
+@unsafe(reason: "actual same-account request and checked parameter-copy recipe required", capabilities: [ffi, raw_ptr])
+pub fn source_region_copy_prepare_v1(context: SourceRegionContextV1,
+        words: i64) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]): context.prepare_parameter_copy_v1(words)
+
+@unsafe(reason: "actual checked copy site under the retained request lease required", capabilities: [ffi, raw_ptr])
+pub fn source_region_copy_alloc_pinned_v1(context: SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]): context.allocate_parameter_copy_pinned_v1()
+
+@unsafe(reason: "actual retained request frame and all-exit cleanup proof required", capabilities: [ffi, raw_ptr])
+pub fn source_region_copy_cleanup_context_pinned_v1(context: SourceRegionContextV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]): context.cleanup_parameter_copy_pinned_v1()

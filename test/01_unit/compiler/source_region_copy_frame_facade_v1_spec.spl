@@ -1,0 +1,137 @@
+# Native common-facade controls, authored UNRUN. These use actual request,
+# account and native control births; unsafe fixture ownership is NOT generated
+# compiler confinement or parameter-copy/backend admission evidence.
+use std.spec.{describe, it, expect}
+use compiler.common.loop_resource_account_v1.*
+use compiler.common.source_region_context_v1.*
+use compiler.common.source_region_request_v1.{SourceRegionRequestV1}
+use compiler.common.source_region_copy_frame_v1.*
+use compiler.common.source_region_pinned_lifecycle_v1.*
+
+@unsafe(reason: "native fixture module owner", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "native fixture module owner", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "write owned fixture copy after actual allocation success", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(pointer: i64, offset: i64, value: i64)
+@unsafe(reason: "read still-owned fixture copy", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_i64(pointer: i64, offset: i64) -> i64
+@unsafe(reason: "actual allocation used only as stale-revision negative control", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(bytes: i64) -> i64
+@unsafe(reason: "retire actual negative-control allocation", capabilities: [ffi, raw_ptr])
+extern fn rt_free(pointer: i64)
+
+@unsafe(reason: "create actual request before entering native fixture scope", capabilities: [ffi, raw_ptr])
+fn copy_facade_fixture_v1() -> SourceRegionRequestV1:
+    val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+    val request = SourceRegionRequestV1.create(account).unwrap()
+    val started = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_begin()
+    expect(started).to_equal(true)
+    request
+
+@unsafe(reason: "cleanup actual request without granting compiler authority", capabilities: [ffi, raw_ptr])
+fn copy_facade_finish_v1(request: SourceRegionRequestV1):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        source_region_copy_cleanup_pinned_v1(request).unwrap()
+        source_region_read_end_pinned_v1(request).unwrap()
+        source_region_revoke_pinned_v1(request).unwrap()
+        source_region_release_pinned_v1(request).unwrap()
+    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    expect(ended).to_equal(true)
+
+fn copy_facade_error_v1(result: Result<i64, SourceRegionErrorV1>, expected: SourceRegionErrorV1):
+    match result:
+        case Err(error): expect(error).to_equal(expected)
+        case Ok(value): expect(value).to_equal(-99)
+
+describe "actual SOURCE copy-frame shared-account facade":
+    it "reserves the actual account before lease and publishes only a positive allocated copy":
+        val request = unsafe(capabilities: [ffi, raw_ptr]): copy_facade_fixture_v1()
+        val before = request.context.account.snapshot()
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_prepare_v1(request.context, 1).unwrap()
+        val prepared_lease = request.context.pending_lease_
+        val prepared_state = request.context.copy_frame_state_
+        val epoch = source_region_stamp_v1(request.context).unwrap()
+        val lease = source_region_read_begin_v1(request.context, epoch).unwrap()
+        val raw = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_alloc_pinned_v1(request.context).unwrap()
+        # Assertion helpers may allocate: keep them after the checked raw birth.
+        expect(prepared_lease).to_equal(0)
+        expect(prepared_state).to_equal(1)
+        expect(request.context.pending_lease_).to_equal(lease)
+        expect(raw).to_be_greater_than(0)
+        unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_write_i64(raw, 0, 37)
+        val scalar = unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_read_i64(raw, 0)
+        expect(scalar).to_equal(37)
+        val repeated = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_alloc_pinned_v1(request.context)
+        copy_facade_error_v1(repeated, SourceRegionErrorV1.Consumed)
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_cleanup_pinned_v1(request).unwrap()
+        expect(request.context.copy_frame_state_).to_equal(3)
+        expect(request.context.pending_lease_).to_equal(lease)
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_read_end_pinned_v1(request).unwrap()
+        expect(request.context.copy_frame_state_).to_equal(0)
+        expect(request.context.copy_cleanup_attempted_).to_equal(false)
+        val after = request.context.account.snapshot()
+        expect(after.work_used - before.work_used).to_be_greater_than(3)
+        expect(after.state_fields - before.state_fields).to_be_greater_than(0)
+        expect(after.output_bytes - before.output_bytes).to_be_greater_than(0)
+        unsafe(capabilities: [ffi, raw_ptr]): copy_facade_finish_v1(request)
+
+    it "cancels a prepared frame when the actual ReadBegin fails":
+        val request = unsafe(capabilities: [ffi, raw_ptr]): copy_facade_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_prepare_v1(request.context, 1).unwrap()
+        val epoch = source_region_stamp_v1(request.context).unwrap()
+        copy_facade_error_v1(source_region_read_begin_v1(request.context, epoch + 1), SourceRegionErrorV1.Stale)
+        expect(request.context.pending_lease_).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_cleanup_pinned_v1(request).unwrap()
+        expect(request.context.copy_frame_state_).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]): copy_facade_finish_v1(request)
+
+    it "retains failed cleanup and charges fresh work for an explicit recovery attempt":
+        val request = unsafe(capabilities: [ffi, raw_ptr]): copy_facade_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_prepare_v1(request.context, 1).unwrap()
+        val epoch = source_region_stamp_v1(request.context).unwrap()
+        val lease = source_region_read_begin_v1(request.context, epoch).unwrap()
+        val raw = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_alloc_pinned_v1(request.context).unwrap()
+        unsafe(capabilities: [ffi, raw_ptr]): rt_ptr_write_i64(raw, 0, 37)
+        # Corrupt only correlation for this negative control, then restore the
+        # genuine saved lease. It must never fabricate a successful native pin.
+        request.context.pending_lease_ = lease + 1
+        val refused = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_cleanup_pinned_v1(request)
+        copy_facade_error_v1(refused, SourceRegionErrorV1.Consumed)
+        expect(request.context.copy_frame_state_).to_equal(2)
+        expect(request.context.copy_cleanup_attempted_).to_equal(true)
+        val credit = request.context.pending_read_end_work_
+        val blocked = unsafe(capabilities: [ffi, raw_ptr]): source_region_read_end_pinned_v1(request)
+        copy_facade_error_v1(blocked, SourceRegionErrorV1.Conflict)
+        expect(request.context.pending_read_end_work_).to_equal(credit)
+        request.context.pending_lease_ = lease
+        val before = request.context.account.snapshot().work_used
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_cleanup_pinned_v1(request).unwrap()
+        expect(request.context.account.snapshot().work_used).to_be_greater_than(before + 1)
+        expect(request.context.copy_frame_state_).to_equal(3)
+        expect(request.cleanup_error).to_equal(Some(SourceRegionErrorV1.Consumed))
+        unsafe(capabilities: [ffi, raw_ptr]): copy_facade_finish_v1(request)
+
+    it "preserves cleanup ownership after a stale allocation and refuses another allocation attempt":
+        val request = unsafe(capabilities: [ffi, raw_ptr]): copy_facade_fixture_v1()
+        unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_prepare_v1(request.context, 1).unwrap()
+        val epoch = source_region_stamp_v1(request.context).unwrap()
+        source_region_read_begin_v1(request.context, epoch).unwrap()
+        val other = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(8)
+        expect(other).to_be_greater_than(0)
+        val failed = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_alloc_pinned_v1(request.context)
+        copy_facade_error_v1(failed, SourceRegionErrorV1.Stale)
+        val repeated = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_alloc_pinned_v1(request.context)
+        copy_facade_error_v1(repeated, SourceRegionErrorV1.Consumed)
+        unsafe(capabilities: [ffi, raw_ptr]): rt_free(other)
+        unsafe(capabilities: [ffi, raw_ptr]): copy_facade_finish_v1(request)
+
+    it "refuses exhausted account preparation without claiming a native frame":
+        val request = unsafe(capabilities: [ffi, raw_ptr]): copy_facade_fixture_v1()
+        val remaining = request.context.account.remaining(MirLoopResourceKindV1.Work)
+        request.context.account.reserve(remaining).unwrap()
+        val result = unsafe(capabilities: [ffi, raw_ptr]): source_region_copy_prepare_v1(request.context, 1)
+        copy_facade_error_v1(result, SourceRegionErrorV1.Capacity)
+        expect(request.context.copy_frame_state_).to_equal(0)
+        expect(request.context.pending_lease_).to_equal(0)
+        unsafe(capabilities: [ffi, raw_ptr]): copy_facade_finish_v1(request)

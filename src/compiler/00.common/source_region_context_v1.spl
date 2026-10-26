@@ -23,8 +23,13 @@ pub class SourceRegionContextV1:
     live_: bool = false
     revoked_: bool = false
     release_attempted_: bool = false
+    # Correlation only: 0 absent, 1 prepared, 2 allocation attempted,
+    # 3 native cleanup completed but ReadEnd still owns its lease/module pin.
+    copy_frame_state_: i64 = 0
+    copy_cleanup_attempted_: bool = false
 
     me close_guarded() -> Result<i64, SourceRegionErrorV1>:
+        if self.copy_frame_state_ != 0: return Err(SourceRegionErrorV1.Conflict)
         val work = source_region_prepare_v1(self.account, 10)?
         val result = source_region_value_v1(rt_source_region_close_v1(
             self.native_control, self.generation, work))?
@@ -34,6 +39,7 @@ pub class SourceRegionContextV1:
         Ok(result)
 
     me release_guarded() -> Result<i64, SourceRegionErrorV1>:
+        if self.copy_frame_state_ != 0: return Err(SourceRegionErrorV1.Conflict)
         val work = source_region_prepare_v1(self.account, 11)?
         val result = source_region_value_v1(rt_source_region_release_v1(
             self.native_control, self.generation, work))?
@@ -52,6 +58,8 @@ pub class SourceRegionContextV1:
         Ok(lease)
 
     me end_read_guarded(lease: i64) -> Result<i64, SourceRegionErrorV1>:
+        if self.copy_frame_state_ != 0 and self.copy_frame_state_ != 3:
+            return Err(SourceRegionErrorV1.Conflict)
         if lease <= 0 or lease != self.pending_lease_:
             return Err(SourceRegionErrorV1.Consumed)
         val work = source_region_prepare_v1(self.account, 6)?
@@ -59,6 +67,8 @@ pub class SourceRegionContextV1:
             self.native_control, self.generation, lease, work))?
         self.pending_lease_ = 0
         self.pending_read_end_work_ = 0
+        self.copy_frame_state_ = 0
+        self.copy_cleanup_attempted_ = false
         Ok(result)
 
     me begin_write(expected_epoch: i64, destination: i64, slot: i64) -> Result<i64, SourceRegionErrorV1>:
@@ -136,9 +146,9 @@ fn source_region_cleanup_credit_v1(account: MirLoopResourceAccountV1,
     Ok(work)
 
 pub fn source_region_create_v1(account: MirLoopResourceAccountV1) -> Result<SourceRegionContextV1, SourceRegionErrorV1>:
-    # Reserve the twelve-field facade and birth-only immutable generation read
+    # Reserve the fourteen-field facade and birth-only immutable generation read
     # before native creation. There is no fallible lookup after native birth.
-    source_region_reserve_v1(account, 109, 12, 96)?
+    source_region_reserve_v1(account, 127, 14, 112)?
     val revoke_work = source_region_cleanup_credit_v1(account, 1)?
     val release_work = source_region_cleanup_credit_v1(account, 3)?
     val work = source_region_prepare_v1(account, 1)?
