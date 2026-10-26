@@ -19,7 +19,7 @@
   (`compiler.mdsoc.transform.feature.<pair>.entity_view.<file>` is 8, so `<file>` was treated as an item of the
   directory module; probed: `...feature.ev3.hir_view` (6) resolves, `...feature.hir_to_mir.ev4.hir_view` (7) does not,
   independent of PascalCase vs snake_case); (2) each `entity_view/__init__.spl` was a bare `export X` that re-exports nothing.
-- Fix: `entity_view/__init__.spl` (all 8 transform pairs) now re-exports with a relative `export use .<file>.{Type}`
+- Fix: `entity_view/__init__.spl` (all 9 transform pairs) now re-exports with a relative `export use .<file>.{Type}`
   (mir_to_backend: MirDebugInfo, MirProgram); the 11 PascalCase files were `git mv`'d to snake_case
   (typed_ast_view.spl, hir_view.spl, ...) for consistency with sibling packages and the `exports { expose = [...] }`
   entries in each `transform/feature/*/__init__.spl` updated; transform_adapters_spec.spl now imports
