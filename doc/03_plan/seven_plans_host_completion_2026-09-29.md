@@ -19,15 +19,16 @@ written; the one open follow-up is the AOP match-shard driver wiring #4401.
 | 3. Typed DataFrame collections | nothing in range | TODO (unchanged) |
 | 4. mold-based MDSOC++ linker | linker-adjacent only: mswsock default lib (#4507), COMDAT instance dedup for non-LLVM backends (#4603) | TODO (unchanged) |
 | 5. Kernel/extension aspects, binary size | AOP pointcut-affected invalidation plan (#4511, `incremental_rebuild_plan_v1`); directory match-shard driver wiring #4401 still open. Provider/size work: none in range | IN_PROGRESS per 2026-10-11 note; cache part partial |
-| 6. Compile optimization | per-module lowering default, whole-program behind `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (#4525 #4547); objects streamed during MIR, batch 8 (#4566); HIR admission linear (#4557), validation blob removed (#4562), admission paths normalised once (#4552); cache scope published before shard spawn, HIR cache decoupled from `SIMPLE_FRONTEND_CACHE=0` (#4565); Stage 2 cache content-keyed (#4559); file-worker claim loop opt-in `SIMPLE_FILE_WORKERS=1` (#4576 #4584 #4585 #4588 P-A), incremental planner + object cache in the pool (P-E #4594), default-flip readiness + overlap receipt gate (P-F #4592); module-scoped mono with COMDAT, no global pass in the per-file lane (#4575 #4580 #4597 #4598 P-G3 #4603 P-D); reader-driven concrete generic instances (P-G1 #4591); cache budgets + admit-before-plan (#4506); docs/design (#4510 #4542 #4564 #4567). The true per-file lane is **not** the default (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`) ; evening update: P-G4..P-H merged (#4625 #4628 #4653 #4672 #4683), P-G7 #4696 open, see Progress 2026-10-25 (evening) below | IN_PROGRESS (Windows native lane); no end-to-end timing on a stage2 built from these sources yet |
+| 6. Compile optimization | per-module lowering default, whole-program behind `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (#4525 #4547); objects streamed during MIR, batch 8 (#4566); HIR admission linear (#4557), validation blob removed (#4562), admission paths normalised once (#4552); cache scope published before shard spawn, HIR cache decoupled from `SIMPLE_FRONTEND_CACHE=0` (#4565); Stage 2 cache content-keyed (#4559); file-worker claim loop and per-file default (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`, enabled 2026-10-26; explicit `SIMPLE_FILE_WORKERS=0` opts out); P-A..P-H and generic cache packages tracked in `compiler/cache/cache_perfile_plan_index_2026-10-25.md`. Native overlap qualification remains pending | IN_PROGRESS (Windows native lane); no default-lane overlap receipt yet |
 | 7. Profile-switchable containers | `CollectionFeedbackState` snapshot only (#4535, parse-side state move) | TODO (unchanged) |
 
 Cross-item decisions taken today (details and evidence in the index §2):
 persisted cache tiers are packed AST + TLDR, generic instances per concrete key,
 AOP weave bodies, objects, lib/bin — HIR stays in memory and there is no
 general MIR cache; `.spab` is the default parse-cache format with `.fpc` as the
-opt-out fallback; "per-file default" in guides means per-module lowering with
-streamed objects, while the barrier-free `--file-worker` lane stays opt-in;
+opt-out fallback; as of 2026-10-26, unset `SIMPLE_FILE_WORKERS` selects the
+barrier-free `--file-worker` lane, with explicit `SIMPLE_FILE_WORKERS=0` as
+the opt-out;
 mono is module-scoped always inside the file-worker lane and global outside it;
 shards, file workers and `--parse-fibers` children coexist, and in-process
 fibers wait on `ParseContext` stages 3-4; single-flight futures replace locks
@@ -57,10 +58,11 @@ E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
 reviewer (comment), pending merge. Merge release_phase3 into
 release/1.0.0: #4704 OPEN.
 
-**Default stays off:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`
-(`SIMPLE_FILE_WORKERS` default "0"). Flip waits on a proof run: stage3 -> stage3'
-built with P-H, then a per-file self-rebuild that yields an overlap receipt
-(`scripts/check/check-per-file-overlap-receipt.shs`). No such receipt exists yet.
+**Default enabled 2026-10-26:** unset `SIMPLE_FILE_WORKERS` selects the
+per-file worker pool; explicit `SIMPLE_FILE_WORKERS=0` opts out. Native
+qualification remains pending: build Stage 3 from these sources, self-rebuild
+through the default lane, and retain an overlap receipt from
+`scripts/check/check-per-file-overlap-receipt.shs`.
 
 **Stage evidence (in progress, not a retained measurement):** stage2 built cold
 from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The
