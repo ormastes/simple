@@ -7,12 +7,14 @@ use os.apps.smux.frame_snapshot.{smux_frame_validate, smux_frame_from_state}
 use os.apps.smux.vt_screen.{vt_new, vt_feed}
 use os.apps.smux.vt_capture.{vt_legacy_capture_lost}
 use os.apps.smux.input_queue.{pane_input_enqueue, pane_input_remaining,
-    pane_input_advance, pane_input_fail}
+    pane_input_advance, pane_input_fail, pane_input_enqueue_bytes_v1}
 use std.sosix.pty.{sosix_pty_open as pty_open,
     sosix_pty_spawn as pty_spawn, sosix_pty_write_some as pty_write_some,
     sosix_pty_input_pending as pty_input_pending, sosix_pty_read as pty_read,
     sosix_pty_close as pty_close, sosix_pty_is_running as pty_is_running,
-    sosix_pty_cleanup_pending as pty_cleanup_pending}
+    sosix_pty_cleanup_pending as pty_cleanup_pending,
+    sosix_pty_literal_bytes_supported_v1 as pty_literal_supported,
+    sosix_pty_write_literal_some_v1 as pty_write_literal_some}
 use std.sosix.process.{sosix_process_spawn_piped as process_spawn_piped,
     sosix_process_write_stdin_some as process_write_stdin_some,
     sosix_process_read_stdout as process_read_stdout,
@@ -136,6 +138,8 @@ fn _flush_input(pr0: PaneRecord, closing: bool) -> PaneRecord:
         return pr0
     if pr0.input.error != "" or not _has_child(pr0):
         return pr0
+    if pr0.input.literal_pty and (not _is_pty(pr0) or not pty_literal_supported()):
+        return pr0.with_input(pane_input_fail(pr0.input, "literal PTY input unsupported"))
     if _is_pty(pr0):
         val pending = pty_input_pending(pr0.pty_fd as i32)
         if pending.is_err():
@@ -145,7 +149,14 @@ fn _flush_input(pr0: PaneRecord, closing: bool) -> PaneRecord:
     val bytes = pane_input_remaining(pr0.input)
     if bytes.len() == 0:
         return pr0
-    val accepted = if _is_pty(pr0): pty_write_some(pr0.pty_fd as i32, bytes) else: process_write_stdin_some(pr0.child_pid, pr0.input.original, pr0.input.offset, 4096)
+    var accepted: i64 = 0
+    if pr0.input.literal_pty:
+        val written = pty_write_literal_some(pr0.pty_fd as i32, bytes)
+        if written.is_err():
+            return pr0.with_input(pane_input_fail(pr0.input, "literal PTY write failed"))
+        accepted = written.unwrap()
+    else:
+        accepted = if _is_pty(pr0): pty_write_some(pr0.pty_fd as i32, bytes) else: process_write_stdin_some(pr0.child_pid, pr0.input.original, pr0.input.offset, 4096)
     if accepted < 0:
         return pr0.with_input(pane_input_fail(pr0.input, "write failed: " + pr0.pane.id))
     val advanced = pane_input_advance(pr0.input, accepted)
@@ -289,6 +300,36 @@ pub fn pane_close_pty_state(before: ServiceState, closing: bool, session_id: tex
     commit = true
     state = state.replace_pane(idx, pr.with_pty(-1, -1))
     return PaneCloseUpdate(state: state, commit: commit, result: true)
+
+# Pure admission shared with the exact effect path; support is a mechanism fact,
+# not execution evidence. Synthetic unit records must only enter this function.
+pub fn pane_literal_admit_v1(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, supported: bool) -> Result<int, text>:
+    if closing: return Err("window or session is closing")
+    val si = before.find_session_idx(session_id)
+    val wi = before.find_window_idx(window_id)
+    val pi = _pane_idx(before, session_id, window_id, pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("unknown literal input owner")
+    if before.get_window(wi).session_id != session_id: return Err("foreign literal input window")
+    val pane = before.get_pane(pi)
+    if not _has_child(pane): return Err("pane has no child")
+    if not _is_pty(pane) or not supported: return Err("literal PTY input unsupported")
+    return Ok(pi)
+
+pub fn pane_send_bytes_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, data: [u8]) -> PaneTextUpdate:
+    val admitted = pane_literal_admit_v1(before, closing, session_id, window_id, pane_id, pty_literal_supported())
+    if admitted.is_err(): return PaneTextUpdate(state: before, commit: false, result: Err(admitted.unwrap_err()))
+    if data.len() == 0: return PaneTextUpdate(state: before, commit: false, result: Err("empty literal input"))
+    val idx = admitted.unwrap()
+    val pane = before.get_pane(idx)
+    val queued = pane_input_enqueue_bytes_v1(pane.input, data)
+    if queued.is_err(): return PaneTextUpdate(state: before, commit: false, result: Err(queued.unwrap_err()))
+    if not _child_alive(pane): return PaneTextUpdate(state: before, commit: false, result: Err("pane child is not running"))
+    val updated = _flush_input(pane.with_input(queued.unwrap()), closing)
+    val state = before.replace_pane(idx, updated)
+    if updated.input.error != "":
+        return PaneTextUpdate(state: state, commit: true, result: Err(updated.input.error))
+    # Accepted by bounded owner/native storage, not proof of child consumption.
+    return PaneTextUpdate(state: state, commit: true, result: Ok("accepted"))
 
 pub fn pane_send_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, text_input: text) -> PaneTextUpdate:
     var state = before

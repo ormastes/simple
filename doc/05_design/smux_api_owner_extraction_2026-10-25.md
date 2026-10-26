@@ -83,3 +83,28 @@ remain the regression suite. They were not rewritten to mirror the extraction,
 and no test, docgen, compiler or product process was launched for this change.
 Structured source fingerprints are in
 `doc/09_report/smux_api_owner_extraction_2026-10-25.sdn`.
+
+## Configured launch API composition, 2026-10-26
+
+The next source candidate moves six existing read-only queries into
+`service_queries.spl`, receiving an explicit ServiceState. Public list-session,
+list-client, list-window, active-window, list-pane and focused-pane signatures,
+ordering, filters and error text remain unchanged. These helpers hold no global
+state and perform no host access. The earlier 53-signature evidence remains
+historical; newly added operations are not covered by that old count.
+
+`smux_pane_spawn_configured` adds structured PtyLaunchV1 admission through the
+existing configured-launch owner. Revision and closing guards precede native
+effects. A failed spawn retaining a concrete pane fd records closing intent and
+publishes its returned state once. Provider-global pending cleanup without an
+issued pane token must not create pane-close authority. The API forwards launch
+fields unchanged; the typed adapter remains responsible for common request
+validation before mapping, and the platform provider validates native launch
+details. No shell reconstruction or pipe fallback is introduced.
+
+API size after extraction and the new entrypoint is 783 lines. Existing query
+regressions remain applicable; the real-child configured-launch spec is being
+extended to observe this public API rather than only its explicit-state owner.
+All execution, native cleanup and generated-manual gates remain NOT_RUN for
+this candidate. Network dispatch and full persistent-server admission are
+separate unfinished work.

@@ -1,6 +1,6 @@
 # Configured PTY composition with actual children
 
-REQ-CMUX-004/005/008. **AUTHORED / NOT_RUN: two cases, zero executed.** Child fixture `test/fixtures/coremux/configured_launch_child.spl` is **NOT_BUILT**. This manual is source-authored, not generated or execution-qualified.
+REQ-CMUX-004/005/008. **AUTHORED / NOT_RUN: three cases, zero executed.** The first two cases are the unchanged cycle-1 explicit-state scenarios. Child fixture `test/fixtures/coremux/configured_launch_child.spl` is **NOT_BUILT**. This manual is source-authored, not generated or execution-qualified.
 
 Run only with an admitted self-hosted producer, explicit library mode, linked configured PTY provider, and recorded producer/source/runtime/fixture hashes. The suite targets the Windows configured-provider composition; Shell syntax is explicitly Windows syntax. No missing capability or fixture becomes a skip/pass. No compiler or native helper was launched while authoring it.
 
@@ -13,4 +13,22 @@ Both cases attempt a second launch against the actual retained owner and require
 
 The suite queries arbitrary-PID presence through `sosix_process_exists` before and after cleanup. Presence is not exit status or stable process identity; PID reuse, provider-query ambiguity, retained native objects, and descendant/Job evidence remain explicit limits. A zero global pending count is necessary, not sufficient to qualify complete native resource cleanup. The fixture returns retained state even if cleanup is unresolved; the external guard must retain failure artifacts and terminate residual owned processes.
 
-No deterministic native allocation/close-failure injection is provided. Failed-close retention, failed-open quarantine attribution, provider errors, and incarnation-at-ceiling native behavior still require admitted failure-oriented execution evidence. These two scenarios alone cannot qualify all CoreMux commands, public API publication, listener admission, or capabilities.
+No deterministic native allocation/close-failure injection is provided. Failed-close retention, failed-open quarantine attribution, provider errors, and incarnation-at-ceiling native behavior still require admitted failure-oriented execution evidence. These scenarios alone cannot qualify all CoreMux commands, listener admission, or capabilities.
+
+## Cycle 2: public API integration scenario
+
+The third case creates only its own entropy-named session through `smux_create_session`; it never resets the shared service. It discovers the actual initial window/pane through public queries and launches the unchanged compiled fixture through `smux_pane_spawn_configured`. The authoritative `smux_owner_snapshot` must contain the returned real PID, nonnegative fd, initial child incarnation, and exact ancestry. A second public launch must refuse and preserve all three child identity fields.
+
+Public `smux_capture` must observe the fixture's computed-success marker. A real leased client is attached, observed in the authoritative attachment records, then detached by its exact token. The pane's PID/fd/incarnation and process presence must survive detach, while the exact attachment disappears and public capture still returns the child's content. The marker protocol is unchanged; entropy binds unique session/client names, not a child nonce-echo claim. Snapshots are read-only observations, never a second registry or a direct-state effect path.
+
+All fixture/behavior assertions occur after bounded checked `smux_kill_session` cleanup of the one owned session. Even absent fixture configuration, entropy failure, admission failure, or marker failure reaches that cleanup step before hard failure; none is a skip. The case checks retained first and any unexpected second PID for absence after cleanup, owner metadata removal, unchanged surrounding session/client counts, and global pending zero. No other session is killed and no direct-state helper performs the third case's launch/capture/teardown. Cycle 3 below adds explicit cleanup of captured owned tokens if an overwrite regression replaces the original registry entry.
+
+This is an authored **in-process live-child API** oracle. It does not exercise network framing, persistent-daemon restart, remote dispatch, full CoreMux capability admission, or completed native execution. Execution receipt requirements above apply unchanged.
+
+## Cycle 3: cleanup after an overwrite-refusal regression
+
+The API case now retains a first PTY token only after the authoritative record matches its positive returned PID and exact pane/session/window ancestry. A distinct second token is retained only after the same checks against the second returned positive PID; both tokens must fit the provider's nonnegative i32 handle domain. Tokens from unbound or foreign snapshots are never closed by this helper.
+
+After the public API session cleanup, a bounded generic `sosix_pty_close` retry loop discharges every captured owned token, including the first token if a broken overwrite implementation removed it from the service registry. The exclusive-provider precondition prevents intervening opens; already closed tokens use the configured owner's idempotent-close contract. There is no reconstructed service state, replacement controller, or publication from this test-only token list. Native launch and behavior observations still use the real public API.
+
+At most 200 rounds retain only false-close tokens, with 25 ms sleeps. Remaining tokens and the two known child PIDs are printed as cleanup diagnostics before any assertion, and unresolved tokens fail explicitly. A failed API cleanup remains a failure even if later token cleanup succeeds. PID absence and global pending zero are checked after both cleanup paths; they do not conceal a retained-token failure. The outer Job guard is still required for provider bugs or unbound ownership, not used as a substitute for discharging known tokens. All three native cases remain NOT_RUN; these are source changes, not observed cleanup success.

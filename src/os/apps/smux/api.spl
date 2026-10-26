@@ -23,6 +23,10 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.service_queries.{service_list_sessions, service_list_clients,
+    service_list_windows, service_active_window, service_list_panes, service_focused_pane}
+use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
+use std.sosix.pty.{PtyLaunchV1}
 use os.apps.smux.client_context_service.{client_context_reconcile}
 use os.apps.smux.window_metadata_service.{rename_window_state}
 use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_new,
@@ -206,12 +210,7 @@ pub fn smux_create_session(name: text) -> MuxSession:
     return session
 
 pub fn smux_list_sessions() -> [MuxSession]:
-    var result: [MuxSession] = []
-    var i = 0
-    while i < _svc.session_count:
-        result.push(_svc.get_session(i))
-        i = i + 1
-    return result
+    return service_list_sessions(_svc)
 
 pub fn smux_session_closing(session_id: text) -> bool:
     for pending in _closing_sessions:
@@ -347,8 +346,7 @@ pub fn smux_detach(client_id: text) -> bool:
     return true
 
 pub fn smux_list_clients() -> [MuxClientAttachment]:
-    val clients = [_svc.c0, _svc.c1, _svc.c2, _svc.c3]
-    return clients[0:_svc.client_count]
+    return service_list_clients(_svc)
 
 pub fn smux_detach_from(session_id: text, client_id: text) -> bool:
     val idx = _svc.find_client_idx(client_id)
@@ -423,14 +421,7 @@ pub fn smux_rename_window(session_id: text, window_id: text, name: text) -> Resu
     return Ok(window)
 
 pub fn smux_list_windows(session_id: text) -> [MuxWindow]:
-    var result: [MuxWindow] = []
-    var i = 0
-    while i < _svc.window_count:
-        val w = _svc.get_window(i)
-        if w.session_id == session_id:
-            result.push(w)
-        i = i + 1
-    return result
+    return service_list_windows(_svc, session_id)
 
 pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
     if not smux_configuration_writable(): return false
@@ -448,23 +439,12 @@ pub fn smux_focus_window(session_id: text, window_id: text) -> bool:
     return true
 
 pub fn smux_active_window(session_id: text) -> Result<MuxWindow, text>:
-    for w in smux_list_windows(session_id):
-        if w.is_active:
-            return Ok(w)
-    return Err("no active window in session: " + session_id)
+    return service_active_window(_svc, session_id)
 
 # Pane management
 
 pub fn smux_list_panes(session_id: text, window_id: text) -> [MuxPane]:
-    var result: [MuxPane] = []
-    var i = 0
-    while i < _svc.pane_count:
-        val pr = _svc.get_pane(i)
-        if (pr.pane.session_id == session_id and
-            pr.pane.window_id == window_id):
-            result.push(pr.pane)
-        i = i + 1
-    return result
+    return service_list_panes(_svc, session_id, window_id)
 
 pub fn smux_split_pane(session_id: text, window_id: text, pane_id: text, direction: text) -> Result<MuxPane, text>:
     return smux_split_pane_sized(session_id, window_id, pane_id, direction, MuxSplitSizeV1.Equal)
@@ -565,13 +545,7 @@ pub fn smux_toggle_zoom(session_id: text, window_id: text, pane_id: text) -> Res
     return Ok(zoom)
 
 pub fn smux_focused_pane(session_id: text, window_id: text) -> Result<MuxPane, text>:
-    var i = 0
-    while i < _svc.pane_count:
-        val pr = _svc.get_pane(i)
-        if pr.pane.session_id == session_id and pr.pane.window_id == window_id and pr.focus:
-            return Ok(pr.pane)
-        i = i + 1
-    return Err("no focused pane in window: " + window_id)
+    return service_focused_pane(_svc, session_id, window_id)
 
 # Native provider resizing precedes the corresponding VT/service commit.
 # Piped/no-child panes permit grid-only changes; owned PTYs require resizing.
@@ -601,6 +575,15 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
     if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_spawn_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command_line)
+    if updated.cleanup_pending and updated.commit:
+        _closing_panes.push(PaneClosePending(session_id: session_id, window_id: window_id, pane_id: pane_id))
+    if updated.commit: _svc = _publish(updated.state)
+    return updated.result
+
+# Structured launch uses the existing pane geometry and selected Sosix owner.
+pub fn smux_pane_spawn_configured(session_id: text, window_id: text, pane_id: text, launch: PtyLaunchV1) -> Result<i64, text>:
+    if not smux_configuration_writable(): return Err("service revision authority exhausted")
+    val updated = pane_spawn_configured_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, launch)
     if updated.cleanup_pending and updated.commit:
         _closing_panes.push(PaneClosePending(session_id: session_id, window_id: window_id, pane_id: pane_id))
     if updated.commit: _svc = _publish(updated.state)

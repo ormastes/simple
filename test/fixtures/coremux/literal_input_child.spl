@@ -1,0 +1,52 @@
+# NOT_BUILT. Actual console child; public selected console owner, no raw extern.
+# UTF8 terminal effects are distinct from arbitrary byte channel acceptance.
+use std.sys.terminal_console.{open, read, write, close, cleanup}
+use std.sosix.host.{sosix_get_cli_args}
+use std.sosix.stdio.{sosix_println}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+
+fn main() -> i64:
+    val args = sosix_get_cli_args()
+    if args.len() != 1: return 20
+    val mode = args[0]
+    if mode != "literal" and mode != "paste" and mode != "channel": return 21
+    val opened = open()
+    if opened.is_err():
+        val _cleanup = cleanup()
+        return 22
+    val handle = opened.unwrap()
+    var valid = write(handle, "LITERAL_CHILD_READY\r\n").is_ok()
+    var received = ""
+    val begin = sosix_time_now_monotonic_ms()
+    var now = begin
+    var attempts = 0
+    while valid and attempts < 400 and begin >= 0 and now >= begin and now - begin < 10000:
+        if mode != "channel":
+            val input = read(handle, 512)
+            if input.is_err():
+                valid = false
+            else:
+                received = received + input.unwrap()
+                if received.len() > 1024: valid = false
+                if received.ends_with("\r"): break
+        sosix_sleep_ms(25)
+        attempts = attempts + 1
+        now = sosix_time_now_monotonic_ms()
+    val expected = if mode == "paste": "PASTE 한글😀\r" else: "LITERAL 한글😀\r"
+    val observed = valid and mode != "channel" and received == expected
+    # Always restore the actual child console before emitting the oracle.
+    var released = close(handle)
+    attempts = 0
+    while not released and attempts < 80:
+        sosix_sleep_ms(25)
+        released = close(handle)
+        attempts = attempts + 1
+    val global_clean = cleanup()
+    if not released or not global_clean: return 23
+    if mode == "channel": return 0
+    if not observed: return 24
+    # Absent from launch argv and bytes sent by the parent. Prefix is computed.
+    sosix_println("LITERAL_EFFECT_" + (6 * 7).to_text())
+    # Parent observes the same real process and performs checked teardown.
+    for attempt in 0..200: sosix_sleep_ms(100)
+    return 0
