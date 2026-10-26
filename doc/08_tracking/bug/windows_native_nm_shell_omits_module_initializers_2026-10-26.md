@@ -1,6 +1,6 @@
 # Windows native symbol discovery omits module initialization
 
-Status: source repair prepared; verification BLOCKED at the six-cycle limit.
+Status: source repair prepared; verification blocked by the immutable P2 producer ABI.
 
 The actual Phase 2 producer SHA-256
 `13d73267e690b2cdd46438315e2bfe6d4d6c0c37bcfc15591a921fc9728b270b`
@@ -64,7 +64,7 @@ quiescent with exit 1 (peak RSS 1164888 KiB). There is no LLVM test binary.
 A separate 30-second bounded LLDB attempt could not start because of missing
 DLLs (`0xc0000135`); it executed no initializer and proves no repaired behavior.
 
-No further repair cycle was started. Resume needs a genuine producer containing
+At that stop, no further repair cycle was started. The recorded resume needed a genuine producer containing
 `2add6be09ff` or a working pinned LLVM tool-discovery lane. Then execute the exact
 process-call regression (plain/spaced/missing object), verify the generated
 entry invokes its discovered initializers, and run the six-assertion arithmetic
@@ -72,3 +72,56 @@ global fixture plus the original HIR codec probe. A focused before/after
 performance comparison, full compiler/core smoke checks, and merged PR remain
 pending. The authored native fixture is UNRUN. There is no verification PASS,
 P3 compiler, cache admission, publication, or release claim.
+
+## Explicitly renewed object-generation diagnostic
+
+After the six-cycle stop, the user explicitly authorized one additional bounded
+attempt to start object generation. No historical attempt was discarded or
+renumbered. The material change was a different, healthy `llc`, not the mere
+presence of the prior MSYS executable. MSYS llc/clang/lld still fail to load with
+`0xc0000135`. LLVM 18.1.8 `llc.exe` at
+`C:/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin` runs successfully;
+its SHA-256 is
+`7d900ddc6e17ebc4438a39589e4319cc80fc019ae2f189fb52afd5370f1948e7`.
+The executable package name does not select MSVC ABI: the target remains
+`x86_64-pc-windows-gnu`, with the pinned MinGW Clang/LLD 23.1.2 first on PATH.
+
+An independent envelope review admitted only this diagnostic: all 55 source
+files and the clean project HEAD were pinned, argv/tool hashes enforced,
+physical memory and free commit measured through the exact Win32 APIs, and the
+600-second watchdog/8 MiB log bound retained. A 30-second tool preflight emitted
+valid AMD64 COFF. No warning, source/cache integrity, or diagnostic checker
+bypass was required.
+
+Attempt 7 then completed real P2 LLVM compilation and linking, with 54 user
+object files in the actual link argv. The guard exited zero and quiescent;
+peak RSS was 2038704 KiB and peak job commit 2050868 KiB. The executable hashes
+to `5cfcee30fad1fff8700593a0e184aa9c77a01a7465f7d1cb11053e7cb703c938`.
+These are focused diagnostic objects, not full P3 compiler objects.
+
+Executing that binary failed the first positive process assertion. Both plain
+and spaced object paths return status -1, empty stdout, and `missing command`.
+Unlike the Cranelift capacity-4 result, the tuple is well formed. Disassembly of
+`_process_run_bounded_raw` at `0x140001890` shows the call at `0x140001949`
+passing only four words to `rt_process_run_bounded_tuple`: command pointer,
+argument-array pointer, timeout, and output cap. The actual C facade requires
+five words, including command length. Thus the argument-array pointer becomes
+`cmd_len`, and the process owner rejects it before invoking nm.
+
+Current release already repairs that split in `8f13b29892d`
+(`text_extern_abi.spl`). A rebuilt producer must contain that fix as well as
+`2add6be09ff` before the process regression can qualify this nm call-site repair.
+The source fixes were not duplicated, and no subsequent attempt was started.
+
+The original POSIX shell command and direct pinned nm also produced identical
+symbol output and exit zero for the actual object path containing spaces under
+Windows Git Bash. This is POSIX-shell transport evidence, not a native Unix
+compiler test. Native Unix verification remains unrun.
+
+Retained receipts, source/tool pins, actual link argv, executable, disassembly,
+and POSIX-shell parity evidence are under
+`C:/dev/simple-hir-nm-helper-astra-20261026`, especially `compile7`, `run7`, and
+`evidence/attempt7-process-bounded-disassembly.txt`. PR #4862 remains draft;
+actual fixed startup, original codec regression, performance comparison, and
+full compiler qualification remain pending. No P3, release, or admission PASS
+is claimed.
