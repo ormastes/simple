@@ -741,12 +741,12 @@ void* rt_realloc(void* ptr, int64_t size) {
 /* Shared canonical disposal after ownership/registrations were consumed. The
  * private SOURCE frame may use this only for its exact never-struct-registered
  * raw birth. No independent libc-free implementation is permitted. */
-static void rt_dispose_unregistered_raw_v1(uint8_t* ptr) {
-    if (rt_mem_guard_is_slot(ptr)) {
+static void rt_dispose_unregistered_raw_v1(uint8_t* ptr, int guarded, int hardened) {
+    if (guarded) {
         rt_mem_guard_free_sampled(ptr);
         return;
     }
-    if (rt_mem_harden_enabled()) {
+    if (hardened) {
         uint8_t* base = ptr - RT_MEM_HARDEN_HEADER_BYTES;
         size_t size = *(size_t*)base;
         memset(ptr, RT_MEM_HARDEN_POISON_BYTE, size);
@@ -761,9 +761,11 @@ void rt_free(uint8_t* ptr) {
     if (!rt_transient_raw_owner_thread_allows() || rt_transient_raw_copy_is_pinned_v1(ptr)) return;
 #endif
     rt_struct_alloc_unregister(ptr);
-    if (!rt_mem_guard_is_slot(ptr) && rt_mem_harden_enabled() && rt_mem_quarantine_contains(ptr)) return;
+    int guarded=rt_mem_guard_is_slot(ptr);
+    int hardened=!guarded && rt_mem_harden_enabled();
+    if (hardened && rt_mem_quarantine_contains(ptr)) return;
     rt_transient_raw_erase(ptr);
-    rt_dispose_unregistered_raw_v1(ptr);
+    rt_dispose_unregistered_raw_v1(ptr,guarded,hardened);
 }
 
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {

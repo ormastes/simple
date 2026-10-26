@@ -100,7 +100,7 @@ int64_t rt_source_region_copy_alloc_live_v1(int64_t control,int64_t generation,i
                 /* Registration rollback uses the canonical allocation branch.
                  * The module/raw entry is ours, never a struct registry birth. */
                 rt_transient_raw_owner_unregister(raw);
-                rt_dispose_unregistered_raw_v1(raw);
+                rt_dispose_unregistered_raw_v1(raw,0,0);
                 r->copy.raw=0; error=SR_INCOMPLETE;
             } else {
                 r->copy.state=SR_COPY_LIVE;
@@ -132,7 +132,7 @@ int64_t rt_source_region_copy_cleanup_live_v1(int64_t control,int64_t generation
             if (!r->copy.raw || rt_transient_raw_copy_claim_v1((void*)r->copy.raw,
                 r->copy.words*8,(int64_t)r->copy.module,(int64_t)r->copy.raw_capacity)) error=SR_STALE;
             else {
-                rt_dispose_unregistered_raw_v1((uint8_t*)r->copy.raw);
+                rt_dispose_unregistered_raw_v1((uint8_t*)r->copy.raw,0,0);
                 r->copy.raw=0;
             }
         }
