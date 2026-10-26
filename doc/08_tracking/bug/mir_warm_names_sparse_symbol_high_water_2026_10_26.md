@@ -35,7 +35,7 @@ The new focused executable spec uses actual SymbolTable registration, checks
 two entries with high-water1000000001, exact ascending visitation versus the
 old dense oracle on a bounded fixture, key3, empty/duplicate owners, negative
 and out-of-range keys, unchanged dictionary size/high-water and canonical memo
-results. Three scenarios remain authored UNRUN without a qualified general
+results. Four scenarios remain authored UNRUN without a qualified general
 self-hosted CLI. No seed fallback, heavy job or live process attachment.
 
 The bounded target history/symbol check found the same high-water loop and no
