@@ -1,0 +1,37 @@
+# Accessor forwarding for field reads (REQ-SELFHOST-ACCESSOR-001).
+# `recv.x` with no real field `x` lowers to `get_x()`, `is_x()` or `x()` on a
+# fully-known owner type (seed parity). The undefined-field hard error is
+# opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1, read once.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+var _strict_field_forwarding_state: i64 = 0
+
+fn strict_field_forwarding_enabled() -> bool:
+    if _strict_field_forwarding_state == 0:
+        _strict_field_forwarding_state = if (env_get_opt("SIMPLE_STRICT_FIELD_FORWARDING") ?? "") == "1": 1 else: 2
+    _strict_field_forwarding_state == 1
+
+# Test hook: forget the cached flag so the next read re-queries the environment.
+fn strict_field_forwarding_reset():
+    _strict_field_forwarding_state = 0
+
+impl HirLowering:
+    me lower_accessor_read(base: HirExpr, name: text, owner_id: i64, span: Span) -> HirExpr?:
+        if owner_id < 0:
+            return nil
+        val candidates = ["get_" + name, "is_" + name, name]
+        for candidate in candidates:
+            if self.symbols.lookup_method_in_type_raw(owner_id, candidate).?:
+                return HirExpr(
+                    kind: HirExprKind.MethodCall(base, candidate, [], MethodResolution.Unresolved),
+                    has_type_: false,
+                    type_: nil,
+                    span: span)
+        if strict_field_forwarding_enabled():
+            self.error("no field `{name}` on type and no get_/is_ accessor", span)
+        nil

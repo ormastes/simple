@@ -1,0 +1,92 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that HIR lowering forwards a field read `recv.x` with no real field `x` to
+# get_x() / is_x() / x(), that a real field wins, and that the undefined-field
+# error is opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1.
+# @req REQ-SELFHOST-ACCESSOR-001
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{env_set_process}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.{strict_field_forwarding_reset}
+
+val DECLS = "class Temp:\n" +
+    "    level: i64\n" +
+    "    me get_celsius() -> i64:\n" +
+    "        1\n" +
+    "    me is_hot() -> bool:\n" +
+    "        true\n" +
+    "    me get_level() -> i64:\n" +
+    "        99\n" +
+    "    me size() -> i64:\n" +
+    "        3\n"
+
+fn expr_tag(e: HirExpr) -> text:
+    match e.kind:
+        case HirExprKind.MethodCall(_, method, args, _): "method:{method}/{args.len()}"
+        case HirExprKind.Field(_, name, _): "field:{name}"
+        case _: "other"
+
+fn probe_tail(probe_body: text, flag: text) -> [text]:
+    # Returns [tail tag, error count, joined messages].
+    env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", flag)
+    strict_field_forwarding_reset()
+    val src = DECLS + "\nfn probe(t: Temp) -> i64:\n    " + probe_body + "\n"
+    val parsed = parse_full_frontend(src, "testdata/accessor_fwd.spl", "accessor_fwd", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/accessor_fwd.spl")
+    val hir = lowering.lower_module(parsed)
+    var tag = "missing"
+    for fn_ in hir.functions.values():
+        if fn_.name == "probe":
+            tag = "other"
+            if fn_.body.has:
+                tag = expr_tag(fn_.body.value)
+            else:
+                val n = fn_.body.stmts.len()
+                if n > 0:
+                    match fn_.body.stmts[n - 1].kind:
+                        case HirStmtKind.Expr(ex): tag = expr_tag(ex)
+                        case _: ()
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + "\n"
+    env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "")
+    strict_field_forwarding_reset()
+    [tag, "{lowering.errors.len()}", msgs]
+
+describe "HIR accessor forwarding for field reads":
+    it "forwards recv.celsius to get_celsius()":
+        step("given no field celsius but get_celsius when reading t.celsius then a get_celsius call is lowered")
+        val r = probe_tail("t.celsius", "")
+        expect(r[0]).to_equal("method:get_celsius/0")
+
+    it "forwards recv.hot to is_hot()":
+        step("given no field hot but is_hot when reading t.hot then an is_hot call is lowered")
+        val r = probe_tail("t.hot", "")
+        expect(r[0]).to_equal("method:is_hot/0")
+
+    it "forwards recv.size to the no-paren method size()":
+        step("given no field size but method size when reading t.size then a size call is lowered")
+        val r = probe_tail("t.size", "")
+        expect(r[0]).to_equal("method:size/0")
+
+    it "lets a real field win over get_level":
+        step("given field level and get_level when reading t.level then the field is read")
+        val r = probe_tail("t.level", "")
+        expect(r[0]).to_equal("field:level")
+
+    it "leaves an unknown field unchanged with the flag off":
+        step("given unknown field when flag is off then the untyped field read remains without error")
+        val r = probe_tail("t.nope", "")
+        expect(r[0]).to_equal("field:nope")
+        expect(r[2].contains("no field `nope`")).to_equal(false)
+
+    it "reports an unknown field as an error with the flag on":
+        step("given unknown field when SIMPLE_STRICT_FIELD_FORWARDING=1 then a no-field error is reported")
+        val r = probe_tail("t.nope", "1")
+        expect(r[2].contains("no field `nope`")).to_equal(true)

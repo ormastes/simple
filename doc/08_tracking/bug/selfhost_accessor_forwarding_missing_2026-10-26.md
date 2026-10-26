@@ -37,3 +37,9 @@ ordinary calls). Plus spec wiring.
 
 ## Known unsupported
 `obj.x += 1` on a forwarded name is unsupported (seed too); must error clearly.
+
+## Progress 2026-10-27: PR1 (read forwarding) implemented
+- `_Expressions/accessor_forwarding.spl` (`lower_accessor_read`) hooked at the end of the `ExprKind.Field` arm in `expression_core.spl`, after the real-field lookup. Order: real field, `get_x`, `is_x`, `x()`; owner must be known (>=0) else today's untyped Field is kept.
+- Undefined-field error: opt-in `SIMPLE_STRICT_FIELD_FORWARDING=1`, read once (cached); default off keeps old behaviour.
+- Spec `test/01_unit/compiler/hir/accessor_getter_forwarding_spec.spl` (REQ-SELFHOST-ACCESSOR-001): red 2/6 (reads not forwarded, strict flag no-op), green 6/6.
+- Gaps: bootstrap flat path (module_declarations_bootstrap.spl:561) not mirrored; forwarded call is untyped (no return type); census of strict-mode hits in src/compiler not run; setter/alias PR2-4 untouched.
