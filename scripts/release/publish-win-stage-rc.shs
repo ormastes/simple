@@ -1,0 +1,56 @@
+#!/bin/sh
+# Publish a locally built Windows bootstrap-stage compiler (stage2/stage3) as a
+# numbered rc prerelease, after a fail-closed hello-world object gate.
+#
+# Usage: sh scripts/release/publish-win-stage-rc.shs <stage-exe> <stage2|stage3> <commit> [--dry-run]
+#
+# The asset is the stage compiler itself (bootstrap CLI: compile/native-build
+# only), never the Rust seed. Tag = rc-1.0.0-rc.<highest existing + 1>.
+set -u
+exe=${1:?stage exe path}; stage=${2:?stage2|stage3}; commit=${3:?source commit}; mode=${4:-}
+case "$stage" in stage2|stage3) ;; *) echo "FAIL — stage must be stage2 or stage3"; exit 2 ;; esac
+[ -f "$exe" ] || { echo "ERROR — nothing was checked: $exe missing"; exit 2; }
+case "$(basename "$exe")" in *seed*) echo "FAIL — refusing seed binary"; exit 1 ;; esac
+
+work=$(mktemp -d)
+printf 'fn main():\n    print "hello world"\n' > "$work/hello.spl"
+"$exe" native-build "$work/hello.spl" --emit-object -o "$work/hello.o" > "$work/gate.log" 2>&1
+rc=$?
+size=0; [ -f "$work/hello.o" ] && size=$(wc -c < "$work/hello.o" | tr -d ' ')
+cat "$work/gate.log"
+if [ "$rc" -ne 0 ] || [ "$size" -le 0 ]; then
+  echo "FAIL — hello-world object gate: rc=$rc obj_bytes=$size"; exit 1
+fi
+gate="native-build --emit-object hello.spl: rc=0, hello.o $size bytes"
+"$exe" native-build "$work/hello.spl" -o "$work/hello.exe" > "$work/link.log" 2>&1
+lrc=$?
+if [ "$lrc" -eq 0 ] && [ -f "$work/hello.exe" ]; then
+  out=$("$work/hello.exe" 2>&1); orc=$?
+  gate="$gate; link+run: rc=$orc output='$out'"
+else
+  gate="$gate; link (native-build exe) rc=$lrc (not required)"
+fi
+echo "gate: $gate"
+
+last=$(gh release list -L 200 --json tagName -q '.[].tagName' | sed -n 's/^rc-1\.0\.0-rc\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
+tag="rc-1.0.0-rc.$(( ${last:-0} + 1 ))"
+asset="$work/simple-$stage-${tag#rc-}-windows-x86_64.exe"
+cp "$exe" "$asset"
+hash=$(sha256sum "$asset" | cut -d' ' -f1)
+( cd "$work" && sha256sum "$(basename "$asset")" > "$(basename "$asset").sha256" )
+cat > "$work/notes.md" <<EOF
+Windows x86_64 $stage bootstrap compiler (bootstrap CLI: compile/native-build only; NOT the full CLI).
+
+- source commit: $commit
+- built path: $exe
+- sha256: $hash
+- gate: $gate
+EOF
+echo "tag=$tag asset=$(basename "$asset") sha256=$hash"
+[ "$mode" = "--dry-run" ] && { echo "PASS — dry run, not published"; exit 0; }
+gh release create "$tag" --prerelease --target "$commit" \
+  --title "$tag (win $stage)" --notes-file "$work/notes.md" \
+  "$asset" "$asset.sha256"
+crc=$?
+[ "$crc" -eq 0 ] || { echo "FAIL — gh release create rc=$crc"; exit 1; }
+echo "PASS — published $tag"
