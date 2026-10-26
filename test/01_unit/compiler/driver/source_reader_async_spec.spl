@@ -1,0 +1,126 @@
+"""
+## Purpose and audience
+Purpose: Verify the async SourceReader counterpart (read_src_async /
+update_tldr_async) and that FileFiber v1's async parse path parks a fiber at
+PARSE until the reader's future resolves.
+Audience: compiler-driver and build-runner engineers.
+## Compatibility and limitations
+Uses a fake SourceReader whose update_tldr_async resolves on the 2nd poll.
+Plan: doc/03_plan/compiler/cache/pseudo_immutable_cache_impl_plan.md section 4 step 1.
+"""
+use std.spec
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, file_fiber_run_v1, file_fiber_run_async_v1, file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1}
+use compiler.driver.cache.source_reader_v1.{SourceReader, file_source_reader_v1, await_now}
+use compiler.frontend.parser_types.{ParserModule}
+
+class SlowReader:
+    tag: text
+
+impl SourceReader for SlowReader:
+    fn read_src(path: text) -> ParserModule?:
+        nil
+    fn read_tldr(path: text) -> text:
+        "tldr:" + path
+    fn update_src(path: text) -> bool:
+        true
+    fn update_tldr(path: text) -> text:
+        ""
+    fn update_tldr_async(path: text) -> Future<text>:
+        # pending now; the spec completes it after the run's first poll, so it
+        # resolves on the 2nd poll
+        Future.pending()
+
+class ReadyReader:
+    tag: text
+
+impl SourceReader for ReadyReader:
+    fn read_src(path: text) -> ParserModule?:
+        nil
+    fn read_tldr(path: text) -> text:
+        "tldr:" + path
+    fn update_src(path: text) -> bool:
+        true
+    fn update_tldr(path: text) -> text:
+        ""
+
+fn _imports(source: text) -> [text]:
+    []
+
+fn _path_of_key(key: text) -> text:
+    "ext/{key}.spl"
+
+fn _entries() -> [FileFiberEntryV1]:
+    [FileFiberEntryV1(module_key: "p", path: "virtual/p.spl", est_bytes: 5, content: "fn p(): 0\n"),
+        FileFiberEntryV1(module_key: "q", path: "virtual/q.spl", est_bytes: 5, content: "fn q(): 0\n")]
+
+describe "SourceReader async":
+    it "FileReader async result awaits to the same value as sync":
+        val r = file_source_reader_v1(".no_tldr_root")
+        expect(await_now(r.update_tldr_async("does/not/exist.spl"))).to_equal(r.update_tldr("does/not/exist.spl"))
+        val src = await_now(r.read_src_async("does/not/exist.spl"))
+        expect(src == nil).to_be(true)
+
+    it "a future resolving on the 2nd poll parks each fiber once, then finishes identically":
+        val sync_run = file_fiber_run_v1(_entries(), SlowReader(tag: "slow"), _imports, _path_of_key, [0], 100)
+        var run = file_fiber_begin_v1(_entries(), [0], 100)
+        val reader = SlowReader(tag: "slow")
+        var rounds = 0
+        while not file_fiber_finished_v1(run) and rounds < 50:
+            rounds = rounds + 1
+            run.advance(_imports)
+            for i in run.take_parse_requests():
+                run.park_async(i, reader.update_tldr_async(run.entries[i].path))
+            # round N resolves the futures registered in round N-1 (2nd poll)
+            for d in run.poll_async():
+                run.parse_done(d.index, reader.read_tldr(run.entries[d.index].path), d.err)
+            # the run holds the pending futures; resolve them now (2nd poll)
+            for k in 0..run.async_fut.len():
+                val _done = run.async_fut[k].complete("")
+        file_fiber_end_v1(run)
+        expect(run.async_parks).to_equal(2)
+        expect(run.error[0]).to_equal("")
+        expect(run.error[1]).to_equal("")
+        expect(run.done_order.len()).to_equal(2)
+        expect(run.tldr[0]).to_equal(sync_run.tldr[0])
+        expect(run.tldr[1]).to_equal(sync_run.tldr[1])
+        # a delayed parse legitimately shifts which fiber finishes first, so
+        # the delayed run is compared as a set; the resolved-at-once run below
+        # must match the sync order exactly
+        expect(run.done_order.contains(0)).to_be(true)
+        expect(run.done_order.contains(1)).to_be(true)
+
+    it "an already-resolved async reader gives the sync done_order and tldr":
+        val sync_run = file_fiber_run_v1(_entries(), SlowReader(tag: "slow"), _imports, _path_of_key, [0], 100)
+        val ready_run = file_fiber_run_async_v1(_entries(), ReadyReader(tag: "ready"), _imports, _path_of_key, [0], 100)
+        expect(ready_run.async_parks).to_equal(0)
+        expect(ready_run.done_order.len()).to_equal(2)
+        expect(ready_run.done_order[0]).to_equal(sync_run.done_order[0])
+        expect(ready_run.done_order[1]).to_equal(sync_run.done_order[1])
+        expect(ready_run.tldr[0]).to_equal(sync_run.tldr[0])
+        expect(ready_run.tldr[1]).to_equal(sync_run.tldr[1])
+
+    it "pending async parses count as in flight, so the budget is never over-admitted":
+        var entries: [FileFiberEntryV1] = []
+        for i in 0..4:
+            entries = entries.push(FileFiberEntryV1(module_key: "b{i}", path: "virtual/b{i}.spl", est_bytes: 10, content: "fn b{i}(): 0\n"))
+        var run = file_fiber_begin_v1(entries, [0], 10)
+        val reader = SlowReader(tag: "slow")
+        var rounds = 0
+        var max_reserved = 0
+        while not file_fiber_finished_v1(run) and rounds < 200:
+            rounds = rounds + 1
+            run.advance(_imports)
+            if run.sched.reserved > max_reserved: max_reserved = run.sched.reserved
+            for i in run.take_parse_requests():
+                run.park_async(i, reader.update_tldr_async(run.entries[i].path))
+            for d in run.poll_async():
+                run.parse_done(d.index, reader.read_tldr(run.entries[d.index].path), d.err)
+            # futures stay pending for several rounds before resolving
+            if rounds % 6 == 0:
+                for k in 0..run.async_fut.len():
+                    val _done = run.async_fut[k].complete("")
+        file_fiber_end_v1(run)
+        expect(run.done_order.len()).to_equal(4)
+        expect(max_reserved <= 10).to_be(true)
