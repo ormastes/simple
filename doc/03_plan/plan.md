@@ -392,3 +392,44 @@ This append supersedes the earlier current-status snapshot only for the bounded 
 Generic receiver, MMIO, CUDA no-guess layout, root semantic lint and reviewed transient-exception source changes have landed. C4 descriptor/backend bridges, Result helpers, scoped scalar SOURCE transform and native provider changes have also landed. These are scoped source results: full SOURCE, generic owner replay, request lifetime/cleanup, final ELF-span protections, containers, pure/hosted parity and performance acceptance remain OPEN. Focused native provider ASan/UBSan and Cranelift AOT relocation/RELRO evidence do not close those gates.
 
 The frozen `46772223a7c3` campaign now has admitted Stage2 candidate `991be8f97493426d22fa944bd212afa22487bb22b31d2a6ea0ab95e8b4e05974`. Canonical cycle 3 reused 1,495 objects and rebuilt 2, preserving that exact candidate. Both frontend-mode Hello controls, receiver/planner controls and focused Stage2 admission passed. The latest watcher snapshot is HIR 814/2,914, succeeded 814, failed 0: MATRIX RUNNING, not terminal and not full CLI qualification. Stage3 has NOT STARTED; the requested 500-item batch is NOT YET EXECUTED. The frozen campaign does not include later merged source merely because it exists on the release branch. No full Phase3 PASS or release publication is claimed.
+
+
+## Dated acceptance reconciliation — 2026-10-26, release source b660626832e
+
+This is a bounded owner-evidence snapshot, not a live guarantee, new audit,
+test run or compiler admission. Earlier dated entries remain historical.
+Code, source review, focused execution and landing are separate facts.
+
+| Scope | Code/source review and landing | Execution and remaining acceptance |
+|---|---|---|
+| Memory ownership | #4853 landed `e0b15b1f1d49`; scoped reviews/equivalence retained. | Retained focused Rust/C passes as recorded above; rebuilt memory-lineage producer, general SSpecs and compiler acceptance remain UNRUN. |
+| Native dictionary snapshot | #4857 landed `f33529fd4ce6`; C-private source reviewed. | ASan/UBSan PASS binary `c0fcb18005dde847f833612a25d240fd9f5050c94cd650cfad6db28f1256345f`; typed compiler/confinement OPEN. Churn is not deterministic compaction evidence. |
+| Pure local rebasing | #4858 landed `e8a00fd6217f`; preservation reviewed. | Six authored SSpec scenarios UNRUN; invocation activation OPEN. |
+| Earlier status ledger | #4859 landed `2f259b60e6ce`. | Documentation only; no added runtime evidence. |
+| Accounted expression codec | #4860 landed `fbcc17b7a339`; independent source/preservation review. | Twelve authored SSpecs UNRUN; actual default/archive/invocation activation OPEN. |
+| Physical snapshot wrapper/helpers | #4861 landed `79308d778593`; scoped early source GO. | Actual 64-bit wrapper ASan/UBSan PASS, binary `bc9be6e9f71f01b7ff97a7f61aa18ae39e71e5710a52821ff62cca051ff8feb3`; four backend SSpecs UNRUN. Non-64 guard source-reviewed only. Typed caller/confinement OPEN. |
+| Empty-capability RT analysis sharing | #4863 landed `92dd5a3b9038`; scoped semantic SOURCE_GO. | Differential SSpecs and paired performance/RSS measurements UNRUN; no measured speedup claim. |
+| Selected default-capture scheduling | #4866 landed `b660626832e`; scoped SOURCE_GO. | Eight authored SSpecs UNRUN; driver activation, archive admission/reset, lexical/global bindings and end-to-end replay OPEN. |
+| Checked capture candidate | `67078eb5e92b78087e0a5a42324ac64614301497` SOURCE_GO; unlanded at this snapshot. | Source review is not execution or landing; integrated acceptance UNRUN. |
+| Sparse warm-name repair | #4869 landed `d571e0175cd8b0f95958944921630f52e63f3f77`, head `58b8e8d3ae3052c3cd28beae52276e2a987d84c2`; source/tests preserved from reviewed `6a5d07be08c27d28397aa243e3921ec525febadc`, documentation count corrected. | Four authored SSpecs and paired performance measurements UNRUN; no warm-start speedup or object completion claim. |
+| Archive candidate | Owner reports `4de` SOURCE_HOLD, repair active. | Two P1 findings: hash bounds and cleanup of five global roots; no acceptance. |
+| Nullable route 6 | HOLD / STOP. | No activation or admission. |
+
+The latest root-verified frozen attempt6 observation reached HIR **1453/1453**,
+monomorphization **271**, unresolved **0**, then MIR warm-name start at
+`4209954ms`, with **0 object-stage completions evidenced**. Owner PID3358804 was
+observed at elapsed1:54:06, CPU1:53:02, RSS35127836KiB. These dated observations
+are progress only: no terminal Stage3 compiler, own-Hello, or full CLI result.
+The live frozen83be/8cd lineage does not include later landed memory source.
+
+| Required acceptance condition, in order | Current evidence status |
+|---|---|
+| Complete the requested new compiler on its genuine admitted lineage | NOT ACHIEVED; MIR warm phase is not a compiler artifact. |
+| That exact compiler compiles Hello and runs its output correctly | NOT ACHIEVED. Earlier Stage2 Hello is a different condition/lineage. |
+| Build and qualify the required next compiler generation | NOT ACHIEVED. |
+| Qualify the full CLI and existing general SSpec runner | NOT ACHIEVED. |
+| Execute and pass every selected acceptance scope with real assertions | NOT ACHIEVED; all selected acceptance remains UNRUN. |
+
+Focused provider passes and source landings do not narrow or satisfy that chain.
+No SOURCE activation, release readiness, full graph/lifecycle proof or whole
+compiler performance qualification follows from this reconciliation.
