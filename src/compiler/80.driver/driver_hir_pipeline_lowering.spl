@@ -104,7 +104,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_has_rt_hal}
 use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_deps_v1, hir_shard_publish_hirkey_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
@@ -1262,18 +1262,12 @@ impl CompilerDriver:
                 # admit MIR(F) once F and these imports are PASS.
                 if hir_shard_deps_wanted_v1():
                     var shard_dep_paths: [text] = []
-                    for dep_surface_index in surfaces.surfaces[surface_index].import_target_indices:
-                        if dep_surface_index >= 0 and dep_surface_index < surfaces.surfaces.len():
-                            val dep_source_index = surfaces.surfaces[dep_surface_index].source_index
-                            if dep_source_index >= 0 and dep_source_index < self.ctx.sources.len():
-                                shard_dep_paths = shard_dep_paths.push(self.ctx.sources[dep_source_index].path)
-                    if not hir_shard_publish_deps_v1(source.path, shard_dep_paths):
-                        hir_shard_guard_block("HIR shard deps record publication failed")
-                        self.ctx.add_error("HIR shard deps record publication failed")
-                        return false
-                    if not hir_shard_publish_hirkey_v1(source.path, hir_stream_key):
-                        hir_shard_guard_block("HIR shard hirkey record publication failed")
-                        self.ctx.add_error("HIR shard hirkey record publication failed")
+                    for dep_source_index in hir_shard_dep_source_indices_v1(surfaces, surface_index, self.ctx.sources.len()):
+                        shard_dep_paths = shard_dep_paths.push(self.ctx.sources[dep_source_index].path)
+                    val shard_records_err = hir_shard_publish_records_v1(source.path, hir_stream_key, shard_dep_paths)
+                    if shard_records_err != "":
+                        hir_shard_guard_block(shard_records_err)
+                        self.ctx.add_error(shard_records_err)
                         return false
                 val shard_status = self.lower_streaming_hir_shard_transaction_v1(
                     lowering, source, is_requested_bootstrap_entry, hir_stream_key)
@@ -1889,6 +1883,35 @@ impl CompilerDriver:
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
+                # Same deps/hirkey records as the streaming path (shared helper):
+                # the file-worker pool admits MIR(F) only from them. Edges are the
+                # frozen surface's import_target_indices, as in streaming.
+                if hir_shard_deps_wanted_v1():
+                    var legacy_dep_paths: [text] = []
+                    # Compatibility spellings may lack a scalar alias; resolve by
+                    # physical source owner, and fail closed when neither finds the
+                    # surface (an own-path-only record would admit MIR with no edges).
+                    var legacy_surface_index: i64 = -1
+                    if retained_module_surfaces.index_by_name.contains_key(name):
+                        legacy_surface_index = retained_module_surfaces.index_by_name[name]
+                    else:
+                        var probe = 0
+                        while probe < retained_module_surfaces.surfaces.len() and legacy_surface_index < 0:
+                            if retained_module_surfaces.surfaces[probe].source_index == source_idx:
+                                legacy_surface_index = probe
+                            probe = probe + 1
+                    if legacy_surface_index < 0:
+                        val missing = "HIR shard deps record: missing module surface for {name} ({src.path})"
+                        hir_shard_guard_block(missing)
+                        self.ctx.add_error(missing)
+                        return false
+                    for dep_source_index in hir_shard_dep_source_indices_v1(retained_module_surfaces, legacy_surface_index, self.ctx.sources.len()):
+                        legacy_dep_paths = legacy_dep_paths.push(self.ctx.sources[dep_source_index].path)
+                    val legacy_records_err = hir_shard_publish_records_v1(src.path, hir_shard_key, legacy_dep_paths)
+                    if legacy_records_err != "":
+                        hir_shard_guard_block(legacy_records_err)
+                        self.ctx.add_error(legacy_records_err)
+                        return false
             # Baseline for the per-module poison check below. Errors already in
             # the list belong to EARLIER modules and must not poison this one.
             # Avoid the staged aggregate-receiver accessor hazard; add_error

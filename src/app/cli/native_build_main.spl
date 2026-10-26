@@ -72,6 +72,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     native_file_worker_mono_pending_path_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use std.nogc_sync_mut.io_runtime.{thread_sleep}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
@@ -1014,6 +1015,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         i = i + 1
     var generation: i64 = 0
     var failed_workers: i64 = 0
+    var first_error_line = ""
     var done: i64 = 0
     var all_stopped = true
     var total_claims: i64 = 0
@@ -1105,6 +1107,8 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
             val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
             if code != 0 or sealed != 0 or not finished:
+                if first_error_line == "":
+                    first_error_line = native_file_worker_first_error_line_v1(label, owner, native_file_worker_error_reason_read_v1(queue_dir, owner))
                 failed_workers = failed_workers + 1
                 eprint "[{label}] owner={owner} status={state} exit={code} claimed={progress} sealed={sealed} finished={finished}"
                 if sealed < 0 or progress < 0 or (not finished and progress == 0) or code == 0 or (code > 0 and sealed > 0):
@@ -1145,6 +1149,8 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         eprint "[{label}] inventory incomplete rows={unfinished} policy_fail_fast={fail_fast}"
     val failed_modules = hir_shard_recovery_failure_count(queue_dir)
     print "[{label}] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} ledger={queue_dir}"
+    if first_error_line != "":
+        print first_error_line
     # Name every failed row: a count alone hid eight go-to-end MIR failures in
     # run-27e. Their errors are in the ICE receipt rows (phase mir_lower).
     for failed_row in hir_shard_recovery_failed_rows_v1(queue_dir):
@@ -1630,11 +1636,11 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
                 module: path, hir_start_ms: hir_start, hir_done_ms: hir_done, deps_ready_ms: -1, mir_done_ms: -1,
                 obj_done_ms: -1, status: if passed: "MONO-PENDING" else: "FAILED", object: ""))
         if code != 0:
-            eprint "[file-worker] owner={owner} HIR child exit={code} claimed={claimed.len()}"
+            native_file_worker_note_error_v1(mir_queue, owner, "HIR child exit={code} claimed={claimed.len()}")
             return 1
         hir_drained = claimed.len() == 0 and hir_shard_recovery_unclaimed_count(hir_queue) == 0
         if claimed.len() == 0 and not hir_drained:
-            eprint "[file-worker] owner={owner} HIR child claimed nothing with rows unclaimed"
+            native_file_worker_note_error_v1(mir_queue, owner, "HIR child claimed nothing with rows unclaimed")
             return 1
     # Mono gate: global mono needs every module's HIR (P4 removes this wait).
     var state = native_file_worker_hir_ledger_state_v1(hir_queue)
@@ -1642,7 +1648,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         thread_sleep(SHARD_POOL_POLL_MS)
         state = native_file_worker_hir_ledger_state_v1(hir_queue)
     if state < 0:
-        eprint "[file-worker] owner={owner} HIR ledger has a non-PASS module; MIR not admitted"
+        native_file_worker_note_error_v1(mir_queue, owner, "HIR ledger has a non-PASS module; MIR not admitted")
         return 1
     # Phase B: MIR + object, one claim batch per child.
     val mir_count = native_file_worker_mir_count_v1(native_file_worker_inventory_rows_v1(hir_queue), batch)
@@ -1665,12 +1671,12 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
                 module: name, hir_start_ms: -1, hir_done_ms: -1, deps_ready_ms: -1, mir_done_ms: -1, obj_done_ms: obj_done,
                 status: if passed: "PASS" else: "FAILED", object: if passed: object_path else: ""))
         if code != 0:
-            eprint "[file-worker] owner={owner} MIR child exit={code} claimed={claimed.len()}"
+            native_file_worker_note_error_v1(mir_queue, owner, "MIR child exit={code} claimed={claimed.len()}")
             return 1
         val unclaimed = hir_shard_recovery_unclaimed_count(mir_queue)
         mir_drained = claimed.len() == 0 or unclaimed == 0
         if claimed.len() == 0 and unclaimed != 0:
-            eprint "[file-worker] owner={owner} MIR child claimed nothing with rows unclaimed={unclaimed}"
+            native_file_worker_note_error_v1(mir_queue, owner, "MIR child claimed nothing with rows unclaimed={unclaimed}")
             return 1
     if not hir_shard_recovery_complete(mir_queue, owner):
         return 1
@@ -2448,11 +2454,11 @@ fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_q
                         module: path, hir_start_ms: hir_start, hir_done_ms: hir_done, deps_ready_ms: -1,
                         mir_done_ms: -1, obj_done_ms: -1, status: "FAILED", object: ""))
             if code != 0:
-                eprint "[file-worker] owner={owner} HIR child exit={code} claimed={claimed.len()}"
+                native_file_worker_note_error_v1(mir_queue, owner, "HIR child exit={code} claimed={claimed.len()}")
                 return 1
             hir_drained = claimed.len() == 0 and hir_shard_recovery_unclaimed_count(hir_queue) == 0
             if claimed.len() == 0 and not hir_drained:
-                eprint "[file-worker] owner={owner} HIR child claimed nothing with rows unclaimed"
+                native_file_worker_note_error_v1(mir_queue, owner, "HIR child claimed nothing with rows unclaimed")
                 return 1
         # Readiness: F and its direct imports PASS (or, without a deps
         # record, the whole ledger PASS).
@@ -2474,13 +2480,13 @@ fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_q
                     states[dep] = native_file_worker_terminal_state_v1(hir_queue, dep)
                 verdict = native_file_worker_deps_ready_v1(path, deps.unwrap(), states)
             else:
-                eprint "[file-worker] owner={owner} module={path} has no deps record; MIR not admitted (no whole-ledger wait)"
+                native_file_worker_note_error_v1(mir_queue, owner, "module={path} has no deps record; MIR not admitted (no whole-ledger wait)")
                 verdict = -1
             if verdict < 0:
                 val _published = native_file_worker_receipt_publish_v1(hir_queue, NativeFileWorkerReceiptV1(
                     module: path, hir_start_ms: pending_hir_start[index], hir_done_ms: pending_hir_done[index],
                     deps_ready_ms: -1, mir_done_ms: -1, obj_done_ms: -1, status: "FAILED", object: ""))
-                eprint "[file-worker] owner={owner} module={path} has a non-PASS import; MIR not admitted"
+                native_file_worker_note_error_v1(mir_queue, owner, "module={path} has a non-PASS import; MIR not admitted")
                 return 1
             if verdict == 1:
                 ready = ready.push(path)
@@ -2529,7 +2535,7 @@ fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_q
                     mir_done_ms: mir_done, obj_done_ms: obj_done,
                     status: if passed: "PASS" else: "FAILED", object: if passed: object_path else: ""))
             if code != 0 or mono_pending:
-                eprint "[file-worker] owner={owner} MIR child exit={code} claimed={claimed.len()} mono_pending={mono_pending}"
+                native_file_worker_note_error_v1(mir_queue, owner, "MIR child exit={code} claimed={claimed.len()} mono_pending={mono_pending}")
                 return 1
         elif hir_drained and pending.len() > 0:
             thread_sleep(SHARD_POOL_POLL_MS)
@@ -2537,3 +2543,9 @@ fn run_native_file_worker_scoped_v1(args: [text], spec: text, owner: text, mir_q
         return 1
     print "[file-worker] done owner={owner} hir_rounds={round} mir_rounds={mir_round} scoped_mono=true"
     0
+
+# Prints a worker failure and records it beside the MIR ledger so the
+# coordinator's summary can name the first one (first-error line).
+fn native_file_worker_note_error_v1(queue: text, owner: text, reason: text):
+    eprint "[file-worker] owner={owner} {reason}"
+    val _recorded = native_file_worker_error_reason_publish_v1(queue, owner, reason)
