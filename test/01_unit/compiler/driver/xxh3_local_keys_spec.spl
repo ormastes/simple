@@ -1,0 +1,103 @@
+"""X2: trusted in-process lookup keys use xxh3-128 (algorithm-tagged);
+persisted identity stays sha256. Design section 5, plan section 4."""
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.aspect_match_shard_v1.{
+    JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1,
+    directory_join_point_facts_v1, pointcut_selector_parse_v1,
+    pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1, pointcut_match_key_v1,
+    pointcut_match_identity_v1, aspect_match_forward_reads_v1, PointcutMatchCacheV1}
+use compiler.driver.cache.daemon.cache_single_flight_v1.{cache_single_flight_key_v1}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn jp(file: text, sym: text) -> JoinPointFactV1:
+    JoinPointFactV1(id: "{file}::{sym}", kind: "forward", symbol: sym, attrs: ["logged"],
+        owner_file: file, base_body_digest: "b1")
+
+fn facts(dir: text, sym: text) -> DirectoryJoinPointFactsV1:
+    directory_join_point_facts_v1(dir, ["{dir}/x.spl"], [jp("{dir}/x.spl", sym)], [], true)
+
+describe "pointcut_match_key_v1 (LOCAL in-memory shard/single-flight key)":
+    it "is deterministic within a process":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        expect(pointcut_match_key_v1(sel, facts("a", "foo"))).to_equal(pointcut_match_key_v1(sel, facts("a", "foo")))
+
+    it "differs for different inputs":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val k1 = pointcut_match_key_v1(sel, facts("a", "foo"))
+        val k2 = pointcut_match_key_v1(sel, facts("b", "bar"))
+        expect(k1 == k2).to_equal(false)
+
+    it "carries the xxh3-128 tag and is never confusable with sha256":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val k = pointcut_match_key_v1(sel, facts("a", "foo"))
+        expect(k.starts_with("xxh3-128:")).to_equal(true)
+        expect(k.starts_with("sha256:")).to_equal(false)
+
+    it "keeps hit/miss semantics in the shard cache":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val f = facts("a", "foo")
+        val r1 = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, f)
+        val r2 = pointcut_match_cache_acquire_v1(r1.cache, sel, f)
+        expect(r1.hit).to_equal(false)
+        expect(r2.hit).to_equal(true)
+        expect(r2.key).to_equal(r1.key)
+
+    it "feeds the single-flight key without touching the persisted shard digest":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val f = facts("a", "foo")
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, f)
+        val flight = cache_single_flight_key_v1("aop.match", r.key)
+        expect(flight.contains("xxh3-128:")).to_equal(true)
+        # persisted forms stay sha256
+        expect(r.shard.match_digest.starts_with("sha256:")).to_equal(true)
+        expect(r.shard.dir_facts_key.starts_with("sha256:")).to_equal(true)
+        expect(r.shard.selector_digest.starts_with("sha256:")).to_equal(true)
+
+    it "forward reads still emit sha256 parameter digests (not the local key)":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val f = facts("a", "foo")
+        val r = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, f)
+        val ident = pointcut_match_identity_v1(sel, f)
+        expect(ident.starts_with("sha256:")).to_equal(true)
+        val reads = aspect_match_forward_reads_v1(sel, f, r.shard, "prof")
+        expect(reads.len()).to_equal(2)
+        val local_hex = r.key.substring(9)
+        expect(reads[0].consumer.parameter_digest == local_hex).to_equal(false)
+        expect(reads[0].consumer.parameter_digest.len()).to_equal(64)
+
+    it "treats a forged Dict entry under the same key with another selector as a miss":
+        val sel = pointcut_selector_parse_v1("attr(logged)")
+        val other = pointcut_selector_parse_v1("attr(other)")
+        val f = facts("a", "foo")
+        val real = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), sel, f)
+        val forged = pointcut_match_cache_acquire_v1(pointcut_match_cache_new_v1(), other, f).shard
+        var shards = {}
+        shards[real.key] = forged
+        val poisoned = PointcutMatchCacheV1(shards: shards, computations: 0)
+        val r = pointcut_match_cache_acquire_v1(poisoned, sel, f)
+        expect(r.hit).to_equal(false)
+        expect(r.shard.selector_digest).to_equal(sel.selector_digest)
+
+describe "key cost, 10k computations (old sha256 vs new xxh3-128)":
+    it "reports timings":
+        val payload = "aop-match/v1\u0000{71}:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\u0000"
+        var sink = 0
+        val t0 = rt_time_now_unix_micros()
+        var i = 0
+        while i < 10000:
+            sink = sink + sha256_u8_hex(text_to_bytes(payload + "{i}")).len()
+            i = i + 1
+        val t1 = rt_time_now_unix_micros()
+        i = 0
+        while i < 10000:
+            sink = sink + xxh3_128_text(payload + "{i}").len()
+            i = i + 1
+        val t2 = rt_time_now_unix_micros()
+        print "X2-TIMING sha256_10k_us={t1 - t0} xxh3_10k_us={t2 - t1}"
+        expect(sink > 0).to_equal(true)
+        expect((t2 - t1) < (t1 - t0)).to_equal(true)

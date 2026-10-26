@@ -1,0 +1,141 @@
+"""
+## Purpose and audience
+Purpose: Verify module_artifact_publish_atomic_async_v1 matches the sync publish
+byte for byte with SIMPLE_ASYNC_WRITES unset and set, replaces an existing
+destination, fails closed (destination untouched, no .tmp) when the write fails
+inside the reactor path, and reports which path really ran.
+Audience: cache/build-runner engineers.
+## Compatibility and limitations
+Writes under a scratch dir in the working directory and removes it at the end.
+The Rust-runtime Windows driver answers ENOSYS for Open/Write/Close, so there
+the flag-on path is a counted fallback to the sync publish; native IOCP and
+Linux drivers run the reactor for real. Every case asserts bytes either way.
+Design: cache plan step 1 (S1-4).
+"""
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_create_all, dir_list, getpid, env_get_opt}
+use std.nogc_sync_mut.io_runtime.{env_set_process, env_remove_process, dir_remove_all}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.nogc_async_mut.async.poll.{Poll}
+use std.nogc_async_mut.async.future.{Future}
+use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_async_v1, module_artifact_reactor_write_status_v1, module_artifact_publish_async_fallbacks_v1}
+
+fn _pa_dir() -> text:
+    val d = ".publish_async_spec_{getpid()}"
+    dir_create_all(d)
+    d
+
+fn _pa_ready(f: Future<bool>) -> bool:
+    match f.poll():
+        case Poll.Ready(v): v
+        case Poll.Pending: false
+
+fn _pa_flag(on: bool):
+    if on: env_set_process("SIMPLE_ASYNC_WRITES", "1")
+    else: env_remove_process("SIMPLE_ASYNC_WRITES")
+
+fn _pa_tmp_leftovers(dir: text) -> bool:
+    var found = false
+    for e in dir_list(dir):
+        if e.ends_with(".tmp"): found = true
+    found
+
+fn _pa_publish(path: text, body: text, on: bool) -> bool:
+    _pa_flag(on)
+    val ok = _pa_ready(module_artifact_publish_atomic_async_v1(path, body))
+    _pa_flag(false)
+    ok
+
+describe "publish_atomic async":
+    it "flag off and flag on give identical bytes and no temp":
+        val dir = _pa_dir()
+        val a = "{dir}/a.bin"
+        val b = "{dir}/b.bin"
+        expect(_pa_publish(a, "payload-1", false)).to_be(true)
+        expect(_pa_publish(b, "payload-1", true)).to_be(true)
+        expect(file_read(a)).to_equal("payload-1")
+        expect(file_read(b)).to_equal(file_read(a))
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(a)
+        file_delete(b)
+
+    it "reports which path ran: reactor (0) or unsupported fallback (-38)":
+        val dir = _pa_dir()
+        val t = "{dir}/probe.bin.tmpx"
+        val st = module_artifact_reactor_write_status_v1(t, "probe-bytes")
+        expect(st == 0 or st == -38).to_be(true)
+        if st == 0:
+            expect(file_read(t)).to_equal("probe-bytes")
+        file_delete(t)
+        val before = module_artifact_publish_async_fallbacks_v1()
+        val d = "{dir}/path.bin"
+        expect(_pa_publish(d, "path-bytes", true)).to_be(true)
+        expect(file_read(d)).to_equal("path-bytes")
+        val after = module_artifact_publish_async_fallbacks_v1()
+        if st == -38:
+            expect(after).to_equal(before + 1)
+        else:
+            expect(after).to_equal(before)
+        file_delete(d)
+
+    it "replaces an existing destination":
+        val dir = _pa_dir()
+        val d = "{dir}/c.bin"
+        file_write(d, "old")
+        expect(_pa_publish(d, "new-content", true)).to_be(true)
+        expect(file_read(d)).to_equal("new-content")
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(d)
+
+    it "failure before the write leaves destination unchanged and no temp":
+        val dir = _pa_dir()
+        val d = "{dir}/d.bin"
+        file_write(d, "keep")
+        val bad = "{d}/inner.bin"
+        expect(_pa_publish(bad, "zzz", true)).to_be(false)
+        expect(file_read(d)).to_equal("keep")
+        expect(file_exists(bad)).to_be(false)
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(d)
+
+    it "failure inside the write path leaves destination unchanged":
+        val dir = _pa_dir()
+        val d = "{dir}/e.bin"
+        file_write(d, "keep-e")
+        val body = "blocked-body"
+        # a directory squatting on the exact temp name makes open/write fail after admission
+        val temp = "{d}.{getpid()}.{xxh3_128_text(body)}.tmp"
+        dir_create_all(temp)
+        expect(_pa_publish(d, body, true)).to_be(false)
+        expect(file_read(d)).to_equal("keep-e")
+        dir_remove_all(temp)
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(d)
+
+    it "non-ASCII content round-trips byte-identical with flag off and on":
+        val dir = _pa_dir()
+        val body = "é→日本 end"
+        val a = "{dir}/u_off.bin"
+        val b = "{dir}/u_on.bin"
+        expect(_pa_publish(a, body, false)).to_be(true)
+        expect(_pa_publish(b, body, true)).to_be(true)
+        expect(file_read(a)).to_equal(body)
+        expect(file_read(b)).to_equal(body)
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(a)
+        file_delete(b)
+
+    it "large payload (8 MB) round-trips byte-identical":
+        val dir = _pa_dir()
+        var body = "0123456789abcdef"
+        for i in 0..19:
+            body = body + body
+        val b = "{dir}/big.bin"
+        expect(_pa_publish(b, body, true)).to_be(true)
+        expect(file_read(b) == body).to_be(true)
+        expect(_pa_tmp_leftovers(dir)).to_be(false)
+        file_delete(b)
+
+    it "removes the scratch dir":
+        val d = ".publish_async_spec_{getpid()}"
+        dir_remove_all(d)
+        expect(file_exists(d)).to_be(false)

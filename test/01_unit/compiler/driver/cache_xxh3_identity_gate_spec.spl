@@ -1,0 +1,81 @@
+# A-2 (pseudo_immutable_cache_impl_plan, design §5): an XXH3 match is an index,
+# never the sole proof of identity for a persistent-cache read.
+use std.spec
+use std.io_runtime.{env_set, getpid}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_admits_identity_v1,
+    HASH_ALGO_SHA256_V1, HASH_ALGO_BLAKE3_V1, HASH_ALGO_XXH3_128_V1, HASH_ALGO_XXH3_64_V1, HASH_ALGO_CRC32_V1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_load,
+    frontend_parse_cache_store, frontend_parse_cache_entry_blob, frontend_parse_cache_entry_encode}
+use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, flat_packed_view_v1, flat_packed_encode_v1,
+    flat_packed_admit_view_v1, flat_packed_admit_view_strict_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    flat_pool_capture_take_trace, parse_and_build_module_scoped}
+use compiler.driver.cache.daemon.cache_daemon_queue_v1.{cache_queue_digest_admitted_v1}
+
+fn use_fresh_cache():
+    val run = "xxh3-identity-gate-{getpid()}"
+    val _a = env_set("SIMPLE_FRONTEND_CACHE", "1")
+    val _b = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", run)
+    val _c = env_set("SIMPLE_FRONTEND_CACHE_DIR", "build/test_xxh3_identity_gate/" + run)
+
+describe "xxh3 is never sole identity":
+    it "central helper admits sha256 and rejects xxh3":
+        expect(digest_admits_identity_v1(HASH_ALGO_SHA256_V1)).to_equal(true)
+        expect(digest_admits_identity_v1(HASH_ALGO_BLAKE3_V1)).to_equal(true)
+        expect(digest_admits_identity_v1(HASH_ALGO_XXH3_128_V1)).to_equal(false)
+        expect(digest_admits_identity_v1(HASH_ALGO_XXH3_64_V1)).to_equal(false)
+        expect(digest_admits_identity_v1(HASH_ALGO_CRC32_V1)).to_equal(false)
+        expect(digest_admits_identity_v1(9999)).to_equal(false)
+
+    it "daemon request digest: xxh3 alone is not admitted":
+        expect(cache_queue_digest_admitted_v1("sha256:ab")).to_equal(true)
+        expect(cache_queue_digest_admitted_v1("xxh3-128:ab")).to_equal(false)
+
+    it "line cache: forged entry under a colliding xxh3 key misses, genuine hits":
+        use_fresh_cache()
+        expect(frontend_parse_cache_enabled()).to_equal(true)
+        val key = xxh3_128_text("source A")          # the shared (colliding) index key
+        val sha_a = sha256_text("source A")
+        val sha_b = sha256_text("source B")          # attacker's different source, same key
+        expect(frontend_parse_cache_store(key, "blob-of-B", sha_b)).to_equal(true)
+        expect(frontend_parse_cache_load(key, sha_a)).to_equal("")          # forged: xxh3 matches, crypto differs
+        expect(frontend_parse_cache_store(key, "blob-of-A", sha_a)).to_equal(true)
+        expect(frontend_parse_cache_load(key, sha_a)).to_equal("blob-of-A")  # genuine
+        # Identity is required: an identity-less store is skipped, an identity-less load misses.
+        expect(frontend_parse_cache_store(key, "legacy", "")).to_equal(false)
+        expect(frontend_parse_cache_load(key, sha_a)).to_equal("blob-of-A")  # untouched by the skipped store
+        expect(frontend_parse_cache_load(key, "")).to_equal("")
+
+    it "entry codec: identity is bound to the entry":
+        val sha_a = sha256_text("source A")
+        val entry = frontend_parse_cache_entry_encode("hdr", "payload", sha_a)
+        val after = entry.substring(entry.index_of("\n") + 1, entry.len())
+        expect(frontend_parse_cache_entry_blob(after, sha_a)).to_equal("payload")
+        expect(frontend_parse_cache_entry_blob(after, sha256_text("source B"))).to_equal("")
+        expect(frontend_parse_cache_entry_blob(after, "")).to_equal("")
+
+    it "packed cache: xxh3-only source digest is refused, sha256 source digest admitted":
+        val src = "fn f() -> i64:\n    1\n"
+        flat_pool_capture_arm()
+        val _m = parse_and_build_module_scoped(src, "spec_xxh3_gate.spl", false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+        val comp = SpabDigestV1(subject: 2, algo: 1, hex: sha256_text("scope"))
+        val xxh = SpabDigestV1(subject: 1, algo: 16, hex: xxh3_128_text(src))
+        val sha = SpabDigestV1(subject: 1, algo: 1, hex: sha256_text(src))
+        val bytes_both = flat_packed_encode_v1(blob, trace, [xxh, sha, comp], xxh3_128_text("p"))
+        val bytes_xxh = flat_packed_encode_v1(blob, trace, [xxh, comp], xxh3_128_text("p"))
+        val want = [xxh, sha, comp]
+        # xxh3-only entry: the lenient admit would accept; the strict gate must not.
+        val v_xxh = flat_packed_view_v1(bytes_xxh)
+        expect(bytes_both.len() > 0).to_equal(true)
+        expect(flat_packed_admit_view_v1(v_xxh, want)).to_equal("")
+        expect(flat_packed_admit_view_strict_v1(v_xxh, want) == "").to_equal(false)
+        # genuine entry carrying the sha256 source digest.
+        val v_both = flat_packed_view_v1(bytes_both)
+        expect(flat_packed_admit_view_strict_v1(v_both, want)).to_equal("")
+        # forged: same xxh3, different sha256 => digest mismatch.
+        val forged = [xxh, SpabDigestV1(subject: 1, algo: 1, hex: sha256_text("other")), comp]
+        expect(flat_packed_admit_view_strict_v1(v_both, forged) == "").to_equal(false)

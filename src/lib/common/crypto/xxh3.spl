@@ -217,16 +217,48 @@ fn _len129to240_64(data: [u8], sec: [u8], seed: u64) -> u64:
 # ============================================================================
 
 fn _acc512(acc: [u64], data: [u8], doff: i64, sec: [u8], soff: i64) -> [u64]:
-    var a = acc
     val m: u64 = 0xFFFFFFFFu64
-    var i = 0
-    while i < 8:
-        val dv: u64 = _xxh64_load_u64_le(data, (doff + 8 * i).to_u64())
-        val dk: u64 = dv ^ _xxh64_load_u64_le(sec, (soff + 8 * i).to_u64())
-        a[i ^ 1] = a[i ^ 1] + dv
-        a[i] = a[i] + (dk & m) * (dk >> 32u64)
-        i = i + 1
-    a
+    val v0: u64 = _xxh64_load_u64_le(data, (doff + 0).to_u64())
+    val v1: u64 = _xxh64_load_u64_le(data, (doff + 8).to_u64())
+    val v2: u64 = _xxh64_load_u64_le(data, (doff + 16).to_u64())
+    val v3: u64 = _xxh64_load_u64_le(data, (doff + 24).to_u64())
+    val v4: u64 = _xxh64_load_u64_le(data, (doff + 32).to_u64())
+    val v5: u64 = _xxh64_load_u64_le(data, (doff + 40).to_u64())
+    val v6: u64 = _xxh64_load_u64_le(data, (doff + 48).to_u64())
+    val v7: u64 = _xxh64_load_u64_le(data, (doff + 56).to_u64())
+    val x0: u64 = v0 ^ _xxh64_load_u64_le(sec, (soff + 0).to_u64())
+    val x1: u64 = v1 ^ _xxh64_load_u64_le(sec, (soff + 8).to_u64())
+    val x2: u64 = v2 ^ _xxh64_load_u64_le(sec, (soff + 16).to_u64())
+    val x3: u64 = v3 ^ _xxh64_load_u64_le(sec, (soff + 24).to_u64())
+    val x4: u64 = v4 ^ _xxh64_load_u64_le(sec, (soff + 32).to_u64())
+    val x5: u64 = v5 ^ _xxh64_load_u64_le(sec, (soff + 40).to_u64())
+    val x6: u64 = v6 ^ _xxh64_load_u64_le(sec, (soff + 48).to_u64())
+    val x7: u64 = v7 ^ _xxh64_load_u64_le(sec, (soff + 56).to_u64())
+    var a0: u64 = acc[0]
+    var a1: u64 = acc[1]
+    var a2: u64 = acc[2]
+    var a3: u64 = acc[3]
+    var a4: u64 = acc[4]
+    var a5: u64 = acc[5]
+    var a6: u64 = acc[6]
+    var a7: u64 = acc[7]
+    a1 = a1 + v0
+    a0 = a0 + (x0 & m) * (x0 >> 32u64)
+    a0 = a0 + v1
+    a1 = a1 + (x1 & m) * (x1 >> 32u64)
+    a3 = a3 + v2
+    a2 = a2 + (x2 & m) * (x2 >> 32u64)
+    a2 = a2 + v3
+    a3 = a3 + (x3 & m) * (x3 >> 32u64)
+    a5 = a5 + v4
+    a4 = a4 + (x4 & m) * (x4 >> 32u64)
+    a4 = a4 + v5
+    a5 = a5 + (x5 & m) * (x5 >> 32u64)
+    a7 = a7 + v6
+    a6 = a6 + (x6 & m) * (x6 >> 32u64)
+    a6 = a6 + v7
+    a7 = a7 + (x7 & m) * (x7 >> 32u64)
+    [a0, a1, a2, a3, a4, a5, a6, a7]
 
 fn _scramble(acc: [u64], sec: [u8], soff: i64) -> [u64]:
     var a = acc
@@ -238,27 +270,81 @@ fn _scramble(acc: [u64], sec: [u8], soff: i64) -> [u64]:
         i = i + 1
     a
 
+# One pass over every stripe (full blocks with scramble, partial block, final
+# stripe) with the 8 accumulator lanes held in locals.
 fn _hash_long_acc(data: [u8], sec: [u8]) -> [u64]:
-    var acc: [u64] = [_p32_3(), _p64_1(), _p64_2(), _p64_3(), _p64_4(), _p32_2(), _p64_5(), _p32_1()]
+    var a0: u64 = _p32_3()
+    var a1: u64 = _p64_1()
+    var a2: u64 = _p64_2()
+    var a3: u64 = _p64_3()
+    var a4: u64 = _p64_4()
+    var a5: u64 = _p32_2()
+    var a6: u64 = _p64_5()
+    var a7: u64 = _p32_1()
+    val m: u64 = 0xFFFFFFFFu64
+    val k32: u64 = _p32_1()
     val n = data.len()
     val ssz = sec.len()
     val per_block = (ssz - 64) / 8
     val block_len = 64 * per_block
     val nb_blocks = (n - 1) / block_len
-    var b = 0
-    while b < nb_blocks:
-        var s = 0
-        while s < per_block:
-            acc = _acc512(acc, data, b * block_len + s * 64, sec, s * 8)
-            s = s + 1
-        acc = _scramble(acc, sec, ssz - 64)
-        b = b + 1
-    val nb_last = ((n - 1) - block_len * nb_blocks) / 64
-    var s2 = 0
-    while s2 < nb_last:
-        acc = _acc512(acc, data, nb_blocks * block_len + s2 * 64, sec, s2 * 8)
-        s2 = s2 + 1
-    _acc512(acc, data, n - 64, sec, ssz - 64 - 7)
+    val full = nb_blocks * per_block
+    val total = full + ((n - 1) - block_len * nb_blocks) / 64
+    val last_k = ssz - 64
+    var t = 0
+    var s = 0
+    while t <= total:
+        var d = t * 64
+        var k = s * 8
+        if t == total:
+            d = n - 64
+            k = ssz - 71
+        val v0: u64 = _xxh64_load_u64_le(data, (d + 0).to_u64())
+        val v1: u64 = _xxh64_load_u64_le(data, (d + 8).to_u64())
+        val v2: u64 = _xxh64_load_u64_le(data, (d + 16).to_u64())
+        val v3: u64 = _xxh64_load_u64_le(data, (d + 24).to_u64())
+        val v4: u64 = _xxh64_load_u64_le(data, (d + 32).to_u64())
+        val v5: u64 = _xxh64_load_u64_le(data, (d + 40).to_u64())
+        val v6: u64 = _xxh64_load_u64_le(data, (d + 48).to_u64())
+        val v7: u64 = _xxh64_load_u64_le(data, (d + 56).to_u64())
+        val x0: u64 = v0 ^ _xxh64_load_u64_le(sec, (k + 0).to_u64())
+        val x1: u64 = v1 ^ _xxh64_load_u64_le(sec, (k + 8).to_u64())
+        val x2: u64 = v2 ^ _xxh64_load_u64_le(sec, (k + 16).to_u64())
+        val x3: u64 = v3 ^ _xxh64_load_u64_le(sec, (k + 24).to_u64())
+        val x4: u64 = v4 ^ _xxh64_load_u64_le(sec, (k + 32).to_u64())
+        val x5: u64 = v5 ^ _xxh64_load_u64_le(sec, (k + 40).to_u64())
+        val x6: u64 = v6 ^ _xxh64_load_u64_le(sec, (k + 48).to_u64())
+        val x7: u64 = v7 ^ _xxh64_load_u64_le(sec, (k + 56).to_u64())
+        a1 = a1 + v0
+        a0 = a0 + (x0 & m) * (x0 >> 32u64)
+        a0 = a0 + v1
+        a1 = a1 + (x1 & m) * (x1 >> 32u64)
+        a3 = a3 + v2
+        a2 = a2 + (x2 & m) * (x2 >> 32u64)
+        a2 = a2 + v3
+        a3 = a3 + (x3 & m) * (x3 >> 32u64)
+        a5 = a5 + v4
+        a4 = a4 + (x4 & m) * (x4 >> 32u64)
+        a4 = a4 + v5
+        a5 = a5 + (x5 & m) * (x5 >> 32u64)
+        a7 = a7 + v6
+        a6 = a6 + (x6 & m) * (x6 >> 32u64)
+        a6 = a6 + v7
+        a7 = a7 + (x7 & m) * (x7 >> 32u64)
+        s = s + 1
+        if s == per_block:
+            s = 0
+            if t < full:
+                a0 = ((a0 ^ (a0 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 0).to_u64())) * k32
+                a1 = ((a1 ^ (a1 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 8).to_u64())) * k32
+                a2 = ((a2 ^ (a2 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 16).to_u64())) * k32
+                a3 = ((a3 ^ (a3 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 24).to_u64())) * k32
+                a4 = ((a4 ^ (a4 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 32).to_u64())) * k32
+                a5 = ((a5 ^ (a5 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 40).to_u64())) * k32
+                a6 = ((a6 ^ (a6 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 48).to_u64())) * k32
+                a7 = ((a7 ^ (a7 >> 47u64)) ^ _xxh64_load_u64_le(sec, (last_k + 56).to_u64())) * k32
+        t = t + 1
+    [a0, a1, a2, a3, a4, a5, a6, a7]
 
 fn _merge_accs(acc: [u64], sec: [u8], soff: i64, start: u64) -> u64:
     var r: u64 = start
@@ -309,16 +395,8 @@ fn _core64(data: [u8], seed: u64, sec: [u8]) -> u64:
         return _len1to3_64(data, sec, seed)
     _len0_64(sec, seed)
 
-fn xxh3_64(data: [u8]) -> u64:
-    _core64(data, 0u64, _ksecret())
-
-fn xxh3_64_seeded(data: [u8], seed: u64) -> u64:
-    if data.len() > 240 and seed != 0u64:
-        return _core64(data, seed, _custom_secret(seed))
-    _core64(data, seed, _ksecret())
-
 # [] when the secret is shorter than XXH3_SECRET_SIZE_MIN (136), else [hash].
-fn xxh3_64_with_secret(data: [u8], secret: [u8]) -> [u64]:
+fn _k_xxh3_64_with_secret(data: [u8], secret: [u8]) -> [u64]:
     if secret.len() < _secret_min():
         return []
     [_core64(data, 0u64, secret)]
@@ -427,15 +505,15 @@ fn _core128(data: [u8], seed: u64, sec: [u8]) -> [u64]:
         return _len1to3_128(data, sec, seed)
     _len0_128(sec, seed)
 
-fn xxh3_128(data: [u8]) -> [u64]:
+fn _k_xxh3_128(data: [u8]) -> [u64]:
     _core128(data, 0u64, _ksecret())
 
-fn xxh3_128_seeded(data: [u8], seed: u64) -> [u64]:
+fn _k_xxh3_128_seeded(data: [u8], seed: u64) -> [u64]:
     if data.len() > 240 and seed != 0u64:
         return _core128(data, seed, _custom_secret(seed))
     _core128(data, seed, _ksecret())
 
-fn xxh3_128_with_secret(data: [u8], secret: [u8]) -> [u64]:
+fn _k_xxh3_128_with_secret(data: [u8], secret: [u8]) -> [u64]:
     if secret.len() < _secret_min():
         return []
     _core128(data, 0u64, secret)
@@ -450,6 +528,6 @@ fn _hex64(v: u64) -> text:
         i = i - 1
     out
 
-fn xxh3_128_hex(data: [u8]) -> text:
-    val h = xxh3_128(data)
+fn _k_xxh3_128_hex(data: [u8]) -> text:
+    val h = _k_xxh3_128(data)
     _hex64(h[1]) + _hex64(h[0])

@@ -1,0 +1,143 @@
+# XXH3 hash (xxHash 0.8): 64-bit and 128-bit, one-shot and streaming.
+#
+# Non-cryptographic. The one-shot kernels (length classes 0, 1-3, 4-8, 9-16,
+# 17-128, 129-240, >240 with 64-bit-limb 128-bit multiply) live in
+# std.common.crypto.xxh3; this module adds the struct-typed 128-bit result and
+# the streaming state (256-byte buffer + 8-lane accumulator, kSecret/seeded
+# custom secret, last stripe at secret offset 192-64-7).
+
+use std.common.crypto.xxh3.{_core64, _core128, _acc512, _scramble, _merge_accs, _custom_secret, _ksecret, _p64_1, _p64_2, _p32_1, _p32_2, _p32_3, _p64_3, _p64_4, _p64_5, _k_xxh3_64_with_secret, _k_xxh3_128_with_secret, _k_xxh3_128_hex}
+
+pub struct Xxh3Hash128:
+    low: u64
+    high: u64
+
+val _XXH3_BUF_SIZE: i64 = 256
+val _XXH3_STRIPE: i64 = 64
+val _XXH3_STRIPES_PER_BLOCK: i64 = 16
+
+fn _to_hash128(p: [u64]) -> Xxh3Hash128:
+    Xxh3Hash128(low: p[0], high: p[1])
+
+fn _secret_for(seed: u64) -> [u8]:
+    if seed != 0u64:
+        return _custom_secret(seed)
+    _ksecret()
+
+pub fn xxh3_64(data: [u8]) -> u64:
+    _core64(data, 0u64, _ksecret())
+
+pub fn xxh3_64_seeded(data: [u8], seed: u64) -> u64:
+    if data.len() > 240:
+        return _core64(data, seed, _secret_for(seed))
+    _core64(data, seed, _ksecret())
+
+pub fn xxh3_128(data: [u8]) -> Xxh3Hash128:
+    _to_hash128(_core128(data, 0u64, _ksecret()))
+
+pub fn xxh3_128_seeded(data: [u8], seed: u64) -> Xxh3Hash128:
+    if data.len() > 240:
+        return _to_hash128(_core128(data, seed, _secret_for(seed)))
+    _to_hash128(_core128(data, seed, _ksecret()))
+
+fn _init_acc() -> [u64]:
+    [_p32_3(), _p64_1(), _p64_2(), _p64_3(), _p64_4(), _p32_2(), _p64_5(), _p32_1()]
+
+pub struct Xxh3State:
+    seed: u64
+    secret: [u8]
+    acc: [u64]
+    buf: [u8]
+    buf_len: i64
+    stripes: i64
+    total: i64
+
+    # Absorb every stripe except the final (up to 64 byte) tail of the buffer,
+    # starting at stripe index `s` within the current block. Returns the new
+    # accumulator; (buf_len - 1) / 64 stripes are absorbed.
+    fn _absorb(a0: [u64], s0: i64) -> [u64]:
+        var a = a0
+        var s = s0
+        var p = 0
+        while self.buf_len - p > _XXH3_STRIPE:
+            a = _acc512(a, self.buf, p, self.secret, s * 8)
+            p = p + _XXH3_STRIPE
+            s = s + 1
+            if s == _XXH3_STRIPES_PER_BLOCK:
+                a = _scramble(a, self.secret, self.secret.len() - _XXH3_STRIPE)
+                s = 0
+        a
+
+    # Only entered with a full buffer: absorb 3 stripes, keep the last 64 bytes.
+    me _consume():
+        self.acc = self._absorb(self.acc, self.stripes)
+        self.stripes = (self.stripes + (self.buf_len - 1) / _XXH3_STRIPE) % _XXH3_STRIPES_PER_BLOCK
+        val shift = self.buf_len - _XXH3_STRIPE
+        var i = 0
+        while i < _XXH3_STRIPE:
+            self.buf[i] = self.buf[shift + i]
+            i = i + 1
+        self.buf_len = _XXH3_STRIPE
+
+    me update(data: [u8]):
+        val n = data.len()
+        var i = 0
+        while i < n:
+            if self.buf_len == _XXH3_BUF_SIZE:
+                self._consume()
+            var room = _XXH3_BUF_SIZE - self.buf_len
+            if room > n - i:
+                room = n - i
+            var j = 0
+            while j < room:
+                self.buf[self.buf_len + j] = data[i + j]
+                j = j + 1
+            self.buf_len = self.buf_len + room
+            i = i + room
+        self.total = self.total + n
+
+    me reset():
+        self.acc = _init_acc()
+        self.buf_len = 0
+        self.stripes = 0
+        self.total = 0
+
+    fn _short_bytes() -> [u8]:
+        var out: [u8] = [0u8; self.buf_len]
+        var i = 0
+        while i < self.buf_len:
+            out[i] = self.buf[i]
+            i = i + 1
+        out
+
+    # Accumulator after absorbing the remaining stripes and the last stripe
+    # (non-destructive).
+    fn _final_acc() -> [u64]:
+        val a = self._absorb(self.acc, self.stripes)
+        _acc512(a, self.buf, self.buf_len - _XXH3_STRIPE, self.secret, self.secret.len() - _XXH3_STRIPE - 7)
+
+    fn digest64() -> u64:
+        if self.total <= 240:
+            return _core64(self._short_bytes(), self.seed, _ksecret())
+        _merge_accs(self._final_acc(), self.secret, 11, self.total.to_u64() * _p64_1())
+
+    fn digest128() -> Xxh3Hash128:
+        if self.total <= 240:
+            return _to_hash128(_core128(self._short_bytes(), self.seed, _ksecret()))
+        val a = self._final_acc()
+        val n = self.total.to_u64()
+        val lo = _merge_accs(a, self.secret, 11, n * _p64_1())
+        val hi = _merge_accs(a, self.secret, self.secret.len() - _XXH3_STRIPE - 11, 0xFFFFFFFFFFFFFFFFu64 ^ (n * _p64_2()))
+        Xxh3Hash128(low: lo, high: hi)
+
+pub fn xxh3_state_new(seed: u64) -> Xxh3State:
+    Xxh3State(seed: seed, secret: _secret_for(seed), acc: _init_acc(), buf: [0u8; 256], buf_len: 0, stripes: 0, total: 0)
+
+pub fn xxh3_64_with_secret(data: [u8], secret: [u8]) -> [u64]:
+    _k_xxh3_64_with_secret(data, secret)
+
+pub fn xxh3_128_with_secret(data: [u8], secret: [u8]) -> [u64]:
+    _k_xxh3_128_with_secret(data, secret)
+
+pub fn xxh3_128_hex(data: [u8]) -> text:
+    _k_xxh3_128_hex(data)

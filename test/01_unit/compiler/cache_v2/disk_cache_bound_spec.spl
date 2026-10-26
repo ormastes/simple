@@ -1,0 +1,60 @@
+"""Flat disk caches (HIR, warm artifacts) obey per-source and total caps."""
+
+use std.spec.*
+use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_source_record_v1,
+    disk_cache_sweep_v1, disk_cache_admit_v1, disk_cache_dir_bytes_v1}
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
+use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
+
+fn bound_limits(versions: i64, per_source_bytes: i64, storage: i64) -> CacheRetentionLimitsV1:
+    CacheRetentionLimitsV1(memory_max_bytes: 1024, storage_max_bytes: storage,
+        max_branches: 4, kept_branches: ["main"], versions_per_source: versions,
+        per_source_max_disk_bytes: per_source_bytes, per_source_max_memory_bytes: 1024)
+
+fn bound_dir(label: text) -> text:
+    val dir = "build/disk_cache_bound_{getpid()}_{time_now_unix_micros()}_{label}"
+    dir_create(dir, true)
+    dir
+
+describe "disk cache bounds":
+    it "keeps at most versions_per_source entries per source, oldest out":
+        val dir = bound_dir("count")
+        val limits = bound_limits(2, 1000000, 1000000)
+        for name in ["a1.hir", "a2.hir", "a3.hir"]:
+            file_write(dir + "/" + name, "xxxx")
+            disk_cache_source_record_v1(dir, "src-a", name, limits)
+        file_write(dir + "/b1.hir", "xxxx")
+        disk_cache_source_record_v1(dir, "src-b", "b1.hir", limits)
+        expect(file_exists(dir + "/a1.hir")).to_equal(false)
+        expect(file_exists(dir + "/a2.hir")).to_equal(true)
+        expect(file_exists(dir + "/a3.hir")).to_equal(true)
+        expect(file_exists(dir + "/b1.hir")).to_equal(true)
+        dir_remove_all(dir)
+
+    it "evicts by per-source bytes but never the newest entry":
+        val dir = bound_dir("bytes")
+        val limits = bound_limits(10, 6, 1000000)
+        for name in ["a1.hir", "a2.hir"]:
+            file_write(dir + "/" + name, "xxxxx")
+            disk_cache_source_record_v1(dir, "src-a", name, limits)
+        expect(file_exists(dir + "/a1.hir")).to_equal(false)
+        expect(file_exists(dir + "/a2.hir")).to_equal(true)
+        dir_remove_all(dir)
+
+    it "sweeps the directory down to the target bytes":
+        val dir = bound_dir("sweep")
+        for name in ["k1.hir", "k2.hir", "k3.hir"]:
+            file_write(dir + "/" + name, "0123456789")
+        expect(disk_cache_sweep_v1(dir, 10)).to_equal(2)
+        expect(disk_cache_dir_bytes_v1(dir)).to_equal(10)
+        dir_remove_all(dir)
+
+    it "refuses a write that would exceed the hard cap after sweeping":
+        val dir = bound_dir("admit")
+        val limits = bound_limits(10, 1000000, 100)
+        file_write(dir + "/old.hir", "0123456789")
+        expect(disk_cache_admit_v1(dir, 50, -1, limits).admitted).to_equal(true)
+        val refused = disk_cache_admit_v1(dir, 1000, 60, limits)
+        expect(refused.admitted).to_equal(false)
+        expect(refused.reason).to_equal("over_hard_limit")
+        dir_remove_all(dir)

@@ -1,0 +1,43 @@
+use std.spec
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Parse shards must inherit one coordinator-published SCV authority; otherwise
+# every shard cold-acquires and they race {event_root}/refresh.lock
+# (compile-event-refresh-lock-unavailable, inventory_events.spl).
+describe "bootstrap coordinator publishes SCV authority once":
+    it "publishes authority before the shard prepass spawns children":
+        val source = read_source("src/app/cli/bootstrap_main.spl")
+        val publish = source.index_of("if not bootstrap_coordinator_publish_authority_v1(worker_args):") ?? -1
+        val prepass = source.index_of("if not bootstrap_capsule_shard_prepass_routed(args, true, true):") ?? -1
+        expect(publish > 0).to_equal(true)
+        expect(prepass > publish).to_equal(true)
+
+    it "acquires only in the coordinator and only when nothing is published":
+        val source = read_source("src/app/cli/bootstrap_main.spl")
+        expect(source).to_contain("not shard_child and snapshot_root == \"\"")
+        expect(source).to_contain("bootstrap_coordinator_needs_authority_v1(bootstrap_shard_child_active(),")
+        expect(source).to_contain("compiler_source_authority_publish_v1(authority)")
+
+describe "parse child binds the admitted preclosed source roots":
+    it "sets native source roots and snapshot root before load_sources":
+        val source = read_source("src/compiler/80.driver/driver_parse_shard_entry.spl")
+        expect(source).to_contain("bound.native_source_roots = preclosed!.binding.source_roots")
+        expect(source).to_contain("bound.native_source_snapshot_root = preclosed!.snapshot.snapshot_root")
+        # Both the --parse-shard and --parse-fibers drivers bind.
+        val calls = source.split("options = driver_parse_child_bind_preclosed_roots_v1(options, preclosed)").len() - 1
+        expect(calls).to_equal(2)
+
+describe "shard children are not held to the linked-output check":
+    it "exempts parse/HIR/MIR shard children from the missing -o failure":
+        val source = read_source("src/app/cli/native_build_main.spl")
+        expect(source).to_contain("code == 0 and output_path != \"\" and not output_ok and not shard_child")
+        expect(source).to_contain("if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):")
+
+describe "workaround index refreshes once per build":
+    it "skips the writer lock in re-executed shard children":
+        val source = read_source("src/app/cli/native_build_main.spl")
+        expect(source).to_contain("worker != \"1\" and not shard_child")
+        expect(source).to_contain("native_build_workarounds_refresh_needed_v1(env_get(\"SIMPLE_NATIVE_BUILD_WORKER\") ?? \"\", shard_child)")

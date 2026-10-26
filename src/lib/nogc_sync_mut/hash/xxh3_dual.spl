@@ -1,0 +1,155 @@
+# TEMPORARY dual-run shadow facade for pure-Simple XXH3 (std.common.hash.xxh3).
+#
+# Each *_checked fn returns the pure-Simple result. While SIMPLE_XXH3_DUAL_RUN is
+# unset or "1" (default ON; "0" disables) it ALSO computes the runtime result for
+# the variants that have a runtime counterpart, compares, and on mismatch logs to
+# stderr and fails closed (panic).
+#
+# Runtime-boundary decision record (.claude/skills/spipe.md "runtime_need" rule):
+#   runtime_need: independent oracle for pure-Simple XXH3 during rollout
+#   facade_checked: sffi.runtime.xxh3_128_text_runtime_only (per-call, no fallback latch; added as the smallest owner facade over rt_xxh3_128_text; xxh3_128_text keeps its fallback) is
+#     the existing facade over rt_xxh3_128_text; the rt_xxhash_* hasher externs
+#     are declared only in the seed lib (compiler_rust/lib/std/src/infra/hash.spl)
+#     and are NOT backed in the interpreter ("unknown extern function"),
+#     verified 2026-10-26 with bin/simple.exe.
+#   chosen_path: reuse-facade (no new externs)
+#   rejected_shortcuts: new rt_xxhash_* externs in src/lib (unbacked in
+#     interpreter); tool-local rt_* aliases
+#
+# Variant coverage:
+#   xxh3_64            : NO runtime counterpart (rt_xxhash_* unbacked) -> not compared
+#   xxh3_64_seeded     : NO runtime counterpart (same reason)            -> not compared
+#   xxh3_128           : compared via rt_xxh3_128_text, ONLY when the bytes are valid UTF-8 without NUL (text round-trip exact);
+#                        (the runtime takes text); otherwise skipped and counted.
+#   xxh3_128_seeded    : NO runtime counterpart (text API is unseeded) -> not compared
+# If the runtime digest is unavailable (facade fell back to pure Simple) the
+# comparison would be vacuous, so it is skipped (per call, no latch) and counted as skipped.
+#
+# TODO: [hash][P1] remove xxh3 dual-run shadow by 2026-11-02 (expiry) once zero mismatches observed across dev/test lanes since landing; then route callers directly to std.common.hash.xxh3
+
+use std.common.hash.xxh3.{xxh3_64, xxh3_64_seeded, xxh3_128, xxh3_128_seeded, Xxh3Hash128}
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text_runtime_only}
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.io.{eprint}
+
+var _comparisons: i64 = 0
+var _mismatches: i64 = 0
+var _skipped: i64 = 0
+
+fn xxh3_dual_comparisons() -> i64:
+    _comparisons
+
+fn xxh3_dual_mismatches() -> i64:
+    _mismatches
+
+fn xxh3_dual_skipped() -> i64:
+    _skipped
+
+fn xxh3_dual_reset_counters():
+    _comparisons = 0
+    _mismatches = 0
+    _skipped = 0
+
+fn xxh3_dual_enabled() -> bool:
+    env_get("SIMPLE_XXH3_DUAL_RUN") != "0"
+
+fn _hex64(v: u64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 15
+    while i >= 0:
+        val nib = ((v >> (i * 4)) & 15) as i64
+        out = out + digits[nib:nib + 1]
+        i = i - 1
+    out
+
+fn _hex128(h: Xxh3Hash128) -> text:
+    _hex64(h.high) + _hex64(h.low)
+
+fn _is_valid_utf8_no_nul(d: [u8]) -> bool:
+    # strict UTF-8 (RFC 3629): no NUL, no overlong, no surrogates, <= U+10FFFF
+    val n = d.len()
+    var i = 0
+    while i < n:
+        val b = d[i] as i64
+        if b == 0:
+            return false
+        if b < 0x80:
+            i = i + 1
+        elif b >= 0xC2 and b <= 0xDF:
+            if i + 1 >= n or (d[i + 1] as i64) < 0x80 or (d[i + 1] as i64) > 0xBF:
+                return false
+            i = i + 2
+        elif b >= 0xE0 and b <= 0xEF:
+            if i + 2 >= n:
+                return false
+            val b1 = d[i + 1] as i64
+            val b2 = d[i + 2] as i64
+            if b2 < 0x80 or b2 > 0xBF:
+                return false
+            var lo = 0x80
+            var hi = 0xBF
+            if b == 0xE0:
+                lo = 0xA0
+            if b == 0xED:
+                hi = 0x9F
+            if b1 < lo or b1 > hi:
+                return false
+            i = i + 3
+        elif b >= 0xF0 and b <= 0xF4:
+            if i + 3 >= n:
+                return false
+            val b1 = d[i + 1] as i64
+            val b2 = d[i + 2] as i64
+            val b3 = d[i + 3] as i64
+            if b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF:
+                return false
+            var lo = 0x80
+            var hi = 0xBF
+            if b == 0xF0:
+                lo = 0x90
+            if b == 0xF4:
+                hi = 0x8F
+            if b1 < lo or b1 > hi:
+                return false
+            i = i + 4
+        else:
+            return false
+    true
+
+fn _fail(variant: text, n: i64, pure: text, runtime: text):
+    eprint("xxh3 dual-run MISMATCH variant={variant} len={n} seed=0 pure={pure} runtime={runtime}")
+    panic("xxh3 dual-run MISMATCH variant={variant}")
+
+fn xxh3_64_checked(data: [u8]) -> u64:
+    # no runtime counterpart; see header
+    xxh3_64(data)
+
+fn xxh3_64_seeded_checked(data: [u8], seed: u64) -> u64:
+    # no runtime counterpart; see header
+    xxh3_64_seeded(data, seed)
+
+fn xxh3_128_checked(data: [u8]) -> Xxh3Hash128:
+    val pure = xxh3_128(data)
+    if not xxh3_dual_enabled():
+        return pure
+    if not _is_valid_utf8_no_nul(data):
+        _skipped = _skipped + 1
+        return pure
+    val t = bytes_to_text(data)
+    val rt = xxh3_128_text_runtime_only(t)
+    if rt.len() != 32:
+        # runtime unavailable for THIS call (empty sentinel); no latch
+        _skipped = _skipped + 1
+        return pure
+    _comparisons = _comparisons + 1
+    val ph = _hex128(pure)
+    if ph != rt:
+        _mismatches = _mismatches + 1
+        _fail("xxh3_128", data.len(), ph, rt)
+    pure
+
+fn xxh3_128_seeded_checked(data: [u8], seed: u64) -> Xxh3Hash128:
+    # no runtime counterpart; see header
+    xxh3_128_seeded(data, seed)

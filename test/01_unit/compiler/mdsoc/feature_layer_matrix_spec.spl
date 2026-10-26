@@ -1,0 +1,249 @@
+# Purpose and audience: executable evidence for MDSOC compiler engineers that the
+# feature axis x layer axis visibility rules agree (or diverge as designed) on every cell pair of a 2x2 matrix.
+# @req REQ-MDSOC-MATRIX-001
+# @req REQ-MDSOC-MATRIX-002
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+# design: doc/05_design/app/mcp/mdsoc_visibility_requester_design.md ; plan: doc/03_plan/test/language_primitive_mdsoc_visibility_test_plan.md
+"""
+Feature x layer visibility matrix over the REAL checkers.
+
+Fixture: test/fixtures/mdsoc_matrix/ holds two feature capsules (a, b), each with a
+lower layer dir `10.core` and a higher layer dir `20.app`, giving four cells
+(a10, a20, b10, b20).  Each cell file declares three symbols:
+  <f>_<layer>_api    pub and named in the capsule `export` line  (feature-exported)
+  <f>_<layer>_inner  pub but not named in the capsule export line
+  <f>_<layer>_secret no `pub`                                    (private)
+
+Axis separation: feature_a/10.core has its OWN `__init__.spl` (a nested layer boundary
+exporting only a_core_inner), so for cell a10 the layer axis (nearest manifest) and the
+feature axis (capsule root manifest) disagree.  Cells a20, b10, b20 have no nested
+manifest, so both axes see the capsule manifest.  Extra symbols: a_app_viaexport
+(`export use app.{..}` form) and b_port_open / b_port_hidden (`exports { expose }` port file).
+
+Drivers: `check_numbered_layer_dep` (layer axis), `member_visibility_allows`
+(member policy) and `visibility_json` / `feature_*` (query_visibility, feature axis).
+There is no file-level layer checker in layer_checker.spl, so layer steps feed directory
+names, not fixture imports (plan section 2.3).
+
+Run: `bin/simple test test/01_unit/compiler/mdsoc/feature_layer_matrix_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use compiler.mdsoc.layer_checker.{check_numbered_layer_dep}
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.dependency.member_visibility.{MemberAccessScope, member_visibility_allows, member_access_scope_for_modules}
+use app.cli._QueryVisibility.feature_visibility.{feature_dir_of, feature_id_of, feature_export_reason, feature_reachable}
+use app.cli._QueryVisibility.query_commands.{visibility_json, package_name}
+
+val ROOT = "test/fixtures/mdsoc_matrix"
+val CELLS = ["a10", "a20", "b10", "b20"]
+
+fn cell_feature(c: text) -> text:
+    c.substring(0, 1)
+
+fn cell_layer_dir(c: text) -> text:
+    if c.ends_with("10"): "10.core" else: "20.app"
+
+fn cell_layer_name(c: text) -> text:
+    if c.ends_with("10"): "core" else: "app"
+
+fn cell_file(c: text) -> text:
+    ROOT + "/feature_" + cell_feature(c) + "/" + cell_layer_dir(c) + "/" + cell_layer_name(c) + ".spl"
+
+fn cell_symbol(c: text, kind: text) -> text:
+    cell_feature(c) + "_" + cell_layer_name(c) + "_" + kind
+
+fn feature_id(c: text) -> text:
+    "test.fixtures.mdsoc_matrix.feature_" + cell_feature(c)
+
+# Layer-axis oracle (tobe doc): a layer may import only layers <= its own.
+fn expect_layer_violation(from_cell: text, to_cell: text) -> bool:
+    from_cell.ends_with("10") and to_cell.ends_with("20")
+
+# Layer boundary id: nearest __init__.spl.  a10 has a nested one; the rest use the capsule root.
+fn layer_boundary_of(c: text) -> text:
+    if c == "a10": "a-core" else: cell_feature(c)
+
+# Layer display: a10 is judged against the NESTED manifest (exports only a_core_inner).
+fn expect_display(kind: text, owner: text) -> text:
+    if kind == "secret":
+        return "private"
+    if owner == "a10":
+        return if kind == "inner": "public" else: "boundary"
+    if kind == "api": "public" else: "boundary"
+
+fn expect_layer_reachable(kind: text, req: text, owner: text) -> bool:
+    if req == owner:
+        return true
+    val display = expect_display(kind, owner)
+    if display == "public":
+        return true
+    if display == "private":
+        return false
+    layer_boundary_of(req) == layer_boundary_of(owner)
+
+# Feature-axis oracle: `export` lines of EVERY __init__.spl from owner up to the capsule root count (so the nested a10 export of a_core_inner is feature-public too).
+fn expect_feature_exported(kind: text, owner: text) -> bool:
+    kind == "api" or (kind == "inner" and owner == "a10")
+
+fn expect_feature_reachable(kind: text, req: text, owner: text) -> bool:
+    if expect_feature_exported(kind, owner):
+        return true
+    cell_feature(req) == cell_feature(owner)
+
+fn collect_json_mismatches(kind: text) -> [text]:
+    var bad: [text] = []
+    for owner in CELLS:
+        for req in CELLS:
+            val sym = cell_symbol(owner, kind)
+            val json = visibility_json(sym, cell_file(owner), cell_file(req))
+            val want_layer = "{\"display\":\"" + expect_display(kind, owner) + "\",\"reachable\":" + str(expect_layer_reachable(kind, req, owner)) + ","
+            val want_feature = "\"featureVisibility\":{\"feature\":\"" + feature_id(owner) + "\",\"exported\":" + str(expect_feature_exported(kind, owner)) + ",\"reachable\":" + str(expect_feature_reachable(kind, req, owner))
+            if not json.starts_with(want_layer):
+                bad = bad.push(req + "->" + owner + ":" + sym + " layer, got " + json)
+            if not json.contains(want_feature):
+                bad = bad.push(req + "->" + owner + ":" + sym + " feature, got " + json)
+    bad
+
+describe "MDSOC feature x layer matrix: capsule identity":
+    it "resolves each fixture cell to its own feature capsule":
+        # @req REQ-MDSOC-MATRIX-001
+        step("feature_dir_of / feature_id_of for all four cells, including the nested-boundary cell a10")
+        for c in CELLS:
+            expect(feature_dir_of(cell_file(c))).to_equal(ROOT + "/feature_" + cell_feature(c))
+            expect(feature_id_of(cell_file(c))).to_equal(feature_id(c))
+
+    it "names api (and the nested-manifest export a_core_inner) as feature-exported":
+        # @req REQ-MDSOC-MATRIX-001
+        step("feature_export_reason per kind in every cell")
+        for c in CELLS:
+            expect(feature_export_reason(cell_symbol(c, "api"), cell_file(c), "public")).to_contain("named in an export line")
+            if c == "a10":
+                expect(feature_export_reason(cell_symbol(c, "inner"), cell_file(c), "public")).to_contain("named in an export line")
+            else:
+                expect(feature_export_reason(cell_symbol(c, "inner"), cell_file(c), "public")).to_equal("")
+            expect(feature_export_reason(cell_symbol(c, "secret"), cell_file(c), "private")).to_equal("")
+
+    it "accepts the `export use m.{A}` form and the exports.expose port file":
+        # @req REQ-MDSOC-MATRIX-002
+        step("a_app_viaexport via export use; b_port_open via exposed port; b_port_hidden stays private")
+        val app_file = cell_file("a20")
+        expect(feature_export_reason("a_app_viaexport", app_file, "public")).to_contain("named in an export line")
+        val port = ROOT + "/feature_b/20.app/ports.spl"
+        expect(feature_export_reason("b_port_open", port, "public")).to_contain("exposed port")
+        expect(feature_export_reason("b_port_hidden", port, "private")).to_equal("")
+        val open_json = visibility_json("b_port_open", port, cell_file("a10"))
+        expect(open_json).to_contain("\"exported\":true,\"reachable\":true")
+        val hidden_json = visibility_json("b_port_hidden", port, cell_file("a10"))
+        expect(hidden_json).to_contain("\"exported\":false,\"reachable\":false")
+
+describe "MDSOC feature x layer matrix: layer axis":
+    it "allows a layer to import itself and lower layers and rejects only 10 -> 20":
+        # @req REQ-MDSOC-MATRIX-001
+        step("check_numbered_layer_dep on the dir names of all 16 ordered cell pairs (only 4 distinct inputs; fixture files are not parsed)")
+        var bad: [text] = []
+        for from_c in CELLS:
+            for to_c in CELLS:
+                val got = check_numbered_layer_dep(cell_layer_dir(from_c), cell_layer_dir(to_c)).is_some()
+                if got != expect_layer_violation(from_c, to_c):
+                    bad = bad.push(from_c + "->" + to_c + " got violation=" + str(got))
+        expect(bad).to_equal([])
+
+    it "explains an upward import with both layer numbers":
+        # @req REQ-MDSOC-MATRIX-001
+        step("a10 -> a20 and a10 -> b20 produce the same layer message; features are not consulted")
+        for to_c in ["a20", "b20"]:
+            val v = check_numbered_layer_dep("10.core", cell_layer_dir(to_c))
+            expect(v.is_some()).to_equal(true)
+            expect(v.unwrap().message).to_contain("layer 10 (10.core) cannot import from layer 20 (20.app)")
+
+    it "treats a cross-feature same-layer import as layer-legal":
+        # @req REQ-MDSOC-MATRIX-001
+        step("same-layer dir names pass the numbered rule; only the feature axis can restrict cross-feature use")
+        expect(check_numbered_layer_dep("20.app", "20.app").is_some()).to_equal(false)
+        expect(check_numbered_layer_dep("10.core", "10.core").is_some()).to_equal(false)
+
+describe "MDSOC feature x layer matrix: member visibility policy":
+    it "applies public, private and package kinds per cell pair using the path-derived package":
+        # @req REQ-MDSOC-MATRIX-002
+        step("package = package_name(file); fixtures sit outside src/ so every cell resolves to the same package")
+        var bad: [text] = []
+        for owner in CELLS:
+            for req in CELLS:
+                val scope = member_access_scope_for_modules(cell_file(req), package_name(cell_file(req)), cell_file(owner), package_name(cell_file(owner)), [])
+                val same_file = req == owner
+                val same_pkg = package_name(cell_file(req)) == package_name(cell_file(owner))
+                if not member_visibility_allows(Visibility.Public, scope):
+                    bad = bad.push(req + "->" + owner + " public denied")
+                if member_visibility_allows(Visibility.Private, scope) != same_file:
+                    bad = bad.push(req + "->" + owner + " private wrong")
+                if member_visibility_allows(Visibility.Package, scope) != same_pkg:
+                    bad = bad.push(req + "->" + owner + " package wrong")
+        expect(bad).to_equal([])
+        expect(package_name(cell_file("a10"))).to_equal(package_name(cell_file("b20")))
+
+    it "never admits a private member to a sibling layer of the same package":
+        # @req REQ-MDSOC-MATRIX-002
+        step("a10 secret from a20: same package, different module")
+        val scope = member_access_scope_for_modules(cell_file("a20"), "p", cell_file("a10"), "p", [])
+        expect(member_visibility_allows(Visibility.Private, scope)).to_equal(false)
+        expect(member_visibility_allows(Visibility.Package, scope)).to_equal(true)
+
+describe "MDSOC feature x layer matrix: query_visibility per cell pair":
+    it "classifies exported api symbols as feature-public and reachable from every cell":
+        # @req REQ-MDSOC-MATRIX-002
+        step("visibility_json for *_api, 16 pairs; a10 api is layer-boundary yet feature-exported (axes diverge)")
+        expect(collect_json_mismatches("api")).to_equal([])
+
+    it "confines inner symbols to their feature unless a nested manifest exports them":
+        # @req REQ-MDSOC-MATRIX-002
+        step("visibility_json for *_inner, 16 pairs; a10 inner is exported by the nested manifest so it is public on both axes")
+        expect(collect_json_mismatches("inner")).to_equal([])
+
+    it "hides secret symbols from every other file on the layer axis but not from the feature axis":
+        # @req REQ-MDSOC-MATRIX-002
+        step("visibility_json for *_secret, 16 pairs; same-feature sibling layer is feature-reachable")
+        expect(collect_json_mismatches("secret")).to_equal([])
+
+    it "diverges the two axes on the nested-boundary cell":
+        # @req REQ-MDSOC-MATRIX-002
+        step("a10: api is layer-boundary (unreachable from a20) yet feature-exported (reachable); nested export of inner counts for both axes")
+        val api = visibility_json("a_core_api", cell_file("a10"), cell_file("a20"))
+        expect(api.starts_with("{\"display\":\"boundary\",\"reachable\":false,")).to_equal(true)
+        expect(api).to_contain("\"exported\":true,\"reachable\":true")
+        val inner = visibility_json("a_core_inner", cell_file("a10"), cell_file("b20"))
+        expect(inner.starts_with("{\"display\":\"public\",\"reachable\":true,")).to_equal(true)
+        expect(inner).to_contain("\"exported\":true,\"reachable\":true")
+
+    it "exposes only public-display symbols when there is no requester":
+        # @req REQ-MDSOC-MATRIX-002
+        step("requester = empty: reachable equals display == public, never the owner's own view")
+        var bad: [text] = []
+        for owner in CELLS:
+            for kind in ["api", "inner", "secret"]:
+                val json = visibility_json(cell_symbol(owner, kind), cell_file(owner), "")
+                val want = expect_display(kind, owner) == "public"
+                if not json.contains("\"reachable\":" + str(want) + ","):
+                    bad = bad.push(owner + ":" + kind + " no-requester got " + json)
+        expect(bad).to_equal([])
+
+describe "MDSOC feature x layer matrix: combined verdicts":
+    it "allows a20 -> b10 api use and blocks a20 -> b10 secret use":
+        # @req REQ-MDSOC-MATRIX-002
+        step("layer-legal downward cross-feature import: only exported symbols resolve")
+        expect(check_numbered_layer_dep("20.app", "10.core").is_some()).to_equal(false)
+        expect(feature_reachable(cell_file("b10"), cell_file("a20"), true)).to_equal(true)
+        expect(feature_reachable(cell_file("b10"), cell_file("a20"), false)).to_equal(false)
+
+    it "keeps an upward import illegal even when the target symbol is exported":
+        # @req REQ-MDSOC-MATRIX-001
+        step("a10 -> a20: symbol is feature-public, but the numbered layer rule still rejects the import")
+        expect(feature_reachable(cell_file("a20"), cell_file("a10"), true)).to_equal(true)
+        expect(check_numbered_layer_dep("10.core", "20.app").is_some()).to_equal(true)
+
+    it "treats the same-feature sibling layer as feature-reachable for non-exported symbols":
+        # @req REQ-MDSOC-MATRIX-002
+        step("feature_reachable(a10, a20, exported=false) is true; (a10, b20, false) is false")
+        expect(feature_reachable(cell_file("a10"), cell_file("a20"), false)).to_equal(true)
+        expect(feature_reachable(cell_file("a10"), cell_file("b20"), false)).to_equal(false)

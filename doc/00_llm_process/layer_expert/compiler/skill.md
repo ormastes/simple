@@ -58,3 +58,27 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   regenerate through `compiler_schema`, and bind both cache codec versions.
   This candidate has failing MIR/interpreter checks and P1 filter admission
   parity findings; see the collection-planner feature expert before resuming.
+
+- 2026-10-26 HIR keeps every `@cfg` arm: `HirExprKind.CfgSelect` is APPENDED
+  last (codec ordinals are positional) and the visitor/children/hash/codec files
+  are regenerated with `compiler_schema` (`visitors`, `codec`) - never hand-edit.
+  Hand-written exhaustive walkers (mono preflight 09, semantics checkers,
+  subst/rewrite passes) each need a `CfgSelect` arm that walks ALL arms. The
+  parser still strips arms unless the (not yet landed) opt-in emission exists;
+  declaration-level `@cfg` has no HIR carrier yet. Specs:
+  `test/01_unit/compiler/20.hir/hir_cfg_select_*_spec.spl`.
+
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.

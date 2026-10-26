@@ -47,10 +47,11 @@ describe "cache single-flight table":
         val (role, _g) = table.join_at(key, "next", 600)
         expect(role).to_equal(SINGLE_FLIGHT_LEADER_V1)
 
-    it "keeps the in-process future for participants that hold the table":
+    it "keeps the in-process future for waiters that hold the table":
         val table = CacheSingleFlightV1.create()
         val key = cache_single_flight_key_v1("tldr", "sha256:d4")
         val (_r, flight) = table.join(key, "a")
+        val (_w, _wf) = table.join(key, "b")
         expect(table.complete(key, "a", Some([9u8]))).to_equal(true)
         val got = match table.future(flight).poll():
             case Poll.Ready(blob):
@@ -59,6 +60,60 @@ describe "cache single-flight table":
                     case nil: -1
             case Poll.Pending: -2
         expect(got).to_equal(1)
+
+describe "cache single-flight in-process release":
+    it "retains nothing after a leader-only join and complete":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("aop.match", "k1")
+        val (_r, flight) = table.join(key, "lead")
+        expect(table.complete(key, "lead", Some([1u8]))).to_equal(true)
+        expect(table.done.len()).to_equal(0)
+        expect(table.participants.len()).to_equal(0)
+        expect(table.woken.len()).to_equal(0)
+        expect(table.inflight_count()).to_equal(0)
+        table.forget(flight)
+        expect(table.done.len()).to_equal(0)
+
+    it "hands a waiter the result after the leader completes, then empties":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("aop.match", "k2")
+        val (_r, flight) = table.join(key, "lead")
+        val (_w, _wf) = table.join(key, "waiter")
+        expect(table.complete(key, "lead", Some([5u8, 6u8]))).to_equal(true)
+        expect(table.done.len()).to_equal(1)
+        val got = match table.future(flight).poll():
+            case Poll.Ready(blob):
+                match blob:
+                    case Some(bytes): bytes.len()
+                    case nil: -1
+            case Poll.Pending: -2
+        expect(got).to_equal(2)
+        expect(table.done.len()).to_equal(0)
+        expect(table.participants.len()).to_equal(0)
+
+    it "keeps the result for two waiters until both have read it":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("aop.match", "k3")
+        val (_r, flight) = table.join(key, "lead")
+        val (_a, _af) = table.join(key, "w1")
+        val (_b, _bf) = table.join(key, "w2")
+        val _c = table.complete(key, "lead", Some([7u8]))
+        val _first = table.future(flight)
+        expect(table.done.len()).to_equal(1)
+        val _second = table.future(flight)
+        expect(table.done.len()).to_equal(0)
+        expect(table.participants.len()).to_equal(0)
+
+    it "forget on a released flight is a no-op":
+        val table = CacheSingleFlightV1.create()
+        val key = cache_single_flight_key_v1("aop.match", "k4")
+        val (_r, flight) = table.join(key, "lead")
+        val (_w, _wf) = table.join(key, "w")
+        val _c = table.complete(key, "lead", nil)
+        table.forget(flight)
+        table.forget(flight)
+        expect(table.take_woken(flight).len()).to_equal(0)
+        expect(table.done.len()).to_equal(0)
 
 describe "cache daemon host artifact flights":
     it "refuses artifact production before daemon admission":
@@ -81,3 +136,49 @@ describe "cache daemon host artifact flights":
         expect(replies).to_equal(["q/b"])
         val (again, _b2) = host.take_woken_replies(flight)
         expect(again.len()).to_equal(0)
+
+describe "cache single-flight wake and release (T-SF1)":
+    it "publish wakes both waiters with the result and removes the flight entry":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        host.package_admission_open = true
+        val (_ra, flight) = host.join_artifact("tldr", "sha256:e1", "lead", 1)
+        val (rb, _fb) = host.join_artifact("tldr", "sha256:e1", "wa", 2)
+        val (rc, _fc) = host.join_artifact("tldr", "sha256:e1", "wb", 3)
+        expect(rb).to_equal(SINGLE_FLIGHT_WAITER_V1)
+        expect(rc).to_equal(SINGLE_FLIGHT_WAITER_V1)
+        host.park_waiter("wa", "q/a")
+        host.park_waiter("wb", "q/b")
+        expect(host.complete_artifact("tldr", "sha256:e1", "lead", Some([7u8]), 4)).to_equal(flight)
+        val (replies, blob) = host.take_woken_replies(flight)
+        expect(replies).to_equal(["q/a", "q/b"])
+        val got = match blob:
+            case Some(bytes): bytes.len()
+            case nil: -1
+        expect(got).to_equal(1)
+        expect(host.artifact_flights.inflight_count()).to_equal(0)
+        expect(host.parked_waiters.len()).to_equal(0)
+        # no residue for a daemon-answered flight: nobody polls future()
+        expect(host.artifact_flights.done.len()).to_equal(0)
+        expect(host.artifact_flights.participants.len()).to_equal(0)
+
+    it "a failed leader wakes every waiter with nil and leaves none parked":
+        val host = CacheDaemonHost.create(daemon_config_new("p.pid", "p.sock", 1000), 0)
+        host.package_admission_open = true
+        val (_ra, flight) = host.join_artifact("tldr", "sha256:e2", "lead", 1)
+        val (_rb, _fb) = host.join_artifact("tldr", "sha256:e2", "wa", 2)
+        val (_rc, _fc) = host.join_artifact("tldr", "sha256:e2", "wb", 3)
+        host.park_waiter("wa", "q/a")
+        host.park_waiter("wb", "q/b")
+        expect(host.complete_artifact("tldr", "sha256:e2", "lead", nil, 4)).to_equal(flight)
+        val (replies, blob) = host.take_woken_replies(flight)
+        expect(replies.len()).to_equal(2)
+        val failed = match blob:
+            case Some(_b): false
+            case nil: true
+        expect(failed).to_equal(true)
+        expect(host.parked_waiters.len()).to_equal(0)
+        expect(host.artifact_flights.inflight_count()).to_equal(0)
+        expect(host.artifact_flights.done.len()).to_equal(0)
+        expect(host.artifact_flights.participants.len()).to_equal(0)
+        val (again, _fd) = host.join_artifact("tldr", "sha256:e2", "next", 5)
+        expect(again).to_equal(SINGLE_FLIGHT_LEADER_V1)

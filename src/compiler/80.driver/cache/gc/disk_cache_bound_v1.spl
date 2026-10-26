@@ -1,0 +1,116 @@
+# Bounds for flat on-disk caches (HIR, warm artifacts, native objects) that
+# are written outside the CAS store and so were never counted by
+# admission.spl. Two limits from cache_limits.spl's CacheRetentionLimitsV1:
+#
+# - per source: at most `versions_per_source` entries and
+#   `per_source_max_disk_bytes` per source tag; oldest recorded first out.
+#   The tag→entries index lives in {dir}/.by-source/<tag>.idx, one basename
+#   per line in publish order.
+# - whole directory: `storage_max_bytes`. Over it, oldest-mtime files are
+#   swept to the low watermark; if the store is still over its hard limit the
+#   write is refused (fail closed) with a clear one-time error, instead of
+#   filling the disk.
+
+use std.nogc_sync_mut.io_runtime.{file_exists, file_size_signed,
+    file_read_nullable, file_delete, dir_create}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_dir_bytes, disk_bound_sweep}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_move(src: text, dst: text) -> bool
+extern fn rt_getpid() -> i64
+
+struct DiskCacheAdmitV1:
+    admitted: bool
+    evicted: i64
+    total: i64
+    reason: text
+
+var _dcb_refusal_noted: bool = false
+
+fn _dcb_index_path(dir: text, tag: text) -> text:
+    "{dir}/.by-source/{tag}.idx"
+
+fn disk_cache_dir_bytes_v1(dir: text) -> i64:
+    disk_bound_dir_bytes(dir)
+
+fn disk_cache_sweep_v1(dir: text, target_bytes: i64) -> i64:
+    disk_bound_sweep(dir, target_bytes)
+
+# The index is read-modify-written without a lock: two processes recording
+# the same tag at once can drop one line, leaving that entry outside the
+# per-source bound (it is still covered by the storage cap sweep).
+# Records `entry` (a basename in dir) under source `tag` and evicts that
+# source's oldest entries beyond the per-source count/byte limits.
+fn disk_cache_source_record_v1(dir: text, tag: text, entry: text,
+        limits: CacheRetentionLimitsV1) -> i64:
+    if tag == "" or entry == "":
+        return 0
+    val _made = dir_create("{dir}/.by-source", true)
+    val index_path = _dcb_index_path(dir, tag)
+    var entries: [text] = []
+    val existing = file_read_nullable(index_path) ?? ""
+    if existing != "":
+        for line in existing.split("\n"):
+            val name = line.trim()
+            if name != "" and name != entry and file_exists("{dir}/{name}"):
+                entries.push(name)
+    entries.push(entry)
+    var bytes: i64 = 0
+    for name in entries:
+        val size = file_size_signed("{dir}/{name}")
+        if size > 0:
+            bytes = bytes + size
+    var removed = 0
+    var start = 0
+    while start < entries.len() - 1 and
+            (entries.len() - start > limits.versions_per_source or
+             bytes > limits.per_source_max_disk_bytes):
+        val victim = "{dir}/{entries[start]}"
+        val size = file_size_signed(victim)
+        if file_delete(victim):
+            removed = removed + 1
+            if size > 0:
+                bytes = bytes - size
+        start = start + 1
+    var kept: [text] = []
+    var index = start
+    while index < entries.len():
+        kept.push(entries[index])
+        index = index + 1
+    val tmp = index_path + ".{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, kept.join("\n") + "\n"):
+        if not rt_file_move(tmp, index_path):
+            file_delete(tmp)
+    removed
+
+# Admission for a write of write_bytes into dir under limits.storage_max_bytes.
+# known_total is the caller's running byte total for dir (-1 = measure now);
+# the result carries the updated total. Callers keep it in an i64, never a
+# text-keyed global, so nothing retains a string owned by a scratch scope.
+# Sweeps to 75% of the cap when the projected total crosses it; refuses only
+# when the store is still over the hard limit (cap * 1.05) after the sweep.
+fn disk_cache_admit_v1(dir: text, write_bytes: i64, known_total: i64,
+        limits: CacheRetentionLimitsV1) -> DiskCacheAdmitV1:
+    val cap = limits.storage_max_bytes
+    var total = if known_total >= 0: known_total else: disk_cache_dir_bytes_v1(dir)
+    var evicted = 0
+    if total + write_bytes > cap:
+        evicted = disk_cache_sweep_v1(dir, cap * 3 / 4)
+        total = disk_cache_dir_bytes_v1(dir)
+    val hard = cap + cap / 20
+    if total + write_bytes > hard:
+        if not _dcb_refusal_noted:
+            _dcb_refusal_noted = true
+            eprint("error: cache storage cap reached: {dir} holds {total} bytes, " +
+                "writing {write_bytes} more would exceed the hard limit {hard} " +
+                "(SIMPLE_CACHE_MAX_BYTES={cap}); write refused, build continues uncached")
+        return DiskCacheAdmitV1(admitted: false, evicted: evicted, total: total, reason: "over_hard_limit")
+    DiskCacheAdmitV1(admitted: true, evicted: evicted, total: total + write_bytes, reason: "ok")
+
+export DiskCacheAdmitV1
+export disk_cache_dir_bytes_v1
+export disk_cache_sweep_v1
+export disk_cache_source_record_v1
+export disk_cache_admit_v1

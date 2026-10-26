@@ -1,0 +1,80 @@
+"""
+# XXH3 dual-run shadow facade
+@req XXH3-DUAL-001 pure result is returned and compared with runtime where a counterpart exists
+@req XXH3-DUAL-002 SIMPLE_XXH3_DUAL_RUN=0 performs zero comparisons
+"""
+
+use std.spec.step
+use std.spec.*
+use std.common.hash.xxh3.{xxh3_64 as pure_xxh3_64, xxh3_64_seeded as pure_xxh3_64_seeded, xxh3_128 as pure_xxh3_128, xxh3_128_seeded as pure_xxh3_128_seeded}
+use std.nogc_sync_mut.hash.xxh3_dual.{xxh3_64_checked, xxh3_64_seeded_checked, xxh3_128_checked, xxh3_128_seeded_checked, xxh3_dual_comparisons, xxh3_dual_mismatches, xxh3_dual_skipped, xxh3_dual_reset_counters}
+use std.io_runtime.{env_set_process}
+
+fn _data(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((((i * 7) % 94) + 33) as u8)
+        i = i + 1
+    out
+
+fn _lengths() -> [i64]:
+    var ls: [i64] = []
+    var n = 0
+    while n <= 300:
+        ls.push(n)
+        n = n + 1
+    ls.push(1024)
+    ls.push(65536)
+    ls
+
+describe "xxh3 dual-run facade":
+    it "dual-run matches over lengths 0..300, 1024, 65536 with both seeds":
+        step("enable dual-run and reset counters")
+        env_set_process("SIMPLE_XXH3_DUAL_RUN", "1")
+        xxh3_dual_reset_counters()
+        step("run all variants")
+        for n in _lengths():
+            val d = _data(n)
+            expect(xxh3_64_checked(d)).to_equal(pure_xxh3_64(d))
+            expect(xxh3_64_seeded_checked(d, 0x9E3779B97F4A7C15)).to_equal(pure_xxh3_64_seeded(d, 0x9E3779B97F4A7C15))
+            expect(xxh3_128_checked(d).low).to_equal(pure_xxh3_128(d).low)
+            expect(xxh3_128_seeded_checked(d, 7).high).to_equal(pure_xxh3_128_seeded(d, 7).high)
+        step("assert non-vacuous and clean")
+        expect(xxh3_dual_mismatches()).to_equal(0)
+        expect(xxh3_dual_comparisons() > 0).to_equal(true)
+        print "xxh3-dual comparisons={xxh3_dual_comparisons()} skipped={xxh3_dual_skipped()} mismatches={xxh3_dual_mismatches()}"
+
+    it "performs zero comparisons when disabled":
+        step("disable and reset")
+        env_set_process("SIMPLE_XXH3_DUAL_RUN", "0")
+        xxh3_dual_reset_counters()
+        for n in [0, 1, 17, 129, 300]:
+            val d = _data(n)
+            expect(xxh3_128_checked(d).low).to_equal(pure_xxh3_128(d).low)
+        expect(xxh3_dual_comparisons()).to_equal(0)
+        env_set_process("SIMPLE_XXH3_DUAL_RUN", "1")
+
+    it "compares valid non-ASCII UTF-8 and skips invalid UTF-8 and NUL":
+        step("reset")
+        env_set_process("SIMPLE_XXH3_DUAL_RUN", "1")
+        xxh3_dual_reset_counters()
+        val utf8: [u8] = [0xC3u8, 0xA9u8, 0x61u8]
+        val bad: [u8] = [0xFFu8, 0x61u8]
+        val nul: [u8] = [0x61u8, 0u8]
+        xxh3_128_checked(utf8)
+        expect(xxh3_dual_comparisons()).to_equal(1)
+        xxh3_128_checked(bad)
+        xxh3_128_checked(nul)
+        expect(xxh3_dual_comparisons()).to_equal(1)
+        val overlong: [u8] = [0xC0u8, 0x80u8]
+        val surrogate: [u8] = [0xEDu8, 0xA0u8, 0x80u8]
+        val toobig: [u8] = [0xF4u8, 0x90u8, 0x80u8, 0x80u8]
+        val trunc: [u8] = [0xE2u8, 0x82u8]
+        xxh3_128_checked(overlong)
+        xxh3_128_checked(surrogate)
+        xxh3_128_checked(toobig)
+        xxh3_128_checked(trunc)
+        expect(xxh3_dual_comparisons()).to_equal(1)
+        expect(xxh3_dual_skipped()).to_equal(6)
+        expect(xxh3_dual_mismatches()).to_equal(0)

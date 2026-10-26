@@ -754,20 +754,16 @@ fn impl_type_arg_is_param(name: text) -> bool:
 # arguments are exactly distinct bare type-parameter names (`Pair<A, B>`), as
 # opposed to `List<Option<T>>`, `Pair<T, T>` or `Pair<i64, T>`. Only the former
 # lets a receiver's type arguments bind the impl's parameters positionally.
-var par_impl_target_applied: bool = false
-var par_impl_target_plain: bool = true
-var par_impl_target_arg_names: [text] = []
-var par_impl_target_leaf_simple: bool = false
 
 fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false) -> [text]:
     var params: [text] = []
     if not collect_leaf:
-        par_impl_target_applied = false
-        par_impl_target_plain = true
-        par_impl_target_arg_names = []
+        impl_target_state.par_impl_target_applied = false
+        impl_target_state.par_impl_target_plain = true
+        impl_target_state.par_impl_target_arg_names = []
     if par_kind_get() != TOK_IDENT:
         parser_parse_type()
-        par_impl_target_leaf_simple = false
+        impl_target_state.par_impl_target_leaf_simple = false
         return params
     val name = par_text_get()
     parser_advance()
@@ -783,10 +779,10 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
     if k != TOK_LT and k != TOK_LT_GENERIC and k != TOK_LBRACKET:
         if collect_leaf and not qualified and not has_explicit_params and impl_type_arg_is_param(name):
             params.push(name)
-        par_impl_target_leaf_simple = not qualified
+        impl_target_state.par_impl_target_leaf_simple = not qualified
         return params
     if not collect_leaf:
-        par_impl_target_applied = true
+        impl_target_state.par_impl_target_applied = true
     # These are type APPLICATION arguments, not declaration parameters.
     # parse_type_params only accepts names/constraints and stops at the '<'
     # of a nested application such as Result<T, E>.
@@ -800,9 +796,9 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
             if not params.contains(parameter):
                 params.push(parameter)
         if not collect_leaf:
-            if not arg_is_ident or not par_impl_target_leaf_simple or not impl_type_arg_is_param(arg_name) or par_impl_target_arg_names.contains(arg_name):
-                par_impl_target_plain = false
-            par_impl_target_arg_names.push(arg_name)
+            if not arg_is_ident or not impl_target_state.par_impl_target_leaf_simple or not impl_type_arg_is_param(arg_name) or impl_target_state.par_impl_target_arg_names.contains(arg_name):
+                impl_target_state.par_impl_target_plain = false
+            impl_target_state.par_impl_target_arg_names.push(arg_name)
         if par_kind_get() != TOK_COMMA:
             break
         parser_advance()
@@ -811,7 +807,7 @@ fn parse_impl_target_type(has_explicit_params: bool, collect_leaf: bool = false)
     else:
         lex_mark_current_token_as_generic_close()
         parser_expect(TOK_GT)
-    par_impl_target_leaf_simple = false
+    impl_target_state.par_impl_target_leaf_simple = false
     params
 
 fn impl_target_binds_positionally(explicit_params: [text]) -> bool:
@@ -819,17 +815,17 @@ fn impl_target_binds_positionally(explicit_params: [text]) -> bool:
     bind the impl's type parameters in order: it applies no arguments, or its
     arguments are distinct bare parameter names that -- when the impl also
     writes `impl<...>` -- repeat that list exactly."""
-    if not par_impl_target_applied:
+    if not impl_target_state.par_impl_target_applied:
         return true
-    if not par_impl_target_plain:
+    if not impl_target_state.par_impl_target_plain:
         return false
     if explicit_params.len() == 0:
         return true
-    if explicit_params.len() != par_impl_target_arg_names.len():
+    if explicit_params.len() != impl_target_state.par_impl_target_arg_names.len():
         return false
     var i = 0
     while i < explicit_params.len():
-        if explicit_params[i] != par_impl_target_arg_names[i]:
+        if explicit_params[i] != impl_target_state.par_impl_target_arg_names[i]:
             return false
         i = i + 1
     true
@@ -964,23 +960,17 @@ pub struct ImplTargetState:
     par_impl_target_arg_names: [text]
     par_impl_target_leaf_simple: bool
 
+fn impl_target_state_fresh() -> ImplTargetState:
+    ImplTargetState(par_impl_target_applied: false, par_impl_target_plain: true, par_impl_target_arg_names: [], par_impl_target_leaf_simple: false)
+
+var impl_target_state: ImplTargetState = impl_target_state_fresh()
+
 pub fn impl_target_state_take() -> ImplTargetState:
-    val s = ImplTargetState(
-        par_impl_target_applied: par_impl_target_applied,
-        par_impl_target_plain: par_impl_target_plain,
-        par_impl_target_arg_names: par_impl_target_arg_names,
-        par_impl_target_leaf_simple: par_impl_target_leaf_simple
-    )
-    par_impl_target_applied = false
-    par_impl_target_plain = true
-    par_impl_target_arg_names = []
-    par_impl_target_leaf_simple = false
+    val s = impl_target_state
+    impl_target_state = impl_target_state_fresh()
     s
 
 pub fn impl_target_state_install(s: ImplTargetState):
-    par_impl_target_applied = s.par_impl_target_applied
-    par_impl_target_plain = s.par_impl_target_plain
-    par_impl_target_arg_names = s.par_impl_target_arg_names
-    par_impl_target_leaf_simple = s.par_impl_target_leaf_simple
+    impl_target_state = s
 
 export ImplTargetState, impl_target_state_take, impl_target_state_install

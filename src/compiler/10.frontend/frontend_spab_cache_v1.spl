@@ -27,7 +27,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, fronte
     frontend_parse_cache_dir, frontend_cache_note_native_digest_unavailable}
 use compiler.frontend.flat_ast_bridge.{build_module_from_packed_view_v1}
 use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_open_v1,
-    flat_packed_close_v1, flat_packed_admit_view_v1, flat_packed_store_v1, module_artifact_path_v1,
+    flat_packed_close_v1, flat_packed_admit_view_strict_v1, flat_packed_store_v1, module_artifact_path_v1,
     SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1}
 use std.common.crypto.sha256.{sha256_text_native_or_empty}
@@ -58,8 +58,11 @@ fn _scope_digest() -> text:
         _spab_scope_digest_for = scope
     _spab_scope_digest_memo
 
-fn _identity(key: text, scope_digest: text) -> [SpabDigestV1]:
+# The xxh3 key is only an index; the sha256 of the exact source bytes is the
+# identity proof a hit must match (A-2: xxh3 alone never admits a persistent read).
+fn _identity(key: text, scope_digest: text, source_sha: text) -> [SpabDigestV1]:
     [SpabDigestV1(subject: 1, algo: HASH_ALGO_XXH3_128_V1, hex: key),
+     SpabDigestV1(subject: 1, algo: HASH_ALGO_SHA256_V1, hex: source_sha),
      SpabDigestV1(subject: 2, algo: HASH_ALGO_SHA256_V1, hex: scope_digest)]
 
 pub fn frontend_spab_path_v1(key: text) -> text:
@@ -68,15 +71,15 @@ pub fn frontend_spab_path_v1(key: text) -> text:
     val sd = _scope_digest()
     if sd == "":
         return ""
-    val ids = _identity(key, sd)
-    module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[1])
+    val ids = _identity(key, sd, "")
+    module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[2])
 
 pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i64],
-        refs: [SpabImportRefV1]) -> bool:
+        refs: [SpabImportRefV1], source_sha: text) -> bool:
     val path = frontend_spab_path_v1(key)
-    if path == "" or blob == "" or trace.len() == 0:
+    if path == "" or blob == "" or trace.len() == 0 or source_sha == "":
         return false
-    val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key, _scope_digest()), xxh3_128_text(file_path))
+    val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key, _scope_digest(), source_sha), xxh3_128_text(file_path))
     if packed.len() == 0:
         return false
     flat_packed_store_v1(path, packed)
@@ -97,7 +100,7 @@ fn _now_us() -> i64:
     unsafe(capabilities: [ffi]):
         rt_time_now_unix_micros()
 
-pub fn frontend_spab_load_v1(key: text, source: text, file_path: text) -> ParserModule?:
+pub fn frontend_spab_load_v1(key: text, source: text, source_sha: text, file_path: text) -> ParserModule?:
     _spab_last_verify_us = 0
     _spab_last_build_us = 0
     if key.len() == 32 and _scope_digest() == "":
@@ -107,13 +110,16 @@ pub fn frontend_spab_load_v1(key: text, source: text, file_path: text) -> Parser
     if path == "":
         return nil
     val t0 = _now_us()
+    if source_sha == "":
+        frontend_cache_note_native_digest_unavailable()
+        return nil
     val view = flat_packed_open_v1(path)
     if not view.valid:
         if view.reason == SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1:
             frontend_cache_note_native_digest_unavailable()
         val _closed = flat_packed_close_v1(view)
         return nil
-    if flat_packed_admit_view_v1(view, _identity(key, _scope_digest())) != "":
+    if flat_packed_admit_view_strict_v1(view, _identity(key, _scope_digest(), source_sha)) != "":
         val _closed = flat_packed_close_v1(view)
         return nil
     val t1 = _now_us()

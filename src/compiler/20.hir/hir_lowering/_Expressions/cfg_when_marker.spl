@@ -1,0 +1,46 @@
+# Recognizes the preprocessor's cfg-select marker (SIMPLE_HIR_CFG_SELECT=1):
+# an if/elif chain whose conditions are `__cfg_when__("<condition text>")`.
+# HIR lowering turns the whole chain into HirExprKind.CfgSelect, but only when
+# the flag is on and EVERY arm is a marker (a mixed chain stays a normal if).
+# Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
+
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, CallArg, IfArm}
+use compiler.core.parser_preprocessor.{_pp_cfg_select_flag}
+
+fn cfg_when_ident_name(e: Expr) -> text:
+    val kind: ExprKind = e.kind
+    match kind:
+        case ExprKind.Ident(name): name
+        case _: ""
+
+# The literal's text, or nil when `e` is not a string literal.
+fn cfg_when_string_lit(e: Expr) -> text?:
+    val kind: ExprKind = e.kind
+    match kind:
+        case ExprKind.StringLit(s, _): Some(s)
+        case _: nil
+
+# The marker's condition text, or nil when `cond` is not a marker call with a
+# string-literal argument.
+fn cfg_when_marker_cond(cond: Expr) -> text?:
+    val kind: ExprKind = cond.kind
+    match kind:
+        case ExprKind.Call(callee, args):
+            val callee_t: Expr = callee
+            if cfg_when_ident_name(callee_t) != "__cfg_when__": return nil
+            if args.len() != 1: return nil
+            val arg: CallArg = args[0]
+            val arg_value: Expr = arg.value
+            cfg_when_string_lit(arg_value)
+        case _: nil
+
+# True only with the flag on and every arm a marker; with the flag off a user
+# function named `__cfg_when__` is never hijacked.
+fn cfg_when_chain_is_marker(arms: [IfArm]) -> bool:
+    if arms.len() == 0: return false
+    for arm in arms:
+        val arm_t: IfArm = arm
+        if not cfg_when_marker_cond(arm_t.cond).?: return false
+    _pp_cfg_select_flag()
+
+export cfg_when_marker_cond, cfg_when_chain_is_marker

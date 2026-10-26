@@ -1,0 +1,33 @@
+use std.spec
+use app.cli.shard_mem_clamp.{shard_threads_cap_for, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1}
+
+# Phase-4 problem 1: per-file worker pool memory admission defaults.
+# Old budgets (HIR 6700000 kB, MIR 16000000 kB) refused the pool unless >~54 GB
+# was free. Measured per-file worker peak RSS is >= 5.65 GiB (5924000 kB, lower
+# bound); budgets are that x ~1.5. The pool needs >= 2 admitted workers; fewer
+# is refused (the caller skips the pool and takes the capsule-shard two-pass path).
+describe "native-build per-file pool memory admission":
+    val free_32_gb = 33554432
+    val free_24_gb = 25165824
+    val free_1_gb = 1048576
+
+    it "budgets cover the largest measured worker peak":
+        expect(SHARD_MIR_WORKER_KB_V1 >= 5924000).to_be_true()
+        expect(SHARD_HIR_WORKER_KB_V1 >= 5924000).to_be_true()
+
+    it "MIR budget is below the old refusing constant":
+        expect(SHARD_MIR_WORKER_KB_V1 < 16000000).to_be_true()
+
+    it "admits a pool of 2 workers with 32 GB free":
+        expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, free_32_gb)).to_equal(2)
+        expect(shard_threads_cap_for(2, SHARD_HIR_WORKER_KB_V1, free_32_gb)).to_equal(2)
+
+    it "refuses the pool (cap <= 1) with 24 GB free":
+        expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, free_24_gb) <= 1).to_be_true()
+
+    it "refuses the pool (cap <= 1) with 1 GB free":
+        expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, free_1_gb) <= 1).to_be_true()
+        expect(shard_threads_cap_for(2, SHARD_HIR_WORKER_KB_V1, free_1_gb) <= 1).to_be_true()
+
+    it "refuses with unknown host memory":
+        expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, 0)).to_equal(1)

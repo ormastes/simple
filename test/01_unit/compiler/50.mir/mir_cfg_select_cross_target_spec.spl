@@ -1,0 +1,44 @@
+# @req: REQ-COMP-MIR-CFG-TARGET-SELECT-001 — one target-neutral set of @cfg arms, MIR picks per target.
+"""
+## Purpose and audience
+Purpose: Prove MIR selects the @cfg arm from an explicit MirTargetContext (no env, no globals),
+so the same HIR arms lower to i686 / x86_64 / aarch64 / riscv64 differing only in the chosen arm.
+Audience: COMP maintainers. Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
+"""
+use std.spec.{describe, it, expect}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_eval_for_target}
+
+fn tgt(arch: text, os: text) -> MirTargetContext:
+    MirTargetContext(arch: arch, os: os, abi: "gnu", backend: "llvm", version: 1)
+
+val ARMS: [text] = ["arch = \"x86\"", "arch == \"x86_64\" and os = \"linux\"", "aarch64", "target_arch = \"riscv64\" && unix", ""]
+
+describe "MIR @cfg arm selection is target-explicit":
+    it "same arms select a different arm per target":
+        val no_feat: [text] = []
+        expect(mir_cfg_select_arm(ARMS, tgt("x86", "linux"), no_feat)).to_equal(0)
+        expect(mir_cfg_select_arm(ARMS, tgt("x86_64", "linux"), no_feat)).to_equal(1)
+        expect(mir_cfg_select_arm(ARMS, tgt("aarch64", "macos"), no_feat)).to_equal(2)
+        expect(mir_cfg_select_arm(ARMS, tgt("riscv64", "linux"), no_feat)).to_equal(3)
+
+    it "falls back to the else arm and reports malformed arms":
+        val no_feat: [text] = []
+        expect(mir_cfg_select_arm(ARMS, tgt("x86_64", "windows"), no_feat)).to_equal(4)
+        expect(mir_cfg_select_arm(["bogus_atom"], tgt("x86_64", "linux"), no_feat)).to_equal(-2)
+        expect(mir_cfg_select_arm(["windows"], tgt("x86_64", "linux"), no_feat)).to_equal(-1)
+
+    it "shares the preprocessor's exact atom vocabulary":
+        val no_feat: [text] = []
+        expect(mir_cfg_select_arm(["os = \"none\""], tgt("riscv64", "baremetal"), no_feat)).to_equal(0)
+        expect(mir_cfg_select_arm(["armv7"], tgt("arm", "linux"), no_feat)).to_equal(0)
+        expect(mir_cfg_select_arm(["arch = \"ppc64le\""], tgt("ppc64le", "linux"), no_feat)).to_equal(0)
+        expect(mir_cfg_select_arm(["os = \"linux-gnu\""], tgt("x86_64", "linux"), no_feat)).to_equal(-2)
+        expect(mir_cfg_select_arm(["machine"], tgt("x86_64", "macos"), no_feat)).to_equal(-2)
+
+    it "evaluates not / parens / family / feature against the target only":
+        val feats: [text] = ["avx2"]
+        expect(mir_cfg_eval_for_target("not (windows or arch = \"arm\")", tgt("x86_64", "linux"), feats).value).to_equal(true)
+        expect(mir_cfg_eval_for_target("family = \"unix\"", tgt("aarch64", "freebsd"), feats).value).to_equal(true)
+        expect(mir_cfg_eval_for_target("feature = \"avx2\"", tgt("x86_64", "linux"), feats).value).to_equal(true)
+        expect(mir_cfg_eval_for_target("feature = \"avx2\"", tgt("x86_64", "linux"), []).value).to_equal(false)

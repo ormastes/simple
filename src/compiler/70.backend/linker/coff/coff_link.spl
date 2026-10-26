@@ -3,7 +3,8 @@
 # capsule never silently delegates unsupported object features externally.
 
 use compiler.backend.linker.coff.coff_object.{
-    CoffObject, CoffSection, CoffSymbol, COFF_MACHINE_AMD64, COFF_MACHINE_ARM64,
+    CoffObject, CoffSection, CoffSymbol, COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_UNKNOWN,
+    COFF_STORAGE_CLASS_EXTERNAL,
     COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64,
     COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_5,
     COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7,
@@ -11,8 +12,8 @@ use compiler.backend.linker.coff.coff_object.{
     COFF_REL_ARM64_SECREL_HIGH12A, COFF_REL_ARM64_SECREL_LOW12L,
     COFF_REL_ARM64_SECTION, COFF_REL_ARM64_ADDR64, COFF_REL_ARM64_REL32,
     COFF_SECTION_LNK_INFO, COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT,
-    coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name,
-    coff_weak_primary_for_fallback, coff_symbol_is_relocated,
+    coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name, coff_is_weak_alias,
+    coff_weak_primary_map, coff_symbol_is_relocated,
     coff_apply_amd64_relocation, coff_apply_arm64_relocation,
     coff_apply_arm64_section_relocation}
 use compiler.backend.linker.coff.pe_image_writer.{
@@ -20,7 +21,7 @@ use compiler.backend.linker.coff.pe_image_writer.{
     PE_MACHINE_AMD64, PE_MACHINE_ARM64, pe_align_up,
     pe_validate_policy, pe_write_image_policy}
 use compiler.backend.linker.coff.archive_closure.{
-    CoffArchiveClosure, coff_archive_closure_retained_aliases}
+    CoffArchiveMember, CoffArchiveClosure, coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{
     pe_build_amd64_imports, pe_build_arm64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
@@ -350,10 +351,13 @@ fn _coff_section_rvas(objects: [CoffObject],
             val section = objects[oi].sections[si]
             if accepted[oi][si] and (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0:
                 val selection = section.comdat_selection
-                val comdat_key = if section.comdat_key != "": section.comdat_key else: section.name
+                # The key is the first external symbol defined in the section. A
+                # section with only a static leader (clang -ffunction-sections on a
+                # `static` function) has no key: it is local and never deduplicated.
+                val comdat_key = section.comdat_key
                 if selection <= 0 or selection > 7:
                     return Err("COFF COMDAT section '{section.name}' has invalid selection {selection}")
-                if selection != 5:
+                if selection != 5 and comdat_key != "":
                     val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
                     if not chosen_object.has(comdat_key):
                         chosen_object[comdat_key] = oi
@@ -549,6 +553,9 @@ fn _coff_common_layout(objects: [CoffObject], rvas: [[i64]], base_rva: i64) -> C
                 cursor = pe_align_up(cursor, alignment)
                 symbols[symbol.name] = base_rva + cursor
                 cursor = cursor + sizes[symbol.name]
+    # lld-link synthesizes __ImageBase (RVA 0, the image's own load address);
+    # MSVC CRT objects reference it. It occupies no common storage.
+    if not defined.has("__ImageBase"): symbols["__ImageBase"] = 0
     CoffCommonLayout(virtual_address: base_rva, size: cursor, symbol_rvas: symbols)
 
 fn _coff_image_characteristics(characteristics: i64) -> i64:
@@ -1105,14 +1112,21 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
     oi = 0
     while oi < objects.len():
         val object = objects[oi]
+        val weak_primaries = coff_weak_primary_map(object)
         for symbol in object.symbols:
             if symbol.name != "" and symbol.is_external() and not symbol.is_defined() and
                     not symbol.is_absolute() and symbol.value == 0:
                 if gc_sections and not _coff_symbol_is_live_relocated(
                         object, rvas[oi], symbol.table_index):
                     continue
-                val weak_primary = coff_weak_primary_for_fallback(object, symbol.table_index)
-                val relocated = if gc_sections:
+                val weak_primary: text? = if weak_primaries.has(symbol.table_index):
+                    Some(weak_primaries[symbol.table_index])
+                else:
+                    nil
+                # Relocation scans are per-object linear; only weak fallbacks need one.
+                val relocated = if weak_primary == nil:
+                    false
+                elif gc_sections:
                     _coff_symbol_is_live_relocated(
                         object, rvas[oi], symbol.table_index)
                 else:
@@ -1134,6 +1148,51 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
                     return Err("unresolved external COFF symbol '{name}'")
         oi = oi + 1
     Ok(true)
+
+fn _coff_root_defines(roots: [CoffObject], name: text) -> bool:
+    for object in roots:
+        for symbol in object.symbols:
+            if symbol.name == name and symbol.is_external() and symbol.is_defined():
+                return true
+    false
+
+fn _coff_with_entry_roots(closure_roots: [text], roots: [CoffObject],
+        entry: text) -> [text]:
+    """Archive-closure roots plus the entry symbol, as lld-link roots /ENTRY.
+
+    An explicit entry is pulled from archives like an /INCLUDE. For "auto", a
+    program that defines `main` but not the CRT startup gets the
+    console CRT startup symbol, which lives in msvcrt.lib and carries the
+    /DEFAULTLIB rows for vcruntime.lib and ucrt.lib. Kept apart from the
+    retained roots: a missing auto entry is not a missing /INCLUDE."""
+    var result = closure_roots
+    var wanted = ""
+    if entry != "auto":
+        wanted = entry
+    elif _coff_root_defines(roots, "main") and not _coff_root_defines(roots, "mainCRTStartup"):
+        wanted = "mainCRTStartup"
+    if wanted != "" and not result.contains(wanted): result = result.push(wanted)
+    result
+
+fn _coff_weak_alias_rows(aliases: {text: text}, roots: [CoffObject],
+        members: [CoffArchiveMember]) -> Result<{text: text}, text>:
+    """Fold SEARCH_ALIAS weak externals of the input objects and selected
+    archive members into the alias map, as lld-link resolves oldnames.lib
+    `__imp_mkdir` to `__imp__mkdir` and a clang `weak` definition
+    (`spl_init_args` -> `.weak.spl_init_args.default.*`) for other objects.
+    An explicit /ALTERNATENAME or a strong definition wins."""
+    var result: {text: text} = {}
+    for name in aliases.keys(): result[name] = aliases[name]
+    var objects = roots
+    for member in members: objects = objects.push(member.object)
+    for object in objects:
+        for symbol in object.symbols:
+            if not coff_is_weak_alias(symbol) or result.has(symbol.name): continue
+            if _coff_root_defines(objects, symbol.name): continue
+            val target = coff_symbol_resolution_name(object, symbol)
+            if target.is_err(): return Err(target.unwrap_err())
+            result[symbol.name] = target.unwrap()
+    Ok(result)
 
 fn _coff_prepare_link_machine(request: CoffLinkRequest,
         retained_symbols: [text], machine: i64,
@@ -1166,7 +1225,7 @@ fn _coff_prepare_link_machine(request: CoffLinkRequest,
         if not closure_roots.contains(exported.internal_name):
             closure_roots = closure_roots.push(exported.internal_name)
     var closure = coff_archive_closure_retained_aliases(
-        roots, request.archives, closure_roots, aliases)
+        roots, request.archives, _coff_with_entry_roots(closure_roots, roots, request.entry), aliases)
     if closure.is_err(): return Err(closure.unwrap_err())
     var selected = closure.unwrap()
     var roots_changed = true
@@ -1194,14 +1253,19 @@ fn _coff_prepare_link_machine(request: CoffLinkRequest,
             aliases = more_aliases.unwrap()
             alias_count = all_directives.alternate_names.len()
             roots_changed = true
+        val with_weak = _coff_weak_alias_rows(aliases, roots, selected.members)
+        if with_weak.is_err(): return Err(with_weak.unwrap_err())
+        if with_weak.unwrap().len() != aliases.len():
+            aliases = with_weak.unwrap()
+            roots_changed = true
         if roots_changed:
             closure = coff_archive_closure_retained_aliases(
-                roots, request.archives, closure_roots, aliases)
+                roots, request.archives, _coff_with_entry_roots(closure_roots, roots, request.entry), aliases)
             if closure.is_err(): return Err(closure.unwrap_err())
             selected = closure.unwrap()
     var objects = roots
     for member in selected.members:
-        if member.object.machine != machine:
+        if member.object.machine != machine and member.object.machine != COFF_MACHINE_UNKNOWN:
             return Err("COFF archive member '{member.name}' is not {machine_name}")
         objects = objects.push(member.object)
     Ok(CoffPreparedLink(objects: objects, selected: selected,
@@ -1345,6 +1409,30 @@ fn coff_link_arm64_retained_image_policy_full(request: CoffLinkRequest,
         request, retained_symbols, COFF_MACHINE_ARM64, policy, image_base,
         gc_sections, icf_sections, allow_multiple_definitions, command_exports)
 
+fn _coff_synthetic_absolutes(objects: [CoffObject], machine: i64) -> CoffObject:
+    """Absolute zero symbols lld-link always defines so the MSVC CRT load-config
+    and enclave tables link without /guard:cf (Driver.cpp addAbsolute rows)."""
+    var symbols: [CoffSymbol] = []
+    var table_index: i64 = 0
+    for name in ["__guard_fids_count", "__guard_fids_table", "__guard_flags",
+            "__guard_iat_count", "__guard_iat_table", "__guard_longjmp_count",
+            "__guard_longjmp_table", "__enclave_config", "__guard_eh_cont_count",
+            "__guard_eh_cont_table"]:
+        var defined = false
+        for object in objects:
+            for symbol in object.symbols:
+                if symbol.name == name and symbol.is_external() and
+                        (symbol.is_defined() or symbol.is_absolute()):
+                    defined = true
+        if defined: continue
+        symbols = symbols.push(CoffSymbol(name: name, value: 0, section_number: -1,
+            symbol_type: 0, storage_class: COFF_STORAGE_CLASS_EXTERNAL,
+            auxiliary_count: 0, table_index: table_index, weak_default_index: -1,
+            weak_characteristics: 0))
+        table_index = table_index + 1
+    CoffObject(machine: machine, timestamp: 0, characteristics: 0, sections: [],
+        symbols: symbols, symbol_table_offset: 0, symbol_table_count: table_index)
+
 fn _coff_link_retained(request: CoffLinkRequest,
         retained_symbols: [text], machine: i64,
         policy: PeImagePolicy, image_base: i64,
@@ -1362,10 +1450,12 @@ fn _coff_link_retained(request: CoffLinkRequest,
         request, effective_roots, machine, machine_name)
     if prepared_result.is_err(): return Err(prepared_result.unwrap_err())
     val prepared = prepared_result.unwrap()
-    val objects = if allow_multiple_definitions:
+    val input_objects = if allow_multiple_definitions:
         _coff_first_definition_objects(prepared.objects)
     else:
         prepared.objects
+    var objects = input_objects
+    objects.push(_coff_synthetic_absolutes(input_objects, machine))
     val selected = prepared.selected
     val closure_roots = prepared.closure_roots
     val aliases = prepared.aliases

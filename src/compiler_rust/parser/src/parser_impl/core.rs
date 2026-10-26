@@ -93,6 +93,10 @@ pub struct Parser<'a> {
     pub(crate) no_brace_postfix: bool,
     /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
     pub(crate) pending_statements: Vec<Node>,
+    /// `alias TraitName = field` lines seen in the class body being parsed.
+    pub(crate) class_trait_aliases: Vec<(String, String)>,
+    /// (class, trait, field) trait-alias forwards, expanded after the module parse.
+    pub(crate) trait_alias_forwards: Vec<(String, String, String)>,
     /// Count of INDENT tokens consumed during binary expression line continuation
     /// that need matching DEDENTs consumed after the expression.
     pub(crate) binary_indent_count: usize,
@@ -167,6 +171,8 @@ impl<'a> Parser<'a> {
             match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            class_trait_aliases: Vec::new(),
+            trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
             inline_if_then_call_depth: None,
@@ -260,6 +266,8 @@ impl<'a> Parser<'a> {
             match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            class_trait_aliases: Vec::new(),
+            trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
             inline_if_then_call_depth: None,
@@ -408,6 +416,10 @@ impl<'a> Parser<'a> {
             items.append(&mut self.pending_statements);
         }
 
+        if !self.trait_alias_forwards.is_empty() {
+            let forwards = std::mem::take(&mut self.trait_alias_forwards);
+            expand_trait_alias_forwards(&mut items, &forwards)?;
+        }
         self.debug_trace(&format!("Finished parse(), {} items", items.len()));
         if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
             let dump = format!("{:?}", items);
@@ -1578,4 +1590,80 @@ impl<'a> Parser<'a> {
 
         Ok(Node::Pass(PassStmt { span: start_span }))
     }
+}
+
+/// Expand `alias TraitName = field` declarations recorded during class-body
+/// parsing into real forwarding methods, mirroring
+/// src/app/desugar/forwarding.spl Phase 3: each abstract method of the trait
+/// becomes `fn m(params) -> R: self.field.m(params)` (`me` kept). A method the
+/// class already defines explicitly is NOT forwarded (explicit beats
+/// forwarded). Because the result is ordinary AST, the interpreter, HIR/JIT
+/// and native paths all see the same methods.
+fn expand_trait_alias_forwards(items: &mut [Node], forwards: &[(String, String, String)]) -> Result<(), ParseError> {
+    let syntax_error = |message: String, span: Span| ParseError::SyntaxError {
+        message,
+        line: span.line,
+        column: span.column,
+        span: Some(span),
+        context: None,
+    };
+    for (class_name, trait_name, field_name) in forwards {
+        let trait_methods: Vec<FunctionDef> = items
+            .iter()
+            .find_map(|n| match n {
+                Node::Trait(t) if &t.name == trait_name => Some(t.methods.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let Some(class) = items.iter_mut().find_map(|n| match n {
+            Node::Class(c) if &c.name == class_name => Some(c),
+            _ => None,
+        }) else {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name}: trait-alias forwarding is only supported in a top-level class (class {class_name} is nested)"),
+                Span::new(0, 0, 0, 0),
+            ));
+        };
+        if trait_methods.is_empty() {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name} in class {class_name}: trait `{trait_name}` is not defined in this module"),
+                class.span,
+            ));
+        }
+        if !class.fields.iter().any(|f| &f.name == field_name) {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name} in class {class_name}: `{field_name}` is not a field of {class_name}"),
+                class.span,
+            ));
+        }
+        for tm in trait_methods.into_iter().filter(|m| m.is_abstract) {
+            if class.methods.iter().any(|m| m.name == tm.name) {
+                continue;
+            }
+            let span = tm.span;
+            let args = tm
+                .params
+                .iter()
+                .filter(|p| p.name != "self")
+                .map(|p| Argument::new(None, Expr::Identifier(p.name.clone())))
+                .collect();
+            let call = Expr::MethodCall {
+                receiver: Box::new(Expr::FieldAccess {
+                    receiver: Box::new(Expr::Identifier("self".to_string())),
+                    field: field_name.clone(),
+                }),
+                method: tm.name.clone(),
+                args,
+                generic_args: vec![],
+            };
+            let mut forwarded = tm;
+            forwarded.is_abstract = false;
+            forwarded.body = Block {
+                span,
+                statements: vec![Node::Expression(call)],
+            };
+            class.methods.push(forwarded);
+        }
+    }
+    Ok(())
 }

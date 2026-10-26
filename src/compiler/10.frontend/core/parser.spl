@@ -101,71 +101,106 @@ use compiler.frontend.core.flat_pool_codec.*
 
 use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
 
-# Owned by this Parser lifecycle; unresolved outer names stay unresolved.
+# Per-parse parser state (ParseContext stage 3,
+# doc/05_design/compiler/frontend/parse_context_per_context_state.md).
+# Each parse owns one ParserState; `par_state` is the single active-context
+# slot. take hands the active state out and installs a fresh one; install
+# makes a state active (O(1) swap; no per-field copy list to forget).
+pub struct ParserState:
+    # Owned by this Parser lifecycle; unresolved outer names stay unresolved.
+    par_lexical_bindings: ParserLexicalBindings
+    par_errors: [text]
+    par_warnings: [text]
+    par_struct_names: [text]
+    par_had_error: bool
+    # True once this file has a `use` that may bring a `List` type into scope
+    # (explicit `List` item or alias, `use m.List`, or any wildcard). The
+    # `List<T>` -> `[T]` seed-parity rewrite is only sound without one:
+    # common.core.collections exports a real `pub class List<T>`.
+    par_list_type_import_seen: bool
+    # Local names this file imports by an explicit `use` item (`use m.{Box}`,
+    # `use m.{Box as B}` -> "B"). Only such a name may become an imported
+    # generic instance type; wildcard imports keep the ANY fallback.
+    par_imported_type_names: [text]
+    # Fixed-array side-channel: element tag + literal-int size of the most recent
+    # `[T; N]` annotation parsed by parser_parse_type_impl. The flat type-tag lane
+    # is dynamic and drops N ("stage4 arrays are dynamic"), but the var-decl
+    # declare-without-initializer paths (parse_var_decl_stmt, parse_var_decl) need
+    # N to synthesize the seed's zero-filled default (`var g: [u8; 32]` with no
+    # `=` is a zero-filled global in the seed — hir/lower/module_lowering/
+    # module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
+    # node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
+    par_fixed_array_elem: i64
+    par_fixed_array_size: i64
+    par_diagnostics_suppressed: bool
+    par_diagnostic_emit_count: i64
+    par_kind_slot: [i64]
+    par_text_slot: [text]
+    par_line_slot: [i64]
+    par_col_slot: [i64]
+
+fn parser_state_fresh() -> ParserState:
+    ParserState(
+        par_lexical_bindings: ParserLexicalBindings(authority: 0, scope_authorities: []),
+        par_errors: [],
+        par_warnings: [],
+        par_struct_names: [],
+        par_had_error: false,
+        par_list_type_import_seen: false,
+        par_imported_type_names: [],
+        par_fixed_array_elem: 0,
+        par_fixed_array_size: -1,
+        par_diagnostics_suppressed: false,
+        par_diagnostic_emit_count: 0,
+        par_kind_slot: [0],
+        par_text_slot: [""],
+        par_line_slot: [0],
+        par_col_slot: [0]
+    )
+
 # @workaround bug=module_static_unresolved_initializer_2026-10-24 reason=struct-literal initializer of module var is not typed by the native lowering; explicit annotation
-var par_lexical_bindings: ParserLexicalBindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
+var par_state: ParserState = parser_state_fresh()
+
+pub fn parser_state_take() -> ParserState:
+    val s = par_state
+    par_state = parser_state_fresh()
+    s
+
+pub fn parser_state_install(s: ParserState):
+    par_state = s
 
 fn parser_lexical_scope_enter():
-    par_lexical_bindings.enter_scope()
+    par_state.par_lexical_bindings.enter_scope()
 
 fn parser_lexical_scope_leave():
-    par_lexical_bindings.leave_scope()
+    par_state.par_lexical_bindings.leave_scope()
 
 fn parser_lexical_bind_value(name: text):
-    par_lexical_bindings.bind_value(name)
+    par_state.par_lexical_bindings.bind_value(name)
 
 fn parser_lexical_unknown_shadow():
-    par_lexical_bindings.unknown_shadow()
+    par_state.par_lexical_bindings.unknown_shadow()
 
 fn parser_lexical_has_new_value() -> bool:
-    par_lexical_bindings.has_new_value()
+    par_state.par_lexical_bindings.has_new_value()
 
-var par_errors: [text] = []
-var par_warnings: [text] = []
-var par_struct_names: [text] = []
 
 # Owner write path for struct names registered outside this file
 # (parser_decls_types.spl bitfields). Cross-module `par_struct_names.push`
 # was silently dropped by the seed (it mutates a copy); this routes the
 # write to the owner, which is the intended behaviour.
 fn parser_note_struct_name(name: text):
-    if par_struct_names == nil:
-        par_struct_names = []
-    par_struct_names.push(name)
-var par_had_error: bool = false
-# True once this file has a `use` that may bring a `List` type into scope
-# (explicit `List` item or alias, `use m.List`, or any wildcard). The
-# `List<T>` -> `[T]` seed-parity rewrite is only sound without one:
-# common.core.collections exports a real `pub class List<T>`.
-var par_list_type_import_seen: bool = false
-# Local names this file imports by an explicit `use` item (`use m.{Box}`,
-# `use m.{Box as B}` -> "B"). Only such a name may become an imported
-# generic instance type; wildcard imports keep the ANY fallback.
-var par_imported_type_names: [text] = []
-# Fixed-array side-channel: element tag + literal-int size of the most recent
-# `[T; N]` annotation parsed by parser_parse_type_impl. The flat type-tag lane
-# is dynamic and drops N ("stage4 arrays are dynamic"), but the var-decl
-# declare-without-initializer paths (parse_var_decl_stmt, parse_var_decl) need
-# N to synthesize the seed's zero-filled default (`var g: [u8; 32]` with no
-# `=` is a zero-filled global in the seed — hir/lower/module_lowering/
-# module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
-# node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
-var par_fixed_array_elem: i64 = 0
-var par_fixed_array_size: i64 = -1
+    if par_state.par_struct_names == nil:
+        par_state.par_struct_names = []
+    par_state.par_struct_names.push(name)
 
 # Stage-2 accessors (parse_context_per_context_state.md): the fixed-array
 # side channel is read only through these, so its storage stays private.
 fn parser_fixed_array_elem() -> i64:
-    par_fixed_array_elem
+    par_state.par_fixed_array_elem
 
 fn parser_fixed_array_size() -> i64:
-    par_fixed_array_size
-var par_diagnostics_suppressed: bool = false
-var par_diagnostic_emit_count: i64 = 0
-var par_kind_slot: [i64] = [0]
-var par_text_slot: [text] = [""]
-var par_line_slot: [i64] = [0]
-var par_col_slot: [i64] = [0]
+    par_state.par_fixed_array_size
 var par_initialization_generation_v1: i64 = 0
 
 pub fn parser_initialization_generation_v1() -> i64:
@@ -177,13 +212,13 @@ extern fn rt_transient_heap_promote<T>(value: T) -> bool
 # Keep them and public diagnostics alive before reclaiming the file's scratch;
 # parser_init_with_path reuses non-nil token slots on the next file.
 pub fn parser_promote_transient_owners() -> bool:
-    rt_transient_heap_promote(par_kind_slot) and
-        rt_transient_heap_promote(par_text_slot) and
-        rt_transient_heap_promote(par_line_slot) and
-        rt_transient_heap_promote(par_col_slot) and
-        rt_transient_heap_promote(par_errors) and
-        rt_transient_heap_promote(par_warnings) and
-        rt_transient_heap_promote(par_struct_names) and
+    rt_transient_heap_promote(par_state.par_kind_slot) and
+        rt_transient_heap_promote(par_state.par_text_slot) and
+        rt_transient_heap_promote(par_state.par_line_slot) and
+        rt_transient_heap_promote(par_state.par_col_slot) and
+        rt_transient_heap_promote(par_state.par_errors) and
+        rt_transient_heap_promote(par_state.par_warnings) and
+        rt_transient_heap_promote(par_state.par_struct_names) and
         type_pools_promote_hir_owners() and
         decl_pools_promote_transient_owners() and
         parser_decls_pools_promote_transient_owners()
@@ -222,52 +257,52 @@ fn parser_current_token_text(kind: i64) -> text:
     lex_token_text()
 
 fn par_kind_set(value: i64):
-    par_kind_slot[0] = value
+    par_state.par_kind_slot[0] = value
     if par_env_save_enabled():
         env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{value}")
 
 fn par_kind_get() -> i64:
-    if par_kind_slot == nil:
+    if par_state.par_kind_slot == nil:
         return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_KIND")
-    par_kind_slot[0]
+    par_state.par_kind_slot[0]
 
 fn par_text_set(value: text):
-    par_text_slot[0] = value
+    par_state.par_text_slot[0] = value
     if par_env_save_enabled():
         env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
 
 fn par_text_get() -> text:
-    if par_text_slot != nil:
-        return par_text_slot[0]
+    if par_state.par_text_slot != nil:
+        return par_state.par_text_slot[0]
     if par_env_save_enabled():
         return env_get("SIMPLE_BOOTSTRAP_PAR_TEXT")
     ""
 
 fn par_line_set(value: i64):
-    par_line_slot[0] = value
+    par_state.par_line_slot[0] = value
     if par_env_save_enabled():
         env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{value}")
 
 fn par_line_get() -> i64:
-    if par_line_slot == nil:
+    if par_state.par_line_slot == nil:
         return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_LINE")
-    par_line_slot[0]
+    par_state.par_line_slot[0]
 
 fn par_col_set(value: i64):
-    par_col_slot[0] = value
+    par_state.par_col_slot[0] = value
     if par_env_save_enabled():
         env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{value}")
 
 fn par_col_get() -> i64:
-    if par_col_slot == nil:
+    if par_state.par_col_slot == nil:
         return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_COL")
-    par_col_slot[0]
+    par_state.par_col_slot[0]
 
 fn par_had_error_set(value: bool):
-    par_had_error = value
+    par_state.par_had_error = value
 
 fn par_had_error_get() -> bool:
-    par_had_error
+    par_state.par_had_error
 
 # Process-global mirror of par_had_error.
 #
@@ -314,37 +349,37 @@ fn parser_first_error_get() -> text:
     env_get("SIMPLE_PARSER_FIRST_ERROR")
 
 fn parser_diagnostics_suppressed_get() -> bool:
-    par_diagnostics_suppressed
+    par_state.par_diagnostics_suppressed
 
 fn parser_diagnostics_suppressed_set(value: bool):
-    par_diagnostics_suppressed = value
+    par_state.par_diagnostics_suppressed = value
 
 fn parser_diagnostic_emit_count_get() -> i64:
-    par_diagnostic_emit_count
+    par_state.par_diagnostic_emit_count
 
 # ===== Parser Init =====
 
 fn parser_note_use_import(module_path: text, imported_names: [text], wildcard: bool):
     """Record whether a parsed `use` may bring a `List` type into scope."""
     if wildcard:
-        par_list_type_import_seen = true
+        par_state.par_list_type_import_seen = true
         return
     if imported_names.len() == 0:
         if module_path == "List" or module_path.ends_with(".List"):
-            par_list_type_import_seen = true
+            par_state.par_list_type_import_seen = true
         # `use m.Box` imports the item `Box` (a capitalized last segment;
         # `use lib.ext` imports a module).
         val item_at = module_path.rfind(".")
         val item = if item_at >= 0: module_path.substring(item_at + 1) else: module_path
         if item != "" and item.substring(0, 1) != item.substring(0, 1).lower():
-            par_imported_type_names.push(item)
+            par_state.par_imported_type_names.push(item)
         return
     for imported in imported_names:
         if imported == "List" or imported.ends_with(":List"):
-            par_list_type_import_seen = true
+            par_state.par_list_type_import_seen = true
         val alias_at = imported.rfind(":")
         val local_name = if alias_at >= 0: imported.substring(alias_at + 1) else: imported
-        par_imported_type_names.push(local_name)
+        par_state.par_imported_type_names.push(local_name)
 
 fn parser_init(source: text):
     parser_init_with_path(source, "")
@@ -361,32 +396,32 @@ fn parser_init_with_path(source: text, path: text):
     # reclaims that backing; clear() on the next file would reuse freed memory.
     # Assignment discards the stale owner before any read and makes this
     # file's scratch explicitly scope-local.
-    par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
-    par_errors = []
-    par_warnings = []
-    par_struct_names = []
-    if par_kind_slot == nil:
-        par_kind_slot = [0]
-    par_kind_slot[0] = 0
-    if par_text_slot == nil:
-        par_text_slot = [""]
-    par_text_slot[0] = ""
-    if par_line_slot == nil:
-        par_line_slot = [0]
-    par_line_slot[0] = 0
-    if par_col_slot == nil:
-        par_col_slot = [0]
-    par_col_slot[0] = 0
-    par_had_error = false
-    par_list_type_import_seen = false
-    par_fixed_array_elem = 0
-    par_fixed_array_size = -1
-    par_imported_type_names = []
-    par_diagnostics_suppressed = false
+    par_state.par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
+    par_state.par_errors = []
+    par_state.par_warnings = []
+    par_state.par_struct_names = []
+    if par_state.par_kind_slot == nil:
+        par_state.par_kind_slot = [0]
+    par_state.par_kind_slot[0] = 0
+    if par_state.par_text_slot == nil:
+        par_state.par_text_slot = [""]
+    par_state.par_text_slot[0] = ""
+    if par_state.par_line_slot == nil:
+        par_state.par_line_slot = [0]
+    par_state.par_line_slot[0] = 0
+    if par_state.par_col_slot == nil:
+        par_state.par_col_slot = [0]
+    par_state.par_col_slot[0] = 0
+    par_state.par_had_error = false
+    par_state.par_list_type_import_seen = false
+    par_state.par_fixed_array_elem = 0
+    par_state.par_fixed_array_size = -1
+    par_state.par_imported_type_names = []
+    par_state.par_diagnostics_suppressed = false
     # First-error text belongs to this module, including ordinary driver
     # parses. A preceding failed file must not supply this file's diagnostic.
     par_first_error_mirror_clear()
-    par_diagnostic_emit_count = 0
+    par_state.par_diagnostic_emit_count = 0
     if (env_get("SIMPLE_TRACE_AST_RESET") == "1" and
         not frontend_trace_suppressed()):
         print "[parser_init_with_path] resetting for path={path}"
@@ -473,18 +508,18 @@ fn parser_advance():
     # See doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md.
     val snap = lex_next_snapshot()
     val kind: i64 = snap.kind
-    par_kind_slot[0] = kind
+    par_state.par_kind_slot[0] = kind
     if kind == 180 or kind == 181 or kind == 182 or kind == 190:
-        par_text_slot[0] = ""
+        par_state.par_text_slot[0] = ""
     else:
-        par_text_slot[0] = snap.token_text
-    par_line_slot[0] = snap.line
-    par_col_slot[0] = snap.col
+        par_state.par_text_slot[0] = snap.token_text
+    par_state.par_line_slot[0] = snap.line
+    par_state.par_col_slot[0] = snap.col
     if par_env_save_enabled():
         env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{kind}")
-        env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", par_text_slot[0])
-        env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{par_line_slot[0]}")
-        env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{par_col_slot[0]}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", par_state.par_text_slot[0])
+        env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{par_state.par_line_slot[0]}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{par_state.par_col_slot[0]}")
 
 # ===== Token Checking =====
 
@@ -508,9 +543,9 @@ fn parser_expect(expected: i64) -> bool:
     # module — see bootstrap stage4 "check_dbs cross-module desync"). Include
     # module_get_path() to match parser_error()'s format below.
     val msg = "path " + module_get_path() + " line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'"
-    if not par_diagnostics_suppressed:
+    if not par_state.par_diagnostics_suppressed:
         print "[parser_error] {msg}"
-        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
+        par_state.par_diagnostic_emit_count = par_state.par_diagnostic_emit_count + 1
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(msg)
@@ -519,10 +554,10 @@ fn parser_expect(expected: i64) -> bool:
 
 fn parser_error(msg: text):
     val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
-    if not par_diagnostics_suppressed:
+    if not par_state.par_diagnostics_suppressed:
         print "[parser_error] {full}"
         print "[parser_error_ctx] path " + module_get_path() + " kind " + int_to_str(par_kind_get()) + " text '" + par_text_get() + "'"
-        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
+        par_state.par_diagnostic_emit_count = par_state.par_diagnostic_emit_count + 1
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(full)
@@ -532,10 +567,10 @@ fn parser_error(msg: text):
 # position of the offending node instead of the parser's final token.
 fn parser_error_at(line: i64, col: i64, msg: text):
     val full = "line " + int_to_str(line) + ":" + int_to_str(col) + ": " + msg
-    if not par_diagnostics_suppressed:
+    if not par_state.par_diagnostics_suppressed:
         print "[parser_error] {full}"
         print "[parser_error_ctx] path " + module_get_path()
-        par_diagnostic_emit_count = par_diagnostic_emit_count + 1
+        par_state.par_diagnostic_emit_count = par_state.par_diagnostic_emit_count + 1
     par_had_error_set(true)
     par_had_error_mirror_set()
     par_record_error(full)
@@ -548,9 +583,9 @@ fn parser_error_at(line: i64, col: i64, msg: text):
 # matter how many errors had been printed. Recorded regardless of
 # par_diagnostics_suppressed: suppression hides the message, not the error.
 fn par_record_error(msg: text):
-    if par_errors == nil:
-        par_errors = []
-    par_errors.push(msg)
+    if par_state.par_errors == nil:
+        par_state.par_errors = []
+    par_state.par_errors.push(msg)
 
 fn parser_guarded_int_text(t: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
@@ -606,10 +641,10 @@ fn parser_guarded_int_text(t: text) -> i64:
     acc
 
 fn parser_warn(msg: text):
-    if par_warnings == nil:
-        par_warnings = []
+    if par_state.par_warnings == nil:
+        par_state.par_warnings = []
     val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
-    par_warnings.push(full)
+    par_state.par_warnings.push(full)
     if frontend_compiler_trace_enabled():
         print "[parser_warning] {full}"
 
@@ -633,13 +668,13 @@ fn parser_warn_print_if_needed():
     parser_warn("LOG001: use log() instead of print() in non-script code")
 
 fn parser_warnings_get() -> [text]:
-    if par_warnings == nil:
+    if par_state.par_warnings == nil:
         return []
-    par_warnings
+    par_state.par_warnings
 
 fn parser_warnings_clear():
-    if par_warnings != nil:
-        par_warnings.clear()
+    if par_state.par_warnings != nil:
+        par_state.par_warnings.clear()
 
 # ===== Skip Newlines =====
 
@@ -821,8 +856,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # var-decl caller never reads a stale `[T; N]` from an earlier annotation
     # in the file. A nested/recursive call may set it again below; the
     # outermost sized-array branch writes last and wins.
-    par_fixed_array_elem = 0
-    par_fixed_array_size = -1
+    par_state.par_fixed_array_elem = 0
+    par_state.par_fixed_array_size = -1
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
     # Canonical reference types.  Register the inner tag and mutability so the
@@ -1097,7 +1132,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             # type arguments for 40.mono to specialize `b.get()` with. Checked
             # before the named-type lookup: a bare `Box` use earlier in the file
             # registers the base name, which must not erase these arguments.
-            if par_imported_type_names.contains(type_name):
+            if par_state.par_imported_type_names.contains(type_name):
                 val instance_tag = named_generic_instance_register(type_name, generic_arg_tags)
                 return parser_absorb_optional_suffix(instance_tag)
             # Adaptive containers need their declared key/value instantiation
@@ -1122,7 +1157,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             # must keep its name for HIR, so any `use` that may bring one into
             # scope -- explicit item/alias or a wildcard -- disables the
             # rewrite for the file (par_list_type_import_seen).
-            if type_name == "List" and not has_extra_type and not par_list_type_import_seen:
+            if type_name == "List" and not has_extra_type and not par_state.par_list_type_import_seen:
                 return parser_absorb_optional_suffix(parser_array_tag_for_elem(inner_type))
             # Keep forward declarations too; HIR resolves the base after the
             # file's declarations are registered. Unresolvable imported
@@ -1258,8 +1293,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         if kind == 163:
             parser_advance()
             if par_kind_get() == TOK_INT_LIT:
-                par_fixed_array_elem = elem_type
-                par_fixed_array_size = parse_int_text(par_text_get())
+                par_state.par_fixed_array_elem = elem_type
+                par_state.par_fixed_array_size = parse_int_text(par_text_get())
                 parser_advance()
             for _si in 0..50:
                 if par_kind_get() == 145 or par_kind_get() == 190:
@@ -1432,13 +1467,13 @@ fn parse_module_file(source: text, path: text):
     val saved_lex_source = env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")
     val saved_lex_path = env_get("SIMPLE_BOOTSTRAP_LEX_PATH")
     # Nil-guards: module-level vars may be nil in native binaries
-    if par_errors == nil:
-        par_errors = []
-    if par_warnings == nil:
-        par_warnings = []
-    if par_struct_names == nil:
-        par_struct_names = []
-    par_had_error = false
+    if par_state.par_errors == nil:
+        par_state.par_errors = []
+    if par_state.par_warnings == nil:
+        par_state.par_warnings = []
+    if par_state.par_struct_names == nil:
+        par_state.par_struct_names = []
+    par_state.par_had_error = false
     val preprocessed = _pp_preprocess_conditionals(source)
     module_set_path(path)
     parser_collection_site_reset()
@@ -1455,14 +1490,14 @@ fn parser_set_had_error(value: bool):
     par_had_error_set(value)
 
 fn parser_get_errors() -> [text]:
-    if par_errors == nil:
+    if par_state.par_errors == nil:
         return []
-    par_errors
+    par_state.par_errors
 
 fn parser_error_count() -> i64:
-    if par_errors == nil:
+    if par_state.par_errors == nil:
         return 0
-    par_errors.len()
+    par_state.par_errors.len()
 
 # ===== Parser Token Snapshot (for speculative parse / backtrack) =====
 #
@@ -1560,39 +1595,39 @@ pub fn flat_parser_state_dump() -> text:
     # The bytes emitted are unchanged: the same pieces, in the same order.
     # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
     var parts: [text] = []
-    parts = parts.push(flat_pool_enc_i64(par_col_slot))
-    parts = parts.push(flat_pool_enc_scalar_i64(par_diagnostic_emit_count))
-    parts = parts.push(flat_pool_enc_scalar_bool(par_diagnostics_suppressed))
-    parts = parts.push(flat_pool_enc_text(par_errors))
-    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_elem))
-    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_size))
-    parts = parts.push(flat_pool_enc_scalar_bool(par_had_error))
-    parts = parts.push(flat_pool_enc_text(par_imported_type_names))
-    parts = parts.push(flat_pool_enc_i64(par_kind_slot))
-    parts = parts.push(flat_pool_enc_i64(par_line_slot))
-    parts = parts.push(flat_pool_enc_scalar_bool(par_list_type_import_seen))
-    parts = parts.push(flat_pool_enc_text(par_struct_names))
-    parts = parts.push(flat_pool_enc_text(par_text_slot))
-    parts = parts.push(flat_pool_enc_text(par_warnings))
+    parts = parts.push(flat_pool_enc_i64(par_state.par_col_slot))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_state.par_diagnostic_emit_count))
+    parts = parts.push(flat_pool_enc_scalar_bool(par_state.par_diagnostics_suppressed))
+    parts = parts.push(flat_pool_enc_text(par_state.par_errors))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_state.par_fixed_array_elem))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_state.par_fixed_array_size))
+    parts = parts.push(flat_pool_enc_scalar_bool(par_state.par_had_error))
+    parts = parts.push(flat_pool_enc_text(par_state.par_imported_type_names))
+    parts = parts.push(flat_pool_enc_i64(par_state.par_kind_slot))
+    parts = parts.push(flat_pool_enc_i64(par_state.par_line_slot))
+    parts = parts.push(flat_pool_enc_scalar_bool(par_state.par_list_type_import_seen))
+    parts = parts.push(flat_pool_enc_text(par_state.par_struct_names))
+    parts = parts.push(flat_pool_enc_text(par_state.par_text_slot))
+    parts = parts.push(flat_pool_enc_text(par_state.par_warnings))
     parts.join("")
 
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
-    par_col_slot = flat_pool_dec_i64_into(par_col_slot, r)
-    par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
-    par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
-    par_errors = flat_pool_dec_text(r)
-    par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
-    par_fixed_array_size = flat_pool_dec_scalar_i64(r)
-    par_had_error = flat_pool_dec_scalar_bool(r)
-    par_imported_type_names = flat_pool_dec_text(r)
-    par_kind_slot = flat_pool_dec_i64_into(par_kind_slot, r)
-    par_line_slot = flat_pool_dec_i64_into(par_line_slot, r)
-    par_list_type_import_seen = flat_pool_dec_scalar_bool(r)
-    par_struct_names = flat_pool_dec_text(r)
-    par_text_slot = flat_pool_dec_text(r)
-    par_warnings = flat_pool_dec_text(r)
+    par_state.par_col_slot = flat_pool_dec_i64_into(par_state.par_col_slot, r)
+    par_state.par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
+    par_state.par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
+    par_state.par_errors = flat_pool_dec_text(r)
+    par_state.par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
+    par_state.par_fixed_array_size = flat_pool_dec_scalar_i64(r)
+    par_state.par_had_error = flat_pool_dec_scalar_bool(r)
+    par_state.par_imported_type_names = flat_pool_dec_text(r)
+    par_state.par_kind_slot = flat_pool_dec_i64_into(par_state.par_kind_slot, r)
+    par_state.par_line_slot = flat_pool_dec_i64_into(par_state.par_line_slot, r)
+    par_state.par_list_type_import_seen = flat_pool_dec_scalar_bool(r)
+    par_state.par_struct_names = flat_pool_dec_text(r)
+    par_state.par_text_slot = flat_pool_dec_text(r)
+    par_state.par_warnings = flat_pool_dec_text(r)
     r.ok
 
 export flat_parser_state_dump, flat_parser_state_restore
@@ -1614,78 +1649,5 @@ fn parser_fixed_width_int_tag(type_name: text) -> i64:
     if primitive_integer_bit_width_from_name(type_name) > 0:
         return TYPE_NAMED_BASE + named_type_register(type_name, [], [])
     -1
-
-# ===== ParserState snapshot (ParseContext stage 1) =====
-# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
-# take moves this file's parse state out and installs fresh initial
-# owners; install makes a taken snapshot active again.
-pub struct ParserState:
-    par_lexical_bindings: ParserLexicalBindings
-    par_errors: [text]
-    par_warnings: [text]
-    par_struct_names: [text]
-    par_had_error: bool
-    par_list_type_import_seen: bool
-    par_imported_type_names: [text]
-    par_fixed_array_elem: i64
-    par_fixed_array_size: i64
-    par_diagnostics_suppressed: bool
-    par_diagnostic_emit_count: i64
-    par_kind_slot: [i64]
-    par_text_slot: [text]
-    par_line_slot: [i64]
-    par_col_slot: [i64]
-
-pub fn parser_state_take() -> ParserState:
-    val s = ParserState(
-        par_lexical_bindings: par_lexical_bindings,
-        par_errors: par_errors,
-        par_warnings: par_warnings,
-        par_struct_names: par_struct_names,
-        par_had_error: par_had_error,
-        par_list_type_import_seen: par_list_type_import_seen,
-        par_imported_type_names: par_imported_type_names,
-        par_fixed_array_elem: par_fixed_array_elem,
-        par_fixed_array_size: par_fixed_array_size,
-        par_diagnostics_suppressed: par_diagnostics_suppressed,
-        par_diagnostic_emit_count: par_diagnostic_emit_count,
-        par_kind_slot: par_kind_slot,
-        par_text_slot: par_text_slot,
-        par_line_slot: par_line_slot,
-        par_col_slot: par_col_slot
-    )
-    par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
-    par_errors = []
-    par_warnings = []
-    par_struct_names = []
-    par_had_error = false
-    par_list_type_import_seen = false
-    par_imported_type_names = []
-    par_fixed_array_elem = 0
-    par_fixed_array_size = -1
-    par_diagnostics_suppressed = false
-    par_diagnostic_emit_count = 0
-    par_kind_slot = [0]
-    par_text_slot = [""]
-    par_line_slot = [0]
-    par_col_slot = [0]
-    s
-
-pub fn parser_state_install(s: ParserState):
-    par_lexical_bindings = s.par_lexical_bindings
-    par_errors = s.par_errors
-    par_warnings = s.par_warnings
-    par_struct_names = s.par_struct_names
-    par_had_error = s.par_had_error
-    par_list_type_import_seen = s.par_list_type_import_seen
-    par_imported_type_names = s.par_imported_type_names
-    par_fixed_array_elem = s.par_fixed_array_elem
-    par_fixed_array_size = s.par_fixed_array_size
-    par_diagnostics_suppressed = s.par_diagnostics_suppressed
-    par_diagnostic_emit_count = s.par_diagnostic_emit_count
-    par_kind_slot = s.par_kind_slot
-    par_text_slot = s.par_text_slot
-    par_line_slot = s.par_line_slot
-    par_col_slot = s.par_col_slot
 
 export ParserState, parser_state_take, parser_state_install

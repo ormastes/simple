@@ -218,6 +218,7 @@ fn rt_expr_dispatches(expr: HirExpr, fn_names: Dict<i64, text>) -> bool:
         case HirExprKind.NogradBlock(body): rt_block_dispatches(body, fn_names)
         case HirExprKind.InlineAsm(_): true
         case HirExprKind.InlineAsmMatch(_): true
+        case HirExprKind.CfgSelect(_, arms, else_): rt_cfg_select_dispatches(arms, else_, fn_names)
         case HirExprKind.Error: true
         case HirExprKind.TypeTest(value, _): rt_expr_dispatches(value, fn_names)
         case _:
@@ -344,6 +345,7 @@ fn rt_expr_allocates(expr: HirExpr) -> bool:
         case HirExprKind.CustomBlock(_, _): true
         case HirExprKind.InlineAsm(_): false
         case HirExprKind.InlineAsmMatch(_): false
+        case HirExprKind.CfgSelect(_, arms, else_): rt_cfg_select_allocates(arms, else_)
         case HirExprKind.Error: true
         case HirExprKind.TypeTest(value, _): rt_expr_allocates(value)
         case _:
@@ -1076,3 +1078,21 @@ export RtCriticalContractClaimV1, rt_critical_contract_claims_v1, validate_rt_cr
 
 export RtCriticalSharedAnalysisV1
 export validate_rt_criticality_claim_facts_with_analysis_v1
+
+# A target-neutral cfg select is conservatively the union of its arms: HIR does
+# not know which arm MIR will pick for a given target.
+fn rt_cfg_select_dispatches(arms: [HirBlock], else_: HirBlock?, fn_names: Dict<i64, text>) -> bool:
+    for arm in arms:
+        if rt_block_dispatches(arm, fn_names): return true
+    if else_ != nil:
+        val else_block: HirBlock = else_
+        return rt_block_dispatches(else_block, fn_names)
+    false
+
+fn rt_cfg_select_allocates(arms: [HirBlock], else_: HirBlock?) -> bool:
+    for arm in arms:
+        if rt_block_allocates(arm): return true
+    if else_ != nil:
+        val else_block: HirBlock = else_
+        return rt_block_allocates(else_block)
+    false
