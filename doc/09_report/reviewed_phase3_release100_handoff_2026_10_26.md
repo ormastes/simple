@@ -1,6 +1,6 @@
 # Reviewed Phase3 sharing handoff — 2026-10-26
 
-Base: release/1.0.0 `d1dcfaa19c09dd0ca804946439c9f76e4c605736`.
+Base: release/1.0.0 `71e9962598fc2143cff94a3524faee04a44feef2`; initial comparison used `d1dcfaa19c09dd0ca804946439c9f76e4c605736`. The intervening total-text-parse repair is preserved.
 Reviewed donor branch: `0db0889e119cf6dfe0c171879e91dc065af1f591`.
 This is a bounded source-sharing reconciliation, not a broad branch merge,
 compiler generation, test run, performance result or full acceptance PASS.
@@ -11,6 +11,8 @@ compiler generation, test run, performance result or full acceptance PASS.
 |---|---|
 | #4863 `92dd5a3b9038` | `35.semantics/rt_criticality.spl`, `rt_criticality_validation.spl`, original differential spec and bug record. Invocation-local empty-capability analysis and ordered claim-name index. The target has no bounded trace helper; retain its untraced entry rather than adding unrelated donor progress calls. HAL and nonempty capability routes remain unchanged. |
 | #4886 `0db0889e119c` | `50.mir/_MirLowering/module_lowering.spl`, two added qualified-default metadata controls and appended existing bug provenance. Preserve target parameter signatures, both field-index ambiguity guards, repository logic and value semantics. Only missing qualified default field-order registration and its two production callsites are added. |
+
+| #4881 `eea6ec3fcf46` | `compiler_rust/compiler/src/codegen/cranelift_sffi.rs`, the four original cancellation/JIT controls and bug record. Preserve newer MODULE_OWNED/SIG_OWNER release cleanup; add only reviewed native JIT ISA selection, cancellation without finalize and module-specific builder/backing retirement. Current adapted Rust/native tests UNRUN; donor four ARM passes retain their original identity. |
 
 ## Equivalent/newer target implementations preserved
 
@@ -45,9 +47,9 @@ new default or go-to-end policy is imported.
 #4853 allocation-claim hardening is not identical to the target's older
 session runtime. It needs a separate reviewed semantic adaptation preserving
 release sharded/fork/RC registries; copying the donor's old runtime files is
-unsafe. #4881 similarly needs adaptation to the target's newer MODULE_OWNED /
-SIG_OWNER Cranelift cleanup instead of importing exposed-handle/readonly-word
-dependencies. These remain explicit sharing gaps unless separately reviewed.
+unsafe. This memory claim hardening remains an explicit sharing gap.
+The separate minimal #4881 adaptation listed above preserves newer target
+handle owners and imports no exposed-handle/readonly-word dependencies.
 
 ## Evidence and stop boundary
 
