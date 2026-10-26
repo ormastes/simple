@@ -41,3 +41,46 @@ The new scalar counter case covers admitted positive values, admitted unknown
 sentinels and unadmitted positive values. This narrow interpreter test does not
 reproduce the full native owner collision; P3 qualification remains required.
 Astra reviewed the exact nominal rename and regression before admission.
+
+Separate root-fix draft (not admitted to the workaround build): construction
+and parameter provenance select the declaration layout through the existing
+canonical identity registry; imported field index lookup uses the same fold;
+projected field type lookup refuses conflicted bare provenance. A HIR-identified qualified
+layout missing the requested field and a conflicted owner lacking a qualified
+layout produce fatal diagnostics. Unconflicted legacy bare layouts remain
+available. This draft does not change global module normalization or metadata
+registration keys. Focused tests cover owner/index consistency, direct and
+literal construction, plain/ref/iso parameter provenance, and missing-layout
+fail-closed behavior. Bounded retained-seed interpreter validation ran under canonical session/RSS
+control (3 GiB, 120 seconds), with no native build. Attempt01 ran all nine
+cases: seven passed and both constructor fixtures failed due to an outdated
+one-argument IntLit fixture. The fixture now supplies IntLit(73, nil).
+Attempt04 ran only those two constructor cases inside the root-fix worktree:
+two passed, exit0, quiescent1, peak RSS1265600 KiB, input hashes unchanged.
+The seven genuine passing cases from01 were not rerun. This is seven plus two
+passing cases across attempts, not a single nine-case green run.
+
+Attempts02/03 are preserved as wrong-source diagnostics, excluded from
+qualification: absolute subset paths placed beneath the review worktree
+caused test_runner/child_cwd.spl to select that spec's project, despite outer
+cwd and SIMPLE_LIB pointing at the root-fix worktree. Attempt04 places its
+subset beneath the root-fix worktree and uses a relative spec path. Its direct
+constructor case asserts the new helper's presence and exact owner before
+checking actual construction. All receipts remain in the review workspace's
+build/verify/qualified-struct-field-rootfix-20261026-{01,02,03,04}/ directories.
+
+Construction canonicalization now lives at the shared lower_struct_construct
+boundary before field order/types are read, covering direct calls and struct
+literals consistently. The earlier wrong-source result does not prove a
+nested-mutation defect; no such defect is claimed. Native P3 qualification is
+still pending, and this root-fix must remain separate from the frozen
+workaround build until exact-patch admission.
+
+A final scoped guard rejects a requested field absent from a registered exact
+qualified value layout even when its HIR annotation is unavailable. Attempt05
+ran only that new negative case inside the root-fix worktree: one passed,
+exit0, quiescent1, peak RSS1265904 KiB under the same enforced3GiB cap.
+Unknown-owner legacy fallback remains unchanged. Genuine coverage is seven
+passing cases in01, two in04, and one in05, never a single ten-case green run.
+All five attempt receipts are retained;02/03 remain excluded wrong-source
+diagnostics. Native P3 validation of this exact root-fix is still pending.
