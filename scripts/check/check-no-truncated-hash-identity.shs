@@ -1,0 +1,215 @@
+#!/bin/sh
+# check-no-truncated-hash-identity.shs — a truncated hash is never an identity proof.
+#
+# Design rule (cache identity design §5): a digest cut down to a prefix
+# (`sha256_text(x).substring(0, 16)`, `digest[0:12]`, `.slice(0, N)`,
+# `.truncate(`, `.prefix(`, `short_hash`) cannot prove two inputs are the same, yet
+# it is exactly what gets compared with `==`, used as a cache key or put in a file
+# name. This is a fail-closed static scanner over src/compiler/**/*.spl and
+# src/lib/**/*.spl (vendor excluded).
+#
+# WHAT IS FLAGGED
+#   A line where the receiver name contains digest|hash|sha|xxh3|cache_key (or is a
+#   call such as sha256_text(..)) is followed by `.substring(0, N)` / `.slice(0, N)`
+#   / `[0:N]` with a literal N >= 4, or by `.truncate(` / `.prefix(`, or where
+#   `short_hash` appears. N < 4 is the shard-prefix idiom (`digest.substring(0, 2)`
+#   plus `digest.substring(2, ..)`) which loses nothing and is not flagged.
+#   Every flagged line is treated as identity use unless it is display-only:
+#     - carries the marker comment  `# trunc-hash-ok: display`, or
+#     - is a print/println/eprint/log_*/debug/trace call.
+#
+# RATCHET
+#   Existing offenders are frozen in scripts/check/truncated_hash_identity_baseline.txt
+#   as `path<TAB>whitespace-collapsed line`. A new offender FAILs; a baseline entry
+#   that no longer matches (fixed, moved text, file gone) is STALE and also FAILs.
+#   Regenerate only after review: --generate-baseline.
+#
+# Verdict, last stdout line:
+#   PASS  — <n> file(s) scanned, 0 new, 0 stale                  exit 0
+#   FAIL  — <n> file(s) scanned, <k> new, <s> stale: ...          exit 1
+#   ERROR — nothing was checked (<reason>)                        exit 2   (0 files => ERROR)
+#
+# Usage:
+#   sh scripts/check/check-no-truncated-hash-identity.shs [--root DIR] [--baseline FILE]
+#   sh scripts/check/check-no-truncated-hash-identity.shs --range <base>..<tip>   (diff-scoped, committed blobs)
+#   sh scripts/check/check-no-truncated-hash-identity.shs --generate-baseline
+#   sh scripts/check/check-no-truncated-hash-identity.shs --selftest
+
+set -u
+LC_ALL=C; export LC_ALL
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+DEFAULT_ROOT=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd -P)
+ROOT=$DEFAULT_ROOT
+BASELINE=""
+RANGE=""
+GEN=0
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=${2:-}; shift 2 ;;
+        --baseline) BASELINE=${2:-}; shift 2 ;;
+        --range) RANGE=${2:-}; shift 2 ;;
+        --generate-baseline) GEN=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+[ -n "$BASELINE" ] || BASELINE="$SELF_DIR/truncated_hash_identity_baseline.txt"
+
+PAT_N='(digest|hash|sha|xxh3|cache_key)[A-Za-z0-9_]*(\([^()]*\))?(\.(substring|slice)\(0, *[0-9]+\)|\[0:[0-9]+\])'
+PAT_X='(digest|hash|sha|xxh3|cache_key)[A-Za-z0-9_]*(\([^()]*\))?\.(truncate|prefix)\(|short_hash'
+
+# offenders <root> <listfile> <outfile>: write sorted `path<TAB>line` offenders.
+offenders() {
+    _r=$1; _list=$2; _out=$3
+    : > "$_out"
+    [ -s "$_list" ] || return 0
+    ( cd "$_r" && tr '\n' '\0' < "$_list" | xargs -0 grep -HnE -e "$PAT_N" -e "$PAT_X" 2>/dev/null ) |
+    PN="$PAT_N" awk '
+    BEGIN { PN = ENVIRON["PN"] }
+    function collapse(s) { gsub(/[ \t\r]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s }
+    {
+        i = index($0, ":"); p = substr($0, 1, i - 1); rest = substr($0, i + 1)
+        j = index(rest, ":"); t = substr(rest, j + 1)
+        if (index(t, "trunc-hash-ok: display") > 0) next
+        if (t ~ /(print|println|eprint|eprintln|log_[a-z_]*|debug|trace)\(/) next
+        hit = 0
+        s = t
+        while (match(s, PN)) {
+            m = substr(s, RSTART, RLENGTH)
+            if (match(m, /\(0, *[0-9]+\)$|\[0:[0-9]+\]$/)) {
+                d = substr(m, RSTART, RLENGTH); gsub(/[^0-9]/, "", d)
+                sub(/^0/, "", d)
+                if (d + 0 >= 4) hit = 1
+            }
+            s = substr(s, RSTART + RLENGTH)
+        }
+        if (t ~ /(digest|hash|sha|xxh3|cache_key)[A-Za-z0-9_]*(\([^()]*\))?\.(truncate|prefix)\(|short_hash/) hit = 1
+        if (hit) print p "\t" collapse(t)
+    }' | sort -u > "$_out"
+}
+
+# verdict <nscanned> <offenders> <baseline> <scoped-list-or-empty>
+verdict() {
+    _n=$1; _off=$2; _base=$3; _scope=$4
+    _w=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    if [ -f "$_base" ]; then grep -v '^#' "$_base" | grep . | sort -u > "$_w/b.txt"; else : > "$_w/b.txt"; fi
+    if [ -n "$_scope" ]; then
+        # range mode: only baseline entries for scanned files can be judged stale
+        awk -F'\t' 'NR==FNR { f[$0]=1; next } ($1 in f)' "$_scope" "$_w/b.txt" > "$_w/b2.txt"; mv "$_w/b2.txt" "$_w/b.txt"
+    fi
+    comm -23 "$_off" "$_w/b.txt" > "$_w/new.txt"
+    comm -13 "$_off" "$_w/b.txt" > "$_w/stale.txt"
+    _new=$(grep -c . "$_w/new.txt"); _stale=$(grep -c . "$_w/stale.txt")
+    if [ "$_new" -eq 0 ] && [ "$_stale" -eq 0 ]; then
+        rm -rf "$_w"; echo "PASS — $_n file(s) scanned, 0 new, 0 stale"; return 0
+    fi
+    [ "$_new" -eq 0 ] || { echo "NEW truncated-hash identity use (add '# trunc-hash-ok: display' only if display-only):" >&2; cut -c1-200 "$_w/new.txt" | sed 's/^/  /' >&2; }
+    [ "$_stale" -eq 0 ] || { echo "STALE baseline entries (fixed or moved; remove them):" >&2; cut -c1-200 "$_w/stale.txt" | sed 's/^/  /' >&2; }
+    _first=$(cat "$_w/new.txt" "$_w/stale.txt" | cut -f1 | sort -u | head -5 | tr '\n' ' ')
+    rm -rf "$_w"
+    echo "FAIL — $_n file(s) scanned, $_new new, $_stale stale: $_first"
+    return 1
+}
+
+scan_tree() {
+    _root=$1; _base=$2
+    _w=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    _dirs=""
+    for _d in src/compiler src/lib; do [ -d "$_root/$_d" ] && _dirs="$_dirs $_d"; done
+    [ -n "$_dirs" ] || { rm -rf "$_w"; echo "ERROR — nothing was checked (no src/compiler or src/lib under $_root)"; return 2; }
+    # shellcheck disable=SC2086
+    ( cd "$_root" && find $_dirs -name '*.spl' -not -path '*/vendor/*' ) | sort > "$_w/list.txt"
+    _n=$(grep -c . "$_w/list.txt")
+    [ "$_n" -gt 0 ] || { rm -rf "$_w"; echo "ERROR — nothing was checked (0 .spl files)"; return 2; }
+    offenders "$_root" "$_w/list.txt" "$_w/off.txt"
+    if [ "$GEN" -eq 1 ]; then
+        { echo "# truncated-hash identity baseline: path<TAB>collapsed line. Ratchet: see check-no-truncated-hash-identity.shs."; cat "$_w/off.txt"; } > "$_base"
+        echo "PASS — baseline regenerated: $(grep -c . "$_w/off.txt") entr(ies) from $_n file(s) scanned"; rm -rf "$_w"; return 0
+    fi
+    verdict "$_n" "$_w/off.txt" "$_base" ""; _rc=$?
+    rm -rf "$_w"; return $_rc
+}
+
+scan_range() {
+    _root=$1; _range=$2; _base=$3
+    case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (need <base>..<tip>, got '$_range')"; return 2 ;; esac
+    _tip=${_range#*..}
+    _w=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    git -C "$_root" diff --name-only --diff-filter=AMRC "$_range" -- src/compiler src/lib > "$_w/all.txt" 2>/dev/null ||
+        { rm -rf "$_w"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
+    git -C "$_root" rev-parse --verify -q "$_tip^{commit}" >/dev/null ||
+        { rm -rf "$_w"; echo "ERROR — nothing was checked (bad tip in $_range)"; return 2; }
+    grep '\.spl$' "$_w/all.txt" | grep -v '/vendor/' > "$_w/list.txt"
+    _n=$(grep -c . "$_w/list.txt")
+    if [ "$_n" -eq 0 ]; then
+        # a range that touches no scoped .spl is a real "nothing to flag" only
+        # if the range itself resolves to commits.
+        _c=$(git -C "$_root" rev-list --count "$_range" 2>/dev/null || echo 0)
+        rm -rf "$_w"
+        [ "$_c" -gt 0 ] || { echo "ERROR — nothing was checked (empty range $_range)"; return 2; }
+        echo "PASS — 0 file(s) scanned ($_c commit(s) in $_range touch no scoped .spl), 0 new, 0 stale"; return 0
+    fi
+    mkdir -p "$_w/tree"
+    while IFS= read -r _f; do
+        mkdir -p "$_w/tree/$(dirname "$_f")"
+        git -C "$_root" show "$_tip:$_f" > "$_w/tree/$_f" 2>/dev/null || { rm -rf "$_w"; echo "ERROR — nothing was checked (cannot read $_f at $_tip)"; return 2; }
+    done < "$_w/list.txt"
+    offenders "$_w/tree" "$_w/list.txt" "$_w/off.txt"
+    verdict "$_n" "$_w/off.txt" "$_base" "$_w/list.txt"; _rc=$?
+    rm -rf "$_w"; return $_rc
+}
+
+selftest() {
+    _t=$(mktemp -d) || { echo "selftest: mktemp failed" >&2; return 2; }
+    _fails=0
+    mk() { mkdir -p "$_t/$1/src/lib"; }
+    GEN=0
+    : > "$_t/empty_base.txt"
+    # 1 clean
+    mk c1; printf 'fn f(a: text, b: text) -> bool:\n    sha256_text(a) == sha256_text(b)\n' > "$_t/c1/src/lib/a.spl"
+    _o=$(scan_tree "$_t/c1" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 1: clean tree rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    # 2 truncated sha compared with ==
+    mk c2; printf 'fn f(a: text, b: text) -> bool:\n    val h = sha256_text(a).substring(0, 16)\n    h == b\n' > "$_t/c2/src/lib/a.spl"
+    _o=$(scan_tree "$_t/c2" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL 2: truncated sha not flagged rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    # 2b bracket form and short_hash
+    mk c2b; printf 'val k = digest[0:12]\nval s = short_hash(x)\n' > "$_t/c2b/src/lib/a.spl"
+    _o=$(scan_tree "$_t/c2b" "$_t/empty_base.txt" 2>/dev/null)
+    case "$_o" in *"2 new"*) ;; *) echo "selftest FAIL 2b: [0:N]/short_hash not both flagged ($_o)"; _fails=$((_fails + 1)) ;; esac
+    # 3 display marker and shard idiom pass
+    mk c3; printf 'val h = sha256_text(a).substring(0, 16)  # trunc-hash-ok: display\nval d = digest.substring(0, 2)\nprint(digest.substring(0, 8))\n' > "$_t/c3/src/lib/a.spl"
+    _o=$(scan_tree "$_t/c3" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 3: display/shard lines flagged rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    # 4 empty tree
+    mk c4
+    _o=$(scan_tree "$_t/c4" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 4: empty tree rc=$_rc, want 2 ($_o)"; _fails=$((_fails + 1)); }
+    _o=$(scan_tree "$_t/nonexistent" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 4b: missing tree rc=$_rc, want 2"; _fails=$((_fails + 1)); }
+    # 5 baselined offender passes; stale baseline entry fails
+    printf 'src/lib/a.spl\tval h = sha256_text(a).substring(0, 16)\n' > "$_t/b5.txt"
+    mk c5; printf 'val h = sha256_text(a).substring(0, 16)\n' > "$_t/c5/src/lib/a.spl"
+    _o=$(scan_tree "$_t/c5" "$_t/b5.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 5a: baselined offender rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    _o=$(scan_tree "$_t/c1" "$_t/b5.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL 5b: stale baseline entry rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    # 6 vendor excluded
+    mk c6; mkdir -p "$_t/c6/src/lib/vendor"; printf 'val h = sha256_text(a).substring(0, 16)\n' > "$_t/c6/src/lib/vendor/v.spl"; printf 'fn ok(): pass\n' > "$_t/c6/src/lib/b.spl"
+    _o=$(scan_tree "$_t/c6" "$_t/empty_base.txt" 2>/dev/null); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 6: vendor scanned rc=$_rc ($_o)"; _fails=$((_fails + 1)); }
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails failure(s)" >&2; return 1; }
+    echo "selftest: ok (8 fixtures)" >&2
+    return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$SELFTEST_ONLY" -eq 0 ] || { echo "PASS — selftest ok"; exit 0; }
+
+if [ -n "$RANGE" ]; then
+    scan_range "$ROOT" "$RANGE" "$BASELINE"; exit $?
+fi
+scan_tree "$ROOT" "$BASELINE"; exit $?
