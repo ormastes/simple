@@ -44,6 +44,7 @@ use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
+use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
@@ -1005,7 +1006,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val pool_base_headroom = host_commit_avail_kib()
     if pool_base_headroom < 0:
         print "[{label}] commit headroom unavailable on this host/engine; static worker cap only"
-    val commit_reserve_kib: i64 = 4194304
+    val commit_reserve_kib: i64 = build_memory_reserve_kib()
     var pending: [i64] = []
     var i: i64 = 0
     while i < count:
@@ -2378,8 +2379,27 @@ pub fn run_native_build_entry_v1(raw_args: [text]) -> i64:
         eprint "Error: No entry point specified for native-build backend"
         eprint "Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]..."
         return 1
+    # Memory admission at build start (top-level builds only: shard and
+    # grouped children are admitted by their parent's worker pool).
+    if native_build_is_top_level_v1(args, group_manifest):
+        val refusal = build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
+        if refusal != "":
+            eprint refusal
+            return 3
 
     run_native_build_worker(args)
+
+fn native_build_is_top_level_v1(args: [text], group_manifest: text) -> bool:
+    if group_manifest != "":
+        return false
+    for name in ["SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_MIR_SHARD_QUEUE"]:
+        val queue = env_get(name) ?? ""
+        if queue != "" and queue != "0":
+            return false
+    for arg in args:
+        if arg.starts_with("--parse-shard") or arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard"):
+            return false
+    true
 
 fn main() -> i64:
     run_native_build_entry_v1(native_build_entry_args())

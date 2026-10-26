@@ -489,3 +489,19 @@ pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
     val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
     if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
     shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb), estimate_kb)
+
+# Host memory reserve a build must leave free (RAM and commit, whichever is
+# smaller on Windows): SIMPLE_BUILD_MEMORY_RESERVE_BYTES, default 24 GiB.
+# Also the floor the worker pool keeps when admitting more workers.
+pub fn build_memory_reserve_kib() -> i64:
+    val parsed = shard_mem_available_kb_from_field(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "")
+    if parsed > 0: parsed / 1024 else: 25165824
+
+# "" admits; otherwise the refusal message. Headroom <= 0 means it could not
+# be measured, which admits (same rule as disk admission).
+pub fn build_memory_start_refusal_v1(available_kib: i64, reserve_kib: i64) -> text:
+    if available_kib <= 0 or available_kib >= reserve_kib:
+        return ""
+    "error: build refused: {available_kib / 1024} MiB of RAM/commit headroom free, below the " +
+        "{reserve_kib / 1024} MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds " +
+        "to finish or lower the reserve"
