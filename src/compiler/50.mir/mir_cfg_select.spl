@@ -26,8 +26,8 @@ fn _mcs_os_match(wanted: text, target: MirTargetContext) -> bool:
     if wanted == "none": return target.os == "none" or target.os == "baremetal"
     wanted == target.os
 
-# Thumb/armv sub-arch atoms only match when the context carries that exact
-# arch; MirTargetContext normalizes them to "arm" today (plan risk item).
+# `arm` matches every 32-bit ARM (armv*, thumbv*): MirTargetContext normalizes
+# them to arch "arm"; use `thumb` / `armv7` / `subarch = ...` to tell them apart.
 fn _mcs_arch_match(wanted: text, target: MirTargetContext) -> bool:
     wanted == _pp_arch_name(target.arch) or wanted == target.arch
 
@@ -36,12 +36,24 @@ fn _mcs_atom(token: text, target: MirTargetContext, features: [text]) -> MirCfgS
     val lowered = t.lower()
     if lowered == "true": return MirCfgStep(value: true, pos: 0, ok: true)
     if lowered == "false": return MirCfgStep(value: false, pos: 0, ok: true)
+    # Build profile comes from the context. WA: the parser preprocessor
+    # (_pp_eval_atom) still hardcodes debug=true / release=false.
+    if lowered == "debug" or lowered == "release":
+        return MirCfgStep(value: target.build_profile == lowered, pos: 0, ok: true)
+    # ARM sub-arch atoms; `arm` (below) keeps matching every 32-bit ARM.
+    if lowered == "thumb": return MirCfgStep(value: target.subarch.starts_with("thumbv"), pos: 0, ok: true)
+    if lowered == "armv7" or lowered == "armv6":
+        # Empty subarch = legacy context built by hand: fall back to arch.
+        val legacy = target.subarch == "" and target.arch == "arm"
+        return MirCfgStep(value: target.subarch.starts_with(lowered) or legacy, pos: 0, ok: true)
     if _pp_os_name(t) != "": return MirCfgStep(value: _mcs_os_match(_pp_os_name(t), target), pos: 0, ok: true)
     if _pp_arch_name(t) != "": return MirCfgStep(value: _mcs_arch_match(_pp_arch_name(t), target), pos: 0, ok: true)
     val parts = if t.contains("=="): t.split("==") else: t.split("=")
     if parts.len() == 2:
         val key = cfg_strip_quotes(parts[0]).trim()
         val value = cfg_strip_quotes(parts[1]).trim()
+        if key == "subarch" or key == "target_subarch":
+            return MirCfgStep(value: target.subarch == value.lower(), pos: 0, ok: true)
         if key == "os" or key == "platform" or key == "target_os":
             val wanted_os = _pp_os_name(value)
             if wanted_os != "": return MirCfgStep(value: _mcs_os_match(wanted_os, target), pos: 0, ok: true)
