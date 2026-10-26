@@ -100,19 +100,18 @@ use compiler.frontend.core.parser_primary.{parse_primary_expr}
 # stays well under the measured crash threshold. ponytail: single choke-point
 # guard covers all downstream recursive passes; raise the limit if real code
 # ever legitimately nests deeper.
-var g_expr_nest_depth: i64 = 0
 val MAX_EXPR_NEST_DEPTH: i64 = 128
 
 fn parse_expr() -> i64:
     if parser_expr_trace_line_enabled():
         eprint("[parser-expr] expr:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
-    g_expr_nest_depth = g_expr_nest_depth + 1
-    if g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
+    expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth + 1
+    if expr_nest_state.g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
         parser_error("expression nesting too deep (max 128 levels)")
-        g_expr_nest_depth = g_expr_nest_depth - 1
+        expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth - 1
         return expr_int_lit(0, 0)
     val result = parse_pipe()
-    g_expr_nest_depth = g_expr_nest_depth - 1
+    expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth - 1
     if parser_expr_trace_line_enabled():
         eprint("[parser-expr] expr:done result={result}")
     result
@@ -1533,14 +1532,17 @@ export parse_int_text
 pub struct ExprNestState:
     g_expr_nest_depth: i64
 
+fn expr_nest_state_fresh() -> ExprNestState:
+    ExprNestState(g_expr_nest_depth: 0)
+
+var expr_nest_state: ExprNestState = expr_nest_state_fresh()
+
 pub fn expr_nest_state_take() -> ExprNestState:
-    val s = ExprNestState(
-        g_expr_nest_depth: g_expr_nest_depth
-    )
-    g_expr_nest_depth = 0
+    val s = expr_nest_state
+    expr_nest_state = expr_nest_state_fresh()
     s
 
 pub fn expr_nest_state_install(s: ExprNestState):
-    g_expr_nest_depth = s.g_expr_nest_depth
+    expr_nest_state = s
 
 export ExprNestState, expr_nest_state_take, expr_nest_state_install

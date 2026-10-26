@@ -77,6 +77,22 @@ Landed per-owner snapshots: `FlatPoolState` (#4505), `LexerState` (#4512),
 - arena generation/hardening (`ast_gen_*`, `ast_reset_seq`,
   `ast_harden_*`) stays process-wide by design.
 
+### Stage 3 status (2026-10-26)
+
+Context-owned storage landed for the parser owners: `ParserState`
+(`core/parser.spl`), `PreprocessorState`, `ImplTargetState`,
+`FileGenericConstraintState` (`parser_decls_fn.spl`) and `ExprNestState`.
+Each file keeps its per-parse fields only in one struct-typed slot
+(`par_state`, `pp_state`, `impl_target_state`, `file_generic_constraint_state`,
+`expr_nest_state`); take/install swap that slot. Deliberately process-wide in
+`parser.spl`: `par_initialization_generation_v1` (monotonic counter the driver
+compares across a parse), `par_env_save_cached` and `par_prof_enabled_cached`
+(env-var caches). The lexer stays stage 1 (hot per-char slots); its snapshot
+now includes `lex_dead_reported`, which it previously dropped. Owner states are
+value types (structs; classes are value types too), so a taken context is a
+value: a swap is still required to
+observe or resume it. Spec: `test/01_unit/compiler/frontend/parse_context_interleave_spec.spl`.
+
 Process-wide caches/counters (`frontend_parse_cache.spl`) stay global but
 must become atomic or per-worker before stage 4.
 
