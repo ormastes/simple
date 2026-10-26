@@ -185,19 +185,11 @@ pub const SHARD_MIR_WORKER_KB_V1: i64 = 9000000
 # below the measured HIR RSS behind the 3 GB HIR default) is ignored, with a
 # warning, rather than silently loosening the clamp.
 #
-# The parent peak is deliberately NOT a budget floor by default. When it was
-# one (61bb554b161), a large tree priced every HIR worker at the supervisor's
-# own front-end high-water mark (~8.16 GiB on the phase-3 tree); host headroom
-# then could not fit even one floored estimate and admission collapsed to
-# exactly one worker, which re-ran the entire front-end replay (load_sources
-# through surface_freeze and hir) as its baseline -- double the retained
-# parent footprint -- and was SIGBUS-killed near 7-8 GB RSS (41 deaths,
-# 2026-10-24 phase-3 lane). With the floor dropped, fanout is sized from the
-# measured per-worker default (or a deliberate override) and RSS splits across
-# queue-claiming workers; the tree reserve in shard_threads_parent_cap_for
-# still protects the supervisor. SIMPLE_HIR_SHARD_PARENT_FLOOR=1 restores the
-# old floor explicitly. A valid phase override still wins over everything.
-pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i64 = 0) -> i64:
+# The coordinator's peak is never a worker budget (a floor at the supervisor's
+# own front-end peak collapsed admission to one SIGBUS-killed worker, 41 deaths,
+# 2026-10-24); the tree reserve in shard_threads_parent_cap_for protects the
+# supervisor. A valid phase override still wins over everything.
+pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
     val raw = env_get(var_name) ?? ""
     if raw != "":
         val parsed = shard_mem_available_kb_from_field(raw)
@@ -208,8 +200,6 @@ pub fn shard_worker_budget_kb(var_name: text, default_kb: i64, parent_peak_kb: i
     if host_kb > 0 and chosen != host_kb:
         val host_mib = host_kb / 1024
         print "[shard] ignoring worker_mem_mib={host_mib} MiB below the {var_name} default {default_kb} kB; set {var_name} to lower it deliberately"
-    if parent_peak_kb > 0 and (env_get("SIMPLE_HIR_SHARD_PARENT_FLOOR") ?? "") == "1":
-        return shard_host_budget_floor_kb(parent_peak_kb, chosen)
     chosen
 
 # worker_mem_mib in kB; 0 (use the default) when absent, invalid or so large
@@ -328,6 +318,38 @@ pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib:
             need = need + (est_kib - current)
     headroom_kib - reserve_kib >= need
 
+# ===== per-worker estimate and tree-budget clamp (phase 4) ===================
+#
+# 2026-10-27 phase 3 (stage2 e4746b05): 21 per-file workers peaked at 72.2 GB
+# (~3.4 GB mean, >= 5.6 GB max) while admission priced them at 2.5 GB, and the
+# declared 90 GB tree budget exceeded the 64 GB cap. The coordinator's peak is
+# never a worker estimate. Precedence: a deliberate override, else
+# max(default SHARD_*_WORKER_KB_V1, max recorded worker peak): measurement can
+# only raise the estimate, never lower it (a light-lane record must not
+# loosen the next heavy run).
+pub fn shard_worker_estimate_kib_v1(default_kb: i64, worker_peaks_kib: [i64], override_kb: i64 = 0) -> i64:
+    if override_kb > 0: return override_kb
+    var best: i64 = 0
+    for p in worker_peaks_kib:
+        if p > best: best = p
+    if best > default_kb: best else: default_kb
+
+pub const SHARD_TREE_HEADROOM_KB_V1: i64 = 25165824
+
+# min(declared, cap_or_free - 24 GB). cap_or_free is the enforced tree RSS cap
+# when set, else free commit. Unknown declared (<= 0) takes the clamp; unknown
+# cap and free (both <= 0) leave the declared budget. 0 = nothing admissible.
+pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64) -> i64:
+    val base = if cap_kb > 0: cap_kb else: free_kb
+    if base <= 0: return declared_kb
+    if base <= SHARD_TREE_HEADROOM_KB_V1: return 0
+    val clamped = base - SHARD_TREE_HEADROOM_KB_V1
+    if declared_kb > 0 and declared_kb < clamped: declared_kb else: clamped
+
+pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
+    if effective_kb <= 0 or estimate_kb <= 0: return 0
+    effective_kb / estimate_kb
+
 pub fn shard_threads_parent_cap_for(requested: i64, budget_kb: i64,
         avail_kb: i64, tree_kb: i64, host_clamp: bool, parent_peak_kb: i64) -> i64:
     if requested <= 0: return 0
@@ -437,12 +459,33 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
         env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     val cgroup_kb = shard_cgroup_memory_max_kb()
     val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
-    val cap = if parent_peak_kb >= 0:
+    val cap0 = if parent_peak_kb >= 0:
         shard_threads_parent_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp, parent_peak_kb)
     else:
         shard_threads_tree_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp)
+    var cap = cap0
     if parent_peak_kb >= 0:
-        print "[hir-shard] admission estimate={budget_kb} kB historical parent peak={parent_peak_kb} kB; warmup pool only, RSS guard authoritative"
+        val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+        val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
+        val effective = shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb)
+        val clamp_workers = shard_pool_workers_v1(effective, budget_kb)
+        if effective != tree_kb:
+            print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {SHARD_TREE_HEADROOM_KB_V1} kB -> effective {effective} kB"
+        if cap_kb > 0 or avail_kb > 0 or tree_kb > 0:
+            if clamp_workers < cap: cap = clamp_workers
+        print "[hir-shard] admission worker estimate={budget_kb} kB (coordinator peak {parent_peak_kb} kB reserved for the coordinator only); warmup pool only, RSS guard authoritative"
     if cap < requested:
         print "[shard] threads={cap} (requested {requested}, host max_threads bound={bounded}, available={avail_kb} kB, tree budget={tree_kb} kB (declared {declared_kb} kB, cgroup memory.max {cgroup_kb} kB), worker budget={budget_kb} kB, parent peak={parent_peak_kb} kB)"
     cap
+
+# Diagnosis only (refusal text): workers the tree-budget clamp alone admits for
+# `estimate_kb`; -1 when no budget, cap or free-memory figure is known.
+pub fn shard_pool_clamp_workers(estimate_kb: i64) -> i64:
+    val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
+    val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val cgroup_kb = shard_cgroup_memory_max_kb()
+    val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
+    val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    val cap_kb = if rss_cap > 0 and (cgroup_kb <= 0 or rss_cap < cgroup_kb): rss_cap else: cgroup_kb
+    if cap_kb <= 0 and avail_kb <= 0 and tree_kb <= 0: return -1
+    shard_pool_workers_v1(shard_effective_tree_budget_kb_v1(tree_kb, cap_kb, avail_kb), estimate_kb)
