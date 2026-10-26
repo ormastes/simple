@@ -95,3 +95,14 @@ are preserved. Ordinary unambiguous legacy fallback is not SOURCE authority.
 The donor regression file is preserved exactly. Historical donor attempts above
 are not recertified for this adaptation: all new-target SSpecs and native P3
 execution remain UNRUN. No compiler, cache or toolchain was launched.
+
+Cycle2 closes review findings: conflicted bare value rows and bare fallback rows
+are excluded from field-index selection as they already were from owner/type
+selection. Exact qualified provenance remains authoritative. The unavailable-
+exact-layout negative fixture now actually marks its bare owner conflicted.
+Local and composite Struct prepasses register default flags/expressions under
+the selected declaration key only when that key's registered field order agrees;
+this prevents Child(value=37) / Child() from silently losing its default when
+construction selects the qualified layout. Imported-provider registration is a
+separate owner change. New real-frontend default and mismatched-order controls
+remain UNRUN; no historical donor execution qualifies this adaptation.
