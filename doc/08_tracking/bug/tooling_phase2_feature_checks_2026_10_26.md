@@ -107,3 +107,19 @@ lengths parsed exactly, and exit0. Captures: `markdown-ids.stdout`/`.stderr`.
 Added3 meaningful SSpec examples for raw success/error IDs and the retained
 integer facade; these are authored, not executed by the crashed general runner.
 Document changes, parser edge cases, and remaining qualification are incomplete.
+
+## Markdown state and fenced-block checks
+
+The prior IDs binary passed full document replacement (Updated supersedes the
+old headings) and closing (subsequent symbols empty). Captures: markdown-state.
+That exchange exposed raw-line symbol/definition scans leaking fenced headings.
+Changed these handlers to use cached parsed blocks; retained physical source
+line ranges. Folding now stops at a closing fence rather than merging adjacent
+fenced runs. Phase2 attempt four compiled/linked successfully (markdown-blocks).
+
+Actual native checks passed: Visible/Last symbols omit Hidden inside code;
+the link to hidden returns null; adjacent fences fold separately at1..3 and4..6
+without a merged1..6 range; process exits0 and frames parse exactly. Captures:
+markdown-blocks.stdout/.stderr. Added two meaningful SSpec regressions, UNRUN
+under the unavailable general runner. Unicode source-position semantics and
+remaining advertised methods still require checks before landing.
