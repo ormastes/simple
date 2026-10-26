@@ -68,14 +68,20 @@ class MacroExpansionCacheV1:
             return false
         self.keys.push(expand_key)
         self.values.push(expansion)
-        val _done = self.flights.complete(cache_single_flight_key_v1("macro-expand", expand_key),
-            request_id, Some(text_to_bytes(expansion)))
+        val flight_key = cache_single_flight_key_v1("macro-expand", expand_key)
+        val (_role, flight) = self.flights.join(flight_key, request_id)
+        val _done = self.flights.complete(flight_key, request_id, Some(text_to_bytes(expansion)))
+        self.flights.forget(flight)
         true
 
     # Failure path of a leader: completes the flight with nil so it is never
     # left in flight; waiters then produce in process (their next begin leads).
     me fail(expand_key: text, request_id: text) -> bool:
-        self.flights.complete(cache_single_flight_key_v1("macro-expand", expand_key), request_id, nil)
+        val flight_key = cache_single_flight_key_v1("macro-expand", expand_key)
+        val (_role, flight) = self.flights.join(flight_key, request_id)
+        self.flights.complete(flight_key, request_id, nil)
+        self.flights.forget(flight)
+        true
 
     # try/finally-equivalent leader driver: `expand` returns Err on failure,
     # and EVERY non-publishing outcome (Err, quarantine) completes with nil.
