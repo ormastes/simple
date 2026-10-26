@@ -819,6 +819,84 @@ fn try_assign_module_global_index(
 }
 
 // Helper function for regular assignment
+/// `obj.name = v` where `name` is not a field of `obj`'s class: forward to
+/// `obj.set_name(v)` when that method exists (the setter half of the
+/// get_/is_/no-paren getter forwarding in expr/calls.rs), otherwise a hard
+/// E1012 "undefined field" error. Before this, the write silently created a
+/// dynamic field and the setter never ran (wrong result, exit 0).
+/// Returns Ok(true) when the assignment was handled by the setter.
+/// `_`-prefixed names keep their auto-backing-field semantics (mirrors the
+/// getter's `_` auto-zero), and receivers whose class is unknown are left to
+/// the existing paths.
+#[allow(clippy::too_many_arguments)]
+fn forward_field_setter(
+    obj_name: &str,
+    field: &str,
+    value: &Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<bool, CompileError> {
+    if field.starts_with('_') {
+        return Ok(false);
+    }
+    let current = match env.get(obj_name).cloned() {
+        Some(v) => Some(v),
+        None => MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned()),
+    };
+    let (class_name, has_field) = match current.map(Value::into_option_payload) {
+        Some(Value::ClassInstance(ref inst)) => (inst.class().to_string(), inst.field(field).is_some()),
+        Some(Value::Object { ref class, ref fields }) => (class.clone(), fields.contains_key(field)),
+        _ => return Ok(false),
+    };
+    if has_field {
+        return Ok(false);
+    }
+    let Some(class_def) = classes.get(class_name.as_str()).cloned() else {
+        return Ok(false);
+    };
+    if class_def.fields.iter().any(|f| f.name == field) {
+        return Ok(false);
+    }
+    let setter = format!("set_{field}");
+    let has_setter = class_def.methods.iter().any(|m| m.name == setter)
+        || impl_methods
+            .get(class_name.as_str())
+            .is_some_and(|ms| ms.iter().any(|m| m.name == setter));
+    if !has_setter {
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
+            "declare field '{field}' or a setter 'fn {setter}(v)' on {class_name}"
+        ));
+        return Err(CompileError::semantic_with_context(
+            format!("undefined field '{field}': class {class_name} has no such field or setter"),
+            ctx,
+        ));
+    }
+    let tmp = "__setter_arg__".to_string();
+    env.insert(tmp.clone(), value.clone());
+    let call = Expr::MethodCall {
+        receiver: Box::new(Expr::Identifier(obj_name.to_string())),
+        method: setter,
+        args: vec![simple_parser::ast::Argument::new(None, Expr::Identifier(tmp.clone()))],
+        generic_args: vec![],
+    };
+    let result = handle_method_call_with_self_update(&call, env, functions, classes, enums, impl_methods);
+    env.remove(&tmp);
+    let (_, update) = result?;
+    if let Some((upd_name, new_self)) = update {
+        if env.contains_key(&upd_name) {
+            env.insert(upd_name, new_self);
+        } else {
+            MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert(upd_name, new_self);
+            });
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
@@ -1057,6 +1135,9 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            if forward_field_setter(obj_name, field, &value, env, functions, classes, enums, impl_methods)? {
+                return Ok(Control::Next);
+            }
             if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::ClassInstance(instance) => {

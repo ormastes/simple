@@ -213,6 +213,7 @@ impl<'a> Parser<'a> {
 
         // Check for empty class (no body)
         let previous_collection_owner = self.collection_owner_push(&name);
+        let outer_trait_aliases = std::mem::take(&mut self.class_trait_aliases);
         let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
             if self.check(&TokenKind::Newline) || self.is_at_end() {
                 // Empty class - no fields, methods, invariant, etc.
@@ -220,6 +221,9 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_class_body()?
             };
+        for (trait_name, field_name) in std::mem::replace(&mut self.class_trait_aliases, outer_trait_aliases) {
+            self.trait_alias_forwards.push((name.clone(), trait_name, field_name));
+        }
         self.collection_owner = previous_collection_owner;
 
         // Prepend explicit mixins from `with` clause
@@ -265,6 +269,7 @@ impl<'a> Parser<'a> {
 
         let _where_clause = self.parse_where_clause()?;
         let (fields, methods, _invariant, _macro_invocations, inner_mixins, doc_comment) = self.parse_class_body()?;
+        self.class_trait_aliases.clear();
 
         // Merge `use` declarations from mixin body into required_mixins
         let mut all_required_mixins = required_mixins;
@@ -1048,6 +1053,20 @@ impl<'a> Parser<'a> {
             {
                 // pass_dn / pass_do_nothing / pass_todo as identifiers in class body: skip
                 self.advance();
+                self.skip_newlines();
+            } else if self.check(&TokenKind::Alias)
+                && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. }
+                    if name.starts_with(|c: char| c.is_ascii_uppercase()))
+                && self.peek_nth(2).kind == TokenKind::Assign
+            {
+                // `alias TraitName = field`: forward the trait's abstract methods to
+                // `self.field` (same contract as src/app/desugar/forwarding.spl Phase 3).
+                // Expanded in Parser::parse once the trait definitions are known.
+                self.advance();
+                let trait_name = self.expect_identifier()?;
+                self.expect(&TokenKind::Assign)?;
+                let field_name = self.expect_identifier()?;
+                self.class_trait_aliases.push((trait_name, field_name));
                 self.skip_newlines();
             } else {
                 fields.push(self.parse_field()?);

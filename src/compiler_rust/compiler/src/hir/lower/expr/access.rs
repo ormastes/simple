@@ -383,6 +383,30 @@ impl Lowerer {
                     }
                 }
 
+                // Getter forwarding: `obj.name` with no field `name` reads
+                // `obj.get_name()` then `obj.is_name()` — the same order as the
+                // interpreter (interpreter/expr/calls.rs). The bare no-paren
+                // `obj.name()` case is the has_known_method path below.
+                for prefix in ["get_", "is_"] {
+                    let getter = format!("{prefix}{field}");
+                    if candidate_struct_names
+                        .iter()
+                        .any(|name| self.has_known_method_for_struct_name(name, &getter))
+                    {
+                        // Re-lower as a real `receiver.getter()` call so the
+                        // method's declared return type is kept; a hand-built
+                        // Dynamic call typed ANY rendered `t.celsius` as a
+                        // garbage f64 and `t.hot` as nil in the JIT.
+                        let call = Expr::MethodCall {
+                            receiver: Box::new(receiver.clone()),
+                            method: getter,
+                            args: vec![],
+                            generic_args: vec![],
+                        };
+                        return self.lower_expr(&call, ctx);
+                    }
+                }
+
                 // Class 2 fallback: when the receiver's type is ANY (e.g.
                 // from a call expression like `shell(...)` whose return type
                 // wasn't propagated) and no candidate struct names could be
@@ -698,6 +722,27 @@ impl Lowerer {
                         .then_some(candidate)
                 })
         })
+    }
+
+    /// Setter forwarding for `receiver.field = value`: when the receiver's
+    /// struct has no field `field` but defines `set_<field>`, the assignment
+    /// is the call `receiver.set_<field>(value)` (interpreter twin:
+    /// interpreter/node_exec.rs `forward_field_setter`). Returns None when the
+    /// target is a real field or no setter is known, leaving the normal
+    /// store path (and its fail-closed field diagnostics) untouched.
+    pub(crate) fn setter_forward_name(&mut self, receiver: &Expr, field: &str, ctx: &FunctionContext) -> Option<String> {
+        if field.starts_with('_') {
+            return None;
+        }
+        let struct_name = self.try_resolve_receiver_struct_name_from_expr(receiver, ctx)?;
+        if self.try_resolve_field_type_by_name(&struct_name, field).is_some()
+            || self.try_resolve_global_field_type_by_name(&struct_name, field).is_some()
+        {
+            return None;
+        }
+        let setter = format!("set_{field}");
+        self.has_known_method_for_struct_name(&struct_name, &setter)
+            .then_some(setter)
     }
 
     pub(crate) fn try_resolve_receiver_struct_name_from_expr(

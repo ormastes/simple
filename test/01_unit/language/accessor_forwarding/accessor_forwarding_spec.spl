@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LANGUAGE
+# bugs: doc/08_tracking/bug/seed_setter_forwarding_silent_noop_2026-10-26.md
+#       doc/08_tracking/bug/seed_hir_getter_setter_forwarding_dejit_2026-10-26.md
+#       doc/08_tracking/bug/seed_trait_alias_forwarding_unsupported_2026-10-26.md
+#
+# Accessor and trait-alias forwarding, checked on BOTH seed engines:
+#   - `obj.name` with no field `name` reads get_name() / is_name()
+#   - `obj.name = v` with no field `name` calls set_name(v); with no setter it
+#     is a hard error (was: silent no-op, exit 0)
+#   - `alias Trait = field` forwards the trait's abstract methods to the field;
+#     a method the class defines explicitly wins over the forwarded one
+# The JIT run sets SIMPLE_JIT_STRICT=1, so a HIR-lowering fallback to the
+# interpreter is a failure instead of a silently-passing interpreter run.
+# Oracle: every `CASE <name>=<got> want=<expected>` line must have got == expected
+# (literals written in the probe, not computed by it).
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_DIR: text = "test/01_unit/language/accessor_forwarding/"
+
+fn run_probe(name: text, mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_JIT_STRICT=1 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_DIR + name + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn case_lines(raw: text) -> [text]:
+    var kept: [text] = []
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with("CASE "):
+            kept.push(t)
+    kept
+
+fn mismatched_cases(raw: text) -> [text]:
+    var bad: [text] = []
+    for line in case_lines(raw):
+        val halves = line.split(" want=")
+        if halves.len() != 2:
+            bad.push(line)
+        else:
+            val lhs = halves[0].split("=")
+            if lhs.len() != 2 or lhs[1] != halves[1]:
+                bad.push(line)
+    bad
+
+describe "accessor forwarding (get_/is_/set_) on the seed":
+    it "forwards getters and setters on the interpreter":
+        # @req REQ-SSPEC-LANGUAGE
+        step("forwards getters and setters on the interpreter")
+        val out = run_probe("probe_setter.spl", "interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(case_lines(out).len()).to_equal(6)
+        expect(mismatched_cases(out).join("|")).to_equal("")
+
+    it "forwards getters and setters on the jit without falling back":
+        # @req REQ-SSPEC-LANGUAGE
+        step("forwards getters and setters on the jit without falling back")
+        val out = run_probe("probe_setter.spl", "jit")
+        expect(out).to_contain("PROBE_DONE")
+        expect(case_lines(out).len()).to_equal(6)
+        expect(mismatched_cases(out).join("|")).to_equal("")
+
+    it "rejects assignment to an undefined field with no setter":
+        # @req REQ-SSPEC-LANGUAGE
+        step("rejects assignment to an undefined field with no setter")
+        val interp = run_probe("probe_undefined_field.spl", "interpreter")
+        expect(interp).to_contain("undefined field 'celsius'")
+        expect(interp.contains("SILENT_NOOP")).to_equal(false)
+        val jit = run_probe("probe_undefined_field.spl", "jit")
+        expect(jit.contains("SILENT_NOOP")).to_equal(false)
+
+describe "alias Trait = field forwarding on the seed":
+    it "forwards trait methods on the interpreter, explicit method wins":
+        # @req REQ-SSPEC-LANGUAGE
+        step("forwards trait methods on the interpreter, explicit method wins")
+        val out = run_probe("probe_alias.spl", "interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(case_lines(out).len()).to_equal(2)
+        expect(mismatched_cases(out).join("|")).to_equal("")
+
+    it "forwards trait methods on the jit without falling back":
+        # @req REQ-SSPEC-LANGUAGE
+        step("forwards trait methods on the jit without falling back")
+        val out = run_probe("probe_alias.spl", "jit")
+        expect(out).to_contain("PROBE_DONE")
+        expect(case_lines(out).len()).to_equal(2)
+        expect(mismatched_cases(out).join("|")).to_equal("")
