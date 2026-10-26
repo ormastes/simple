@@ -37,7 +37,7 @@ describe "bare enum unit patterns use the subject owner":
         for name in ["Release", "Payload", "anything"]:
             val binding = Pattern(kind: PatternKind.Binding(name, false), span: span)
             expect(pattern_label(lowerer.lower_match_pattern(binding, Some(subject)))).to_equal("binding")
-        expect(pattern_label(lowerer.lower_match_pattern(relaxed, nil))).to_equal("binding")
+        expect(pattern_label(lowerer.lower_match_pattern(relaxed, nil))).to_equal("Relaxed")
         val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
         expect(pattern_label(lowerer.lower_match_pattern(acquire, Some(integer)))).to_equal("binding")
         val mutable = Pattern(kind: PatternKind.Binding("Relaxed", true), span: span)
@@ -54,3 +54,39 @@ describe "bare enum unit patterns use the subject owner":
         val subject = HirType(kind: HirTypeKind.Named(alias, []), span: span)
         val pattern = Pattern(kind: PatternKind.Binding("Ready", false), span: span)
         expect(pattern_label(lowerer.lower_match_pattern(pattern, Some(subject)))).to_equal("Ready")
+
+    it "retains the subject owner on every bare unit OR alternative":
+        val parsed = parse_full_frontend("enum Order:\n    Relaxed\n    Acquire\nenum Other:\n    Acquire\n", "or_owner.spl", "or_owner", Logger(level: 0))
+        var lowerer = HirLowering.with_filename("or_owner.spl")
+        val span = Span.empty()
+        val owner = lowerer.symbols.define("Order", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        lowerer.symbols.define("Other", SymbolKind.Enum, nil, span, Visibility.Public, false, nil)
+        lowerer.register_enum_unit_patterns(parsed.enums["Order"], "Order")
+        lowerer.register_enum_unit_patterns(parsed.enums["Other"], "Other")
+        val subject = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+        val relaxed = Pattern(kind: PatternKind.Binding("Relaxed", false), span: span)
+        val acquire = Pattern(kind: PatternKind.Binding("Acquire", false), span: span)
+        val either = Pattern(kind: PatternKind.Or([relaxed, acquire]), span: span)
+        val lowered = lowerer.lower_match_pattern(either, Some(subject))
+        match lowered.kind:
+            case HirPatternKind.Or(alternatives):
+                expect(alternatives.len()).to_equal(2)
+                expect(pattern_label(alternatives[0])).to_equal("Relaxed")
+                expect(pattern_label(alternatives[1])).to_equal("Acquire")
+                for alternative in alternatives:
+                    match alternative.kind:
+                        case HirPatternKind.Enum(enum_type, _, _):
+                            match enum_type.kind:
+                                case HirTypeKind.Named(actual_owner, _): expect(actual_owner.id).to_equal(owner.id)
+                                case _: expect(false).to_equal(true)
+                        case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        expect(lowerer.errors.len()).to_equal(0)
+        # A shared name has no provable owner on an untyped subject.
+        expect(pattern_label(lowerer.lower_match_pattern(acquire, nil))).to_equal("binding")
+        # Genuine unequal binding names must still be rejected by OR validation.
+        val left = Pattern(kind: PatternKind.Binding("left", false), span: span)
+        val right = Pattern(kind: PatternKind.Binding("right", false), span: span)
+        val invalid = Pattern(kind: PatternKind.Or([left, right]), span: span)
+        lowerer.lower_match_pattern(invalid, Some(subject))
+        expect(lowerer.errors.len() > 0).to_equal(true)

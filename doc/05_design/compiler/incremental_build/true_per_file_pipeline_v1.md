@@ -1,10 +1,11 @@
 # True per-file pipeline v1 — one job per source file, src → parse → HIR → MIR → obj, no phase barrier
 
-**Status:** FIXED design (2026-10-25, release/1.0.0 @ `b9fd03115ad`). Owner: Fable lead;
+**Status:** FIXED design (2026-10-25, release/1.0.0 @ `b9fd03115ad`); per-file pipeline default enabled 2026-10-26. Owner: Fable lead;
 implementers listed in §6. Supersedes nothing: it is the execution contract for
 rule 1 of `src_based_tldr_build_v1.md` ("per-file jobs, no stage barrier") and
 §8/§9 of `build_runner_fiber_scheduler_v1.md`, written against what the code
-does TODAY (measured, see §1).
+did at the time of the 2026-10-25 measurement, see §1. The default is now
+enabled; native qualification evidence remains pending.
 
 ## 1. What is NOT per-file today (measured on the frozen Windows stage2, 2026-10-25)
 
@@ -83,13 +84,14 @@ template's module" coupling. Design detail: `build_runner_fiber_scheduler_v1.md`
 cache). P4 DONE (opt-in) #4575, #4580, #4597 (P-B), #4598 (P-G3, no global
 mono pass on this lane), #4603 (P-D). P5 PARTIAL — #4585/#4588 limit HIR to the
 claimed module's import closure; TLDR specialization list + `.rr` producers (P-G2) DONE
-#4600 `73c4aef632a`. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568). Default
-flip (P-F #4592 `1c6ccfb61c4`) is prepared but **not flipped**:
-`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` in
-`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`; enable with
-`SIMPLE_FILE_WORKERS=1`. The §2 overlap proof (`obj_done(A) < hir_start(B)`) has
-a checker (`scripts/check/check-per-file-overlap-receipt.shs`) but **no native
-receipt yet**; §7's limit still holds.
+#4600 `73c4aef632a`. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568).
+The default now resolves unset `SIMPLE_FILE_WORKERS` to
+`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` in
+`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`.
+`SIMPLE_FILE_WORKERS=0` and `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` remain opt-outs.
+The §2 overlap proof (`obj_done(A) < hir_start(B)`) has a checker
+(`scripts/check/check-per-file-overlap-receipt.shs`) but **no native receipt
+yet**; the shared default flip is not qualification evidence.
 
 | # | Package | Owner | Status |
 |---|---|---|---|
@@ -128,10 +130,10 @@ E-MONO-040 fails closed for imported generics: #4651 `6c257d14918`.
 reviewer (comment), pending merge. Merge release_phase3 into
 release/1.0.0: #4704 OPEN.
 
-**Default stays off:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`
-(`SIMPLE_FILE_WORKERS` default "0"). Flip waits on a proof run: stage3 -> stage3'
-built with P-H, then a per-file self-rebuild that yields an overlap receipt
-(`scripts/check/check-per-file-overlap-receipt.shs`). No such receipt exists yet.
+**Default enabled 2026-10-26:** unset `SIMPLE_FILE_WORKERS` now selects the
+per-file worker pool. Native qualification is still pending: build a Stage 3
+binary from these sources, self-rebuild it through the default lane, then
+require an overlap receipt from `scripts/check/check-per-file-overlap-receipt.shs`.
 
 **Stage evidence (in progress, not a retained measurement):** stage2 built cold
 from `d72188e68ec` (1534 modules, 0 failed, mswsock workaround dropped). The

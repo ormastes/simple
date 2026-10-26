@@ -14,8 +14,58 @@ use std.common.crypto.sha256.{sha256_text}
 use test.fixtures.scv.db_apply_fixture.*
 
 use test.fixtures.scv.db_checkpoint_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_repin}
+use std.scv.db_paged_model.*
+use std.scv.db_reducer.{DbFieldSchema, FieldMergeRule}
+
+fn checkpoint_paged_authority() -> (DbDatabaseCheckpoint, DbCheckpointAuthority):
+    val (initial, initial_authority) = setup_item2_checkpoint()
+    val paged = setup_item2_paged_policy()
+    var checkpoint = initial
+    checkpoint.reducer_revision = paged.config.admission.reducer_revision
+    checkpoint.policy_revision = paged.config.revision
+    checkpoint.storage = DbCheckpointStorage.Paged(db_paged_genesis(paged).unwrap())
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    var authority = initial_authority
+    authority.expected_checkpoint = checkpoint.revision
+    authority.policy = paged.config
+    authority.paged_policy = Some(paged)
+    (checkpoint, authority)
 
 describe "Signed complete checkpoint envelopes and explicit history":
+    it "authenticates a paged checkpoint with independently validated equal policy pins":
+        step("Authenticate a signed paged manifest under its complete reviewed policy")
+        val (checkpoint, authority) = checkpoint_paged_authority()
+        expect(db_checkpoint_authenticate(checkpoint, authority)).to_equal(Ok(true))
+
+    it "rejects a changed configuration body carrying the original policy pin":
+        step("Keep the revision but change a merge rule before authentication")
+        val (checkpoint, initial) = checkpoint_paged_authority()
+        var authority = initial
+        var paged = authority.paged_policy.unwrap()
+        var config = paged.config
+        var merge = config.merge
+        merge.fields = [DbFieldSchema(kind: "bug", field: "code", rule: FieldMergeRule.Derived), DbFieldSchema(kind: "bug", field: "link", rule: FieldMergeRule.ScalarConflict)]
+        config.merge = merge
+        paged.config = config
+        authority.paged_policy = Some(paged)
+        expect(db_checkpoint_authenticate(checkpoint, authority)).to_equal(Err("SCVDB_POLICY_CONFIG_REVISION"))
+
+    it "rejects a different valid policy even when its paged pin is recomputed":
+        step("Repin a changed merge policy without changing the checkpoint authority")
+        val (checkpoint, initial) = checkpoint_paged_authority()
+        var authority = initial
+        var paged = authority.paged_policy.unwrap()
+        var config = paged.config
+        var merge = config.merge
+        merge.fields = [DbFieldSchema(kind: "bug", field: "code", rule: FieldMergeRule.Derived), DbFieldSchema(kind: "bug", field: "link", rule: FieldMergeRule.ScalarConflict)]
+        config.merge = merge
+        paged.config = config
+        authority.paged_policy = Some(setup_item2_paged_repin(paged))
+        expect(db_checkpoint_authenticate(checkpoint, authority)).to_equal(Err("SCVDB_CHECKPOINT_PAGED_POLICY"))
+
     it "roundtrips authenticated metadata roots and rejects independent pin or signature changes":
         val (checkpoint, authority) = setup_item2_checkpoint()
         val encoded = db_checkpoint_encode(checkpoint).unwrap()

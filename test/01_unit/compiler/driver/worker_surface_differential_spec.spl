@@ -4,13 +4,18 @@
 # worker builds surfaces only for its seeds' import closure.
 use std.spec
 use compiler.common.config.{Logger}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_delete, file_read, file_write}
+use std.nogc_sync_mut.io_runtime.{cwd, getpid, time_now_unix_micros}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
     worker_surface_seed_v1, worker_surface_import_ids_v1, worker_surface_closure_v1,
-    worker_surface_ready_v1, worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1}
+    worker_surface_ready_v1, worker_surface_restrict_claims_v1, worker_surface_claim_allowed_v1,
+    worker_surface_text_v1}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -42,6 +47,25 @@ describe "worker skeleton surface equals the full-parse surface":
             val skel = module_surface_skeleton_v1(source)
             expect(projection(skel, path)).to_equal(projection(source, path))
             expect(digest(skel, path)).to_equal(digest(source, path))
+
+    it "rejects and replaces a v1 surface sidecar for the lexer source":
+        val source_path = "src/compiler/10.frontend/core/lexer_struct.spl"
+        val original = rt_file_read_text(source_path) ?? ""
+        expect(original.len()).to_be_greater_than(0)
+        val source = original + "\n# unique worker sidecar v2 regression source"
+        val root = cwd() + "/build/test_tmp/worker_surface_sidecar_v2-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val tldr = module_tldr_companion_path_v1(root, source_path)
+        val sidecar = tldr.substring(0, tldr.len() - 5) + ".surface"
+        val slash = sidecar.rfind("/")
+        expect(dir_create_all(sidecar.substring(0, slash))).to_equal(true)
+        val old = "simple-worker-surface v1\nsource-sha256: " + sha256_text(source) + "\nold body-truncated surface"
+        expect(file_write(sidecar, old)).to_equal(true)
+        val rebuilt = worker_surface_text_v1(source_path, source, root)
+        expect(rebuilt).to_equal(module_surface_skeleton_v1(source))
+        expect(rebuilt).to_contain("fn core_lexer_token_start")
+        expect(file_read(sidecar).starts_with("simple-worker-surface v2\n")).to_equal(true)
+        expect(file_delete(sidecar)).to_equal(true)
 
 describe "worker surface closure":
     it "is default-on for HIR shard workers with an explicit opt-out":

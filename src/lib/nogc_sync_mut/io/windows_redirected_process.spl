@@ -52,7 +52,7 @@ fn _windows_redirected_image_digest(program: text) -> text:
         if image.path == program: return image.digest
     val digest = windows_process_file_digest_v1(program)
     if digest.len() == 64:
-        _windows_redirected_images.push(WindowsRedirectedImage(path: program, digest: digest))
+        _windows_redirected_images = _windows_redirected_images.push(WindowsRedirectedImage(path: program, digest: digest))
     digest
 
 fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
@@ -71,38 +71,40 @@ fn _windows_redirected_owner_lease(token: i64) -> Result<WindowsProcessLeaseV1, 
     Ok(WindowsProcessLeaseV1(slot: lease.slot))
 export _windows_redirected_owner_lease
 
-fn windows_redirected_spawn_with_memory(cmd: text, args: [text], stdout_path: text,
-        stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> i64:
-    if capture_limit <= 0 or _windows_redirected_states.len() >= 100000 or _windows_redirected_cleanup_blocked: return -1
+fn windows_redirected_spawn_checked_with_memory(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> Result<i64, text>:
+    if capture_limit <= 0: return Err("Windows capture limit must be positive")
+    if _windows_redirected_states.len() >= 100000: return Err("Windows redirected lease slots exhausted")
+    if _windows_redirected_cleanup_blocked: return Err("Windows redirected cleanup remains unproven")
     val snapshot = env_vars()
-    if snapshot == nil: return -1
+    if snapshot == nil: return Err("Windows environment snapshot unavailable")
     val program = host_path_native(path_absolute(cmd))
     val output = host_path_native(path_absolute(stdout_path))
     val error = host_path_native(path_absolute(stderr_path))
     val private_root = output + ".scope"
-    if is_dir(private_root): return -1
+    if is_dir(private_root): return Err("Windows private capture scope already exists")
     for directory in [private_root, private_root + "/home", private_root + "/tmp", private_root + "/cache"]:
         if not dir_create_all(directory):
             val cleaned = _windows_redirected_cleanup(output)
-            return -1
+            return Err("Windows private capture directory creation failed: " + directory)
     var environment: [text] = []
     for (key, value) in snapshot ?? []:
         val name = key.lower()
         # Windows hidden drive assignments are replaced by explicit cwd.
         if key == "" or key.starts_with("="): continue
         if ["home", "tmp", "temp", "tmpdir", "simple_cache_dir", "simple_frontend_cache_dir", "simple_native_build_cache_dir"].contains(name): continue
-        environment.push(key + "=" + value)
-    environment.push("HOME=" + private_root + "/home")
-    environment.push("TMP=" + private_root + "/tmp")
-    environment.push("TEMP=" + private_root + "/tmp")
-    environment.push("TMPDIR=" + private_root + "/tmp")
-    environment.push("SIMPLE_CACHE_DIR=" + private_root + "/cache")
-    environment.push("SIMPLE_FRONTEND_CACHE_DIR=" + private_root + "/cache/frontend")
-    environment.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + private_root + "/cache/native")
+        environment = environment.push(key + "=" + value)
+    environment = environment.push("HOME=" + private_root + "/home")
+    environment = environment.push("TMP=" + private_root + "/tmp")
+    environment = environment.push("TEMP=" + private_root + "/tmp")
+    environment = environment.push("TMPDIR=" + private_root + "/tmp")
+    environment = environment.push("SIMPLE_CACHE_DIR=" + private_root + "/cache")
+    environment = environment.push("SIMPLE_FRONTEND_CACHE_DIR=" + private_root + "/cache/frontend")
+    environment = environment.push("SIMPLE_NATIVE_BUILD_CACHE_DIR=" + private_root + "/cache/native")
     val digest = _windows_redirected_image_digest(program)
     if digest.len() != 64:
         val cleaned = _windows_redirected_cleanup(output)
-        return -1
+        return Err("Windows child executable digest unavailable")
     val request = WindowsProcessRequestV1(program: program, producer_digest: digest,
         args: args, environment: environment, directory: host_path_native(cwd()),
         inputs: [], stdout_path: output, stderr_path: error, timeout_ms: timeout_ms)
@@ -116,18 +118,18 @@ fn windows_redirected_spawn_with_memory(cmd: text, args: [text], stdout_path: te
     val transport_digest = sha256_text(transport)
     if transport_digest.len() != 64:
         val cleaned = _windows_redirected_cleanup(output)
-        return -1
+        return Err("Windows child transport digest unavailable")
     match windows_process_start_with_memory_v1(request, memory_limit_bytes):
         case Err(reason):
             val cleaned = _windows_redirected_cleanup(output)
-            return -1
+            return Err(reason)
         case Ok(lease):
             val slot = _windows_redirected_states.len()
-            _windows_redirected_states.push(WindowsRedirectedState(lease: lease,
+            _windows_redirected_states = _windows_redirected_states.push(WindowsRedirectedState(lease: lease,
                 stdout_path: output, stderr_path: error, capture_limit: capture_limit,
                 failed: false, failure_reason: "", closed: false,
                 transport_digest: transport_digest))
-            return WINDOWS_REDIRECTED_TOKEN_BASE + slot
+            return Ok(WINDOWS_REDIRECTED_TOKEN_BASE + slot)
 
 fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
     val slot = windows_redirected_token_slot(token, _windows_redirected_states.len())
@@ -242,9 +244,9 @@ fn windows_redirected_kill(token: i64) -> bool:
 # into POSIX builds. The POSIX runner retains its argv-safe shell redirect.
 fn windows_redirected_token_slot(token: i64, count: i64) -> i64:
     -1
-fn windows_redirected_spawn_with_memory(cmd: text, args: [text], stdout_path: text,
-        stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> i64:
-    -1
+fn windows_redirected_spawn_checked_with_memory(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> Result<i64, text>:
+    Err("Windows redirected owner unavailable on this platform")
 fn windows_redirected_wait(token: i64, timeout_ms: i64) -> i64:
     -1
 fn windows_redirected_is_running(token: i64) -> bool:
@@ -261,6 +263,14 @@ fn windows_redirected_kill(token: i64) -> bool:
     false
 @end
 
+# Keep the existing integer-token API for callers that cannot carry a reason.
+fn windows_redirected_spawn_with_memory(cmd: text, args: [text], stdout_path: text,
+        stderr_path: text, timeout_ms: i64, capture_limit: i64, memory_limit_bytes: i64) -> i64:
+    match windows_redirected_spawn_checked_with_memory(cmd, args, stdout_path,
+            stderr_path, timeout_ms, capture_limit, memory_limit_bytes):
+        case Ok(token): token
+        case Err(_): -1
+
 # Preserve the existing six-argument ABI for cached test-runner callers.
 fn windows_redirected_spawn(cmd: text, args: [text], stdout_path: text,
         stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
@@ -274,3 +284,4 @@ export windows_redirected_admission_count
 export windows_redirected_completion
 export windows_redirected_quarantine
 export windows_redirected_spawn_with_memory
+export windows_redirected_spawn_checked_with_memory

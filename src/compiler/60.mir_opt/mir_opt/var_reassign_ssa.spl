@@ -13,7 +13,6 @@ use compiler.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_bac
 use compiler.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
     local_count_index,
-    local_count_increment,
     local_list_contains,
     local_list_push_unique,
     var_reassign_analysis_hotspot_facts,
@@ -1159,8 +1158,10 @@ fn ssa_var_transform_blocks(blocks: [MirBlock]) -> SsaVarTransformResult:
 fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
     """Locals written at more than one site across `blocks` (the set that
     the old phi mechanism could not resolve correctly for real CFGs)."""
-    var local_ids: [i64] = []
-    var counts: [i64] = []
+    # Count by the actual local id, without a linear lookup and copied
+    # first-seen/count arrays for every instruction. This removes quadratic
+    # counting work when a large function mostly defines distinct locals.
+    var counts: Dict<i64, i64> = {}
     for block in blocks:
         for inst in block.instructions:
             # NOTE: explicit match, not `if written.?:` -- local id 0
@@ -1170,15 +1171,22 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
             # landed var_reassign_written_local fix addressed.
             val written_id = _ssa_written_local_id(inst)
             if written_id >= 0:
-                val next_counts = local_count_increment(local_ids, counts, written_id)
-                local_ids = next_counts[0]
-                counts = next_counts[1]
+                var previous: i64 = 0
+                if counts.contains_key(written_id):
+                    previous = counts[written_id]
+                counts[written_id] = previous + 1
     var reassigned: [i64] = []
-    var i = 0
-    while i < local_ids.len():
-        if counts[i] > 1:
-            reassigned = reassigned.push(local_ids[i])
-        i = i + 1
+    # Revisit the original graph rather than iterating the dictionary: slot
+    # allocation must retain first-definition order, not second-write order.
+    # Clear an emitted count so later writes cannot append the same id again.
+    # Output .push retains its existing cost; only counting is indexed here.
+    for block in blocks:
+        for inst in block.instructions:
+            val written_id = _ssa_written_local_id(inst)
+            if written_id >= 0 and counts.contains_key(written_id):
+                if counts[written_id] > 1:
+                    reassigned = reassigned.push(written_id)
+                    counts[written_id] = 0
     reassigned
 
 fn ssa_local_first_indices(mir_locals: [MirLocal]) -> Dict<i64, i64>:

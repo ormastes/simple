@@ -1,0 +1,37 @@
+# A fresh-process readback oracle. Expected values come from the parent's
+# committed generation; the child independently decodes policy and disk state.
+use app.io.cli_ops.{get_args}
+use app.io.mod.{file_read}
+use app.scv.db.settlement_queue.{db_settlement_queue_open}
+use app.scv.db.settlement_queue_codec.{db_settlement_queue_encode}
+use std.scv.db_policy_codec.{db_policy_decode}
+use std.common.crypto.sha256.{sha256_text}
+
+fn queue_reopen_probe() -> Result<text, text>:
+    var root = ""
+    var policy_revision = ""
+    var expected_head = ""
+    var expected_digest = ""
+    for arg in get_args():
+        if arg.starts_with("--root="): root = arg.substring(7, arg.len())
+        elif arg.starts_with("--policy="): policy_revision = arg.substring(9, arg.len())
+        elif arg.starts_with("--head="): expected_head = arg.substring(7, arg.len())
+        elif arg.starts_with("--digest="): expected_digest = arg.substring(9, arg.len())
+    if root == "" or policy_revision == "" or expected_head == "" or expected_digest == "":
+        return Err("queue-reopen: missing fixture identity")
+    val policy = db_policy_decode(file_read(root + "/causal-policy.scv"), policy_revision)?
+    val view = db_settlement_queue_open(root, policy.admission)?
+    if view.head != expected_head:
+        return Err("queue-reopen: generation mismatch")
+    if sha256_text(db_settlement_queue_encode(view.queue)?) != expected_digest:
+        return Err("queue-reopen: content mismatch")
+    Ok("queue-reopen: verified " + view.head + " " + expected_digest)
+
+fn main() -> i64:
+    match queue_reopen_probe():
+        Ok(receipt):
+            print receipt
+            0
+        Err(reason):
+            print reason
+            1
