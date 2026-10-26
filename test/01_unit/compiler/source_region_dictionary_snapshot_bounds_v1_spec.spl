@@ -1,0 +1,42 @@
+# Authored UNRUN. Native scalar observation, never a safe snapshot activation.
+use std.spec.{describe, it, expect}
+use compiler.common.loop_resource_account_v1.*
+use compiler.common.source_region_context_v1.*
+use compiler.common.source_region_dictionary_snapshot_bounds_v1.*
+
+describe "private dictionary snapshot scalar bound observations":
+    it "debits the actual account before native observation and retains no credit":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val before = account.snapshot()
+        val result = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_observation_bound_v1(account)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_be_greater_than(0)
+        expect(account.snapshot().work_used).to_equal(before.work_used + 1)
+        expect(account.snapshot().state_fields).to_equal(before.state_fields)
+        expect(account.snapshot().output_bytes).to_equal(before.output_bytes)
+
+    it "refuses malformed metrics and dimensions without querying native owner":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val before = account.snapshot().work_used
+        val bad_metric = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_array_bound_v1(account, 0, 3)
+        val negative = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_array_bound_v1(account, -1, 0)
+        val overfull = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_fill_bound_v1(account, 8, 9)
+        expect(bad_metric).to_equal(Err(SourceRegionErrorV1.Incomplete))
+        expect(negative).to_equal(Err(SourceRegionErrorV1.Incomplete))
+        expect(overfull).to_equal(Err(SourceRegionErrorV1.Incomplete))
+        expect(account.snapshot().work_used).to_equal(before)
+
+    it "refuses an exhausted real account before FFI":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1(max_work: 20)).unwrap()
+        val before = account.snapshot()
+        val result = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_observation_bound_v1(account)
+        expect(result).to_equal(Err(SourceRegionErrorV1.Capacity))
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it "accepts cleanup dimensions and observes all exact native array metric domains":
+        val account = MirLoopResourceAccountV1.create(MirLoopResourceLimitsV1()).unwrap()
+        val cleanup = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_fill_bound_v1(account, 0, 0)
+        expect(cleanup.unwrap()).to_be_greater_than(0)
+        for metric in 0..3:
+            val result = unsafe(capabilities: [ffi, raw_ptr]): source_region_snapshot_array_bound_v1(account, 0, metric)
+            expect(result.unwrap()).to_be_greater_than(0)
