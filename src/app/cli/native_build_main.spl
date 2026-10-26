@@ -60,7 +60,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, native_file_worker_pool_request_v1,
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
-    NativeFileWorkerReceiptV1, native_file_workers_selected_v1, native_file_worker_spec_from_args_v1,
+    NativeFileWorkerReceiptV1, native_bootstrap_stage3_per_file_selected_v1, native_file_worker_spec_from_args_v1,
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
@@ -1332,7 +1332,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     # The opt-in per-file worker pool (explicit SIMPLE_FILE_WORKERS=1)
     # replaces the HIR pass + MIR pass below with one claim-loop pool. A refused
     # pool returns "fail" (error on stderr); it never continues to the two-pass path.
-    if allow_mir and native_file_workers_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1) and
+    if allow_mir and native_bootstrap_stage3_per_file_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+            env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "") and
             (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
         val file_result = run_file_worker_pool_v1(base, args, simple_bin, timeout_ms)
         env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
@@ -1398,10 +1399,14 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     val hir_count = native_build_hir_shard_count(admit_args)
     val mir_parallel = native_build_shard_threads(admit_args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
     val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
+    val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
+        elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
+        else: ""
     # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
     val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, shard_mem_available_kb(),
         shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1),
-        shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
+        shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1),
+        native_build_requested_shard_threads(admit_args), hir_disabled_by)
     if refusal != "":
         eprint refusal
         return "fail"
@@ -1471,8 +1476,8 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if outcome == "fail":
         eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"
         return "fail"
-    eprint "[file-worker] no MIR module verdict; falling back to in-process build"
-    ""
+    eprint "[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback"
+    "fail"
 
 # P-G6/P-G7: after every module object exists (no barrier before the first
 # one), plan the needed generic instances from the fresh TLDR lists and run
