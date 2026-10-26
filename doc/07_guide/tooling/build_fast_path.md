@@ -313,3 +313,24 @@ fixtures (depth-0 runs; self-invoking fixture stopped with exit 3 after exactly
 MAX_DEPTH invocations; `SIMPLE_SHS_MAX_DEPTH` override honoured; overhead
 < 1 ms) and ends with `recursion-guard selftest: PASS — 4 fixture(s)`. Spec:
 `test/01_unit/scripts/recursion_guard_spec.spl`.
+
+## Stage2 build watchdog (2026-10-26)
+
+`sh scripts/check/stage2-build-watchdog.shs --log FILE --root-pid PID [--cache-dir DIR]` or
+`... --log FILE [--cache-dir DIR] -- CMD ARGS...` watches a build driven by the phase-2
+compiler. Native Windows uses PowerShell `Get-CimInstance Win32_Process`; Linux uses `/proc`.
+Complements `scripts/bootstrap/bootstrap-progress-watch.shs` (Linux/macOS, observe-only) and
+`scripts/resource/process-tree-rss-watchdog.*` (RSS cap, not Windows).
+- One status line per `--interval` (15s): procs, tree cores, RSS, log growth, objects.
+- `FIRST_OBJECT_SLOW`: no `.o`/`.obj` under `--cache-dir` (or `[native-build] compiled` in the
+  log) within `--first-object-s` (10); names the busiest process and its `*.spl` phase. Warn only.
+- `STALL`: no log growth and tree CPU < 5% of a core for `--stall-min` (5); dumps a busy/idle table.
+  `--kill-on-stall` terminates only that tree's PIDs.
+- `SERIAL`: > 4 processes but < 1.5 cores for `--serial-min` (3). Warn only.
+- `RSS`: a process growing > `--rss-rate-gb-min` (3) or the tree over `--rss-cap-gb` (80% of RAM);
+  `--kill-on-rss` kills the tree over the cap.
+- `SILENT_FAIL`: exit 0 but the `-o` output (or `--expect-output`) is missing/empty -> FAIL.
+- Last line: `VERDICT — PASS|FAIL|STALL|KILLED <reason> first_object_s= wall_s= peak_tree_rss_gb=`;
+  exit 0 pass, 1 fail/stall/killed, 2 could not monitor (fail closed). `--selftest` runs first-class
+  fixtures (stall, silent fail, pass). `--stall-s`/`--serial-s` give second-granularity thresholds.
+  Limits: first-object is sampled at `--interval` granularity; `--root-pid` mode cannot see the exit code.
