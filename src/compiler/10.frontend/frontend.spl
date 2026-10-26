@@ -41,7 +41,8 @@ use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     FrontendAdvisoryPreprocessPolicyV1,
     FrontendAdvisoryPreprocessDispatchErrorV1,
     frontend_advisory_preprocess_dispatch_checked_scoped_v1}
-use std.common.crypto.sha256.sha256_text
+use std.common.crypto.sha256.{sha256_text, sha256_text_native_or_empty}
+use compiler.frontend.frontend_parse_cache.{frontend_cache_note_native_digest_unavailable}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 
 @unsafe(reason: "raw wall-clock timestamp ABI", capabilities: [ffi])
@@ -147,7 +148,12 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             return packed_hit
     if key != "":
         val load_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
-        val cached_blob = frontend_parse_cache_load(key)
+        # A-2: the xxh3 key is an index only; the line cache hit must also match
+        # the sha256 of the exact parse source (native digest unavailable => miss).
+        val fpc_identity = sha256_text_native_or_empty(parse_source)
+        if fpc_identity == "":
+            frontend_cache_note_native_digest_unavailable()
+        val cached_blob = if fpc_identity == "": "" else: frontend_parse_cache_load(key, fpc_identity)
         val load_t1 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         val cached_module = build_module_from_flat_pool_blob(
             cached_blob, parse_source, file_path)
@@ -169,8 +175,8 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             val shared_module = build_module_from_flat_pool_blob(
                 shared_blob, parse_source, file_path)
             if shared_module != nil:
-                val _hydrated = frontend_parse_cache_store_phase3_immutable_v1(
-                    key, shared_blob)
+                val _hydrated = if fpc_identity == "": false else: frontend_parse_cache_store_phase3_immutable_v1(
+                    key, shared_blob, fpc_identity)
                 frontend_parse_cache_note_hit()
                 return shared_module.unwrap()
         frontend_parse_cache_note_miss()
@@ -195,10 +201,10 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         # under SIMPLE_FRONTEND_SPAB=0 or when the packed store was refused.
         val spab_stored = if frontend_spab_enabled_v1() and captured_blob != "":
             frontend_spab_store_v1(key, file_path, captured_blob, flat_pool_capture_take_trace(),
-                flat_pool_capture_take_refs())
+                flat_pool_capture_take_refs(), parse_source)
         else:
             false
-        val stored = if spab_stored: true else: frontend_parse_cache_store(key, captured_blob)
+        val stored = if spab_stored: true else: frontend_parse_cache_store(key, captured_blob, fpc_identity)
         val _shared_stored = frontend_shared_parse_store_v1(raw_source_sha,
             parse_source, shared_target_identity, file_path, captured_blob)
         if frontend_cache_boundary_profile_enabled():

@@ -54,6 +54,10 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # entry is a counted miss, never a partial pool restore.
 pub val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v3"
 val FRONTEND_CACHE_CHECKSUM_PREFIX: text = "C "
+# A-2: the xxh3 filename key is only an index. An entry stored with an identity
+# carries `C <sha256 blob> I <sha256 identity>`; a load that supplies an
+# identity accepts ONLY such an entry whose I digest equals it (else a miss).
+val FRONTEND_CACHE_IDENTITY_MARK: text = " I "
 
 use compiler.frontend.frontend_cache_root_admission_v1.{frontend_cache_root_admission_v1}
 
@@ -139,7 +143,7 @@ fn frontend_parse_cache_header() -> text:
 # Returns the stored pool blob, or "" for a miss. "" is also what a corrupt or
 # foreign entry returns: the caller cannot tell the difference and must not
 # need to, because both answers are "reparse".
-pub fn frontend_parse_cache_load(key: text) -> text:
+pub fn frontend_parse_cache_load(key: text, identity_sha: text = "") -> text:
     _fe_cache_last_verify_us = 0
     if key == "" or not frontend_parse_cache_enabled():
         return ""
@@ -157,18 +161,32 @@ pub fn frontend_parse_cache_load(key: text) -> text:
     val header = raw.substring(0, nl)
     if header != frontend_parse_cache_header():
         return ""
-    frontend_parse_cache_entry_blob(raw.substring(nl + 1, raw.len()))
+    frontend_parse_cache_entry_blob(raw.substring(nl + 1, raw.len()), identity_sha)
 
 # Pure: the part of an entry after the header line -> the verified blob, or
 # "" when the checksum line is missing, malformed, or does not match the
 # bytes under it (checksum mismatch counted by the caller as a miss).
-pub fn frontend_parse_cache_entry_blob(after_header: text) -> text:
+pub fn frontend_parse_cache_entry_blob(after_header: text, identity_sha: text = "") -> text:
     val c_end = after_header.index_of("\n")
     if c_end < 0:
         return ""
-    val line = after_header.substring(0, c_end)
-    if not line.starts_with(FRONTEND_CACHE_CHECKSUM_PREFIX) or line.len() != FRONTEND_CACHE_CHECKSUM_PREFIX.len() + 64:
+    val full_line = after_header.substring(0, c_end)
+    val sum_len = FRONTEND_CACHE_CHECKSUM_PREFIX.len() + 64
+    if not full_line.starts_with(FRONTEND_CACHE_CHECKSUM_PREFIX):
         return ""
+    val mark_len = FRONTEND_CACHE_IDENTITY_MARK.len()
+    val stored_identity = if full_line.len() == sum_len + mark_len + 64 and
+            full_line.substring(sum_len, sum_len + mark_len) == FRONTEND_CACHE_IDENTITY_MARK:
+        full_line.substring(sum_len + mark_len, full_line.len())
+    else:
+        ""
+    if full_line.len() != sum_len and stored_identity == "":
+        return ""
+    # An xxh3 key match alone never admits: when the caller proves an identity,
+    # the entry must carry the same collision-resistant digest.
+    if identity_sha != "" and stored_identity != identity_sha:
+        return ""
+    val line = full_line.substring(0, sum_len)
     val blob = after_header.substring(c_end + 1, after_header.len())
     if blob == "":
         return ""
@@ -186,21 +204,22 @@ pub fn frontend_parse_cache_entry_blob(after_header: text) -> text:
 
 # Pure: header + checksum line + blob, exactly what frontend_parse_cache_load
 # accepts back.
-pub fn frontend_parse_cache_entry_encode(header: text, blob: text) -> text:
-    header + "\n" + FRONTEND_CACHE_CHECKSUM_PREFIX + sha256_text(blob) + "\n" + blob
+pub fn frontend_parse_cache_entry_encode(header: text, blob: text, identity_sha: text = "") -> text:
+    val identity = if identity_sha == "": "" else: FRONTEND_CACHE_IDENTITY_MARK + identity_sha
+    header + "\n" + FRONTEND_CACHE_CHECKSUM_PREFIX + sha256_text(blob) + identity + "\n" + blob
 
 # Written via a pid-unique temp file then renamed, so a concurrent reader (the
 # shard workers of step 4 run in parallel processes over one cache dir) can
 # never observe a half-written entry. A failed write is a no-op (reported once): a cache
 # that cannot store is a slow build, not a wrong one.
-pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
+pub fn frontend_parse_cache_store(key: text, blob: text, identity_sha: text = "") -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():
         return false
     val dir = frontend_parse_cache_dir()
     val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
-    val entry = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)
+    val entry = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
     # Free-space admission BEFORE the temp exists (review 2026-10-24 P1).
     if not disk_publish_admitted(dir, entry.len()):
         return false
@@ -227,13 +246,13 @@ fn frontend_parse_cache_note_store_failure(dir: text, made: bool):
     _fe_cache_store_failure_noted = true
     eprint("[frontend-cache] store failed: cannot write under {dir} (dir_create_all={made}); modules will be reparsed\n")
 
-pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text) -> bool:
+pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text, identity_sha: text = "") -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():
         return false
     val dir = frontend_parse_cache_dir()
     val _made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
-    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob)
+    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
     if not file_create_excl(final_path, encoded):
         return false
     if file_hash_sha256_or_empty(final_path) != sha256_text(encoded):
@@ -263,7 +282,7 @@ pub fn frontend_parse_cache_record_header_valid_v2(record: text) -> bool:
     val nl = record.index_of("\n")
     nl > 0 and record.substring(0, nl) == frontend_parse_cache_header()
 
-export FRONTEND_CACHE_ENTRY_VERSION, FRONTEND_CACHE_CHECKSUM_PREFIX
+export FRONTEND_CACHE_ENTRY_VERSION, FRONTEND_CACHE_CHECKSUM_PREFIX, FRONTEND_CACHE_IDENTITY_MARK
 export frontend_parse_cache_entry_blob, frontend_parse_cache_entry_encode
 export frontend_parse_cache_scope, frontend_parse_cache_enabled
 export frontend_parse_cache_dir, frontend_parse_cache_key
