@@ -528,3 +528,18 @@ programs never change layout. Rules to keep when editing:
   as condition `""`. `-2` = `error_fatal` (never a silent false); `-1` with no
   else lowers to a unit temp (arm dropped). No env is read: the same HIR lowers
   per target. Plan: `doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md`.
+
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
