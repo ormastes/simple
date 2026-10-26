@@ -81,3 +81,12 @@ add an MCP-local extern or accept interpreter fallback as native performance.
 - Recorded todo: `tok_record_at` re-reads the whole ledger on every append
   (O(n^2)); harmless at stats volume, but the log-opt path appends on every
   claimed exec, so it will matter first there.
+
+## Windows native byte output (2026-10-25)
+
+The main MCP entry uses `app.protocol.wire_stdout` over the existing checked UTF-8
+codec and descriptor owner. Local Stage 3/LLVM evidence includes JSONL tools/list
+(176 listed tools), framed Unicode IDs and actual multilingual Markdown reads.
+These are protocol/one-handler checks, not 176 passing handlers or release
+qualification. Native SSpec still fails Windows environment-block admission.
+See [matrix](../../../08_tracking/bug/tooling_phase3_matrix_2026_10_25.md).

@@ -5,6 +5,7 @@
 
 # Import dependencies (circular - types needs utilities for state_get)
 use std.common.aes.types
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
 
 # OS CSPRNG. Rust interpreter path: rand::rngs::OsRng (panics rather than
 # degrading on entropy failure). Native path: src/runtime/runtime.c reads
@@ -131,7 +132,7 @@ fn gmul(a: i64, b: i64) -> i64:
 # BYTE/TEXT CONVERSION
 # =============================================================================
 
-# Convert text to byte list
+# Convert text to UTF-8 octets in the existing integer byte carrier.
 #
 # The RETURN type is spelled `[i64]` and NOT bare `list` deliberately, for the
 # same reason bytes_to_text's parameter is (see the note below). A bare-`list`
@@ -142,18 +143,14 @@ fn gmul(a: i64, b: i64) -> i64:
 # See doc/08_tracking/bug/credential_derive_key_nondeterministic_and_wrong_under_seed_jit_2026-08-08.md
 fn aes_text_to_bytes(text: text) -> [i64]:
     var bytes: [i64] = []
-    var i = 0
-    val len = text.length()
-
-    while i < len:
-        val char = text[i]
-        # Simple ASCII conversion (char code)
-        val byte = char.ord()
-        bytes.append(byte)
-        i = i + 1
+    # Text indexing differs between execution lanes; the UTF-8 boundary owns
+    # byte extraction consistently for both compiled and interpreted callers.
+    val raw = text_to_utf8_bytes(text)
+    for byte in raw:
+        bytes.push(byte as i64)
     bytes
 
-# Convert byte list to text
+# Decode UTF-8 octets; invalid octets or malformed UTF-8 return empty text.
 #
 # The parameter is spelled `[i64]` and NOT `list` / `list<i64>` deliberately.
 # Under the seed JIT, reading `data[i]` from a param declared `list` or
@@ -162,16 +159,16 @@ fn aes_text_to_bytes(text: text) -> [i64]:
 # only spelling that reads correctly. See
 # doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
 fn aes_bytes_to_text(bytes: [i64]) -> text:
-    var parts: [text] = []
-    var i = 0
-    val len = bytes.length()
-
-    while i < len:
-        val byte = bytes[i]
-        val char = byte.chr()
-        parts.push(char)
-        i = i + 1
-    parts.join("")
+    # Decode the complete UTF-8 sequence once. Calling chr() per octet turns
+    # a valid multibyte character into several newly encoded characters.
+    var raw: [u8] = []
+    for byte in bytes:
+        if byte < 0 or byte > 255:
+            return ""
+        raw.push(byte as u8)
+    if not utf8_bytes_valid(raw):
+        return ""
+    bytes_to_text(raw)
 
 # Convert byte to hex string (2 digits)
 fn byte_to_hex(byte: i64) -> text:

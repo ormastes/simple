@@ -8,6 +8,7 @@ use std.spec
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_complete, hir_shard_recovery_finished}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_close_inventory}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_unclaimed_count, hir_shard_recovery_replacements_dispatchable}
 use std.io_runtime.{dir_create_all, dir_exists, dir_list, dir_list_optional, file_read, file_write, getpid}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -125,6 +126,36 @@ describe "HIR shard bounded recovery decisions":
             expect(dir_list_optional("{queue}/missing").is_none()).to_equal(true)
 
     describe "REQ-KG-005: replacement consumes newly attributed work":
+        it "should count inventory rows without claims before deciding on replacement":
+            step("Count newly claimable rows as the coordinator seals crashed work")
+            val queue = recovery_fixture("replacement-unclaimed-count")
+            val paths = ["first.spl", "second.spl"]
+            expect(hir_shard_recovery_inventory(queue, "closure-two", paths)).to_equal(true)
+            expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(2)
+            expect(hir_shard_recovery_claim(queue, "worker-0", paths[0], "key-0")).to_equal(1)
+            expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(1)
+            expect(hir_shard_recovery_claim(queue, "worker-1", paths[1], "key-1")).to_equal(1)
+            val unclaimed = hir_shard_recovery_unclaimed_count(queue)
+            expect(unclaimed).to_equal(0)
+            expect(hir_shard_recovery_can_replace(false, -134, 2, unclaimed)).to_equal(false)
+
+        it "should drop a queued replacement when the other worker claims the last row":
+            step("Let one crashed worker queue a replacement while another is still running")
+            val queue = recovery_fixture("replacement-stale-queue")
+            val paths = ["crashed.spl", "last.spl"]
+            expect(hir_shard_recovery_inventory(queue, "closure-two-workers", paths)).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "worker-crashed", paths[0], "key-crashed")).to_equal(1)
+            expect(hir_shard_recovery_seal(queue, "worker-crashed", "CRASH")).to_equal(1)
+            val remaining_at_reap = hir_shard_recovery_unclaimed_count(queue)
+            expect(remaining_at_reap).to_equal(1)
+            expect(hir_shard_recovery_can_replace(false, -134, 1, remaining_at_reap)).to_equal(true)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 1)).to_equal(true)
+            step("The other worker claims the final row before replacement dispatch")
+            expect(hir_shard_recovery_claim(queue, "worker-live", paths[1], "key-last")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "worker-live", paths[1], "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 1)).to_equal(false)
+            expect(hir_shard_recovery_replacements_dispatchable(queue, 0)).to_equal(false)
+
         it "should replace a crashed worker after one newly sealed module":
             step("Record a module crash during a local collect-all build")
             expect(hir_shard_recovery_can_replace(false, 139, 1, 3)).to_equal(true)

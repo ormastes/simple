@@ -1,0 +1,155 @@
+# Any-free root-envelope admission over the shared lexical JSON owner.
+# The iterative grammar stack is bounded by the input's token count, not an
+# arbitrary nesting limit. Only root protocol fields affect dispatch.
+use std.common.json.tokenizer.{json_tokenize, json_unescape_string}
+
+struct McpRequestEnvelopeV1:
+    method: text
+    request_id_raw: text
+    params_raw: text
+    has_id: bool
+    valid: bool
+    error_code: i64
+
+fn _mcp_envelope_parse_error_v1() -> McpRequestEnvelopeV1:
+    McpRequestEnvelopeV1(method: "", request_id_raw: "null",
+        params_raw: "{" + "}", has_id: false, valid: false, error_code: -32700)
+
+fn _mcp_envelope_token_raw_v1(kind: text, value: text) -> text:
+    if kind == "STRING": "\"" + value + "\"" else: value
+
+fn mcp_parse_request_envelope_v1(json: text) -> McpRequestEnvelopeV1:
+    val tokens = json_tokenize(json)
+    # Object states: key-or-end=0, required-key=1, colon=2, value=3,
+    # comma-or-end=4. Array states: value-or-end=5, required-value=6,
+    # comma-or-end=7. Retain stack storage on pop to avoid copying deep stacks.
+    var states: [i64] = []
+    var depth = 0
+    var root_started = false
+    var root_object = false
+    var root_key = ""
+    var version_seen = false
+    var version_ok = false
+    var method_seen = false
+    var method_ok = false
+    var id_seen = false
+    var id_ambiguous = false
+    var params_seen = false
+    var params_captured = false
+    var params_active = false
+    var params_parts: [text] = []
+    var method = ""
+    var request_id_raw = "null"
+    var envelope_ok = true
+    var i = 0
+    while i < tokens.len():
+        val token = tokens[i]
+        val kind = token.0
+        val value = token.1
+        if kind == "INVALID":
+            return _mcp_envelope_parse_error_v1()
+        var expects_value = false
+        if depth == 0:
+            if root_started:
+                return _mcp_envelope_parse_error_v1()
+            root_started = true
+            root_object = kind == "LBRACE"
+            expects_value = true
+        else:
+            val state = states[depth - 1]
+            if state == 0 or state == 1:
+                if kind == "RBRACE" and state == 0:
+                    depth = depth - 1
+                elif kind == "STRING":
+                    states[depth - 1] = 2
+                    if depth == 1 and root_object:
+                        root_key = json_unescape_string(value)
+                        if root_key == "jsonrpc":
+                            if version_seen: envelope_ok = false
+                            version_seen = true
+                        elif root_key == "method":
+                            if method_seen: envelope_ok = false
+                            method_seen = true
+                        elif root_key == "id":
+                            if id_seen:
+                                envelope_ok = false
+                                id_ambiguous = true
+                                request_id_raw = "null"
+                            id_seen = true
+                        elif root_key == "params":
+                            if params_seen: envelope_ok = false
+                            params_seen = true
+                else:
+                    return _mcp_envelope_parse_error_v1()
+            elif state == 2:
+                if kind != "COLON":
+                    return _mcp_envelope_parse_error_v1()
+                states[depth - 1] = 3
+            elif state == 3 or state == 6:
+                expects_value = true
+            elif state == 4:
+                if kind == "COMMA":
+                    states[depth - 1] = 1
+                elif kind == "RBRACE":
+                    depth = depth - 1
+                else:
+                    return _mcp_envelope_parse_error_v1()
+            elif state == 5:
+                if kind == "RBRACKET":
+                    depth = depth - 1
+                else:
+                    expects_value = true
+            elif state == 7:
+                if kind == "COMMA":
+                    states[depth - 1] = 6
+                elif kind == "RBRACKET":
+                    depth = depth - 1
+                else:
+                    return _mcp_envelope_parse_error_v1()
+            else:
+                return _mcp_envelope_parse_error_v1()
+        if expects_value:
+            val scalar = kind == "STRING" or kind == "NUMBER" or kind == "TRUE" or kind == "FALSE" or kind == "NULL"
+            val container = kind == "LBRACE" or kind == "LBRACKET"
+            if not scalar and not container:
+                return _mcp_envelope_parse_error_v1()
+            if depth == 1 and root_object:
+                if root_key == "jsonrpc":
+                    version_ok = kind == "STRING" and json_unescape_string(value) == "2.0"
+                elif root_key == "method":
+                    method_ok = kind == "STRING"
+                    if method_ok: method = json_unescape_string(value)
+                elif root_key == "id":
+                    val integer = kind == "NUMBER" and not value.contains(".") and not value.contains("e") and not value.contains("E")
+                    if (kind == "STRING" or integer) and not id_ambiguous:
+                        request_id_raw = _mcp_envelope_token_raw_v1(kind, value)
+                    else:
+                        envelope_ok = false
+                        request_id_raw = "null"
+                elif root_key == "params":
+                    if not container: envelope_ok = false
+                    if not params_captured:
+                        params_captured = true
+                        params_active = true
+            if depth > 0:
+                val parent_state = states[depth - 1]
+                states[depth - 1] = if parent_state == 3: 4 else: 7
+            if container:
+                val next_state: i64 = if kind == "LBRACE": 0 else: 5
+                if depth < states.len():
+                    states[depth] = next_state
+                else:
+                    states = states.push(next_state)
+                depth = depth + 1
+        if params_active:
+            params_parts = params_parts.push(_mcp_envelope_token_raw_v1(kind, value))
+            if depth == 1:
+                params_active = false
+        i = i + 1
+    if not root_started or depth != 0:
+        return _mcp_envelope_parse_error_v1()
+    val params_raw = if params_captured: params_parts.join("") else: "{" + "}"
+    val valid = root_object and version_seen and version_ok and method_seen and method_ok and envelope_ok
+    McpRequestEnvelopeV1(method: method, request_id_raw: request_id_raw,
+        params_raw: params_raw, has_id: id_seen, valid: valid,
+        error_code: if valid: 0 else: -32600)

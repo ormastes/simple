@@ -17,10 +17,10 @@
 # STATUS (honest scope): this module only COMPUTES the plan and owns the cache
 # layout/verification. The file-worker pool consumes the plan through
 # driver_build/native_file_worker_instances_v1.spl (P-G6: single-flight
-# receipted jobs, drop + relink). No instance-object producer exists yet, so
-# instances are still emitted per using object with COMDAT linkage and no
-# instance object is linked; see
+# receipted jobs, drop + relink). The instance-object producer and the link
+# wiring are driver_build/generic_instance_object_producer_v1.spl (P-G7); see
 # doc/08_tracking/bug/generic_instance_plan_has_no_consumer_pg6_2026-10-25.md.
+# The object is stored as raw bytes with a sidecar header (`<object>.hdr`).
 # The instance BODY comes from the template body loader (P-G4/P-G5b).
 #
 # Completeness is explicit: a module whose list is missing, stale, undecodable
@@ -28,7 +28,7 @@
 # instantiating per module (module-scoped mono) instead of trusting the set.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read}
+use std.io_runtime.{file_exists, file_read, file_copy, file_rename, file_hash_sha256_or_empty, dir_create_all, getpid}
 use compiler.driver.cache.generic_specialization_list_v1.{RequiredSpecializationV1,
     GenericSpecializationListV1}
 use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1}
@@ -76,33 +76,44 @@ pub fn generic_instance_needed_v1(lists: [GenericSpecializationListV1?]) -> ([Re
     (needed, complete)
 
 # Cache location of one instance object; "" when the producer is unknown
-# (no shared cache without a producer identity).
+# (no shared cache without a producer identity). The object file holds the raw
+# object bytes (copied, never carried as text); its header is the sidecar
+# `<path>.hdr` (P-G7 review: objects are not byte-transparent through text).
 pub fn generic_instance_object_path_v1(cache_root: text, producer: text, concrete_key: text) -> text:
     if cache_root == "" or producer == "" or concrete_key == "":
         return ""
     cache_root + "/generic_instances/" + sha256_text(producer) + "/" + sha256_text(concrete_key) + ".o"
 
-pub fn generic_instance_object_encode_v1(producer: text, concrete_key: text, object_bytes: text) -> text:
-    _INSTANCE_OBJECT_MAGIC_V1 + "\t" + sha256_text(producer) + "\t" + sha256_text(concrete_key) + "\t" +
-        sha256_text(object_bytes) + "\n" + object_bytes
+pub fn generic_instance_header_path_v1(object_path: text) -> text:
+    if object_path == "": "" else: object_path + ".hdr"
 
-# True only when `content` is an instance object recorded for exactly this
-# producer and key whose body matches its recorded digest.
-pub fn generic_instance_object_verify_v1(content: text, producer: text, concrete_key: text) -> bool:
-    val nl = content.index_of("\n")
-    if nl < 0:
+# Sidecar header: magic, producer, key and the sha256 of the object bytes.
+pub fn generic_instance_object_encode_v1(producer: text, concrete_key: text, object_digest: text) -> text:
+    _INSTANCE_OBJECT_MAGIC_V1 + "\t" + sha256_text(producer) + "\t" + sha256_text(concrete_key) + "\t" +
+        object_digest + "\n"
+
+# True only when `header` records exactly this producer and key and the
+# object's byte digest (`object_digest`, from file_hash_sha256_or_empty).
+pub fn generic_instance_object_verify_v1(header: text, producer: text, concrete_key: text,
+        object_digest: text) -> bool:
+    if object_digest == "":
         return false
-    val head = content.substring(0, nl).split("\t")
+    val head = header.trim().split("\t")
     if head.len() != 4 or head[0] != _INSTANCE_OBJECT_MAGIC_V1:
         return false
-    head[1] == sha256_text(producer) and head[2] == sha256_text(concrete_key) and
-        head[3] == sha256_text(content.substring(nl + 1))
+    head[1] == sha256_text(producer) and head[2] == sha256_text(concrete_key) and head[3] == object_digest
+
+# Verify an object file at `object_path` against the header recorded for it.
+pub fn generic_instance_object_file_verified_v1(object_path: text, header_path: text, producer: text,
+        concrete_key: text) -> bool:
+    if object_path == "" or not file_exists(object_path) or not file_exists(header_path):
+        return false
+    generic_instance_object_verify_v1(file_read(header_path), producer, concrete_key,
+        file_hash_sha256_or_empty(object_path))
 
 pub fn generic_instance_cached_v1(cache_root: text, producer: text, concrete_key: text) -> bool:
     val path = generic_instance_object_path_v1(cache_root, producer, concrete_key)
-    if path == "" or not file_exists(path):
-        return false
-    generic_instance_object_verify_v1(file_read(path), producer, concrete_key)
+    generic_instance_object_file_verified_v1(path, generic_instance_header_path_v1(path), producer, concrete_key)
 
 pub fn generic_instance_build_plan_v1(previous_needed: [text], lists: [GenericSpecializationListV1?],
         cached: [text]) -> GenericInstanceBuildPlanV1:
@@ -136,16 +147,30 @@ pub fn generic_instance_build_plan_of_tldr_v1(module_paths: [text], tldr_root: t
             cached.push(s.concrete_key)
     generic_instance_build_plan_v1(previous_needed, lists, cached)
 
-# Publish one built instance object (header + body, temp + atomic rename).
+# Publish one built instance object from the object FILE at `object_path`:
+# byte copy (temp + atomic rename), then the sidecar header over the copied
+# bytes' digest. A reader that sees a new object with an old header fails the
+# digest check and treats the key as not cached.
 pub fn generic_instance_cache_publish_v1(cache_root: text, producer: text, concrete_key: text,
-        object_bytes: text) -> bool:
+        object_path: text) -> bool:
     val path = generic_instance_object_path_v1(cache_root, producer, concrete_key)
-    if path == "":
+    if path == "" or object_path == "" or not file_exists(object_path):
         return false
-    module_artifact_publish_atomic_v1(path, generic_instance_object_encode_v1(producer, concrete_key, object_bytes))
+    val slash = path.rfind("/")
+    if not dir_create_all(path.substring(0, slash)):
+        return false
+    val tmp = path + ".{getpid()}.tmp"
+    if not file_copy(object_path, tmp) or not file_rename(tmp, path):
+        return false
+    val digest = file_hash_sha256_or_empty(path)
+    if digest == "":
+        return false
+    module_artifact_publish_atomic_v1(generic_instance_header_path_v1(path),
+        generic_instance_object_encode_v1(producer, concrete_key, digest))
 
 export GenericInstanceBuildPlanV1
 export generic_instance_needed_v1, generic_instance_object_path_v1
 export generic_instance_object_encode_v1, generic_instance_object_verify_v1, generic_instance_cached_v1
+export generic_instance_header_path_v1, generic_instance_object_file_verified_v1
 export generic_instance_build_plan_v1, generic_instance_build_plan_of_tldr_v1
 export generic_instance_cache_publish_v1

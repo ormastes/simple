@@ -1,0 +1,136 @@
+# NOT_RUN native qualification scenario. Compile to windows_pty_launch_probe.exe
+# inside a directory containing spaces and Unicode. Start from another directory.
+# Select the real Windows PTY provider and explicit --library-mode nogc-sync-mut.
+# This same executable is the actual child; no shell parses the Exec arguments.
+use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1,
+    sosix_pty_open, sosix_pty_spawn_configured_v1, sosix_pty_configured_launch_probe_v1, sosix_pty_read,
+    sosix_pty_close, sosix_pty_is_running, sosix_pty_exit_code, sosix_pty_cleanup_pending}
+use std.sosix.host.{sosix_get_cli_args, sosix_file_exists}
+use std.sosix.time.{sosix_sleep_ms}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+use std.nogc_sync_mut.io.windows_pty_owner.{windows_pty_cleanup_proof_v1}
+use environment.{native_environment, native_text_units, environment_entries, exact_entry, ascii_name, check_native_merge_preserves_parent, check_native_wide_conversion}
+
+fn child(arguments: [text]) -> i64:
+    val expected = ["--launch-child", "", "two words", "trail\\", "quote\"inside", "한글😀", "&echo EXEC_REPARSED", "%PATH%", "終\\"]
+    if arguments.len() != expected.len(): return 21
+    for index in 0..expected.len():
+        if arguments[index] != expected[index]: return 22
+    # Relative lookup proves CreateProcessW cwd selected the executable folder.
+    if not sosix_file_exists("windows_pty_launch_probe.exe"): return 23
+    val snapshot = native_environment()
+    if snapshot.is_err(): return 24
+    val entries = environment_entries(snapshot.unwrap())
+    for value in ["SMUX_WPL_ä=second", "SMUX_WPL_EMPTY=", "SMUX_WPL_UNICODE=한글😀", "COMSPEC=Z:\\untrusted\\cmd.exe", "SMUX_WPL_PARENT=preserved-한글😀"]:
+        val expected_units = native_text_units(value)
+        if expected_units.is_err() or not exact_entry(entries, expected_units.unwrap()): return 25
+    for entry in entries:
+        if ascii_name(entry, "PATH") or ascii_name(entry, "SMUX_WPL_REMOVED"): return 26
+    print "LAUNCH_CHILD_OK"
+    0
+
+fn close_proven(handle: i32) -> bool:
+    for attempt in 0..200:
+        val closed = sosix_pty_close(handle)
+        if closed and windows_pty_cleanup_proof_v1(handle): return true
+        sosix_sleep_ms(5)
+    false
+
+fn run_child(request: PtyLaunchV1, marker: text) -> bool:
+    val handle = sosix_pty_open(24, 100)
+    if handle < 0: return false
+    val started = sosix_pty_spawn_configured_v1(handle, request)
+    var valid = started.is_ok()
+    var output = ""
+    var terminal = false
+    if valid:
+        for attempt in 0..1000:
+            output = output + sosix_pty_read(handle, 0)
+            if output.len() > 1048576:
+                valid = false
+                break
+            if not sosix_pty_is_running(handle):
+                output = output + sosix_pty_read(handle, 0)
+                terminal = true
+                break
+            sosix_sleep_ms(10)
+        valid = valid and terminal and output.contains(marker) and not output.contains("EXEC_REPARSED\r\n")
+        match sosix_pty_exit_code(handle):
+            case Err(_reason): valid = false
+            case Ok(code):
+                if code != 0: valid = false
+    val closed = close_proven(handle)
+    valid and closed
+
+fn reject_without_child() -> bool:
+    val handle = sosix_pty_open(24, 80)
+    if handle < 0: return false
+    val bad = PtyLaunchV1(mode: PtyLaunchModeV1.Exec("C:\\bad\0.exe", []), cwd: nil, environment: [])
+    val result = sosix_pty_spawn_configured_v1(handle, bad)
+    val rejected = result.is_err() and not sosix_pty_is_running(handle)
+    # Validation failure does not poison a clean unspawned PTY: reuse it.
+    val good = PtyLaunchV1(mode: PtyLaunchModeV1.Shell("exit /b 0"), cwd: nil, environment: [])
+    val reusable = sosix_pty_spawn_configured_v1(handle, good).is_ok()
+    val closed = close_proven(handle)
+    rejected and reusable and closed
+
+fn failed_create_cleanup(request: PtyLaunchV1) -> bool:
+    val handle = sosix_pty_open(24, 80)
+    if handle < 0: return false
+    val rejected = sosix_pty_spawn_configured_v1(handle, request).is_err()
+    val closed = close_proven(handle)
+    rejected and closed
+
+fn parent() -> i64:
+    if sosix_file_exists("windows_pty_launch_probe.exe"): return 1
+    val image = windows_image_path()
+    if image.is_err(): return 2
+    val path = image.unwrap()
+    val suffix = "\\windows_pty_launch_probe.exe"
+    if not path.ends_with(suffix): return 3
+    val directory = path[0:path.len() - suffix.len()]
+    if not directory.contains(" ") or not directory.contains("한글"): return 4
+    if not check_native_wide_conversion(): return 17
+    if not check_native_merge_preserves_parent(): return 5
+    val before_result = native_environment()
+    if before_result.is_err(): return 6
+    val before = before_result.unwrap()
+    # One startup observation, retained by this owner; never poll the probe.
+    # The baseline above and comparison below include this probe's effects.
+    val configured_available = sosix_pty_configured_launch_probe_v1()
+    if not configured_available or sosix_pty_cleanup_pending() != 0: return 18
+    val changes = [PtyEnvironmentChangeV1.Set("SMUX_WPL_Ä", "first"),
+        PtyEnvironmentChangeV1.Set("SMUX_WPL_ä", "second"),
+        PtyEnvironmentChangeV1.Set("SMUX_WPL_EMPTY", ""),
+        PtyEnvironmentChangeV1.Set("SMUX_WPL_UNICODE", "한글😀"),
+        PtyEnvironmentChangeV1.Set("SMUX_WPL_REMOVED", "discard"),
+        PtyEnvironmentChangeV1.Remove("smux_wpl_removed"), PtyEnvironmentChangeV1.Remove("pAtH"),
+        PtyEnvironmentChangeV1.Set("COMSPEC", "Z:\\untrusted\\cmd.exe")]
+    val argv = ["--launch-child", "", "two words", "trail\\", "quote\"inside", "한글😀", "&echo EXEC_REPARSED", "%PATH%", "終\\"]
+    val exec_request = PtyLaunchV1(mode: PtyLaunchModeV1.Exec(path, argv), cwd: Some(directory), environment: changes)
+    if not run_child(exec_request, "LAUNCH_CHILD_OK"): return 7
+    # cmd comes from GetSystemDirectoryW despite the child's poisoned COMSPEC.
+    val shell_request = PtyLaunchV1(mode: PtyLaunchModeV1.Shell("echo SHELL_ONE&&echo SHELL_TWO&&exit /b 0"), cwd: Some(directory), environment: changes)
+    if not run_child(shell_request, "SHELL_TWO"): return 8
+    if not run_child(PtyLaunchV1(mode: PtyLaunchModeV1.Shell("echo INHERITED&&exit /b 0"), cwd: nil, environment: []), "INHERITED"): return 9
+    if not reject_without_child(): return 10
+    val missing = PtyLaunchV1(mode: PtyLaunchModeV1.Exec(directory + "\\missing-wpl-executable.exe", []), cwd: nil, environment: [])
+    if not failed_create_cleanup(missing): return 11
+    val invalid_cwd = PtyLaunchV1(mode: PtyLaunchModeV1.Shell("exit /b 0"), cwd: Some(directory + "\\missing-wpl-directory"), environment: changes)
+    if not failed_create_cleanup(invalid_cwd): return 16
+    val after_result = native_environment()
+    if after_result.is_err(): return 12
+    val after = after_result.unwrap()
+    if after.len() != before.len(): return 13
+    for index in 0..before.len():
+        if after[index] != before[index]: return 14
+    if sosix_pty_cleanup_pending() != 0: return 15
+    print "Windows PTY configured launch PASS"
+    0
+
+fn main() -> i64:
+    val arguments = sosix_get_cli_args()
+    if arguments.len() > 0 and arguments[0] == "--launch-child": return child(arguments)
+    val code = parent()
+    if code != 0: print "Windows PTY configured launch FAIL {code}"
+    code

@@ -84,9 +84,13 @@ fn driver_parse_shard_apply_environment_variant_policy_v1(
 fn _driver_run_parse_shard(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1?,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = nil,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
     var options = driver_core_compile_options_default()
+    options.library_mode = library_mode
+    options.gc_off = gc_off
+    options.allowed_families = allowed_families
     for input in input_files:
         options = driver_options_add_bootstrap_input(options, input)
     options.input_files = input_files
@@ -104,11 +108,13 @@ fn _driver_run_parse_shard(
     match collection:
         case Some(value):
             if not driver_parse_shard_apply_environment_variant_policy_v1(driver, value):
+                eprint "error: parse child: environment-variant policy could not be applied"
                 return false
         case None: ()
     val (loaded_ctx, load_ok) = driver.load_sources_impl(preclosed)
     driver.ctx = loaded_ctx
     if not load_ok:
+        _driver_parse_child_report_load_failure_v1(driver.ctx.errors)
         return false
     driver.parse_all_committing_impl()
 
@@ -118,9 +124,10 @@ fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
 pub fn driver_run_parse_shard_with_environment_variant_policy_v1(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = nil,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
-    _driver_run_parse_shard(input_files, low_memory, Some(collection), preclosed)
+    _driver_run_parse_shard(input_files, low_memory, Some(collection), preclosed, gc_off, allowed_families, library_mode)
 
 # ----- --parse-fibers=i/n child ------------------------------------------------
 # Same driver construction and source load as the parse shard above, then one
@@ -167,9 +174,13 @@ fn _driver_parse_fiber_budget_bytes() -> i64:
 fn _driver_run_parse_fibers(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1?,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = nil,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
     var options = driver_core_compile_options_default()
+    options.library_mode = library_mode
+    options.gc_off = gc_off
+    options.allowed_families = allowed_families
     for input in input_files:
         options = driver_options_add_bootstrap_input(options, input)
     options.input_files = input_files
@@ -187,11 +198,13 @@ fn _driver_run_parse_fibers(
     match collection:
         case Some(value):
             if not driver_parse_shard_apply_environment_variant_policy_v1(driver, value):
+                eprint "error: parse child: environment-variant policy could not be applied"
                 return false
         case None: ()
     val (loaded_ctx, load_ok) = driver.load_sources_impl(preclosed)
     driver.ctx = loaded_ctx
     if not load_ok:
+        _driver_parse_child_report_load_failure_v1(driver.ctx.errors)
         return false
     val _scope = driver_publish_frontend_cache_scope_v1(driver.ctx)
     val tldr_root = env_get("SIMPLE_FRONTEND_CACHE_DIR")
@@ -235,6 +248,17 @@ fn _driver_run_parse_fibers(
 pub fn driver_run_parse_fibers_with_environment_variant_policy_v1(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = nil,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
-    _driver_run_parse_fibers(input_files, low_memory, Some(collection), preclosed)
+    _driver_run_parse_fibers(input_files, low_memory, Some(collection), preclosed, gc_off, allowed_families, library_mode)
+
+# A parse child that fails source loading used to exit 1 with no output (the
+# coordinator only saw `FAILED exit=1`). Name the failure and its first errors.
+fn _driver_parse_child_report_load_failure_v1(errors: [text]):
+    eprint "error: parse child: source load failed ({errors.len()} error(s))"
+    var shown = 0
+    for message in errors:
+        if shown < 5:
+            eprint "  {message}"
+            shown = shown + 1

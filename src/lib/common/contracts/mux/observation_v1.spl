@@ -1,0 +1,263 @@
+# Full CoreMux observations. Snapshots never drain PTY output; capture may
+# ingest bytes, but keeps metadata/configuration and content revisions distinct.
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.execution_v1.*
+use std.common.debug.capability.{CapLevel}
+
+pub struct MuxCoreLimitsV1:
+    discovery: MuxLimitsV1
+    max_windows: i64
+    max_panes: i64
+    max_clients: i64
+    max_input_bytes: i64
+    max_capture_bytes: i64
+    max_events: i64
+    max_request_timeout_ms: i64
+
+# Separate from D1's discovery-only capability enum, preserving D1 callers.
+pub struct MuxOperationCapabilityV1:
+    operation: MuxOperationV1
+    level: CapLevel
+    backend: MuxBackendV1
+    backend_version: text
+    owner_id: text
+    owner_generation: u64
+    limits: MuxCoreLimitsV1
+    constraints: [text]
+    evidence: MuxEvidenceV1
+
+pub enum MuxScopeV1:
+    Namespace
+    Session(target: MuxObjectRefV1)
+    Window(target: MuxObjectRefV1)
+
+pub struct MuxVisibilityV1:
+    include_hidden: bool
+    include_exited: bool
+
+pub struct MuxContextV1:
+    client: MuxObjectRefV1?
+    session: MuxObjectRefV1?
+    window: MuxObjectRefV1?
+    pane: MuxObjectRefV1?
+
+pub struct MuxPaneRectV1:
+    pane: MuxObjectRefV1
+    rectangle: MuxRectV1
+
+pub struct MuxLayoutStateV1:
+    kind: MuxLayoutKindV1
+    canvas: MuxCellSizeV1
+    rectangles: [MuxPaneRectV1]
+
+pub struct MuxSessionStateV1:
+    identity: MuxObjectRefV1
+    name: text
+    current_window: MuxObjectRefV1?
+    background: bool
+
+pub struct MuxWindowStateV1:
+    identity: MuxObjectRefV1
+    session: MuxObjectRefV1
+    name: text
+    index: i64
+    active_pane: MuxObjectRefV1?
+    layout: MuxLayoutStateV1
+    zoomed_pane: MuxObjectRefV1?
+    restore_layout: MuxLayoutStateV1?
+
+# A provider may not label a reserved slot Running. PID must describe a real
+# child. Unknown is an honest observation failure, not a live fake process.
+pub enum MuxChildStateV1:
+    Running(pid: i64)
+    Exited(pid: i64, exit_code: i64?, signal: text?)
+    Unknown(last_pid: i64?, reason: text)
+
+pub struct MuxPaneStateV1:
+    identity: MuxObjectRefV1
+    session: MuxObjectRefV1
+    window: MuxObjectRefV1
+    legacy_id: text
+    index: i64
+    child: MuxChildStateV1
+    title: text
+    current_command: text
+    rectangle: MuxRectV1
+    focused: bool
+    hidden: bool
+    border: MuxBorderV1
+    border_status: MuxBorderStatusV1
+    content_revision: u64
+
+pub struct MuxClientStateV1:
+    identity: MuxObjectRefV1
+    context: MuxContextV1
+    viewport: MuxCellSizeV1
+    attached: bool
+
+pub struct MuxSnapshotV1:
+    backend: MuxBackendV1
+    namespace: text
+    handle: MuxHandleV1
+    revision: u64
+    sessions: [MuxSessionStateV1]
+    windows: [MuxWindowStateV1]
+    panes: [MuxPaneStateV1]
+    clients: [MuxClientStateV1]
+    limits: MuxCoreLimitsV1
+    capabilities: [MuxOperationCapabilityV1]
+
+# Owner-advertised durations, never caller wall-clock expiry timestamps.
+# Connect establishes lifetime_ms from the owner's monotonic clock. Successful
+# authenticated query/poll_events before expiry renew that lifetime; the client
+# polls by renew_after_ms even when idle. Receipt-only recovery never renews.
+# Expired/revoked tokens cannot revive: reconnect issues a distinct lease token.
+# retained_receipt_ms starts once on expiry/revocation and never slides on reads.
+# Retention/capacity eviction yields Unknown, not NotApplied; unknown operation
+# metadata is not invented. max_retained_receipts bounds per-lease history.
+pub struct MuxLeaseTermsV1:
+    lifetime_ms: i64
+    renew_after_ms: i64
+    retained_receipt_ms: i64
+    max_retained_receipts: i64
+
+# Full operation descriptors are snapshot.capabilities; no divergent second list.
+pub struct MuxConnectionV1:
+    snapshot: MuxSnapshotV1
+    lease_terms: MuxLeaseTermsV1
+
+# Lines are logical history lines, not byte or Unicode-scalar offsets. Negative
+# offsets count backward from the current screen; AllHistory is explicit.
+pub enum MuxCaptureRangeV1:
+    Screen
+    AllHistory
+    Lines(first: i64, last: i64)
+
+pub struct MuxCaptureV1:
+    pane: MuxObjectRefV1
+    range: MuxCaptureRangeV1
+    join_wrapped: bool
+    styled: bool
+    max_bytes: i64
+    continuation: text?
+
+pub enum MuxIngestionV1:
+    NotPolled
+    NoNewOutput
+    Ingested
+
+# Continuation is owner-issued, bound to pane/generation/content revision and
+# capture options. Expired/stale continuation is an error, not a fresh capture.
+pub struct MuxCapturedV1:
+    pane: MuxObjectRefV1
+    observed_revision: u64
+    content_revision: u64
+    ingestion: MuxIngestionV1
+    bytes: [u8]
+    byte_extent: i64
+    truncated: bool
+    continuation: text?
+
+pub enum MuxRequestKnowledgeV1:
+    Pending
+    Retained
+    Expired
+    NotKnown
+
+pub struct MuxRequestReceiptV1:
+    handle: MuxHandleV1
+    request_id: u64
+    # Unknown/evicted request status may not know which operation was sent.
+    operation: MuxOperationV1?
+    knowledge: MuxRequestKnowledgeV1
+    commit_state: MuxCommitStateV1
+    prior_revision: u64?
+    observed_revision: u64?
+    affected: [MuxObjectRefV1]
+    error_kind: MuxErrorKindV1?
+    detail: text
+    cleanup_pending: bool
+
+pub struct MuxCleanupV1:
+    pending: bool
+    remaining: [MuxObjectRefV1]
+    detail: text
+
+pub enum MuxNotificationStateV1:
+    Queued
+    Rendered(clients: [MuxObjectRefV1])
+    Expired
+
+pub struct MuxNotificationReceiptV1:
+    notification_id: text
+    state: MuxNotificationStateV1
+
+pub struct MuxMutationV1:
+    receipt: MuxRequestReceiptV1
+    revision: u64
+    created: [MuxObjectRefV1]
+    changed: [MuxObjectRefV1]
+    snapshot: MuxSnapshotV1
+    cleanup: MuxCleanupV1
+    notification: MuxNotificationReceiptV1?
+
+# Disconnect revokes/releases only the requesting lease and its client capacity.
+# Repeating it returns actual retained outcome; it never terminates background
+# sessions. Unknown completion must be reconciled through request status.
+# After revocation, only an identical retained disconnect replay or RequestStatus
+# for IDs already bound to that authenticated original token/incarnation may
+# read retained receipts. If the binding itself is lost, return an Unknown error
+# without exposing other receipt data or inventing an operation.
+# No new effects, metadata, capture, events or renewal are authorized. Lost replay
+# returns an error with Unknown commitment; status may report NotKnown/Expired.
+# After retention ends the old token cannot access even receipt history.
+pub struct MuxDisconnectV1:
+    receipt: MuxRequestReceiptV1
+    already_disconnected: bool
+    released_clients: [MuxObjectRefV1]
+    revision: u64
+    cleanup: MuxCleanupV1
+
+pub enum MuxQueryV1:
+    Snapshot(scope: MuxScopeV1, visibility: MuxVisibilityV1)
+    ResolveTarget(target: text, kind: MuxObjectKindV1, context: MuxContextV1)
+    Capture(request: MuxCaptureV1)
+    CurrentContext(client: MuxObjectRefV1)
+    RequestStatus(request_id: u64)
+    Capabilities
+
+pub enum MuxQueryResultV1:
+    Snapshot(snapshot: MuxSnapshotV1)
+    ResolvedTarget(target: MuxObjectRefV1)
+    Captured(capture: MuxCapturedV1)
+    Context(context: MuxContextV1)
+    RequestReceipt(receipt: MuxRequestReceiptV1)
+    Capabilities(capabilities: [MuxOperationCapabilityV1])
+
+pub enum MuxEventKindV1:
+    ObjectCreated(target: MuxObjectRefV1)
+    ObjectChanged(target: MuxObjectRefV1)
+    ObjectTerminated(target: MuxObjectRefV1)
+    ChildExited(pane: MuxObjectRefV1, state: MuxChildStateV1)
+    ContentAvailable(pane: MuxObjectRefV1, content_revision: u64)
+    LayoutChanged(window: MuxObjectRefV1)
+    Notification(notification: MuxNotificationReceiptV1)
+    LeaseRevoked
+
+pub struct MuxEventV1:
+    cursor: u64
+    causal_request_id: u64?
+    observed_revision: u64
+    kind: MuxEventKindV1
+
+pub struct MuxEventLimitsV1:
+    max_events: i64
+    max_bytes: i64
+
+pub struct MuxEventBatchV1:
+    owner_id: text
+    owner_generation: u64
+    from_cursor: u64
+    to_cursor: u64
+    events: [MuxEventV1]
+    reconciliation_required: bool

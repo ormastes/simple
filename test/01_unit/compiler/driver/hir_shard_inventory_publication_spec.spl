@@ -1,0 +1,40 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+# Purpose: frozen HIR inventory publication must accept identical workers,
+# refuse divergent ones, and name why (s3-wa replacement generation, 2026-10-25).
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_inventory_mismatch_v1}
+use std.io_runtime.{dir_create_all, file_read, getpid}
+
+fn inventory_fixture(label: text) -> text:
+    val queue = "build/test_output/hir_inventory/{getpid()}-{label}"
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "HIR frozen inventory publication":
+    it "accepts every worker that publishes the identical inventory":
+        val queue = inventory_fixture("same")
+        val paths = ["src/a.spl", "src/b.spl", "src/c.spl"]
+        expect(hir_shard_recovery_inventory(queue, "closure-x", paths)).to_equal(true)
+        expect(hir_shard_recovery_inventory(queue, "closure-x", paths)).to_equal(true)
+        expect(hir_shard_recovery_inventory_mismatch_v1(file_read("{queue}/inventory"), "closure-x", paths)).to_equal("match")
+
+    it "refuses a worker with a different closure identity and names it":
+        val queue = inventory_fixture("identity")
+        expect(hir_shard_recovery_inventory(queue, "closure-x", ["src/a.spl"])).to_equal(true)
+        expect(hir_shard_recovery_inventory(queue, "closure-y", ["src/a.spl"])).to_equal(false)
+        val why = hir_shard_recovery_inventory_mismatch_v1(file_read("{queue}/inventory"), "closure-y", ["src/a.spl"])
+        expect(why.starts_with("closure identity differs")).to_equal(true)
+
+    it "refuses a reordered or resized row set and names the first difference":
+        val queue = inventory_fixture("rows")
+        expect(hir_shard_recovery_inventory(queue, "closure-x", ["src/a.spl", "src/b.spl"])).to_equal(true)
+        expect(hir_shard_recovery_inventory(queue, "closure-x", ["src/b.spl", "src/a.spl"])).to_equal(false)
+        val stored = file_read("{queue}/inventory")
+        expect(hir_shard_recovery_inventory_mismatch_v1(stored, "closure-x", ["src/b.spl", "src/a.spl"]).starts_with("row 0 differs")).to_equal(true)
+        expect(hir_shard_recovery_inventory_mismatch_v1(stored, "closure-x", ["src/a.spl"]).starts_with("row count differs")).to_equal(true)
+
+    it "refuses empty identity or inventory before touching the ledger":
+        val queue = inventory_fixture("empty")
+        expect(hir_shard_recovery_inventory(queue, "", ["src/a.spl"])).to_equal(false)
+        expect(hir_shard_recovery_inventory(queue, "closure-x", [])).to_equal(false)
+        expect(hir_shard_recovery_inventory_mismatch_v1("", "closure-x", ["src/a.spl"]).starts_with("no published inventory")).to_equal(true)

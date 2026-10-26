@@ -35,6 +35,8 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1}
 use compiler.driver.driver_aot_native_output.{driver_cold_hir_record_verified_object_v1, driver_cold_hir_record_objectless_v1}
+use compiler.driver.driver_build.generic_instance_object_producer_v1.{GENERIC_INSTANCE_RETIRE_ENV_V1,
+    GENERIC_INSTANCE_LINK_ENV_V1, generic_instance_retire_in_module_v1, generic_instance_list_read_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_arm_v1, native_mir_fork_disarm_v1, native_mir_fork_exit_v1}
 use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
@@ -503,8 +505,10 @@ impl CompilerDriver:
         emit their objects into the native cache via compile_to_native in
         flushing mode, then release their MIR. Gates keep the unstaged
         order: nothing is verified after a lowering failure, nothing is
-        borrow-checked after a verify failure, and no object is emitted once
-        any error is recorded (the batch is still released; the build fails).
+        borrow-checked after a verify failure, and no object is emitted for a
+        batch that recorded an error of its own (the batch is still released;
+        later batches keep emitting and the build fails at the end, naming
+        every failed batch via failed_batches).
         Returns false only for a whole-build failure (cache/session setup)."""
         var batch_names: [text] = []
         for held_name in self.ctx.mir_modules.keys():
@@ -522,6 +526,11 @@ impl CompilerDriver:
         # object of a batch that merely CONTAINS a failed module.
         if go_to_end and self.ctx.error_count_value > 0:
             self.go_to_end_absorb_errors_v1("mir")
+        # Batch-local gate: an error recorded by an EARLIER batch must not
+        # withhold this batch's objects (it used to: one failed batch left a
+        # 1495-module build with ~224 objects). The global count still fails
+        # the build after the last batch, so the link stays blocked.
+        val errors_at_batch_start = self.ctx.error_count_value
         if not self.native_staged_codegen.lowering_failed:
             if not self.verify_lowered_mir_v1():
                 self.native_staged_codegen.verify_failed = true
@@ -534,14 +543,15 @@ impl CompilerDriver:
         # `verify_failed` is part of both gates: under go-to-end the verify
         # errors were absorbed above, so the error count alone no longer
         # proves the batch is valid.
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+        if self.ctx.error_count_value == errors_at_batch_start and not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             val _async_state_machines = self.process_async()
             if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
                 self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
             self.weave_aop()
             self.apply_debug_trace()
-        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed and
+        var batch_failed = self.ctx.error_count_value != errors_at_batch_start
+        if not batch_failed and not self.native_staged_codegen.lowering_failed and
                 not self.native_staged_codegen.verify_failed:
             if self.ctx.freeze_storage_registry_for_schedule(
                     self.native_staged_codegen.scheduled_names) == "invalid":
@@ -556,9 +566,13 @@ impl CompilerDriver:
                     case CompileResult.CodegenError(message): message
                     case _: "staged native codegen batch {batch_index} failed"
                 self.ctx.add_error(batch_error)
-                return false
-        for released_name in batch_names:
-            self.ctx.evict_mir_module(released_name)
+                batch_failed = true
+        if batch_failed:
+            val failed_units = batch_names.join(",")
+            self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
+                "batch-{batch_index}: {failed_units}")
+            print "[staged-codegen] batch {batch_index} failed; continuing codegen for later batches (build will fail at end)"
+        self.ctx.evict_mir_modules(batch_names)
         if go_to_end:
             # The verify verdict is per batch under go-to-end (the batch was
             # recorded and withheld above); a later batch must not inherit it.
@@ -685,6 +699,16 @@ impl CompilerDriver:
                 log_phase("aot:flat_mir_passes:skipped")
                 log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
             if self.ctx.error_count_value == 0:
+                # P-G7: retire COMDAT copies whose instance object the link
+                # step links (coordinator-verified snapshot; empty = keep all).
+                val retire = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_RETIRE_ENV_V1) ?? "")
+                if retire.len() > 0:
+                    for retire_name in self.ctx.mir_modules.keys():
+                        val (retired_module, retired_keys) = generic_instance_retire_in_module_v1(
+                            self.ctx.mir_modules[retire_name], retire)
+                        if retired_keys.len() > 0:
+                            self.ctx.mir_modules[retire_name] = retired_module
+                            print "[file-worker] instances retired module={retire_name} copies={retired_keys.len()}"
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
                     module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
@@ -780,7 +804,13 @@ impl CompilerDriver:
         val inputs = admitted.unwrap()
         var link_state = NativeStagedCodegenStateV1.begin(0)
         link_state.active = true
-        link_state.object_files = inputs.object_files
+        # P-G7: generic instance objects (one per ConcreteTldrKey, COMDAT/weak)
+        # the coordinator verified; linked once, after the module objects.
+        var link_objects = inputs.object_files
+        val instance_objects = generic_instance_list_read_v1(env_get_opt(GENERIC_INSTANCE_LINK_ENV_V1) ?? "")
+        for instance_object in instance_objects:
+            link_objects = link_objects.push(instance_object)
+        link_state.object_files = link_objects
         link_state.modules_flushed = inputs.modules.len()
         link_state.lane_functions = inputs.functions
         link_state.lane_statics = inputs.statics
@@ -805,7 +835,7 @@ impl CompilerDriver:
             if objectless_reason != "":
                 return CompileResult.CodegenError(objectless_reason)
         self.native_staged_codegen = link_state
-        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
+        print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} instance_objects={instance_objects.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         self.compile_to_native(output)
 use compiler.common.diagnostics.span.{Span}

@@ -1,0 +1,91 @@
+# One finite binary-framed TCP exchange. No legacy line-protocol fallback,
+# native ABI, environment reads, process execution or persistent descriptor copy.
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms}
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.contracts.mux.wire_envelope_v1.*
+
+pub enum MuxTransportFailureKindV1:
+    Unavailable
+    Timeout
+    Protocol
+
+pub struct MuxTransportFailureV1:
+    kind: MuxTransportFailureKindV1
+    submitted: bool
+
+fn failure(kind: MuxTransportFailureKindV1, submitted: bool) -> MuxTransportFailureV1:
+    MuxTransportFailureV1(kind: kind, submitted: submitted)
+
+pub fn mux_transport_remaining_v1(start_ms: i64, timeout_ms: i64, now_ms: i64) -> Result<i64, MuxTransportFailureV1>:
+    if start_ms < 0 or timeout_ms < 1 or timeout_ms > 30000 or now_ms < start_ms or now_ms - start_ms >= timeout_ms:
+        return Err(failure(MuxTransportFailureKindV1.Timeout, false))
+    Ok(timeout_ms - (now_ms - start_ms))
+
+fn remaining(start_ms: i64, timeout_ms: i64, submitted: bool) -> Result<i64, MuxTransportFailureV1>:
+    match mux_transport_remaining_v1(start_ms, timeout_ms, sosix_time_now_monotonic_ms()):
+        case Ok(ms): Ok(ms)
+        case Err(_): Err(failure(MuxTransportFailureKindV1.Timeout, submitted))
+
+fn io_failure(start_ms: i64, timeout_ms: i64, submitted: bool) -> MuxTransportFailureV1:
+    if mux_transport_remaining_v1(start_ms, timeout_ms, sosix_time_now_monotonic_ms()).is_err():
+        failure(MuxTransportFailureKindV1.Timeout, submitted)
+    else:
+        failure(MuxTransportFailureKindV1.Unavailable, submitted)
+
+fn send_bytes(stream: TcpStream, bytes: [u8], start_ms: i64, timeout_ms: i64, already_submitted: bool) -> Result<(), MuxTransportFailureV1>:
+    var offset = 0
+    var submitted = already_submitted
+    while offset < bytes.len():
+        val ms = remaining(start_ms, timeout_ms, submitted)?
+        if stream.set_write_timeout(Some(ms)).is_err(): return Err(failure(MuxTransportFailureKindV1.Unavailable, submitted))
+        val count = if bytes.len() - offset > 8192: 8192 else: bytes.len() - offset
+        var chunk: [u8] = []
+        for index in offset..offset + count: chunk.push(bytes[index])
+        # Even a failed native write may have transmitted a prefix. Never retry.
+        submitted = true
+        val written = match stream.write(chunk):
+            case Ok(value): value
+            case Err(_): return Err(io_failure(start_ms, timeout_ms, true))
+        if written < 1 or written > count: return Err(failure(MuxTransportFailureKindV1.Protocol, true))
+        offset = offset + written
+    remaining(start_ms, timeout_ms, submitted)?
+    Ok(())
+
+fn read_bytes(stream: TcpStream, count: i64, start_ms: i64, timeout_ms: i64) -> Result<[u8], MuxTransportFailureV1>:
+    var bytes: [u8] = []
+    while bytes.len() < count:
+        val ms = remaining(start_ms, timeout_ms, true)?
+        if stream.set_read_timeout(Some(ms)).is_err(): return Err(failure(MuxTransportFailureKindV1.Unavailable, true))
+        val size = if count - bytes.len() > 8192: 8192 else: count - bytes.len()
+        val chunk = match stream.read(size):
+            case Ok(value): value
+            case Err(_): return Err(io_failure(start_ms, timeout_ms, true))
+        if chunk.len() < 1 or chunk.len() > size: return Err(failure(MuxTransportFailureKindV1.Protocol, true))
+        for byte in chunk: bytes.push(byte)
+    remaining(start_ms, timeout_ms, true)?
+    Ok(bytes)
+
+fn exchange_open(stream: TcpStream, body: [u8], limit: i64, reply_limit: i64, start_ms: i64, timeout_ms: i64) -> Result<[u8], MuxTransportFailureV1>:
+    val header = match mux_wire_frame_header_v1(body.len(), limit):
+        case Ok(value): value
+        case Err(_): return Err(failure(MuxTransportFailureKindV1.Protocol, false))
+    send_bytes(stream, header, start_ms, timeout_ms, false)?
+    send_bytes(stream, body, start_ms, timeout_ms, true)?
+    val received_header = read_bytes(stream, 4, start_ms, timeout_ms)?
+    val count = match mux_wire_frame_length_v1(received_header, reply_limit):
+        case Ok(value): value
+        case Err(_): return Err(failure(MuxTransportFailureKindV1.Protocol, true))
+    read_bytes(stream, count, start_ms, timeout_ms)
+
+pub fn mux_transport_exchange_v1(address: text, body: [u8], limit: i64, reply_limit: i64, start_ms: i64, timeout_ms: i64) -> Result<[u8], MuxTransportFailureV1>:
+    if mux_wire_validate_limit_v1(limit).is_err() or mux_wire_validate_limit_v1(reply_limit).is_err() or reply_limit > limit or body.len() < 1 or body.len() > limit: return Err(failure(MuxTransportFailureKindV1.Protocol, false))
+    val ms = remaining(start_ms, timeout_ms, false)?
+    var stream = match TcpStream.connect_timeout(address, ms):
+        case Ok(value): value
+        case Err(_): return Err(io_failure(start_ms, timeout_ms, false))
+    val result = exchange_open(stream, body, limit, reply_limit, start_ms, timeout_ms)
+    # Exactly one close on all paths after acquisition. The stream never escapes.
+    val closed = stream.close()
+    if closed.is_err(): return Err(failure(MuxTransportFailureKindV1.Unavailable, true))
+    result

@@ -19,6 +19,8 @@ use compiler.hir.hir_definitions.{HirParam, HirConst}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind}
+use compiler.mir.loop_builder_capture_v1.{MirLoopBuilderCaptureV1}
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instructions.*
 # Strict staged lowering must record the terminal owner for these dominant MIR
@@ -151,6 +153,8 @@ struct MirBuilder:
     enum_semantic_terms: [MirTerminator] = []
     enum_semantic_term_nodes: [i64] = []
     enum_semantic_site_overflow: bool = false
+    # Nil ordinary route allocates no capture tables or provider views.
+    loop_view_capture_v1: MirLoopBuilderCaptureV1? = nil
 
 impl MirBuilder:
     static fn new() -> MirBuilder:
@@ -179,8 +183,31 @@ impl MirBuilder:
     # Function Building
     # ========================================================================
 
-    me begin_function(symbol: SymbolId, name: text, signature: MirSignature, span: Span):
+    me begin_function(symbol: SymbolId, name: text, signature: MirSignature, span: Span, signature_cursor_v1: i64 = -1):
         """Begin building a new function."""
+        if val capture = self.loop_view_capture_v1:
+            capture.reserve_function_return()
+            var name_text_v1: i64 = -1
+            match capture.owner().reserve_text(name.len()):
+                case Err(error): capture.fail(error)
+                case Ok(permit): name_text_v1 = capture.node(permit.publish(name))
+            var span_node_v1: i64 = -1
+            if span != nil:
+                var span_file_v1: i64 = -1
+                match capture.owner().reserve_text(span.file.len()):
+                    case Err(error): capture.fail(error)
+                    case Ok(permit): span_file_v1 = capture.node(permit.publish(span.file))
+                if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                    capture.accept(span_writer_v1.scalar(0, span.start))
+                    capture.accept(span_writer_v1.scalar(1, span.end))
+                    capture.accept(span_writer_v1.scalar(2, span.line))
+                    capture.accept(span_writer_v1.scalar(3, span.col))
+                    capture.accept(span_writer_v1.scalar(4, span.length))
+                    capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                    span_node_v1 = capture.node(span_writer_v1.finish())
+            capture.accept(capture.begin_function(symbol.id, name_text_v1, signature_cursor_v1, span_node_v1))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.current_function = Some(MirFunction(
             symbol: symbol,
             name: name,
@@ -240,6 +267,12 @@ impl MirBuilder:
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
         # Create entry block
+        if val capture = self.loop_view_capture_v1:
+            var entry_text_v1: i64 = -1
+            match capture.owner().reserve_text("entry".len()):
+                case Err(error): capture.fail(error)
+                case Ok(permit): entry_text_v1 = capture.node(permit.publish("entry"))
+            capture.accept(capture.new_block(0, entry_text_v1))
         self.blocks = self.blocks.push(MirBlock(
             id: BlockId.entry(),
             label: Some("entry"),
@@ -248,11 +281,15 @@ impl MirBuilder:
         ))
 
         var bootstrap_mode = false
-        bootstrap_mode = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if self.loop_view_capture_v1 == nil:
+            bootstrap_mode = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
         if not bootstrap_mode:
             # Create return local
             if signature.return_type.kind != MirTypeKind.Unit:
-                self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
+                var return_cursor_v1: i64 = -1
+                if val capture = self.loop_view_capture_v1:
+                    return_cursor_v1 = capture.node(capture.signature_type_cursor(0))
+                self.new_local(Some("_return"), signature.return_type, LocalKind.Return, return_cursor_v1)
 
         # NOTE(#133): parameter locals are created unconditionally, including
         # under SIMPLE_BOOTSTRAP. HIR param lowering was fixed (declaration_lowering.spl
@@ -270,12 +307,52 @@ impl MirBuilder:
         # (e.g. `bootstrap_version`, which returns `text`) already work today without
         # it, so this is left untouched to avoid an unrelated behavior change.
         for i in 0..signature.params.len():
-            self.new_local(nil, signature.params[i], LocalKind.Arg(i))
+            var param_cursor_v1: i64 = -1
+            if val capture = self.loop_view_capture_v1:
+                param_cursor_v1 = capture.node(capture.signature_type_cursor(i + 1))
+            self.new_local(nil, signature.params[i], LocalKind.Arg(i), param_cursor_v1)
 
     me end_function() -> MirFunction:
         """Finish building current function and return it."""
         # Finalize current block
         self.finalize_block()
+
+        if val capture = self.loop_view_capture_v1:
+            capture.accept(capture.finish_function(self.blocks.len(), self.locals.len()))
+            # This fixed empty representation is not the publication authority.
+            # Its construction and return copies were reserved before begin.
+            val funded_return_v1 = capture.consume_sentinel_credit()
+            self.current_function = nil
+            if not funded_return_v1: return nil
+            return MirFunction(
+                symbol: SymbolId.new(-1),
+                name: "",
+                signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+                locals: [],
+                blocks: [],
+                entry_block: BlockId.entry(),
+                span: Span.empty(),
+                generic_params: [],
+                is_generic_template: false,
+                specialization_of: nil,
+                type_bindings: {},
+                layout_phase: nil,
+                is_kernel: false,
+                gpu_target: "",
+                gpu_backend_order: "",
+                is_export_c: false,
+                export_name: "",
+                has_driver_manifest_attr: false,
+                # @workaround bug=BUG-NATIVE-NESTED-STRUCT-NIL-COPY-20261016 recover=6ba18bacb6c431956ade4156b10397250d8e550a reason=tagged-nil-nested-record-copy-guard
+                driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+                has_vhdl_metadata: false,
+                vhdl_metadata: vhdl_hardware_metadata_default(),
+                has_fast_math: false,
+                unroll_factor: 0,
+                pipeline_ii: 0,
+                memory_banks: 0,
+                verification_contract: nil
+                )
 
         var fn_ = match self.current_function:
             case Some(active_function):
@@ -327,6 +404,9 @@ impl MirBuilder:
 
     me add_function(fn_: MirFunction):
         """Add a completed function to the module."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Incomplete)
+            return
         var functions = self.module.functions
         functions[fn_.symbol] = fn_
         self.module.functions = functions
@@ -335,8 +415,69 @@ impl MirBuilder:
     # Local Variables
     # ========================================================================
 
-    me new_local(name: text?, type_: MirType, kind: LocalKind) -> LocalId:
+    me new_local(name: text?, type_: MirType, kind: LocalKind, type_cursor_v1: i64 = -1) -> LocalId:
         """Create a new local variable."""
+        if val capture = self.loop_view_capture_v1:
+            var type_node_v1 = type_cursor_v1
+            if type_node_v1 < 0:
+                match type_.kind:
+                    case I8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                    case I16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                    case I32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                    case I64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                    case U8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                    case U16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                    case U32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                    case U64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                    case Bool: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                    case Char: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                    case Unit: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                    case Never: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                    case F32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                    case F64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                    case Vec4f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                    case Vec8f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                    case Vec4d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                    case Vec4i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                    case Vec8i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                    case Vec16f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                    case Vec8d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                    case Vec16i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                    case Bits(width, signed):
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                            capture.accept(type_writer_v1.scalar(0, width))
+                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Opaque(name):
+                        var type_text_v1: i64 = -1
+                        match capture.owner().reserve_text(name.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Struct(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                    case Enum(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+            var name_text_v1: i64 = -1
+            if val local_name_v1 = name:
+                var published_name_v1: i64 = -1
+                match capture.owner().reserve_text(local_name_v1.len()):
+                    case Err(error): capture.fail(error)
+                    case Ok(permit): published_name_v1 = capture.node(permit.publish(local_name_v1))
+                name_text_v1 = published_name_v1
+            var kind_v1: i64 = 2
+            var ordinal_v1: i64 = -1
+            match kind:
+                case Arg(index):
+                    kind_v1 = 0
+                    ordinal_v1 = index
+                case Var: kind_v1 = 1
+                case Temp: kind_v1 = 2
+                case Return: kind_v1 = 3
+            capture.accept(capture.new_local(self.next_local_id, name_text_v1, type_node_v1, kind_v1, ordinal_v1))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return LocalId(id: -1)
         val id = LocalId(id: self.next_local_id)
         self.next_local_id = self.next_local_id + 1
 
@@ -350,9 +491,9 @@ impl MirBuilder:
 
         id
 
-    me new_temp(type_: MirType) -> LocalId:
+    me new_temp(type_: MirType, type_cursor_v1: i64 = -1) -> LocalId:
         """Create a new temporary."""
-        self.new_local(nil, type_, LocalKind.Temp)
+        self.new_local(nil, type_, LocalKind.Temp, type_cursor_v1)
 
     me _local_position(id: LocalId) -> i64:
         """Resolve a unique local through the canonical dense index."""
@@ -389,6 +530,14 @@ impl MirBuilder:
         val position = self._local_position(id)
         if position < 0:
             return
+        if val capture = self.loop_view_capture_v1:
+            var name_text_v1: i64 = -1
+            match capture.owner().reserve_text(name.len()):
+                case Err(error): capture.fail(error)
+                case Ok(permit): name_text_v1 = capture.node(permit.publish(name))
+            capture.accept(capture.rename_local(id.id, name_text_v1))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         val loc: MirLocal = self.locals[position]
         self.locals[position] = MirLocal(
             id: loc.id,
@@ -401,7 +550,7 @@ impl MirBuilder:
             short_boundary: loc.short_boundary
         )
 
-    me set_local_type(id: LocalId, ty: MirType):
+    me set_local_type(id: LocalId, ty: MirType, type_cursor_v1: i64 = -1):
         """Retype an existing local (mirror of set_local_name).
 
         Used to thread an inferred result type onto a value-position
@@ -413,6 +562,51 @@ impl MirBuilder:
         val position = self._local_position(id)
         if position < 0:
             return
+        if val capture = self.loop_view_capture_v1:
+            var type_node_v1 = type_cursor_v1
+            if type_node_v1 < 0:
+                match ty.kind:
+                    case I8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                    case I16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                    case I32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                    case I64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                    case U8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                    case U16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                    case U32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                    case U64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                    case Bool: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                    case Char: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                    case Unit: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                    case Never: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                    case F32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                    case F64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                    case Vec4f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                    case Vec8f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                    case Vec4d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                    case Vec4i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                    case Vec8i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                    case Vec16f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                    case Vec8d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                    case Vec16i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                    case Bits(width, signed):
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                            capture.accept(type_writer_v1.scalar(0, width))
+                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Opaque(name):
+                        var type_text_v1: i64 = -1
+                        match capture.owner().reserve_text(name.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Struct(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                    case Enum(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+            capture.accept(capture.retype_local(id.id, type_node_v1))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         val loc: MirLocal = self.locals[position]
         self.locals[position] = MirLocal(
             id: loc.id,
@@ -431,6 +625,17 @@ impl MirBuilder:
 
     me new_block(label: text?) -> BlockId:
         """Create a new basic block."""
+        if val capture = self.loop_view_capture_v1:
+            var label_text_v1: i64 = -1
+            if val block_label_v1 = label:
+                var published_label_v1: i64 = -1
+                match capture.owner().reserve_text(block_label_v1.len()):
+                    case Err(error): capture.fail(error)
+                    case Ok(permit): published_label_v1 = capture.node(permit.publish(block_label_v1))
+                label_text_v1 = published_label_v1
+            capture.accept(capture.new_block(self.next_block_id, label_text_v1))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return BlockId.new(-1)
         val id = BlockId.new(self.next_block_id)
         self.next_block_id = self.next_block_id + 1
 
@@ -446,6 +651,10 @@ impl MirBuilder:
     me switch_to_block(block: BlockId):
         """Switch to building a different block."""
         self.finalize_block()
+        if val capture = self.loop_view_capture_v1:
+            capture.accept(capture.switch_to_block(block.id))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.current_block = block
         self.instructions = []
 
@@ -462,6 +671,10 @@ impl MirBuilder:
         # AND the predicate's own answer AND whether the return is taken, so
         # the three are distinguishable. Reuses this file's existing
         # SIMPLE_MIRB_TRACE gate; default OFF.
+        if val capture = self.loop_view_capture_v1:
+            capture.accept(capture.flush(self.current_block.id, self.instructions.len()))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         val fb_pending_len = self.instructions.len()
         val fb_is_empty = self.instructions.is_empty()
         var fb_trace = false
@@ -493,6 +706,10 @@ impl MirBuilder:
 
     me emit(inst: MirInst):
         """Emit an instruction to current block."""
+        if val capture = self.loop_view_capture_v1:
+            capture.accept(capture.consume_instruction(self.current_block.id, self.instructions.len()))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         if self.enum_semantic_recording:
             if self.enum_semantic_site_calls.len() + self.enum_semantic_terms.len() >= 65536:
                 self.enum_semantic_site_overflow = true
@@ -503,8 +720,99 @@ impl MirBuilder:
                 self.enum_semantic_site_nodes.push(self.enum_semantic_node)
         self.instructions.push(inst)
 
-    me emit_const(dest: LocalId, value: MirConstValue, type_: MirType):
+    me emit_const(dest: LocalId, value: MirConstValue, type_: MirType, type_cursor_v1: i64 = -1, constant_cursor_v1: i64 = -1):
         """Emit a constant load."""
+        if val capture = self.loop_view_capture_v1:
+            var type_node_v1 = type_cursor_v1
+            if type_node_v1 < 0:
+                match type_.kind:
+                    case I8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                    case I16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                    case I32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                    case I64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                    case U8: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                    case U16: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                    case U32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                    case U64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                    case Bool: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                    case Char: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                    case Unit: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                    case Never: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                    case F32: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                    case F64: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                    case Vec4f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                    case Vec8f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                    case Vec4d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                    case Vec4i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                    case Vec8i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                    case Vec16f: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                    case Vec8d: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                    case Vec16i: type_node_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                    case Bits(width, signed):
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                            capture.accept(type_writer_v1.scalar(0, width))
+                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Opaque(name):
+                        var type_text_v1: i64 = -1
+                        match capture.owner().reserve_text(name.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                            type_node_v1 = capture.node(type_writer_v1.finish())
+                    case Struct(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                    case Enum(symbol): type_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+            var constant_node_v1 = constant_cursor_v1
+            if constant_node_v1 < 0:
+                match value:
+                    case Int(value): constant_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                    case Bool(value): constant_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                    case Zero: constant_node_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                    case Float(value):
+                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                            capture.accept(constant_writer_v1.real(value))
+                            constant_node_v1 = capture.node(constant_writer_v1.finish())
+                    case FloatLexeme(value):
+                        var lexeme_text_v1: i64 = -1
+                        match capture.owner().reserve_text(value.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                            capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                            constant_node_v1 = capture.node(constant_writer_v1.finish())
+                    case Str(value):
+                        var constant_text_v1: i64 = -1
+                        match capture.owner().reserve_text(value.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                            capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                            constant_node_v1 = capture.node(constant_writer_v1.finish())
+                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstConst):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.child(constant_node_v1))
+                capture.accept(instruction_writer_v1.child(type_node_v1))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.emit(MirInst(
             kind: MirInstKind.Const(dest, value, type_),
             span: self.current_span
@@ -530,6 +838,28 @@ impl MirBuilder:
 
     me emit_copy(dest: LocalId, src: LocalId):
         """Emit a copy instruction."""
+        if val capture = self.loop_view_capture_v1:
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstCopy):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.scalar(1, src.id))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.emit(MirInst(
             kind: MirInstKind.Copy(dest, src),
             span: self.current_span
@@ -552,6 +882,28 @@ impl MirBuilder:
         here. The NLL checker's Move handling is real and spec-proven via
         hand-built MIR (test/01_unit/compiler/borrow/borrow_check_spec.spl).
         """
+        if val capture = self.loop_view_capture_v1:
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstMove):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.scalar(1, src.id))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.emit(MirInst(
             kind: MirInstKind.Move(dest, src),
             span: self.current_span
@@ -565,31 +917,357 @@ impl MirBuilder:
         locals have already been consumed (moved out, returned, or already
         `.close()`d) so this is never called twice for the same local on the
         same control-flow path."""
+        if val capture = self.loop_view_capture_v1:
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstDrop):
+                capture.accept(instruction_writer_v1.scalar(0, local.id))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.emit(MirInst(
             kind: MirInstKind.Drop(local),
             span: self.current_span
         ))
 
-    me emit_binop(op: MirBinOp, left: MirOperand, right: MirOperand, type_: MirType) -> LocalId:
+    me emit_binop(op: MirBinOp, left: MirOperand, right: MirOperand, type_: MirType, type_cursor_v1: i64 = -1, left_cursor_v1: i64 = -1, right_cursor_v1: i64 = -1) -> LocalId:
         """Emit a binary operation and return result local."""
-        val dest = self.new_temp(type_)
+        val dest = self.new_temp(type_, type_cursor_v1)
+        if val capture = self.loop_view_capture_v1:
+            var left_node_v1 = left_cursor_v1
+            if left_node_v1 < 0:
+                match left.kind:
+                    case Copy(local): left_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): left_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        left_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            var right_node_v1 = right_cursor_v1
+            if right_node_v1 < 0:
+                match right.kind:
+                    case Copy(local): right_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): right_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        right_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            val operation_v1 = match op:
+                case Add: 0
+                case Sub: 1
+                case Mul: 2
+                case Div: 3
+                case Rem: 4
+                case Pow: 5
+                case MatMul: 6
+                case BitAnd: 7
+                case BitOr: 8
+                case BitXor: 9
+                case Shl: 10
+                case Shr: 11
+                case Eq: 12
+                case Ne: 13
+                case Lt: 14
+                case Le: 15
+                case Gt: 16
+                case Ge: 17
+                case BroadcastAdd: 18
+                case BroadcastSub: 19
+                case BroadcastMul: 20
+                case BroadcastDiv: 21
+                case BroadcastPow: 22
+                case Offset: 23
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstBinOp):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.scalar(1, operation_v1))
+                capture.accept(instruction_writer_v1.child(left_node_v1))
+                capture.accept(instruction_writer_v1.child(right_node_v1))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return dest
         self.emit(MirInst(
             kind: MirInstKind.BinOp(dest, op, left, right),
             span: self.current_span
         ))
         dest
 
-    me emit_unary(op: MirUnaryOp, operand: MirOperand, type_: MirType) -> LocalId:
+    me emit_unary(op: MirUnaryOp, operand: MirOperand, type_: MirType, type_cursor_v1: i64 = -1, operand_cursor_v1: i64 = -1) -> LocalId:
         """Emit a unary operation and return result local."""
-        val dest = self.new_temp(type_)
+        val dest = self.new_temp(type_, type_cursor_v1)
+        if val capture = self.loop_view_capture_v1:
+            var operand_node_v1 = operand_cursor_v1
+            if operand_node_v1 < 0:
+                match operand.kind:
+                    case Copy(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        operand_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            val operation_v1 = match op:
+                case Neg: 0
+                case Not: 1
+                case BitNot: 2
+                case Transpose: 3
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstUnaryOp):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.scalar(1, operation_v1))
+                capture.accept(instruction_writer_v1.child(operand_node_v1))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return dest
         self.emit(MirInst(
             kind: MirInstKind.UnaryOp(dest, op, operand),
             span: self.current_span
         ))
         dest
 
-    me emit_ref(place: MirPlace, borrow_kind: MirBorrowKind, type_: MirType) -> LocalId:
+    me emit_ref(place: MirPlace, borrow_kind: MirBorrowKind, type_: MirType, type_cursor_v1: i64 = -1) -> LocalId:
         """Emit a borrow reference and return result local."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.Ref(dest, borrow_kind, place),
@@ -599,6 +1277,9 @@ impl MirBuilder:
 
     me emit_global_addr(symbol: SymbolId, pointee_type: MirType, mutable: bool) -> LocalId:
         """Emit the typed address of canonical module-static storage."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val ref_type = MirType(kind: MirTypeKind.Ref(pointee_type, mutable))
         val dest = self.new_temp(ref_type)
         self.emit(MirInst(
@@ -607,8 +1288,11 @@ impl MirBuilder:
         ))
         dest
 
-    me emit_load(ptr: MirOperand, type_: MirType) -> LocalId:
+    me emit_load(ptr: MirOperand, type_: MirType, type_cursor_v1: i64 = -1) -> LocalId:
         """Emit a load instruction."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.Load(dest, ptr),
@@ -618,6 +1302,9 @@ impl MirBuilder:
 
     me emit_store(ptr: MirOperand, value: MirOperand):
         """Emit a store instruction."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return
         self.emit(MirInst(
             kind: MirInstKind.Store(ptr, value),
             span: self.current_span
@@ -625,6 +1312,9 @@ impl MirBuilder:
 
     me emit_alloc(type_: MirType) -> LocalId:
         """Emit an allocation."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(MirType.ptr(type_, true))
         self.emit(MirInst(
             kind: MirInstKind.Alloc(dest, type_),
@@ -642,6 +1332,9 @@ impl MirBuilder:
         This operation is compiler-private and must be consumed by the typed
         storage producer before backend optimization/codegen.
         """
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return MirOwnedRawAllocationFactV1(base_local: LocalId(id: -1), allocation_byte_len: 0, logical_type_id: -1, revision: 0, element_count: 0, allocation_identity: "", allocation_provenance: "", source_revision: "")
         val dest = self.new_temp(MirType.ptr(pointee_type, true))
         # Match emit_call's flat optional LocalId representation.
         val optional_dest: LocalId? = dest
@@ -665,6 +1358,9 @@ impl MirBuilder:
 
     me emit_entry_alloc(type_: MirType) -> LocalId:
         """Emit a fixed-lifetime allocation in the function entry block."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(MirType.ptr(type_, true))
         val alloc = MirInst(kind: MirInstKind.Alloc(dest, type_), span: self.current_span)
         if self.current_block.id == BlockId.entry().id:
@@ -675,8 +1371,11 @@ impl MirBuilder:
             self.blocks[0] = entry
         dest
 
-    me emit_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId?:
+    me emit_call(func: MirOperand, args: [MirOperand], return_type: MirType, return_type_cursor_v1: i64 = -1) -> LocalId?:
         """Emit a function call."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return nil
         # Bare-lift (no explicit Some): an explicit Some(...) builds a heap
         # Option box on the stage4 native lane; downstream readers of the
         # flat LocalId? payload then see the box header as the id.
@@ -693,8 +1392,11 @@ impl MirBuilder:
 
         dest
 
-    me emit_call_value(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
+    me emit_call_value(func: MirOperand, args: [MirOperand], return_type: MirType, return_type_cursor_v1: i64 = -1) -> LocalId:
         """Emit a function call whose non-unit result is required."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         # Level-gated behind this file's existing SIMPLE_MIRB_TRACE gate (see
         # lines 113/186). These probes were unconditional, which on a hot path
         # (every non-unit call emit) floods stderr for the whole build; they are
@@ -718,8 +1420,11 @@ impl MirBuilder:
             eprint("[mir-call-value] emit-after id={dest.id}\n")
         dest
 
-    me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType) -> LocalId?:
+    me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType, return_type_cursor_v1: i64 = -1) -> LocalId?:
         """Emit an indirect function call (through closure or function pointer)."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return nil
         # Bare-lift (no explicit Some): an explicit Some(...) builds a heap
         # Option box on the stage4 native lane; downstream readers of the
         # flat LocalId? payload then see the box header as the id.
@@ -736,16 +1441,118 @@ impl MirBuilder:
 
         dest
 
-    me emit_cast(operand: MirOperand, target: MirType) -> LocalId:
+    me emit_cast(operand: MirOperand, target: MirType, type_cursor_v1: i64 = -1, operand_cursor_v1: i64 = -1) -> LocalId:
         """Emit a type cast."""
-        val dest = self.new_temp(target)
+        val dest = self.new_temp(target, type_cursor_v1)
+        if val capture = self.loop_view_capture_v1:
+            var operand_node_v1 = operand_cursor_v1
+            if operand_node_v1 < 0:
+                match operand.kind:
+                    case Copy(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        operand_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            val target_node_v1 = capture.node(capture.local_type_cursor(dest.id))
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstCast):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.child(operand_node_v1))
+                capture.accept(instruction_writer_v1.child(target_node_v1))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return dest
         self.emit(MirInst(
             kind: MirInstKind.Cast(dest, operand, target),
             span: self.current_span
         ))
         dest
 
-    me emit_bitcast(operand: MirOperand, target: MirType) -> LocalId:
+    me emit_bitcast(operand: MirOperand, target: MirType, type_cursor_v1: i64 = -1, operand_cursor_v1: i64 = -1) -> LocalId:
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(target)
         self.emit(MirInst(
             kind: MirInstKind.Bitcast(dest, operand, target),
@@ -753,18 +1560,277 @@ impl MirBuilder:
         ))
         dest
 
-    me emit_aggregate(kind: AggregateKind, operands: [MirOperand], type_: MirType) -> LocalId:
+    me emit_aggregate(kind: AggregateKind, operands: [MirOperand], type_: MirType, type_cursor_v1: i64 = -1, aggregate_cursor_v1: i64 = -1, aggregate_type_cursor_v1: i64 = -1) -> LocalId:
         """Emit aggregate construction."""
-        val dest = self.new_temp(type_)
+        val dest = self.new_temp(type_, type_cursor_v1)
+        if val capture = self.loop_view_capture_v1:
+            if aggregate_cursor_v1 >= 0:
+                capture.accept(capture.prepare_instruction(aggregate_cursor_v1))
+            if aggregate_cursor_v1 < 0:
+                if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstAggregate):
+                    var aggregate_kind_v1: i64 = 0
+                    var aggregate_symbol_v1: i64 = -1
+                    var aggregate_variant_v1: i64 = -1
+                    var aggregate_type_v1: i64 = -1
+                    match kind:
+                        case Array(array_type_v1):
+                            aggregate_kind_v1 = 0
+                            aggregate_type_v1 = aggregate_type_cursor_v1
+                            if aggregate_type_v1 < 0:
+                                match array_type_v1.kind:
+                                    case I8: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                    case I16: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                    case I32: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                    case I64: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                    case U8: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                    case U16: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                    case U32: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                    case U64: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                    case Bool: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                    case Char: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                    case Unit: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                    case Never: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                    case F32: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                    case F64: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                    case Vec4f: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                    case Vec8f: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                    case Vec4d: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                    case Vec4i: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                    case Vec8i: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                    case Vec16f: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                    case Vec8d: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                    case Vec16i: aggregate_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                    case Bits(width, signed):
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                            capture.accept(type_writer_v1.scalar(0, width))
+                                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                            aggregate_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Opaque(name):
+                                        var type_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(name.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                            aggregate_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Struct(symbol): aggregate_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                    case Enum(symbol): aggregate_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        case Tuple: aggregate_kind_v1 = 1
+                        case Struct(symbol):
+                            aggregate_kind_v1 = 2
+                            aggregate_symbol_v1 = symbol.id
+                        case Enum(symbol, variant):
+                            aggregate_kind_v1 = 3
+                            aggregate_symbol_v1 = symbol.id
+                            aggregate_variant_v1 = variant
+                    capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                    capture.accept(instruction_writer_v1.scalar(1, aggregate_kind_v1))
+                    capture.accept(instruction_writer_v1.scalar(2, aggregate_symbol_v1))
+                    capture.accept(instruction_writer_v1.scalar(3, aggregate_variant_v1))
+                    capture.accept(instruction_writer_v1.child(aggregate_type_v1))
+                    for element_v1 in operands:
+                        var element_node_v1 = -1
+                        if element_node_v1 < 0:
+                            match element_v1.kind:
+                                case Copy(local): element_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                                case Move(local): element_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                                case Const(value, type_):
+                                    var operand_constant_v1 = -1
+                                    if operand_constant_v1 < 0:
+                                        match value:
+                                            case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                            case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                            case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                            case Float(value):
+                                                if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                                    capture.accept(constant_writer_v1.real(value))
+                                                    operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                            case FloatLexeme(value):
+                                                var lexeme_text_v1: i64 = -1
+                                                match capture.owner().reserve_text(value.len()):
+                                                    case Err(error): capture.fail(error)
+                                                    case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                                if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                                    capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                                    operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                            case Str(value):
+                                                var constant_text_v1: i64 = -1
+                                                match capture.owner().reserve_text(value.len()):
+                                                    case Err(error): capture.fail(error)
+                                                    case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                                if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                                    capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                                    operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                            case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                                    var operand_type_v1 = -1
+                                    if operand_type_v1 < 0:
+                                        match type_.kind:
+                                            case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                            case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                            case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                            case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                            case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                            case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                            case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                            case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                            case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                            case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                            case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                            case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                            case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                            case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                            case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                            case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                            case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                            case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                            case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                            case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                            case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                            case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                            case Bits(width, signed):
+                                                if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                                    capture.accept(type_writer_v1.scalar(0, width))
+                                                    capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                                    operand_type_v1 = capture.node(type_writer_v1.finish())
+                                            case Opaque(name):
+                                                var type_text_v1: i64 = -1
+                                                match capture.owner().reserve_text(name.len()):
+                                                    case Err(error): capture.fail(error)
+                                                    case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                                if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                                    capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                                    operand_type_v1 = capture.node(type_writer_v1.finish())
+                                            case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                            case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                            case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                                    element_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+                        capture.accept(instruction_writer_v1.child(element_node_v1))
+                    var instruction_span_v1: i64 = -1
+                    if val source_span_v1 = self.current_span:
+                        var span_file_v1: i64 = -1
+                        match capture.owner().reserve_text(source_span_v1.file.len()):
+                            case Err(error): capture.fail(error)
+                            case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                        if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                            capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                            capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                            capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                            capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                            capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                            capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                            instruction_span_v1 = capture.node(span_writer_v1.finish())
+                    if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                    capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return dest
         self.emit(MirInst(
             kind: MirInstKind.Aggregate(dest, kind, operands),
             span: self.current_span
         ))
         dest
 
-    me emit_get_field(base: MirOperand, field: i64, type_: MirType) -> LocalId:
+    me emit_get_field(base: MirOperand, field: i64, type_: MirType, type_cursor_v1: i64 = -1, base_cursor_v1: i64 = -1) -> LocalId:
         """Emit field access."""
-        val dest = self.new_temp(type_)
+        val dest = self.new_temp(type_, type_cursor_v1)
+        if val capture = self.loop_view_capture_v1:
+            var base_node_v1 = base_cursor_v1
+            if base_node_v1 < 0:
+                match base.kind:
+                    case Copy(local): base_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): base_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        base_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            if val instruction_writer_v1 = capture.start_instruction(MirLoopShapeTagV1.InstGetField):
+                capture.accept(instruction_writer_v1.scalar(0, dest.id))
+                capture.accept(instruction_writer_v1.scalar(1, field))
+                capture.accept(instruction_writer_v1.child(base_node_v1))
+                var instruction_span_v1: i64 = -1
+                if val source_span_v1 = self.current_span:
+                    var span_file_v1: i64 = -1
+                    match capture.owner().reserve_text(source_span_v1.file.len()):
+                        case Err(error): capture.fail(error)
+                        case Ok(permit): span_file_v1 = capture.node(permit.publish(source_span_v1.file))
+                    if val span_writer_v1 = capture.start(MirLoopShapeTagV1.Span):
+                        capture.accept(span_writer_v1.scalar(0, source_span_v1.start))
+                        capture.accept(span_writer_v1.scalar(1, source_span_v1.end))
+                        capture.accept(span_writer_v1.scalar(2, source_span_v1.line))
+                        capture.accept(span_writer_v1.scalar(3, source_span_v1.col))
+                        capture.accept(span_writer_v1.scalar(4, source_span_v1.length))
+                        capture.accept(span_writer_v1.text_id(0, span_file_v1))
+                        instruction_span_v1 = capture.node(span_writer_v1.finish())
+                if instruction_span_v1 >= 0: capture.accept(instruction_writer_v1.span(instruction_span_v1))
+                capture.accept(capture.prepare_instruction(capture.node(instruction_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return dest
         self.emit(MirInst(
             kind: MirInstKind.GetField(dest, base, field),
             span: self.current_span
@@ -773,13 +1839,19 @@ impl MirBuilder:
 
     me emit_set_field(base: MirOperand, field: i64, value: MirOperand):
         """Emit field assignment."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return
         self.emit(MirInst(
             kind: MirInstKind.SetField(base, field, value),
             span: self.current_span
         ))
 
-    me emit_gep(base: MirOperand, indices: [MirOperand], type_: MirType) -> LocalId:
+    me emit_gep(base: MirOperand, indices: [MirOperand], type_: MirType, type_cursor_v1: i64 = -1) -> LocalId:
         """Emit GetElementPtr instruction."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return LocalId(id: -1)
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.GetElementPtr(dest, base, indices),
@@ -793,17 +1865,192 @@ impl MirBuilder:
 
     me terminate_goto(target: BlockId):
         """Terminate current block with unconditional jump."""
+        if val capture = self.loop_view_capture_v1:
+            capture.charge_edges(1)
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermGoto):
+                capture.accept(term_writer_v1.scalar(0, target.id))
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Goto(target))
 
-    me terminate_return(value: MirOperand?):
+    me terminate_return(value: MirOperand?, value_cursor_v1: i64 = -1):
         """Terminate current block with return."""
+        if val capture = self.loop_view_capture_v1:
+            var return_node_v1: i64 = -1
+            if val return_value_v1 = value:
+                var operand_node_v1 = value_cursor_v1
+                if operand_node_v1 < 0:
+                    match return_value_v1.kind:
+                        case Copy(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                        case Move(local): operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                        case Const(value, type_):
+                            var operand_constant_v1 = -1
+                            if operand_constant_v1 < 0:
+                                match value:
+                                    case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                    case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                    case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                    case Float(value):
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                            capture.accept(constant_writer_v1.real(value))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case FloatLexeme(value):
+                                        var lexeme_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(value.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                            capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case Str(value):
+                                        var constant_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(value.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                            capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                            var operand_type_v1 = -1
+                            if operand_type_v1 < 0:
+                                match type_.kind:
+                                    case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                    case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                    case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                    case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                    case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                    case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                    case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                    case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                    case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                    case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                    case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                    case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                    case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                    case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                    case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                    case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                    case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                    case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                    case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                    case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                    case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                    case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                    case Bits(width, signed):
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                            capture.accept(type_writer_v1.scalar(0, width))
+                                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                            operand_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Opaque(name):
+                                        var type_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(name.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                            operand_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                    case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                            operand_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+                return_node_v1 = operand_node_v1
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermRet):
+                if return_node_v1 >= 0: capture.accept(term_writer_v1.child(return_node_v1))
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Ret(value))
 
-    me terminate_if(cond: MirOperand, then_: BlockId, else_: BlockId):
+    me terminate_if(cond: MirOperand, then_: BlockId, else_: BlockId, condition_cursor_v1: i64 = -1):
         """Terminate current block with conditional branch."""
+        if val capture = self.loop_view_capture_v1:
+            var condition_node_v1 = condition_cursor_v1
+            if condition_node_v1 < 0:
+                match cond.kind:
+                    case Copy(local): condition_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                    case Move(local): condition_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                    case Const(value, type_):
+                        var operand_constant_v1 = -1
+                        if operand_constant_v1 < 0:
+                            match value:
+                                case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                case Float(value):
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                        capture.accept(constant_writer_v1.real(value))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case FloatLexeme(value):
+                                    var lexeme_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                        capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case Str(value):
+                                    var constant_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(value.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                    if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                        capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                        operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        var operand_type_v1 = -1
+                        if operand_type_v1 < 0:
+                            match type_.kind:
+                                case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                case Bits(width, signed):
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                        capture.accept(type_writer_v1.scalar(0, width))
+                                        capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Opaque(name):
+                                    var type_text_v1: i64 = -1
+                                    match capture.owner().reserve_text(name.len()):
+                                        case Err(error): capture.fail(error)
+                                        case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                    if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                        capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                        operand_type_v1 = capture.node(type_writer_v1.finish())
+                                case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                        condition_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+            capture.charge_edges(2)
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermIf):
+                capture.accept(term_writer_v1.scalar(0, then_.id))
+                capture.accept(term_writer_v1.scalar(1, else_.id))
+                capture.accept(term_writer_v1.child(condition_node_v1))
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.If(cond, then_, else_))
 
-    me terminate_switch(value: MirOperand, targets: [SwitchCase], default: BlockId):
+    me terminate_switch(value: MirOperand, targets: [SwitchCase], default: BlockId, value_cursor_v1: i64 = -1, switch_cursor_v1: i64 = -1):
         """Terminate current block with switch.
 
         B5b dormant-bug fix: previously declared targets as [(i64, BlockId)]
@@ -811,10 +2058,108 @@ impl MirBuilder:
         [SwitchCase]). Zero callers existed when this was discovered; the
         signature is now corrected so the MatchCase MIR lowerer can call it.
         """
+        if val capture = self.loop_view_capture_v1:
+            if switch_cursor_v1 >= 0:
+                capture.accept(capture.prepare_terminator(switch_cursor_v1))
+            else:
+                var value_node_v1 = value_cursor_v1
+                if value_node_v1 < 0:
+                    match value.kind:
+                        case Copy(local): value_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+                        case Move(local): value_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandMove, local.id)
+                        case Const(value, type_):
+                            var operand_constant_v1 = -1
+                            if operand_constant_v1 < 0:
+                                match value:
+                                    case Int(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, value)
+                                    case Bool(value): operand_constant_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstBool, if value: 1 else: 0)
+                                    case Zero: operand_constant_v1 = capture.leaf(MirLoopShapeTagV1.ConstZero)
+                                    case Float(value):
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloat):
+                                            capture.accept(constant_writer_v1.real(value))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case FloatLexeme(value):
+                                        var lexeme_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(value.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): lexeme_text_v1 = capture.node(permit.publish(value))
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstFloatLexeme):
+                                            capture.accept(constant_writer_v1.text_id(0, lexeme_text_v1))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case Str(value):
+                                        var constant_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(value.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): constant_text_v1 = capture.node(permit.publish(value))
+                                        if val constant_writer_v1 = capture.start(MirLoopShapeTagV1.ConstText):
+                                            capture.accept(constant_writer_v1.text_id(0, constant_text_v1))
+                                            operand_constant_v1 = capture.node(constant_writer_v1.finish())
+                                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                            var operand_type_v1 = -1
+                            if operand_type_v1 < 0:
+                                match type_.kind:
+                                    case I8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI8)
+                                    case I16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI16)
+                                    case I32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI32)
+                                    case I64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeI64)
+                                    case U8: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU8)
+                                    case U16: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU16)
+                                    case U32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU32)
+                                    case U64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeU64)
+                                    case Bool: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeBool)
+                                    case Char: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeChar)
+                                    case Unit: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeUnit)
+                                    case Never: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeNever)
+                                    case F32: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF32)
+                                    case F64: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeF64)
+                                    case Vec4f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4f)
+                                    case Vec8f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8f)
+                                    case Vec4d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4d)
+                                    case Vec4i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec4i)
+                                    case Vec8i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8i)
+                                    case Vec16f: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16f)
+                                    case Vec8d: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec8d)
+                                    case Vec16i: operand_type_v1 = capture.leaf(MirLoopShapeTagV1.TypeVec16i)
+                                    case Bits(width, signed):
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeBits):
+                                            capture.accept(type_writer_v1.scalar(0, width))
+                                            capture.accept(type_writer_v1.scalar(1, if signed: 1 else: 0))
+                                            operand_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Opaque(name):
+                                        var type_text_v1: i64 = -1
+                                        match capture.owner().reserve_text(name.len()):
+                                            case Err(error): capture.fail(error)
+                                            case Ok(permit): type_text_v1 = capture.node(permit.publish(name))
+                                        if val type_writer_v1 = capture.start(MirLoopShapeTagV1.TypeOpaque):
+                                            capture.accept(type_writer_v1.text_id(0, type_text_v1))
+                                            operand_type_v1 = capture.node(type_writer_v1.finish())
+                                    case Struct(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeStruct, symbol.id)
+                                    case Enum(symbol): operand_type_v1 = capture.scalar_leaf(MirLoopShapeTagV1.TypeEnum, symbol.id)
+                                    case _: capture.fail(MirLoopShapeErrorV1.Incomplete)
+                            value_node_v1 = capture.constant_operand(operand_constant_v1, operand_type_v1)
+                capture.charge_edges(targets.len() + 1)
+                if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermSwitch):
+                    capture.accept(term_writer_v1.scalar(0, default.id))
+                    capture.accept(term_writer_v1.child(value_node_v1))
+                    for arm_v1 in targets:
+                        val case_value_v1 = capture.scalar_leaf(MirLoopShapeTagV1.ConstInt, arm_v1.value)
+                        if val arm_writer_v1 = capture.start(MirLoopShapeTagV1.SwitchArm):
+                            capture.accept(arm_writer_v1.scalar(0, arm_v1.target.id))
+                            capture.accept(arm_writer_v1.child(case_value_v1))
+                            capture.accept(term_writer_v1.child(capture.node(arm_writer_v1.finish())))
+                    capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Switch(value, targets, default))
 
     me terminate_unreachable():
         """Terminate current block as unreachable."""
+        if val capture = self.loop_view_capture_v1:
+            capture.charge_edges(0)
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermUnreachable):
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Unreachable)
 
     me terminate_abort(message: text):
@@ -831,14 +2176,30 @@ impl MirBuilder:
         end of the pipeline. Backends lower Abort to a hard trap: INT3 on
         x86_64, BRK #0 on aarch64, EBREAK on riscv32/64.
         """
+        if val capture = self.loop_view_capture_v1:
+            var message_text_v1: i64 = -1
+            match capture.owner().reserve_text(message.len()):
+                case Err(error): capture.fail(error)
+                case Ok(permit): message_text_v1 = capture.node(permit.publish(message))
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermAbort):
+                capture.accept(term_writer_v1.text_id(0, message_text_v1))
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Abort(message))
 
     me terminate_throw(payload: MirOperand, type_tag: MirOperand):
         """Start recoverable exception propagation without allocation."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return
         self.set_terminator(MirTerminator.Throw(payload, type_tag))
 
     me terminate_resume(payload: MirOperand, type_tag: MirOperand):
         """Resume propagation after running a cleanup pad."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return
         self.set_terminator(MirTerminator.Resume(payload, type_tag))
 
     me set_unwind_target(target: BlockId?, payload: LocalId?, type_tag: LocalId?):
@@ -848,6 +2209,8 @@ impl MirBuilder:
 
     me set_terminator(term: MirTerminator):
         """Set terminator for current block."""
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         if self.enum_semantic_recording:
             if self.enum_semantic_site_calls.len() + self.enum_semantic_terms.len() >= 65536:
                 self.enum_semantic_site_overflow = true
@@ -856,7 +2219,11 @@ impl MirBuilder:
                 self.enum_semantic_terms.push(term)
                 self.enum_semantic_term_nodes.push(self.enum_semantic_node)
         self.finalize_block()
+        if val capture = self.loop_view_capture_v1:
+            capture.accept(capture.consume_terminator(self.current_block.id))
 
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         for i in 0..self.blocks.len():
             if self.blocks[i].id.id == self.current_block.id:
                 var block = self.blocks[i]
@@ -878,7 +2245,7 @@ impl MirBuilder:
     # Convenience Methods (for interpreter compatibility)
     # ========================================================================
 
-    me begin_simple_function(name: text, return_type_kind: text):
+    me begin_simple_function(name: text, return_type_kind: text, signature_cursor_v1: i64 = -1):
         """Begin a function with simple return type.
         return_type_kind: "i64", "f64", "bool", "unit", "void"
         """
@@ -892,7 +2259,7 @@ impl MirBuilder:
 
         val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
         val sym = SymbolId(id: self.module.functions.len())
-        self.begin_function(sym, name, sig, nil)
+        self.begin_function(sym, name, sig, nil, signature_cursor_v1)
 
     me emit_const_str(value: text) -> LocalId:
         """Emit a string constant and return its local."""
@@ -903,6 +2270,9 @@ impl MirBuilder:
 
     me emit_void_call(func_name: text, args: [LocalId]):
         """Emit a void call to a named function."""
+        if val capture = self.loop_view_capture_v1:
+            capture.fail(MirLoopShapeErrorV1.Unsupported)
+            return
         val func_type = MirType(kind: MirTypeKind.Unit)
         var operands: [MirOperand] = []
         for a in args:
@@ -925,12 +2295,26 @@ impl MirBuilder:
 
     me terminate_return_copy(local: LocalId):
         """Terminate with return copying a local."""
+        if val capture = self.loop_view_capture_v1:
+            val operand_node_v1 = capture.scalar_leaf(MirLoopShapeTagV1.OperandCopy, local.id)
+            capture.charge_edges(0)
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermRet):
+                capture.accept(term_writer_v1.child(operand_node_v1))
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Ret(
             MirOperand(kind: MirOperandKind.Copy(local))
         ))
 
     me terminate_return_void():
         """Terminate with void return."""
+        if val capture = self.loop_view_capture_v1:
+            capture.charge_edges(0)
+            if val term_writer_v1 = capture.start(MirLoopShapeTagV1.TermRet):
+                capture.accept(capture.prepare_terminator(capture.node(term_writer_v1.finish())))
+        if val capture = self.loop_view_capture_v1:
+            if not capture.is_active(): return
         self.set_terminator(MirTerminator.Ret(None))
 
 # ============================================================================

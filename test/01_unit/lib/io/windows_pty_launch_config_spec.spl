@@ -1,0 +1,100 @@
+"""Configured Windows launch values. Authored source; execution NOT_RUN."""
+use std.spec.{describe, it, expect}
+use std.sys.pty_launch.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1}
+use std.nogc_sync_mut.io.windows_pty_launch_config.{windows_pty_launch_command_v1, windows_pty_launch_validate_v1, windows_pty_launch_utf16_units_v1}
+use std.common.text_bytes.{bytes_to_text, boxed_text_bytes_checked}
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_utf16_units_v1, windows_process_quote_arg_bytes_v1}
+
+fn launch(mode: PtyLaunchModeV1) -> PtyLaunchV1:
+    PtyLaunchV1(mode: mode, cwd: nil, environment: [])
+
+describe "Structured Windows PTY launch admission":
+    it "REQ-WPL-001 quotes empty arguments, literal quotes and trailing slashes for CRT Exec":
+        val mode = PtyLaunchModeV1.Exec("C:\\Program Files\\probe.exe", ["", "a b", "end\\", "q\"x", "한글😀"])
+        expect(windows_pty_launch_command_v1(mode)).to_equal("\"C:\\Program Files\\probe.exe\" \"\" \"a b\" \"end\\\\\" \"q\\\"x\" \"한글😀\"")
+        expect(windows_pty_launch_validate_v1(launch(mode))).to_equal("")
+
+    it "REQ-WPL-001 leaves shell operators and percent text literal in Exec arguments":
+        val mode = PtyLaunchModeV1.Exec("C:\\probe.exe", ["&echo injected", "%PATH%", "a|b"])
+        expect(windows_pty_launch_command_v1(mode)).to_equal("\"C:\\probe.exe\" \"&echo injected\" \"%PATH%\" \"a|b\"")
+
+    it "REQ-WPL-002 preserves raw Shell syntax inside explicit cmd S C wrapper":
+        val command = "\"C:\\Program Files\\probe.exe\" \"a b\" && echo %PATH%"
+        expect(windows_pty_launch_command_v1(PtyLaunchModeV1.Shell(command))).to_equal("\"cmd.exe\" /D /S /C \"" + command + "\"")
+        expect(windows_pty_launch_validate_v1(launch(PtyLaunchModeV1.Shell(command)))).to_equal("")
+
+    it "REQ-WPL-003 validates cwd and environment without banning Unicode or empty values":
+        val request = PtyLaunchV1(mode: PtyLaunchModeV1.Exec("C:\\probe.exe", []), cwd: Some("C:\\space 한글"),
+            environment: [PtyEnvironmentChangeV1.Set("이름", "😀"), PtyEnvironmentChangeV1.Set("Empty", ""), PtyEnvironmentChangeV1.Remove("pAtH")])
+        expect(windows_pty_launch_validate_v1(request)).to_equal("")
+
+    it "REQ-WPL-004 rejects public attempts to change hidden drive keys":
+        var request = launch(PtyLaunchModeV1.Exec("C:\\probe.exe", []))
+        request.environment = [PtyEnvironmentChangeV1.Set("=C:", "C:\\other")]
+        expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows environment name")
+        request.environment = [PtyEnvironmentChangeV1.Remove("=C:")]
+        expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows environment name")
+
+    it "REQ-WPL-005 rejects NUL independently in executable, argv, cwd and environment":
+        expect(windows_pty_launch_validate_v1(launch(PtyLaunchModeV1.Exec("C:\\bad\0.exe", [])))).to_equal("invalid Windows executable")
+        expect(windows_pty_launch_validate_v1(launch(PtyLaunchModeV1.Exec("C:\\probe.exe", ["a\0b"])))).to_equal("invalid Windows argument")
+        var request = launch(PtyLaunchModeV1.Exec("C:\\probe.exe", []))
+        request.cwd = Some("C:\\a\0b")
+        expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows working directory")
+        request.cwd = nil
+        request.environment = [PtyEnvironmentChangeV1.Set("KEY", "a\0b")]
+        expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows environment value")
+
+    it "REQ-WPL-005 counts supplementary UTF16 pairs instead of UTF8 bytes":
+        expect(windows_pty_launch_utf16_units_v1("A한😀")).to_equal(4)
+        expect(windows_pty_launch_utf16_units_v1("")).to_equal(0)
+        expect(windows_pty_launch_utf16_units_v1("\0")).to_equal(-1)
+
+    it "REQ-WPL-005 rejects empty explicit cwd and excessive argument count":
+        var request = launch(PtyLaunchModeV1.Exec("C:\\probe.exe", []))
+        request.cwd = Some("")
+        expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows working directory")
+        request.cwd = nil
+        request.mode = PtyLaunchModeV1.Exec("C:\\probe.exe", [""; 257])
+        expect(windows_pty_launch_validate_v1(request)).to_equal("Windows argument count bound exceeded")
+
+    it "REQ-WPL-005 rejects the complete quoted command when it exceeds the UTF16 budget":
+        var bytes: [u8] = [0u8; 65536]
+        for index in 0..16384:
+            bytes[index * 4] = 240u8
+            bytes[index * 4 + 1] = 159u8
+            bytes[index * 4 + 2] = 152u8
+            bytes[index * 4 + 3] = 128u8
+        val argument = bytes_to_text(bytes)
+        expect(windows_pty_launch_validate_v1(launch(PtyLaunchModeV1.Exec("C:\\probe.exe", [argument])))).to_equal("Windows command line UTF16 bound exceeded")
+
+    it "REQ-WPL-006 rejects overlong, truncated, surrogate and out-of-range UTF8 public text":
+        val malformed = [[192u8, 175u8], [226u8, 130u8], [237u8, 160u8, 128u8], [244u8, 144u8, 128u8, 128u8], [128u8]]
+        for bytes in malformed:
+            val value = bytes_to_text(bytes)
+            expect(boxed_text_bytes_checked(value).unwrap()).to_equal(bytes)
+            expect(windows_pty_launch_utf16_units_v1(value)).to_equal(-1)
+            expect(windows_pty_launch_validate_v1(launch(PtyLaunchModeV1.Exec("C:\\probe.exe", [value])))).to_equal("invalid Windows argument")
+            var request = launch(PtyLaunchModeV1.Exec("C:\\probe.exe", []))
+            request.environment = [PtyEnvironmentChangeV1.Set("KEY", value)]
+            expect(windows_pty_launch_validate_v1(request)).to_equal("invalid Windows environment value")
+
+    it "REQ-WPL-006 quotes exact malformed bytes until strict wide admission can reject them":
+        val value = bytes_to_text([192u8, 175u8, 92u8])
+        expect(windows_process_quote_arg_bytes_v1(value).unwrap()).to_equal([34u8, 192u8, 175u8, 92u8, 92u8, 34u8])
+
+    it "REQ-WPL-006 allows internal NUL-separated environment blocks while refusing public NUL":
+        expect(windows_process_utf16_units_v1("A=한글😀\0\0", true)).to_equal(8)
+        expect(windows_process_utf16_units_v1("A=한글😀\0\0", false)).to_equal(-1)
+
+    it "REQ-WPL-006 preserves the existing near-1MiB multibyte environment allowance":
+        var bytes: [u8] = [0u8; 1048470]
+        for index in 0..349490:
+            bytes[index * 3] = 237u8
+            bytes[index * 3 + 1] = 149u8
+            bytes[index * 3 + 2] = 156u8
+        val value = bytes_to_text(bytes)
+        expect(windows_pty_launch_utf16_units_v1(value)).to_equal(349490)
+        var request = launch(PtyLaunchModeV1.Exec("C:\\probe.exe", []))
+        request.environment = [PtyEnvironmentChangeV1.Set("BIG", value)]
+        expect(windows_pty_launch_validate_v1(request)).to_equal("")

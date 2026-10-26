@@ -503,7 +503,18 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_transient_heap_promote" => value::rt_transient_heap_promote as *const () as usize,
         "rt_transient_heap_promote_share_begin" => value::rt_transient_heap_promote_share_begin as *const () as usize,
         "rt_transient_heap_promote_share_end" => value::rt_transient_heap_promote_share_end as *const () as usize,
+        "rt_session_heap_begin" => value::rt_session_heap_begin as *const () as usize,
+        "rt_session_heap_end" => value::rt_session_heap_end as *const () as usize,
+        "rt_session_alloc_begin" => value::rt_session_alloc_begin as *const () as usize,
+        "rt_session_alloc_end" => value::rt_session_alloc_end as *const () as usize,
+        "rt_transient_heap_adopt" => value::rt_transient_heap_adopt as *const () as usize,
+        "rt_session_heap_id" => value::rt_session_heap_id as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
+        "rt_rc_share" => value::rt_rc_share as *const () as usize,
+        "rt_rc_retain" => value::rt_rc_retain as *const () as usize,
+        "rt_rc_release" => value::rt_rc_release as *const () as usize,
+        "rt_rc_count" => value::rt_rc_count as *const () as usize,
+        "rt_heap_graph_bytes" => value::rt_heap_graph_bytes as *const () as usize,
         // Diagnostic heap counters. Registered here as well as in
         // codegen::runtime_sffi so a JIT-hosted call resolves to the real
         // counter instead of silently returning nil (which is
@@ -538,6 +549,11 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_dict_clear" => value::rt_dict_clear as *const () as usize,
         "rt_dict_keys" => value::rt_dict_keys as *const () as usize,
         "rt_dict_values" => value::rt_dict_values as *const () as usize,
+        "rt_dict_scope_read_bound_v1" => value::rt_dict_scope_read_bound_v1 as *const () as usize,
+        "rt_dict_scope_read_owner_v1" => value::rt_dict_scope_read_owner_v1 as *const () as usize,
+        "rt_dict_scope_read_epoch_v1" => value::rt_dict_scope_read_epoch_v1 as *const () as usize,
+        "rt_dict_scope_read_meta_v1" => value::rt_dict_scope_read_meta_v1 as *const () as usize,
+        "rt_dict_scope_read_slot_v1" => value::rt_dict_scope_read_slot_v1 as *const () as usize,
 
         // Host/GPU lane marker runtime bridge
         "rt_host_gpu_lane_event" => host_gpu_lane::rt_host_gpu_lane_event as *const () as usize,

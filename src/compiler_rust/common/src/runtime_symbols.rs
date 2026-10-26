@@ -410,7 +410,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_heap_promote",
     "rt_transient_heap_promote_share_begin",
     "rt_transient_heap_promote_share_end",
+    "rt_session_heap_begin",
+    "rt_session_heap_end",
+    "rt_session_alloc_begin",
+    "rt_session_alloc_end",
+    "rt_transient_heap_adopt",
+    "rt_session_heap_id",
     "rt_transient_array_scope_end",
+    "rt_rc_share",
+    "rt_rc_retain",
+    "rt_rc_release",
+    "rt_rc_count",
+    "rt_heap_graph_bytes",
     // Unconditionally defined in value/heap.rs and emitted by codegen; absent
     // from this list until 2026-08-01, so any module tagging heap ownership
     // silently fell back to the interpreter.
@@ -491,6 +502,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dict_clear",
     "rt_dict_keys",
     "rt_dict_values",
+    "rt_dict_scope_read_bound_v1",
+    "rt_dict_scope_read_owner_v1",
+    "rt_dict_scope_read_epoch_v1",
+    "rt_dict_scope_read_meta_v1",
+    "rt_dict_scope_read_slot_v1",
     // for-in iteration over dicts/arrays (cranelift for-loop lowering)
     "rt_dict_entries",
     "rt_for_iterable",

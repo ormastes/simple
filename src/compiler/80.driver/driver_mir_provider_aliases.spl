@@ -1,0 +1,134 @@
+# Deduplicate only admitted aliases of one physical HIR provider.
+# Logical module lookup remains untouched; provenance checks stay mandatory.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_codec_key_order.{hc_order_text_keys_v1}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_effect_kind,
+    hc_enc_function_attr, hc_enc_export_attr, hc_enc_visibility}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_retained_identities_by_path_v1}
+
+pub fn driver_mir_extern_contract_v1(function: HirFunction) -> Result<text, text>:
+    # No body traversal, source scan, declaration/parameter SymbolId, or
+    # top-level declaration span contributes. Existing type encodings retain
+    # type-origin spans and nominal identities: changed origins conservatively
+    # refuse coalescence instead of erasing type authority. Actual aliases of
+    # one lowered source share those origins. Attribute encoding remains the
+    # existing complete contract, not a second list of ABI/codegen flags.
+    if not function.is_extern:
+        return Err("MIR provider alias contract requires an extern declaration")
+    if function.verification_contract != nil or function.has_driver_manifest_attr or
+            function.has_vhdl_metadata:
+        return Err("MIR provider alias has unsupported extern contract metadata")
+    val writer = HirCodecWriter.create_canonical()
+    writer.put_text(function.name)
+    writer.put_bool(function.is_extern)
+    writer.put_bool(function.is_async)
+    writer.put_bool(function.is_static)
+    writer.put_bool(function.is_public)
+    writer.put_bool(function.is_method)
+    writer.put_bool(function.is_mutable)
+    writer.put_bool(function.is_const)
+    writer.put_bool(function.is_generic_template)
+    writer.put_bool(function.has_suspension)
+    writer.put_bool(function.is_gpu_kernel)
+    writer.put_text(function.gpu_target)
+    writer.put_text(function.gpu_backend_order)
+    hc_enc_visibility(writer, function.visibility)
+    hc_enc_function_attr(writer, function.func_attr)
+    writer.put_bool(function.has_export_attr)
+    if function.has_export_attr:
+        hc_enc_export_attr(writer, function.export_attr)
+    writer.put_i64(function.type_params.len())
+    for parameter in function.type_params:
+        writer.put_text(parameter.name)
+        writer.put_i64(parameter.bounds.len())
+        for bound in parameter.bounds:
+            hc_enc_hir_type(writer, bound)
+        writer.put_bool(parameter.has_default)
+        if parameter.has_default:
+            hc_enc_hir_type(writer, parameter.default)
+    writer.put_i64(function.params.len())
+    for parameter in function.params:
+        writer.put_text(parameter.name)
+        writer.put_bool(parameter.is_mutable)
+        writer.put_bool(parameter.has_default)
+        if parameter.has_default:
+            # Default expressions can carry relocated local IDs. There is no
+            # admitted extern-expression equality contract at this boundary.
+            return Err("MIR provider alias has an unsupported extern parameter default")
+        hc_enc_hir_type(writer, parameter.type_)
+    hc_enc_hir_type(writer, function.return_type)
+    writer.put_i64(function.effects.len())
+    for effect in function.effects:
+        hc_enc_effect_kind(writer, effect.kind)
+    val encoded = writer.finish()
+    if not writer.ok or encoded == "":
+        return Err("MIR provider alias extern contract encoding refused: " + writer.unsupported)
+    Ok(encoded)
+
+pub fn driver_mir_provider_extern_surface_v1(module: HirModule) -> Result<text, text>:
+    var contracts: Dict<text, text> = {}
+    for declaration in module.functions.values():
+        if not declaration.is_extern:
+            continue
+        if contracts.has(declaration.name):
+            return Err("MIR provider alias has duplicate extern declaration: " + declaration.name)
+        val contract = driver_mir_extern_contract_v1(declaration)
+        if contract.is_err(): return Err(contract.unwrap_err())
+        contracts[declaration.name] = contract.unwrap()
+    val writer = HirCodecWriter.create_canonical()
+    val names = hc_order_text_keys_v1(contracts.keys())
+    writer.put_i64(names.len())
+    for name in names:
+        writer.put_text(name)
+        writer.put_text(contracts[name])
+    val encoded = writer.finish()
+    if not writer.ok or encoded == "":
+        return Err("MIR provider alias extern surface encoding refused")
+    Ok(encoded)
+
+pub fn driver_mir_checked_provider_alias_indices_v1(modules: [HirModule],
+        canonical_paths: [text], retained_paths: [text], retained_identities: [text]
+) -> Result<[i64], text>:
+    if modules.len() != canonical_paths.len():
+        return Err("MIR provider alias inventory shape mismatch")
+    val admission = driver_mir_retained_identities_by_path_v1(retained_paths, retained_identities)
+    if admission.is_err(): return Err(admission.unwrap_err())
+    val identities = admission.unwrap()
+    var first_by_owner: Dict<text, i64> = {}
+    var owner_by_path: Dict<text, text> = {}
+    var surfaces: Dict<i64, text> = {}
+    var selected: [i64] = []
+    var index = 0
+    while index < modules.len():
+        val module: HirModule = modules[index]
+        val owner = mir_provider_callable_key(module.name, "")
+        val path = canonical_paths[index]
+        if path != "" and owner_by_path.has(path) and owner_by_path[path] != owner:
+            return Err("MIR provider physical source has conflicting owners: " + path)
+        if first_by_owner.has(owner):
+            if owner == "#":
+                return Err("MIR provider alias lacks canonical declaration owner")
+            val first = first_by_owner[owner]
+            if path == "" or path != canonical_paths[first]:
+                return Err("MIR provider alias physical ownership conflict for " + owner)
+            # A same-looking path is insufficient: join to the phase-1 full
+            # content authority, rejecting absent or contradictory admission.
+            if not identities.has(path):
+                return Err("MIR provider alias lacks admitted source identity: " + path)
+            if not surfaces.has(first):
+                val first_contract = driver_mir_provider_extern_surface_v1(modules[first])
+                if first_contract.is_err(): return Err(first_contract.unwrap_err())
+                surfaces[first] = first_contract.unwrap()
+            val incoming = driver_mir_provider_extern_surface_v1(module)
+            if incoming.is_err(): return Err(incoming.unwrap_err())
+            if incoming.unwrap() != surfaces[first]:
+                return Err("MIR provider alias extern contract conflict for " + owner)
+        else:
+            first_by_owner[owner] = index
+            if path != "": owner_by_path[path] = owner
+            selected = selected.push(index)
+        index = index + 1
+    Ok(selected)

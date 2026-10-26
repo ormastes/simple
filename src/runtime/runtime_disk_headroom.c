@@ -1,4 +1,4 @@
-/* Shared narrow host provider: also linked into the Rust runtime archive.
+/* Shared narrow host provider (native core-C bundle). The Rust seed archive gets its definition from the Rust twin in file_ops.rs, not from this file.
  * The value/text accessors are public ABI; no C or Rust heap layout is assumed.
  */
 #include "runtime.h"

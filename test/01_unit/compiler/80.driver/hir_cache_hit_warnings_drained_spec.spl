@@ -1,0 +1,24 @@
+# A HIR cache hit's replayed warnings must not stay in the retained
+# hir_cache_last_warnings root: MIR production lookup refuses to start while it
+# is non-empty ("MIR production lookup requires an unoccupied owned boundary:
+# cached warning count=9", hir_mir_archive_consumer_v1.spl). Both hit-replay
+# sites in driver_hir_pipeline_lowering.spl drain it after replay.
+use std.spec.*
+use std.io_runtime.{file_read}
+
+fn count_of(hay: text, needle: text) -> i64:
+    hay.split(needle).len() - 1
+
+val SRC = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+describe "HIR cache hit warning replay":
+    it "drains the retained warnings root at every replay site":
+        val src = file_read(SRC)
+        val replays = count_of(src, "for hir_cached_warning in hir_cache_last_warnings():")
+        val drains = count_of(src, "self.ctx.add_warning(hir_cached_warning)\n                # Replayed: drain")
+        expect(replays).to_equal(2)
+        expect(drains).to_equal(replays)
+
+    it "drains only outside a transient scope":
+        val src = file_read(SRC)
+        expect(count_of(src, "if transient_array_scope_state_v1() == 0:\n                    hir_cache_clear_last_warnings()")).to_equal(2)

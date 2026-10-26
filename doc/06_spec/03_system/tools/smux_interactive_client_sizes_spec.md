@@ -14,13 +14,14 @@ rendered native terminal clients, and neither row is an execution PASS.
 |---|---|---|
 | Different client dimensions | A 100x30 and a 40x12 attachment share a 40x12 canvas; a different session's 10x4 attachment has no effect; repeated frame requests preserve dimensions | TEST_BLOCKED |
 | Resize and detach | Removing 40x12 expands to 100x30; updating remaining attachment reflows to 72x20; selected layout persists; foreign-session identity theft and invalid dimensions are refused | TEST_BLOCKED |
-| Interleaved split and sibling frame | A real split invalidates named geometry; a sibling frame reflows manual geometry even with unchanged canvas dimensions, keeping the client connected | TEST_BLOCKED |
+| Interleaved split and sibling frame | A vertical split on 20x6 retains the original pane at (0,0,9,6) and new pane at (10,0,10,6); two sibling frame requests preserve both IDs, all boundaries, pane sizes and manual layout while both clients remain attached | TEST_BLOCKED |
 
 Preserve actual executed scenario/assertion counts and regenerate this manual
 through docgen with the qualified rebuilt runner. Native acceptance additionally
 requires two real clients of differing console sizes, live resize notification,
 correctly clipped output and owner survival after either client detaches.
 
-The source short-circuits unchanged named geometry before applying a layout.
+The source short-circuits unchanged canvas dimensions before applying a layout;
+frame capture validates the persisted manual or named rectangle plan.
 These scenarios do not instrument native resize calls; the general resize
 metric does not count layout application and cannot prove their absence.

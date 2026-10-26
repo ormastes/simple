@@ -67,7 +67,31 @@ native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
 files on Windows; retain strict policy/PATH checks. A successful focused
 resolver probe does not admit the seed generation or prove Stage 4 readiness.
 
-## Windows MSVC host: install, antivirus, traps (2026-09-24)
+## Windows default lane: MinGW clang (2026-10-25)
+
+**Default Windows build = llvm-mingw clang + ld.lld + compiler-rt/libunwind,
+Rust `x86_64-pc-windows-gnullvm`. Do not reach for MSVC** unless the user asks
+for `--msvc`. Setup and the full command are in
+`doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`
+§ "Default lane".
+
+- Install: `sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw`, then
+  `rustup set default-host x86_64-pc-windows-gnullvm` and install the pinned
+  channel. The bootstrap runs Cargo under `env -i`, so `RUSTUP_TOOLCHAIN` is
+  dropped; only rustup's `default_host_tuple` selects the host.
+- Entry: `bash scripts/bootstrap/bootstrap-windows.sh --full-bootstrap
+  --stop-after-stage2 --backend=cranelift`. Cranelift is needed unless a MinGW
+  LLVM 23 prefix with `lib/libLLVM-23.dll.a` exists.
+- What each failure means:
+  - `unable to find library -lgcc_eh`: the rustup host is still windows-gnu.
+  - `unable to find library -lunwind`: llvm-mingw is not installed.
+  - `bootstrap-cache-error ... producer_sha256`: the seed changed, so rerun
+    with `--invalidate-cache=stage2`.
+  - `disk-space(8GiB<20)`: C: is full, so move `SIMPLE_USER_STORAGE_ROOT`,
+    `TMPDIR`, `TMP` and `TEMP` to another drive.
+- Never fix `-lgcc` by putting a GCC (scoop `mingw-winlibs`) on PATH.
+
+## Windows MSVC host (opt-in `--msvc` lane): install, antivirus, traps (2026-09-24)
 
 The guide is
 `doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`.
@@ -866,4 +890,4 @@ environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skil
 - 2026-10-25: Stage 3 runs from a frozen admitted Stage 2 (source fixes need a Stage 2 rebuild); #4498 closure-struct prescan, #4499 inner `/src/` naming, Windows `mswsock` link (#4430). Per-file src to obj is now the default; opt out with `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`. Knobs and cache protocol: `doc/07_guide/tooling/bootstrap_options.md`.
 - 2026-10-25 (later): Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs.
 
-- Per-file pipeline flip readiness (P-F): unset `SIMPLE_FILE_WORKERS` takes `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` (`native_file_worker_v1.spl`, today `"0"`) -- the flip is that one line; `SIMPLE_FILE_WORKERS=0` is the opt-out. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash, resume-compatible; worker gets `per-file:fw=0|1`). Prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (obj_done(A) < hir_start(B), first-object ms, objects/min). See `doc/07_guide/tooling/bootstrap_options.md`.
+- Per-file pipeline default (P-F): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`) and selects the true `src → obj` worker pool. `SIMPLE_FILE_WORKERS=0` is the opt-out; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` preserves the whole-program route. Stage 3 scripts pass a set value (0|1) through and hash it into the args receipt (unset = unchanged hash; worker gets `per-file:fw=0|1`). The shared default flip is not native qualification evidence: prove overlap with `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>` (`obj_done(A) < hir_start(B)`, first-object ms, objects/min) after a Stage 3 self-rebuild. See `doc/07_guide/tooling/bootstrap_options.md`.

@@ -1,0 +1,112 @@
+# Bounded sparse loss markers: each row holds unique affected column numbers.
+# An overflow is recoverable when the affected content leaves the retained view.
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+
+pub fn vt_loss_new(rows: i64) -> [[i64]]:
+    var out: [[i64]] = []
+    for i in 0..rows: out.push([])
+    out
+
+pub fn vt_loss_copy(rows: [[i64]]) -> [[i64]]:
+    var out: [[i64]] = []
+    for row in rows:
+        var copy: [i64] = []
+        for col in row: copy.push(col)
+        out.push(copy)
+    out
+
+pub fn vt_loss_equal(a: [[i64]], b: [[i64]]) -> bool:
+    if a.len() != b.len(): return false
+    for r in 0..a.len():
+        if a[r].len() != b[r].len(): return false
+        for c in 0..a[r].len():
+            if a[r][c] != b[r][c]: return false
+    true
+
+pub fn vt_loss_note(rows: [[i64]], row: i64, col: i64) -> [[i64]]:
+    var out = rows
+    var line = out[row]
+    for existing in line:
+        if existing == col: return out
+    line.push(col)
+    out[row] = line
+    out
+
+pub fn vt_loss_clear(rows: [[i64]], row: i64, first: i64, last: i64) -> [[i64]]:
+    var out = rows
+    var line: [i64] = []
+    for col in rows[row]:
+        if col < first or col >= last: line.push(col)
+    out[row] = line
+    out
+
+pub fn vt_loss_shift(rows: [[i64]], bottom: i64, at: i64, count: i64, down: bool) -> [[i64]]:
+    var out = rows
+    for k in 0..count:
+        if down:
+            var r = bottom
+            while r > at:
+                out[r] = out[r - 1]
+                r = r - 1
+            out[at] = []
+        else:
+            var r = at
+            while r < bottom:
+                out[r] = out[r + 1]
+                r = r + 1
+            out[bottom] = []
+    out
+
+pub fn vt_loss_trim(rows: [[i64]], count: i64) -> [[i64]]:
+    if count <= 0: return []
+    if rows.len() > count: return rows[rows.len() - count:]
+    rows
+
+pub fn vt_loss_append(rows: [[i64]], line: [i64], count: i64) -> [[i64]]:
+    if count <= 0: return []
+    var out = vt_loss_trim(rows, count - 1)
+    out.push(line)
+    out
+
+pub fn vt_loss_fit(rows: [[i64]], height: i64, width: i64) -> [[i64]]:
+    var out = vt_loss_new(height)
+    for r in 0..height:
+        if r < rows.len():
+            var line: [i64] = []
+            for c in rows[r]:
+                if c < width: line.push(c)
+            out[r] = line
+    out
+
+pub fn vt_loss_edit(rows: [[i64]], row: i64, column: i64, count: i64, width: i64, insert: bool) -> [[i64]]:
+    var out = rows
+    var line: [i64] = []
+    for c in rows[row]:
+        if c < column: line.push(c)
+        elif insert:
+            if c + count < width: line.push(c + count)
+        elif c >= column + count: line.push(c - count)
+    out[row] = line
+    out
+
+pub struct VtTailRetention:
+    content: text
+    truncated: bool
+
+# Trim history by lines, then bytes, advancing a byte cut to the next UTF-8
+# scalar boundary. Normal bounded-history eviction is observable, not fatal.
+pub fn vt_tail_retain(old: text, incoming: text) -> VtTailRetention:
+    var joined = old + incoming
+    var truncated = false
+    val lines = joined.split("\n")
+    if lines.len() > 200:
+        joined = lines[lines.len() - 200:].join("\n")
+        truncated = true
+    val bytes = text_to_bytes(joined)
+    if bytes.len() > 1048576:
+        var start = bytes.len() - 1048576
+        while start < bytes.len() and bytes[start] >= 128 and bytes[start] < 192:
+            start = start + 1
+        joined = bytes_to_text(bytes[start:])
+        truncated = true
+    VtTailRetention(content: joined, truncated: truncated)

@@ -1,0 +1,208 @@
+"""
+REQ-CMUX-002/004/005/008/010: checked pane closure, focus and final-owner lifetime.
+Source-authored NOT_RUN. Pure state refusals are not native close-failure proof.
+The final two cases require real Windows piped/ConPTY children and Phase 3.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+# @cover src/os/apps/smux/pane_lifecycle.spl 80%
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.window_layout_service.{window_layout_rects}
+use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state, remove_closed_pane_state,
+    pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_new_window,
+    smux_list_sessions, smux_list_windows, smux_list_panes, smux_list_clients,
+    smux_attach, smux_close_pane, smux_kill_session, smux_window_closing,
+    smux_split_pane, smux_focus_pane, smux_focused_pane, smux_rollback_split,
+    smux_pane_spawn, smux_pane_spawn_pty, smux_send_command, smux_capture}
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.sosix.pty.{sosix_pty_cleanup_pending}
+use std.sosix.process.{sosix_process_exists}
+
+fn pane_lifecycle_state() -> ServiceState:
+    var st = ServiceState.empty().with_next_id(91)
+    st = st.add_session(MuxSession.create("s", "session"))
+    val rects = [MuxRect(pane_id: "p1", col: 0, row: 0, cols: 39, rows: 24),
+        MuxRect(pane_id: "p2", col: 40, row: 0, cols: 40, rows: 24)]
+    st = st.add_window(MuxWindow.create("w", "s", "window").with_geometry(rects, 80, 24))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p1", "w", "s")).with_focus(true))
+    st = st.add_pane(PaneRecord.create(MuxPane.create("p2", "w", "s")).feed("survivor"))
+    return st
+
+fn pane_lifecycle_cleanup(session: text) -> bool:
+    var present = false
+    for item in smux_list_sessions():
+        if item.id == session: present = true
+    if not present: return true
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var result = smux_kill_session(session)
+    var attempts = 0
+    while result.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        result = smux_kill_session(session)
+        attempts = attempts + 1
+    return result.is_ok()
+
+fn pane_lifecycle_output(session: text, window: text, pane: text, marker: text) -> text:
+    var output = ""
+    var attempts = 0
+    while attempts < 80 and not output.contains(marker):
+        val captured = smux_capture(session, window, pane, 30)
+        if captured.is_ok(): output = captured.unwrap().content
+        if not output.contains(marker): sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return output
+
+fn pane_lifecycle_native_case(use_pty: bool):
+    smux_reset_for_test()
+    val session = smux_create_session("checked-pane")
+    val window = smux_list_windows(session.id)[0]
+    val first = smux_list_panes(session.id, window.id)[0]
+    val second = smux_split_pane(session.id, window.id, first.id, "vertical").unwrap()
+    step("Spawn two real owned children; observe actual command output before closing")
+    val target = if use_pty: smux_pane_spawn_pty(session.id, window.id, first.id, "cmd.exe /Q")
+        else: smux_pane_spawn(session.id, window.id, first.id, "cmd.exe", ["/Q"])
+    val survivor = if use_pty: smux_pane_spawn_pty(session.id, window.id, second.id, "cmd.exe /Q")
+        else: smux_pane_spawn(session.id, window.id, second.id, "cmd.exe", ["/Q"])
+    val first_sent = smux_send_command(session.id, window.id, first.id, "set /a 3141+2718")
+    val first_output = pane_lifecycle_output(session.id, window.id, first.id, "5859")
+    # These Windows providers return real OS PIDs. Query arbitrary-PID presence through the existing host owner,
+    # independently of the pane/pipe registry that successful close removes.
+    val target_pid = if target.is_ok(): target.unwrap() else: -1
+    val survivor_pid = if survivor.is_ok(): survivor.unwrap() else: -1
+    val target_exists_before = target_pid > 0 and sosix_process_exists(target_pid)
+    val survivor_exists_before = survivor_pid > 0 and sosix_process_exists(survivor_pid)
+    step("Retry only checked closure and require a fresh result from the surviving child")
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var closed = smux_close_pane(session.id, window.id, first.id)
+    var attempts = 0
+    while not closed and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        closed = smux_close_pane(session.id, window.id, first.id)
+        attempts = attempts + 1
+    val remaining = smux_list_panes(session.id, window.id)
+    val sent = smux_send_command(session.id, window.id, second.id, "set /a 1618+1414")
+    val output = pane_lifecycle_output(session.id, window.id, second.id, "3032")
+    val target_exists_after_close = target_pid > 0 and sosix_process_exists(target_pid)
+    val survivor_exists_after_close = survivor_pid > 0 and sosix_process_exists(survivor_pid)
+    # Complete owned teardown before any assertion can abort the scenario.
+    val cleaned = pane_lifecycle_cleanup(session.id)
+    val target_exists_after_cleanup = target_pid > 0 and sosix_process_exists(target_pid)
+    val survivor_exists_after_cleanup = survivor_pid > 0 and sosix_process_exists(survivor_pid)
+    expect(cleaned).to_equal(true)
+    expect(target.is_ok() and survivor.is_ok()).to_equal(true)
+    expect(first_sent.is_ok()).to_equal(true)
+    expect(first_output).to_contain("5859")
+    expect(target_exists_before and survivor_exists_before).to_equal(true)
+    expect(closed).to_equal(true)
+    expect(target_exists_after_close).to_equal(false)
+    expect(survivor_exists_after_close).to_equal(true)
+    expect(remaining.len()).to_equal(1)
+    expect(remaining[0].id).to_equal(second.id)
+    expect(sent.is_ok()).to_equal(true)
+    expect(output).to_contain("3032")
+    expect(target_exists_after_cleanup).to_equal(false)
+    expect(survivor_exists_after_cleanup).to_equal(false)
+    expect(sosix_pty_cleanup_pending()).to_equal(0)
+
+describe "checked pane lifetime":
+    it "refuses to remove a record that still owns a piped child":
+        step("Apply the pure commit guard to an owned record without invoking native close")
+        val st = pane_lifecycle_state()
+        val owned = st.replace_pane(0, st.get_pane(0).with_child(123))
+        expect(remove_closed_pane_state(owned, "s", "w", "p1").is_err()).to_equal(true)
+        expect(owned.get_pane(0).child_pid).to_equal(123)
+        expect(owned.pane_count).to_equal(2)
+
+    it "retains deferred PTY authority even when the child PID is absent":
+        val st = pane_lifecycle_state()
+        val owned = st.replace_pane(0, st.get_pane(0).with_pty(-1, 456))
+        expect(remove_closed_pane_state(owned, "s", "w", "p1").is_err()).to_equal(true)
+        expect(owned.get_pane(0).pty_fd).to_equal(456)
+
+    it "rejects a wrong identity triple and an unknown pane without native effects":
+        val st = pane_lifecycle_state()
+        expect(close_pane_state(st, [], "other", "w", "p1").closed).to_equal(false)
+        expect(close_pane_state(st, [], "s", "w", "missing").pending.len()).to_equal(0)
+        expect(remove_closed_pane_state(st, "s", "other", "p1").is_err()).to_equal(true)
+
+    it "preserves survivor geometry and chooses a surviving focus after checked removal":
+        val st = pane_lifecycle_state()
+        val result = remove_closed_pane_state(st, "s", "w", "p1").unwrap()
+        expect(result.pane_count).to_equal(1)
+        expect(result.get_pane(0).pane.id).to_equal("p2")
+        expect(result.get_pane(0).focus).to_equal(true)
+        expect(result.get_pane(0).tail).to_equal("survivor")
+        expect(result.next_id).to_equal(91)
+        val rects = window_layout_rects(result, "s", "w")
+        expect(rects.len()).to_equal(1)
+        expect(rects[0].col).to_equal(40)
+        expect(rects[0].cols).to_equal(40)
+
+    it "freezes the pending window and refuses a competing pane-close intent":
+        val st = pane_lifecycle_state()
+        val pending = [PaneClosePending(session_id: "s", window_id: "w", pane_id: "p1")]
+        expect(pane_close_window_pending(pending, "s", "w")).to_equal(true)
+        expect(pane_close_window_pending(pending, "s", "other")).to_equal(false)
+        expect(pane_close_poll_windows(pending, ["other"])).to_equal(["other", "w"])
+        val denied = close_pane_state(st, pending, "s", "w", "p2")
+        expect(denied.closed).to_equal(false)
+        expect(denied.state.pane_count).to_equal(2)
+        expect(denied.pending[0].pane_id).to_equal("p1")
+
+    it "allows the exact pending intent to finish and removes only its marker":
+        val pending = [PaneClosePending(session_id: "s", window_id: "w", pane_id: "p1"),
+            PaneClosePending(session_id: "other", window_id: "elsewhere", pane_id: "p3")]
+        val result = close_pane_state(pane_lifecycle_state(), pending, "s", "w", "p1")
+        expect(result.closed).to_equal(true)
+        expect(result.pending.len()).to_equal(1)
+        expect(result.pending[0].session_id).to_equal("other")
+        expect(pane_close_forget(pending, "s").len()).to_equal(1)
+
+    it "refuses lower-level final-pane removal so checked window deletion owns it":
+        val st = pane_lifecycle_state().remove_pane(1)
+        expect(remove_closed_pane_state(st, "s", "w", "p1").is_err()).to_equal(true)
+        val result = close_pane_state(st, [], "s", "w", "p1")
+        expect(result.closed).to_equal(false)
+        expect(result.pending.len()).to_equal(0)
+        expect(result.state.window_count).to_equal(1)
+
+    it "commits public pane closure and invalidates only its window checkpoint":
+        smux_reset_for_test()
+        val session = smux_create_session("pane-checkpoint")
+        val first = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, first.id)[0]
+        val split = smux_split_pane(session.id, first.id, pane.id, "vertical").unwrap()
+        val second = smux_new_window(session.id, "other")
+        val other = smux_list_panes(session.id, second.id)[0]
+        val other_split = smux_split_pane(session.id, second.id, other.id, "horizontal").unwrap()
+        expect(smux_focus_pane(session.id, first.id, split.id)).to_equal(true)
+        expect(smux_close_pane(session.id, first.id, split.id)).to_equal(true)
+        expect(smux_focused_pane(session.id, first.id).unwrap().id).to_equal(pane.id)
+        expect(smux_rollback_split(session.id, first.id, split.id).is_err()).to_equal(true)
+        expect(smux_rollback_split(session.id, second.id, other_split.id).is_ok()).to_equal(true)
+        expect(smux_window_closing(session.id, first.id)).to_equal(false)
+        expect(pane_lifecycle_cleanup(session.id)).to_equal(true)
+
+    it "closes final panes through window and final-session attachment teardown":
+        smux_reset_for_test()
+        val session = smux_create_session("pane-final")
+        val first = smux_list_windows(session.id)[0]
+        val second = smux_new_window(session.id, "second")
+        expect(smux_attach(session.id, "viewer", 80, 24).attached).to_equal(true)
+        expect(smux_close_pane(session.id, first.id, smux_list_panes(session.id, first.id)[0].id)).to_equal(true)
+        expect(smux_list_windows(session.id).len()).to_equal(1)
+        expect(smux_close_pane(session.id, second.id, smux_list_panes(session.id, second.id)[0].id)).to_equal(true)
+        expect(smux_list_windows(session.id).len()).to_equal(0)
+        expect(smux_list_clients().len()).to_equal(0)
+        expect(smux_list_sessions().len()).to_equal(0)
+
+    it "closes a real piped child while its sibling continues executing commands":
+        pane_lifecycle_native_case(false)
+
+    it "closes a real ConPTY child while its sibling continues executing commands":
+        pane_lifecycle_native_case(true)

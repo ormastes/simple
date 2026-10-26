@@ -169,6 +169,29 @@ pub extern "C" fn rt_sha512_digest(data: RuntimeValue) -> RuntimeValue {
     vec_to_runtime_byte_array(Sha512::digest(&bytes).as_slice())
 }
 
+/// Compiled-runtime ABI twin of the native C PBKDF2-SHA512 provider.
+#[no_mangle]
+pub extern "C" fn rt_pbkdf2_hmac_sha512(
+    password: RuntimeValue,
+    salt: RuntimeValue,
+    iterations: i64,
+    dk_len: i64,
+) -> RuntimeValue {
+    let Some(password) = crate::value::collections::checked_byte_array_bytes(password).flatten() else {
+        return RuntimeValue::NIL;
+    };
+    let Some(salt) = crate::value::collections::checked_byte_array_bytes(salt).flatten() else {
+        return RuntimeValue::NIL;
+    };
+    if dk_len > 0
+        && (dk_len as u64 > u64::from(u32::MAX) * 64 || usize::try_from(dk_len).is_err())
+    {
+        return RuntimeValue::NIL;
+    }
+    let derived = crate::value::pbkdf2_native::pbkdf2_hmac_sha512(&password, &salt, iterations, dk_len);
+    vec_to_runtime_byte_array(&derived)
+}
+
 /// One-shot SHA-384 (FIPS 180-4), `extern fn rt_sha384_digest(data: [u8]) -> [u8]`.
 /// Rust twin of `rt_sha384_digest` in `src/runtime/runtime_native.c`.
 #[no_mangle]
@@ -234,6 +257,35 @@ pub unsafe extern "C" fn rt_sha256_file_raw_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_pbkdf2_sha512_runtime_abi_vectors() {
+        let cases = [
+            (vec![112, 97, 115, 115, 119, 111, 114, 100], vec![115, 97, 108, 116], 1, 64, "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce"),
+            (vec![112, 97, 115, 115, 119, 111, 114, 100], vec![115, 97, 108, 116], 2, 96, "e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e473e311ad827b68945f4e2dddb204c78e40e2495141e411cd272d020640d673c"),
+            (vec![112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112], vec![115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115], 3, 65, "752e4df4bd150754735ec8966b6fbd5160bd270bd0ae18909860f9154bbc226d0cd62bf2b26143bdd01b35b59b0ebf4dc66a9da1412a0f34dd2ec74676845f36cc"),
+            (vec![], vec![], 0, 32, "6d2ecbbbfb2e6dcd7056faf9af6aa06eae594391db983279a6bf27e0eb228614"),
+            (vec![0, 255, 128], vec![0, 128], 5, 73, "31d70c6dbc4f6dc5979c00ac5c14ceebc0f9af1dc28b3966da6a392157ac43f17fb7665e3894846dea0293a430e6b4d6efbb19e4e5998465a2b1894567cfcff2199105e7a76e462d2e"),
+            (vec![112, 97, 115, 115, 119, 111, 114, 100], vec![115, 97, 108, 116], 4096, 32, "d197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87f6902e072f457b5"),
+            (vec![112, 97, 115, 115, 119, 111, 114, 100], vec![115, 97, 108, 116], 1, 0, ""),
+        ];
+        for (password, salt, rounds, length, expected) in cases {
+            let result = rt_pbkdf2_hmac_sha512(
+                vec_to_runtime_byte_array(&password), vec_to_runtime_byte_array(&salt), rounds, length);
+            assert!(!result.is_nil());
+            let bytes = crate::value::collections::checked_byte_array_bytes(result).flatten().unwrap();
+            let actual: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_pbkdf2_sha512_runtime_abi_rejects_invalid_inputs() {
+        let empty = vec_to_runtime_byte_array(&[]);
+        assert!(rt_pbkdf2_hmac_sha512(RuntimeValue::NIL, empty, 1, 32).is_nil());
+        assert!(rt_pbkdf2_hmac_sha512(empty, RuntimeValue::NIL, 1, 32).is_nil());
+        assert!(rt_pbkdf2_hmac_sha512(empty, empty, 1, i64::MAX).is_nil());
+    }
+
 
     fn test_text(bytes: &[u8]) -> RuntimeValue {
         unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }

@@ -30,8 +30,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_disk_headroom.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_disk_headroom_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_headroom.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
     println!("cargo:rerun-if-changed=../../runtime/simple_gpu_provider_abi_v1.h");
@@ -338,7 +336,6 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_file_view.c",
-        "runtime_disk_headroom.c",
         "runtime_memory_headroom.c",
         "runtime_fd_stat_rust_bridge.c",
         "runtime_font.c",
@@ -709,7 +706,6 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
             .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
     }
     const LINKED_C_SOURCES: &[&str] = &[
-        "runtime_disk_headroom.c",
         "runtime_memory_headroom.c",
         "runtime_memory.c",
         "runtime_alloc_observer.c",

@@ -35,6 +35,7 @@ mod core;
 pub mod diagram_sffi;
 pub mod profiler_sffi;
 mod dict;
+mod dict_scope_read;
 pub mod db_accel_bitmap_ops;
 // SFFI object-based system
 pub mod sffi_example;
@@ -57,6 +58,8 @@ pub mod monoio_future;
 pub mod net;
 mod numeric_kernels;
 mod objects;
+mod rc_graph;
+pub use rc_graph::{rt_heap_graph_bytes, rt_rc_count, rt_rc_release, rt_rc_retain, rt_rc_share};
 mod ownership;
 pub mod pbkdf2_native;
 mod process;
@@ -138,6 +141,8 @@ pub use collections::{
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
     rt_transient_array_scope_state_v1,
     rt_transient_heap_promote, rt_transient_heap_promote_share_begin, rt_transient_heap_promote_share_end,
+    rt_session_alloc_begin, rt_session_alloc_end, rt_session_heap_begin, rt_session_heap_end, rt_session_heap_id,
+    rt_transient_heap_adopt, session_adopt_visits_debug, session_heap_owns,
     transient_heap_scope_paused, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
@@ -180,6 +185,11 @@ pub use dict::{
 };
 
 // Re-export high-performance collection SFFI functions (Rust std::collections)
+pub use dict_scope_read::{
+    rt_dict_scope_read_bound_v1, rt_dict_scope_read_owner_v1, rt_dict_scope_read_epoch_v1,
+    rt_dict_scope_read_meta_v1, rt_dict_scope_read_slot_v1,
+};
+
 pub use hpcollections::{
     // HashMap
     rt_hashmap_clear,

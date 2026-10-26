@@ -63,3 +63,54 @@ Still open:
 - Steps 3-4: the linker does not consume `link_objects`, and using objects
   still emit their COMDAT copies. Both are blocked on the producer above.
 - Gap 2 is closed: `module_generic_template_decls_of_module_v1` projects generic functions into `generic-template` (no fields; `source_digest` covers signature and body), and mono's imported function instances are passed as uses, so `id(1)` keys as `t.id` + [i64] through `concrete_tldr_key_for_v1`. An instance whose template is not visible still makes the list incomplete.
+
+## P-G7 progress (2026-10-25)
+
+`src/compiler/80.driver/driver_build/generic_instance_object_producer_v1.spl`
+adds the producer and the link wiring:
+
+- Producer (step 2, object half): module-scoped mono records the mangled
+  symbol of every imported generic-function instance; the MIR child keys it
+  (`module_tldr_instance_keys_from_mono_v1`, same templates/context as the
+  `generic-spec` list) and, after the using module's object compiles, codegens
+  that one COMDAT function alone through the same backend/target/CPU/storage
+  snapshot (`_stage_generic_instance_objects_v1`, `driver_aot_native_output.spl`)
+  and stages it under the key (first writer wins). The coordinator's
+  single-flight job reads the staged object (`generic_instance_object_from_stage_v1`)
+  and publishes it to the producer-keyed, header-verified cache.
+- Step 3: the coordinator extracts each verified object body and passes the
+  list via `SIMPLE_FILE_WORKER_INSTANCE_LINK`; `aot_link_mir_shards_v1` links
+  them once, after the module objects.
+- Step 4: the needed set is recorded retirable only after a run where every
+  key PASSED. The next build snapshots retirable keys whose object verifies
+  (`SIMPLE_FILE_WORKER_INSTANCE_RETIRE`); MIR children drop exactly those
+  COMDAT copies and the link links exactly those objects. A retired copy with
+  no verified object blocks the link (fail closed).
+
+Still open (keys fail closed, nothing retired for them):
+
+- Instances that touch a module global (LoadGlobal/StoreGlobal/GlobalAddr)
+  are not extracted.
+- Generic TYPE instances (methods keyed by a `Name<args>` use) have no
+  symbol -> key mapping yet.
+
+### P-G7 review r1 fixes
+
+- Body identity: the cache key is ConcreteTldrKey + sha256 of the template
+  owner's current source (`generic_instance_lists_with_body_v1`), so a
+  body-only edit changes the key: the old object is dropped, the instance is
+  rebuilt, and the retire snapshot drops rows whose owner digest changed.
+- Bytes: instance objects are byte-copied (`file_copy`) at stage, cache and
+  link; the cache header is a sidecar `<object>.hdr` over the object's
+  `file_hash_sha256_or_empty` digest; link copies are re-verified.
+- Extraction also rejects instances that name a constant, static or
+  non-instance function of the using module.
+
+### P-G7 review r2 fix
+
+- Owner identity (the body digest in the body key and in each retire row) is
+  now the P-E object-reuse identity: the owner's source digest (native hash)
+  plus `file_worker_inc_iface_digest_v1` of each direct import (HIR ledger
+  deps record). If an import's digest is unknown, the list is marked
+  incomplete. The transitive gap through a non-importing intermediary is the
+  one P-E/P-G2 already have.

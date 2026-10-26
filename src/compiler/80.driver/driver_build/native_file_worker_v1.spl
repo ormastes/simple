@@ -1,4 +1,4 @@
-# Per-file worker role (--file-worker=i/n, opt-in SIMPLE_FILE_WORKERS=1).
+# Per-file worker role (--file-worker=i/n, selected by SIMPLE_FILE_WORKERS).
 #
 # Design: doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md
 # (work package P3). One long-lived worker process claims ONE module at a time
@@ -38,11 +38,10 @@ use std.io_runtime.{file_exists, file_read, file_write, file_rename, dir_list_op
 
 pub const NATIVE_FILE_WORKERS_ENV_V1: text = "SIMPLE_FILE_WORKERS"
 # SINGLE SOURCE OF TRUTH for the per-file pipeline default. It is the value
-# SIMPLE_FILE_WORKERS takes when UNSET. Flipping
-# the pipeline on by default is this one line ("0" -> "1"); an explicit
-# SIMPLE_FILE_WORKERS=0 stays the opt-out.
+# SIMPLE_FILE_WORKERS takes when UNSET. The src-to-object file-worker
+# pipeline is the default; explicit SIMPLE_FILE_WORKERS=0 stays the opt-out.
 # Every read site uses `?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1`.
-pub const NATIVE_PER_FILE_PIPELINE_DEFAULT_V1: text = "0"
+pub const NATIVE_PER_FILE_PIPELINE_DEFAULT_V1: text = "1"
 pub const NATIVE_FILE_WORKER_FLAG_V1: text = "--file-worker="
 pub const NATIVE_FILE_WORKER_QUEUE_ENV_V1: text = "SIMPLE_FILE_WORKER_QUEUE"
 pub const NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1: text = "SIMPLE_FILE_WORKER_HIR_QUEUE"
@@ -59,8 +58,8 @@ pub struct NativeFileWorkerReceiptV1:
     status: text
     object: text
 
-# The coordinator selects the file-worker pool only for SIMPLE_FILE_WORKERS=1
-# (unset => NATIVE_PER_FILE_PIPELINE_DEFAULT_V1).
+# The coordinator selects the file-worker pool only when the resolved
+# SIMPLE_FILE_WORKERS value is 1 (unset => NATIVE_PER_FILE_PIPELINE_DEFAULT_V1).
 pub fn native_file_workers_selected_v1(flag: text) -> bool:
     flag == "1"
 
@@ -98,11 +97,17 @@ pub fn native_file_worker_spec_valid_v1(spec: text) -> bool:
     val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
     count > 0 and index >= 0 and index < count
 
-# argv for the HIR/MIR children: the worker's own argv minus its role flag.
+# argv for the HIR/MIR children: the worker's own argv minus its role flag, starting
+# at the `native-build` command. Under bootstrap_main the worker receives the full
+# get_cli_args() (argv[0] = its own exe); process_spawn_async prepends the exe again,
+# so copying argv[0] made every child fail with "unknown command <exe>".
 pub fn native_file_worker_child_args_v1(args: [text], role_flag: text) -> [text]:
     var out: [text] = []
+    var copying = not args.contains("native-build")
     for arg in args:
-        if not arg.starts_with(NATIVE_FILE_WORKER_FLAG_V1):
+        if not copying and arg == "native-build":
+            copying = true
+        if copying and not arg.starts_with(NATIVE_FILE_WORKER_FLAG_V1):
             out = out.push(arg)
     out.push(role_flag)
 

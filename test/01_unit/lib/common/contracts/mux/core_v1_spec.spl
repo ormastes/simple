@@ -1,0 +1,245 @@
+# REQ-CMUX-006/008: representation controls, NOT backend conformance.
+# Execution status: NOT_RUN until admitted Phase3 and matching full test CLI.
+use std.spec.{describe, it, expect}
+use std.common.debug.capability.{CapLevel}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.validation_v1.*
+use std.common.text_bytes.{bytes_to_text}
+
+fn mux_test_limits() -> MuxLimitsV1:
+    MuxLimitsV1(max_sessions: 4, max_reply_bytes: 65536)
+
+fn mux_test_handle() -> MuxHandleV1:
+    MuxHandleV1(owner_id: "owner-incarnation-a", owner_generation: 1,
+        lease_id: "0123456789abcdef0123456789abcdef:1")
+
+fn mux_test_session(owner: text, generation: u64, kind: MuxObjectKindV1,
+        id: text, name: text) -> MuxSessionSummaryV1:
+    MuxSessionSummaryV1(identity: MuxObjectRefV1(owner_id: owner,
+        owner_generation: generation, kind: kind, object_id: id), name: name)
+
+fn mux_test_capability(backend: MuxBackendV1, owner: text, generation: u64,
+        evidence: MuxEvidenceV1) -> MuxCapabilityV1:
+    MuxCapabilityV1(operation: MuxDiscoveryOperationV1.DiscoverSessions,
+        level: CapLevel.Unavailable, backend: backend, backend_version: "source-only",
+        owner_id: owner, owner_generation: generation, limits: mux_test_limits(),
+        constraints: ["provider not bound"], evidence: evidence)
+
+fn mux_test_discovery(sessions: [MuxSessionSummaryV1], caps: [MuxCapabilityV1]) -> MuxDiscoveryV1:
+    MuxDiscoveryV1(backend: MuxBackendV1.Smux, namespace: "caret_ws_1",
+        handle: mux_test_handle(), revision: 0, sessions: sessions, capabilities: caps)
+
+fn mux_test_good_session(id: text, name: text) -> MuxSessionSummaryV1:
+    mux_test_session("owner-incarnation-a", 1, MuxObjectKindV1.Session, id, name)
+
+describe "CoreMux discovery value validation":
+    it "preserves Unicode namespace bytes without normalization":
+        expect(mux_validate_namespace_v1("caret_한😀").unwrap()).to_equal("caret_한😀")
+
+    it "accepts exact namespace byte limit and refuses one byte over":
+        expect(mux_validate_namespace_v1("a".repeat(128)).is_ok()).to_equal(true)
+        expect(mux_validate_namespace_v1("a".repeat(129)).is_err()).to_equal(true)
+
+    it "counts non-BMP namespace bytes rather than character count":
+        expect(mux_validate_namespace_v1("😀".repeat(32)).is_ok()).to_equal(true)
+        expect(mux_validate_namespace_v1("😀".repeat(33)).is_err()).to_equal(true)
+
+    it "refuses empty control NUL and path namespaces":
+        for name in ["", "bad\nname", "bad\rname", "bad\tname", "bad\0name", ".", "..", "a/b", "a\\b"]:
+            expect(mux_validate_namespace_v1(name).is_err()).to_equal(true)
+
+    it "constructs explicit backend and endpoint policies without connecting":
+        for backend in [MuxBackendV1.Smux, MuxBackendV1.Tmux]:
+            for policy in [MuxEndpointPolicyV1.ExistingOnly, MuxEndpointPolicyV1.CreateOwned]:
+                val request = mux_make_connect_v1(backend, "caret_ws_1", policy, "client 한😀", mux_test_limits()).unwrap()
+                expect(request.backend).to_equal(backend)
+                expect(request.endpoint_policy).to_equal(policy)
+                expect(request.client_identity).to_equal("client 한😀")
+                expect(request.limits.max_sessions).to_equal(4)
+
+    it "refuses missing or oversized client identities":
+        for client in ["", "x".repeat(257), "😀".repeat(65), "a\0b"]:
+            expect(mux_make_connect_v1(MuxBackendV1.Smux, "caret", MuxEndpointPolicyV1.ExistingOnly, client, mux_test_limits()).is_err()).to_equal(true)
+
+    it "accepts budget boundaries and rejects zero negative and excessive limits":
+        expect(mux_validate_limits_v1(MuxLimitsV1(max_sessions: 1, max_reply_bytes: 1)).is_ok()).to_equal(true)
+        expect(mux_validate_limits_v1(MuxLimitsV1(max_sessions: 256, max_reply_bytes: 1048576)).is_ok()).to_equal(true)
+        for count in [-1, 0, 257]:
+            expect(mux_validate_limits_v1(MuxLimitsV1(max_sessions: count, max_reply_bytes: 1)).is_err()).to_equal(true)
+        for count in [-1, 0, 1048577]:
+            expect(mux_validate_limits_v1(MuxLimitsV1(max_sessions: 1, max_reply_bytes: count)).is_err()).to_equal(true)
+
+    it "returns a typed NotApplied validation error with no receipt or revision":
+        val error = mux_validate_namespace_v1("").unwrap_err()
+        expect(error.kind).to_equal(MuxErrorKindV1.InvalidRequest)
+        expect(error.commit_state).to_equal(MuxCommitStateV1.NotApplied)
+        expect(error.request_id).to_equal(0)
+        expect(error.observed_revision).to_be_nil()
+        expect(error.affected.len()).to_equal(0)
+        expect(error.cleanup_pending).to_equal(false)
+
+    it "preserves an opaque incarnation and lease token as value data":
+        val handle = mux_validate_handle_v1(mux_test_handle()).unwrap()
+        expect(handle.owner_id).to_equal("owner-incarnation-a")
+        expect(handle.owner_generation).to_equal(1)
+        expect(handle.lease_id).to_equal("0123456789abcdef0123456789abcdef:1")
+
+    it "rejects zero generation and malformed handle identifiers":
+        expect(mux_validate_handle_v1(MuxHandleV1(owner_id: "owner", owner_generation: 0, lease_id: "lease")).is_err()).to_equal(true)
+        for token in ["", "a b", "a\0b", "한", "x".repeat(129)]:
+            expect(mux_validate_handle_v1(MuxHandleV1(owner_id: token, owner_generation: 1, lease_id: "lease")).is_err()).to_equal(true)
+            expect(mux_validate_handle_v1(MuxHandleV1(owner_id: "owner", owner_generation: 1, lease_id: token)).is_err()).to_equal(true)
+
+    it "preserves each object kind without inventing existence":
+        for kind in [MuxObjectKindV1.Session, MuxObjectKindV1.Window, MuxObjectKindV1.Pane, MuxObjectKindV1.Client]:
+            val identity = mux_make_object_ref_v1("owner", 7, kind, "%23").unwrap()
+            expect(identity.kind).to_equal(kind)
+            expect(identity.object_id).to_equal("%23")
+            expect(identity.owner_generation).to_equal(7)
+
+    it "rejects invalid object reference components":
+        expect(mux_make_object_ref_v1("", 1, MuxObjectKindV1.Pane, "%1").is_err()).to_equal(true)
+        expect(mux_make_object_ref_v1("owner", 0, MuxObjectKindV1.Pane, "%1").is_err()).to_equal(true)
+        expect(mux_make_object_ref_v1("owner", 1, MuxObjectKindV1.Pane, "a\nb").is_err()).to_equal(true)
+
+    it "accepts an empty unqualified metadata snapshot":
+        val reply = mux_validate_discovery_v1(mux_test_discovery([], [])).unwrap()
+        expect(reply.sessions.len()).to_equal(0)
+        expect(reply.capabilities.len()).to_equal(0)
+        expect(reply.revision).to_equal(0)
+
+    it "preserves multiple real-shaped session values and Unicode names":
+        val reply = mux_validate_discovery_v1(mux_test_discovery([
+            mux_test_good_session("$1", "work 한😀"), mux_test_good_session("$2", "agents")], [])).unwrap()
+        expect(reply.sessions.len()).to_equal(2)
+        expect(reply.sessions[0].identity.object_id).to_equal("$1")
+        expect(reply.sessions[0].name).to_equal("work 한😀")
+        expect(reply.sessions[1].identity.object_id).to_equal("$2")
+
+    it "rejects duplicate session IDs without altering the input values":
+        val input = mux_test_discovery([mux_test_good_session("$1", "first"), mux_test_good_session("$1", "second")], [])
+        expect(mux_validate_discovery_v1(input).is_err()).to_equal(true)
+        expect(input.sessions.len()).to_equal(2)
+        expect(input.sessions[1].name).to_equal("second")
+
+    it "retains duplicate names for the provider to resolve as ambiguous":
+        val reply = mux_validate_discovery_v1(mux_test_discovery([
+            mux_test_good_session("$1", "same"), mux_test_good_session("$2", "same")], [])).unwrap()
+        expect(reply.sessions.len()).to_equal(2)
+
+    it "rejects cross-owner stale-generation and wrong-kind session entries":
+        for session in [mux_test_session("other-owner", 1, MuxObjectKindV1.Session, "$1", "work"),
+                mux_test_session("owner-incarnation-a", 2, MuxObjectKindV1.Session, "$1", "work"),
+                mux_test_session("owner-incarnation-a", 1, MuxObjectKindV1.Pane, "%1", "work")]:
+            expect(mux_validate_discovery_v1(mux_test_discovery([session], [])).is_err()).to_equal(true)
+
+    it "rejects malformed and oversized session names":
+        for name in ["", "x".repeat(257), "a\0b"]:
+            expect(mux_validate_discovery_v1(mux_test_discovery([mux_test_good_session("$1", name)], [])).is_err()).to_equal(true)
+
+    it "rejects an oversized session collection before accepting its entries":
+        var sessions: [MuxSessionSummaryV1] = []
+        for index in 0..257:
+            sessions.push(mux_test_good_session("${index}", "session"))
+        expect(mux_validate_discovery_v1(mux_test_discovery(sessions, [])).is_err()).to_equal(true)
+
+    it "keeps support level separate from NotRun evidence":
+        val cap = mux_validate_capability_v1(mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, MuxEvidenceV1.NotRun)).unwrap()
+        expect(cap.level).to_equal(CapLevel.Unavailable)
+        expect(cap.evidence).to_equal(MuxEvidenceV1.NotRun)
+
+    it "rejects empty blocked reasons and empty qualification references":
+        for evidence in [MuxEvidenceV1.Blocked(""), MuxEvidenceV1.Qualified("")]:
+            expect(mux_validate_capability_v1(mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, evidence)).is_err()).to_equal(true)
+
+    it "preserves a blocked reason without granting support":
+        val cap = mux_validate_capability_v1(mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, MuxEvidenceV1.Blocked("Phase3 missing"))).unwrap()
+        expect(cap.level).to_equal(CapLevel.Unavailable)
+        match cap.evidence:
+            case MuxEvidenceV1.Blocked(reason): expect(reason).to_equal("Phase3 missing")
+            case _: expect(false).to_equal(true)
+
+    it "rejects mismatched capability backend owner or generation":
+        for cap in [mux_test_capability(MuxBackendV1.Tmux, "owner-incarnation-a", 1, MuxEvidenceV1.NotRun),
+                mux_test_capability(MuxBackendV1.Smux, "other-owner", 1, MuxEvidenceV1.NotRun),
+                mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 2, MuxEvidenceV1.NotRun)]:
+            expect(mux_validate_discovery_v1(mux_test_discovery([], [cap])).is_err()).to_equal(true)
+
+    it "rejects repeated capability operations":
+        val cap = mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, MuxEvidenceV1.NotRun)
+        expect(mux_validate_discovery_v1(mux_test_discovery([], [cap, cap])).is_err()).to_equal(true)
+
+    it "rejects session counts beyond the advertised capability limit":
+        var sessions: [MuxSessionSummaryV1] = []
+        for index in 0..5:
+            sessions.push(mux_test_good_session("${index}", "session"))
+        val cap = mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, MuxEvidenceV1.NotRun)
+        expect(mux_validate_discovery_v1(mux_test_discovery(sessions, [cap])).is_err()).to_equal(true)
+
+    it "accepts the exact session collection bound with unique identities":
+        var sessions: [MuxSessionSummaryV1] = []
+        for index in 0..256:
+            sessions.push(mux_test_good_session("${index}", "session"))
+        val reply = mux_validate_discovery_v1(mux_test_discovery(sessions, [])).unwrap()
+        expect(reply.sessions.len()).to_equal(256)
+        expect(reply.sessions[255].identity.object_id).to_equal("$255")
+
+    it "rejects invalid capability owner generation version and limits":
+        val cap = mux_test_capability(MuxBackendV1.Smux, "owner", 1, MuxEvidenceV1.NotRun)
+        var changed = cap
+        changed.owner_id = ""
+        expect(mux_validate_capability_v1(changed).is_err()).to_equal(true)
+        changed = cap
+        changed.owner_generation = 0
+        expect(mux_validate_capability_v1(changed).is_err()).to_equal(true)
+        changed = cap
+        changed.backend_version = ""
+        expect(mux_validate_capability_v1(changed).is_err()).to_equal(true)
+        changed = cap
+        changed.limits = MuxLimitsV1(max_sessions: 0, max_reply_bytes: 1)
+        expect(mux_validate_capability_v1(changed).is_err()).to_equal(true)
+
+    it "enforces capability constraint count and text bounds":
+        var cap = mux_test_capability(MuxBackendV1.Smux, "owner", 1, MuxEvidenceV1.NotRun)
+        cap.constraints = []
+        for index in 0..16:
+            cap.constraints.push("x".repeat(1024))
+        expect(mux_validate_capability_v1(cap).is_ok()).to_equal(true)
+        cap.constraints.push("one more")
+        expect(mux_validate_capability_v1(cap).is_err()).to_equal(true)
+        for constraint in ["", "x".repeat(1025), "a\0b"]:
+            cap.constraints = [constraint]
+            expect(mux_validate_capability_v1(cap).is_err()).to_equal(true)
+
+    it "bounds evidence references without certifying a claimed receipt":
+        val evidence = MuxEvidenceV1.Qualified("unverified-test-reference.sdn")
+        val cap = mux_validate_capability_v1(mux_test_capability(MuxBackendV1.Smux, "owner", 1, evidence)).unwrap()
+        match cap.evidence:
+            case MuxEvidenceV1.Qualified(receipt): expect(receipt).to_equal("unverified-test-reference.sdn")
+            case _: expect(false).to_equal(true)
+        for too_long in [MuxEvidenceV1.Blocked("x".repeat(1025)), MuxEvidenceV1.Qualified("x".repeat(1025))]:
+            expect(mux_validate_capability_v1(mux_test_capability(MuxBackendV1.Smux, "owner", 1, too_long)).is_err()).to_equal(true)
+
+    it "rejects more discovery descriptors than the typed operation set":
+        val cap = mux_test_capability(MuxBackendV1.Smux, "owner-incarnation-a", 1, MuxEvidenceV1.NotRun)
+        expect(mux_validate_discovery_v1(mux_test_discovery([], [cap, cap, cap, cap])).is_err()).to_equal(true)
+
+    it "rejects C1 control scalars in namespaces clients and session names":
+        for control in [bytes_to_text([194, 128]), bytes_to_text([194, 133]), bytes_to_text([194, 159])]:
+            val name = "before" + control + "after"
+            expect(mux_validate_namespace_v1(name).is_err()).to_equal(true)
+            expect(mux_make_connect_v1(MuxBackendV1.Smux, "caret", MuxEndpointPolicyV1.ExistingOnly, name, mux_test_limits()).is_err()).to_equal(true)
+            expect(mux_validate_discovery_v1(mux_test_discovery([mux_test_good_session("$1", name)], [])).is_err()).to_equal(true)
+
+    it "preserves Unicode scalars adjacent to C1 and their continuation bytes":
+        val name = bytes_to_text([194, 160]) + "한😀Ā"
+        expect(mux_validate_namespace_v1(name).unwrap()).to_equal(name)
+        val reply = mux_validate_discovery_v1(mux_test_discovery([mux_test_good_session("$1", name)], [])).unwrap()
+        expect(reply.sessions[0].name).to_equal(name)
+
+    it "rejects drive-relative absolute and platform path alias namespaces":
+        for name in ["C:escape", "C:\\escape", "C:/escape", "\\\\server\\share", "caret.", "caret ", "...", ".. "]:
+            expect(mux_validate_namespace_v1(name).is_err()).to_equal(true)
+        expect(mux_validate_namespace_v1("caret_ws_1").unwrap()).to_equal("caret_ws_1")
+        expect(mux_validate_namespace_v1("claude-swarm").unwrap()).to_equal("claude-swarm")
+        expect(mux_validate_namespace_v1("caret.workspace").unwrap()).to_equal("caret.workspace")

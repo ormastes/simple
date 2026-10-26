@@ -1,0 +1,144 @@
+# BuildSession — one per CompilerDriver.compile() (BSM tier T1).
+#
+# Design: doc/05_design/compiler/memory/build_session_memory_model_v1.md
+#   §2 T1, §3 I1-I4, §5, §7 P2/P6.
+#
+# `heap == 0` means "no session": the runtime predates P1 (the extern answers
+# 0), the kill-switch SIMPLE_BUILD_SESSION=0 is set, or a module scope was
+# already active. Every caller then keeps the pre-session promote path.
+#
+# P6 `end()`: with a live session every allocation made outside a running
+# module scope is session-owned, including the CompileResult and the error
+# lists. `end(kept)` first moves every value the caller keeps out of the
+# session with rt_rc_share (an rc root survives rt_session_heap_end in both
+# runtimes), then ends the heap. Fail-closed: if any share fails the session
+# is NOT ended and stays live (leaking is safer than freeing under the
+# caller). Opt-in: runs only with SIMPLE_BUILD_SESSION_END=1 (default keeps P2 behaviour).
+# Pass kept values leaves-first: a node already an rc root is not reclaimed
+# by a later share of a parent that reaches it.
+
+use std.env.{env_get}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_lowering._Items.bootstrap_hir_store.{BootstrapHirStore}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_store, bootstrap_hir_store_set_session,
+    bootstrap_hir_modules_reset}
+use compiler.mir._MirLowering.bootstrap_mir_store.{bootstrap_mir_store_set_session,
+    bootstrap_mir_store_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use compiler.frontend.effect_registry.{effect_registry_reset}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
+
+@unsafe(reason: "begin the build session heap", capabilities: [ffi])
+extern fn rt_session_heap_begin() -> u32
+@unsafe(reason: "allocate session-owned containers inside a module scope", capabilities: [ffi])
+extern fn rt_session_alloc_begin() -> bool
+@unsafe(reason: "end session-owned allocation", capabilities: [ffi])
+extern fn rt_session_alloc_end() -> bool
+@unsafe(reason: "release every session-owned allocation in one sweep", capabilities: [ffi])
+extern fn rt_session_heap_end(session: u32) -> bool
+@unsafe(reason: "move a kept value out of the session into an rc root", capabilities: [ffi])
+extern fn rt_rc_share<T>(value: T) -> bool
+
+fn build_session_enabled_by_env() -> bool:
+    (env_get("SIMPLE_BUILD_SESSION") ?? "") != "0"
+
+# Opt-in until one green Stage-3 run with SIMPLE_BUILD_SESSION_END=1: only a
+# natively compiled compiler frees anything (the interpreter refuses shares).
+fn build_session_end_enabled_by_env() -> bool:
+    (env_get("SIMPLE_BUILD_SESSION_END") ?? "") == "1"
+
+var _build_session_end_disabled_logged: bool = false
+
+# Resets every session-fed module global that HAS a reset function, after the
+# heap is gone (fresh rows are allocated outside any session). Globals with no
+# reset are listed in the design doc §7 P6 row as dangling after end().
+fn build_session_end_reset_globals_v1():
+    bootstrap_hir_modules_reset()
+    bootstrap_hir_store_set_session(false)
+    bootstrap_mir_store_reset()
+    bootstrap_mir_store_set_session(false)
+    aspect_registry_reset()
+    effect_registry_reset()
+    rt_criticality_reset()
+    layer_eq_registry_reset()
+
+fn _sffi_session_rc_share(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_share(value)
+
+fn _sffi_session_heap_end(heap: u32) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_heap_end(heap)
+
+# Injectable so specs run on a runtime that predates the externs.
+struct SessionEndPort:
+    share: fn(Any) -> bool
+    heap_end: fn(u32) -> bool
+
+fn session_end_port_runtime() -> SessionEndPort:
+    SessionEndPort(share: _sffi_session_rc_share, heap_end: _sffi_session_heap_end)
+
+class BuildSession:
+    heap: u32
+    hir_store: BootstrapHirStore
+
+    fn active() -> bool:
+        self.heap != 0u32
+
+    me begin() -> bool:
+        if self.heap != 0u32:
+            return true
+        if build_session_enabled_by_env():
+            unsafe(capabilities: [ffi]):
+                self.heap = rt_session_heap_begin()
+        # Set on the canonical store (the forwarders read it), not a copy.
+        bootstrap_hir_store_set_session(self.active())
+        bootstrap_mir_store_set_session(self.active())
+        self.active()
+
+    me publish_alloc_begin() -> bool:
+        if not self.active(): return false
+        unsafe(capabilities: [ffi]):
+            rt_session_alloc_begin()
+
+    me publish_alloc_end() -> bool:
+        if not self.active(): return false
+        unsafe(capabilities: [ffi]):
+            rt_session_alloc_end()
+
+    me end(kept: [Any]) -> bool:
+        if not self.active():
+            return true
+        if not build_session_end_enabled_by_env():
+            if not _build_session_end_disabled_logged:
+                eprint("build-session: end disabled (opt-in)")
+                _build_session_end_disabled_logged = true
+            return true
+        val ended = self.end_with(kept, session_end_port_runtime())
+        if ended:
+            build_session_end_reset_globals_v1()
+        ended
+
+    # Shares every kept value, then ends the heap. No share failure may end
+    # the session; heap 0 afterwards makes a repeat call a no-op (idempotent).
+    me end_with(kept: [Any], port: SessionEndPort) -> bool:
+        if not self.active():
+            return true
+        val id = self.heap
+        var shared = 0
+        for value in kept:
+            if not port.share(value):
+                eprint("build-session: end skipped reason=share-failed index={shared} id={id}")
+                return false
+            shared = shared + 1
+        if not port.heap_end(id):
+            eprint("build-session: end skipped reason=heap-end-refused id={id}")
+            return false
+        self.heap = 0u32
+        eprint("build-session: end id={id} shared={shared}")
+        true
+
+
+fn build_session_inactive() -> BuildSession:
+    BuildSession(heap: 0u32, hir_store: bootstrap_hir_store())

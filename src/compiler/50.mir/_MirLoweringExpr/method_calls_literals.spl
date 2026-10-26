@@ -663,10 +663,17 @@ impl MirLowering:
         """True for a registered MIR scalar numeric type (I8..U64, F32, F64).
         nil (no registered type) is NOT numeric: an unregistered local must
         keep whatever path it took before this predicate existed."""
-        val found = type_
-        if found == nil:
+        # `found == nil` then `found.kind` read the Option.Some BOX (not its
+        # payload) in Stage-2-built code, so this always answered false and
+        # every `x = x + y` int accumulator lowered to rt_array_extend (lost).
+        # Bind the payload explicitly.
+        # @workaround bug=optional_field_read_after_nil_check_reads_option_box_2026-10-25 reason=field read through MirType? after nil check reads the Option box; bind payload
+        var found_type = MirType.i64()
+        if val present_type = type_:
+            found_type = present_type
+        else:
             return false
-        val disc = _sffi_method_hir_type_discriminant<MirTypeKind>(found.kind)
+        val disc = _sffi_method_hir_type_discriminant<MirTypeKind>(found_type.kind)
         disc == _sffi_method_hir_type_discriminant<MirTypeKind>(MirTypeKind.I8) or
             disc == _sffi_method_hir_type_discriminant<MirTypeKind>(MirTypeKind.I16) or
             disc == _sffi_method_hir_type_discriminant(MirTypeKind.I32) or
@@ -840,6 +847,53 @@ impl MirLowering:
         val result = b.emit_call(unwrap_op, [mir_operand_copy(value_local)], MirType.i64())
         self.builder = b
         result ?? value_local
+
+    me option_record_receiver_payload_v1(receiver: HirExpr, local: LocalId) -> LocalId:
+        """Field-read receiver of type `T?` where T is a struct or class:
+        return a local holding the record itself.
+
+        MIR has no flow typing. After `if v == nil: return` the local still
+        has type `Optional(T)`, and its value may be the canonical Option
+        box (enum id 1) that a `-> T?` producer returned. A field read on the
+        box reads its HEADER word as the field
+        (doc/08_tracking/bug/nil_narrowed_option_field_read_skips_unwrap_2026-10-25.md).
+        rt_unwrap_or_self is the unwrap `if val` and `??` use: Some(x) -> x,
+        any other word (a raw record pointer, nil) -> itself. So this is sound
+        on both lanes. It accepts no new programs: a nil receiver stays nil
+        and still faults on the read, as before. The payload local gets the
+        record's HIR type and layout provenance, so field indexes resolve as
+        for a plain record local. Any other receiver is returned unchanged.
+        """
+        if self.local_is_runtime_array(local):
+            return local
+        val optional_inner = self.option_inner_hir_type_for_local(receiver, local)
+        if val inner = optional_inner:
+            var layout_key = ""
+            match inner.kind:
+                case HirTypeKind.Named(record_symbol, _):
+                    # A bitfield value is a packed word with its own
+                    # get/set lowering; leave it to that path.
+                    if self.bitfield_map.has(record_symbol.id):
+                        return local
+                    if val record_owner = self.symbols.get_symbol_raw(record_symbol.id):
+                        if record_owner.kind == SymbolKind.Struct or record_owner.kind == SymbolKind.Class:
+                            val owner_key = self.declared_struct_layout_key(self.composite_layout_key(record_owner))
+                            if self.struct_field_order.has(owner_key):
+                                layout_key = owner_key
+                case _: ()
+            if layout_key == "":
+                return local
+            val payload = self.option_payload_or_self(local)
+            if payload.id == local.id:
+                return local
+            self.remember_local_hir_type(payload.id, inner, 0, 0)
+            # contains + index, not Dict.get: get is unreliable on the Stage 2 lane.
+            if self.struct_value_syms.contains(local.id):
+                self.struct_value_syms[payload.id] = self.struct_value_syms[local.id]
+            else:
+                self.struct_value_syms[payload.id] = layout_key
+            return payload
+        local
 
     me option_bool_value(value_local: LocalId) -> LocalId:
         """Decode an `Option<bool>` receiver back to a genuine i1.
@@ -1539,6 +1593,80 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
 
+    me lower_unresolved_array_insert_v1(receiver_local: LocalId, args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        if not self.runtime_array_locals.contains(receiver_local.id):
+            return self.reject_runtime_array_slice("array insert requires a proven runtime array handle", nil)
+        # Evaluate arguments once, including for an out-of-range no-op. The
+        # reference insert saturates negative indices to zero and returns self.
+        val raw_index = self.lower_expr(args[0].value)
+        if not self.array_slice_bound_is_integer(args[0].value, raw_index):
+            return self.reject_runtime_array_slice("array insert index must be an integer", Some(args[0].value.span))
+        if val index_type = self.local_mir_type_of(raw_index):
+            match index_type.kind:
+                case MirTypeKind.U64:
+                    return self.reject_runtime_array_slice("array insert requires a signed-representable index", Some(args[0].value.span))
+                case _: ()
+        val raw_value = self.lower_expr(args[1].value)
+        self.note_container_elem_type(receiver_local, raw_value)
+        val tagged_value = self.box_runtime_value(raw_value)
+        val value_operand = self.aggregate_literal_operand(args[1].value, raw_value, tagged_value)
+        val set_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_array_set"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))))
+        var b = self.builder
+        val zero = b.emit_const_int(0)
+        val one = b.emit_const_int(1)
+        val index = b.new_local(nil, MirType.i64(), LocalKind.Var)
+        val widened_index = b.emit_cast(mir_operand_copy(raw_index), MirType.i64())
+        b.emit_copy(index, widened_index)
+        val old_len = b.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(receiver_local)], MirType.i64())
+        val clamp = b.new_block(Some("array_insert_clamp"))
+        val bounds = b.new_block(Some("array_insert_bounds"))
+        val append = b.new_block(Some("array_insert_append"))
+        val condition = b.new_block(Some("array_insert_shift_cond"))
+        val shift = b.new_block(Some("array_insert_shift"))
+        val store = b.new_block(Some("array_insert_store"))
+        val done = b.new_block(Some("array_insert_done"))
+        val cursor = b.new_local(nil, MirType.i64(), LocalKind.Var)
+        b.emit_copy(cursor, old_len)
+        val negative = b.emit_binop(MirBinOp.Lt, mir_operand_copy(index), mir_operand_copy(zero), MirType.bool())
+        b.terminate_if(mir_operand_copy(negative), clamp, bounds)
+        b.switch_to_block(clamp)
+        b.emit_copy(index, zero)
+        b.terminate_goto(bounds)
+        b.switch_to_block(bounds)
+        val in_bounds = b.emit_binop(MirBinOp.Le, mir_operand_copy(index), mir_operand_copy(old_len), MirType.bool())
+        b.terminate_if(mir_operand_copy(in_bounds), append, done)
+        b.switch_to_block(append)
+        # Append must succeed before any existing slot can be overwritten.
+        val pushed = b.emit_call_value(self.rt_array_push_operand(), [mir_operand_copy(receiver_local), value_operand], MirType(kind: MirTypeKind.I8))
+        val push_zero = b.emit_cast(mir_operand_copy(zero), MirType(kind: MirTypeKind.I8))
+        val push_ok = b.emit_binop(MirBinOp.Ne, mir_operand_copy(pushed), mir_operand_copy(push_zero), MirType.bool())
+        val retain = b.new_block(Some("array_insert_retain_slot"))
+        b.terminate_if(mir_operand_copy(push_ok), retain, done)
+        b.switch_to_block(retain)
+        # The source may have moved into push. Read its stored tagged slot
+        # once before shifting, rather than moving the source a second time.
+        val inserted_slot = b.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(receiver_local), mir_operand_copy(old_len)], MirType.i64())
+        b.terminate_goto(condition)
+        b.switch_to_block(condition)
+        val more = b.emit_binop(MirBinOp.Gt, mir_operand_copy(cursor), mir_operand_copy(index), MirType.bool())
+        b.terminate_if(mir_operand_copy(more), shift, store)
+        b.switch_to_block(shift)
+        val previous = b.emit_binop(MirBinOp.Sub, mir_operand_copy(cursor), mir_operand_copy(one), MirType.i64())
+        # Preserve tagged slots without an additional decode/box operation.
+        val slot = b.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(receiver_local), mir_operand_copy(previous)], MirType.i64())
+        b.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(cursor), mir_operand_copy(slot)], MirType(kind: MirTypeKind.I8))
+        b.emit_copy(cursor, previous)
+        b.terminate_goto(condition)
+        b.switch_to_block(store)
+        b.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(index), mir_operand_copy(inserted_slot)], MirType(kind: MirTypeKind.I8))
+        b.terminate_goto(done)
+        b.switch_to_block(done)
+        self.builder = b
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, receiver_local)
+        receiver_local
+
     me array_concat_element_authority_v1(expression: HirExpr, local: LocalId) -> HirType?:
         # A direct empty literal has no element authority. A typed variable
         # or cast keeps its declared element type even when its value is empty.
@@ -2007,7 +2135,7 @@ impl MirLowering:
         # Diagnostics: pass the receiver's span instead of nil so the
         # driver's _format_mir_error can name the failing site --
         # every "unresolved method call" used to be location-blind.
-        self.error("unresolved method call: {method}", Some(receiver.span))
+        self.error_fatal("unresolved method call: {method}", Some(receiver.span))
         # Task #145: self.error only COLLECTS -- both the bootstrap
         # lane (driver_bootstrap.spl reads ctx.errors, never
         # MirLowering.errors) and the native-build worker drop the
@@ -2020,9 +2148,9 @@ impl MirLowering:
         if receiver.has_type_:
             receiver_type_kind = hir_type_kind_discriminant(receiver.type_.kind)
         if receiver.span.file != "":
-            print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145) route={route} module={self.current_module_id} at={receiver.span.file}:{receiver.span.line}:{receiver.span.col} receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
+            print "[mir-lower] WARNING: unresolved method call '{method}' is a FATAL lowering error (Task #145; const-0+rt_panic placeholder only keeps MIR well-formed) route={route} module={self.current_module_id} at={receiver.span.file}:{receiver.span.line}:{receiver.span.col} receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
         else:
-            print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145) route={route} module={self.current_module_id} at=<span-unavailable> receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
+            print "[mir-lower] WARNING: unresolved method call '{method}' is a FATAL lowering error (Task #145; const-0+rt_panic placeholder only keeps MIR well-formed) route={route} module={self.current_module_id} at=<span-unavailable> receiver_has_type={receiver.has_type_} receiver_type_kind={receiver_type_kind}"
         var b = self.builder
         val temp = b.new_temp(MirType.i64())
         # FAIL CLOSED (Task #145). The collected self.error above is
@@ -4038,7 +4166,8 @@ impl MirLowering:
                             self.builder = wb_b
                         wb_kind = 1
                 case Field(base, field_name, resolved):
-                    wb_base = self.lower_expr(base)
+                    # A `T?` record base reads the record, not its Option box.
+                    wb_base = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
                     wb_field_idx = self.resolve_field_index(base, wb_base, field_name, resolved)
                     var wb_b = self.builder
                     wb_receiver = wb_b.emit_get_field(mir_operand_copy(wb_base), wb_field_idx, receiver_type)
@@ -4530,6 +4659,8 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "insert" and args.len() == 2 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
+                    return self.lower_unresolved_array_insert_v1(unresolved_receiver_local, args, wb_kind, wb_base, wb_index, wb_field_idx)
                 if method == "merge" and args.len() == 1:
                     return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
@@ -4720,7 +4851,11 @@ impl MirLowering:
                     if (method == "to_int" or method == "to_i64") and self.local_is_proven_numeric_scalar(unresolved_receiver_local):
                         if val numeric_receiver_type = self.option_map_value_hir_type(unresolved_receiver_local, receiver.span):
                             match numeric_receiver_type.kind:
-                                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_):
+                                case HirTypeKind.Float(_):
+                                    if val saturated = self.try_lower_saturating_float_to_i64_v1(unresolved_receiver_local):
+                                        return saturated
+                                    return self.builtin_extra_fail_closed("float integer conversion requires concrete float MIR storage", Some(receiver.span))
+                                case HirTypeKind.Int(_, _):
                                     var numeric_builder = self.builder
                                     val integer_value = numeric_builder.emit_cast(mir_operand_copy(unresolved_receiver_local), MirType.i64())
                                     self.builder = numeric_builder
@@ -4888,6 +5023,28 @@ impl MirLowering:
                         if val removed_local = remove_result:
                             self.mark_runtime_value_local(removed_local.id)
                             return removed_local
+                    # `arr.insert(i, v)`: rt_array_insert grows the stable
+                    # handle in place (index == len appends; out of range is
+                    # a no-op) and returns an I8 status; the expression value
+                    # is the receiver, like clear/sort above.
+                    if method == "insert" and args.len() == 2:
+                        val insert_index_local = self.lower_expr(args[0].value)
+                        # Element slot is the tagged runtime ABI: box exactly
+                        # as lower_unresolved_array_push does.
+                        val insert_value_raw = self.lower_expr(args[1].value)
+                        self.note_container_elem_type(unresolved_receiver_local, insert_value_raw)
+                        val insert_value_tagged = self.box_runtime_value(insert_value_raw)
+                        val insert_value_op = self.aggregate_literal_operand(args[1].value, insert_value_raw, insert_value_tagged)
+                        val insert_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_array_insert"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
+                        ))
+                        var b_insert = self.builder
+                        b_insert.emit_call(insert_op, [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(insert_index_local), insert_value_op], MirType(kind: MirTypeKind.I8))
+                        self.builder = b_insert
+                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, unresolved_receiver_local)
+                        return unresolved_receiver_local
                     # `arr.copy()` / `arr.clone()`: a fresh shallow array,
                     # the same counted copy loop `val b = a` materializes.
                     if (method == "copy" or method == "clone") and args.len() == 0:
@@ -5016,6 +5173,8 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "insert" and args.len() == 2 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
+                    return self.lower_unresolved_array_insert_v1(unresolved_receiver_local, args, wb_kind, wb_base, wb_index, wb_field_idx)
                 if method == "concat" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local):
                     val left_element = self.array_concat_element_authority_v1(receiver, unresolved_receiver_local)
                     # Contextual literals use the existing element adaptation

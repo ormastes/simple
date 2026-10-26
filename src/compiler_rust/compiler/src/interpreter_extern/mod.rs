@@ -436,6 +436,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
     insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
+    insert_simple!("rt_rc_share", memory::rt_rc_share);
+    insert_simple!("rt_rc_retain", memory::rt_rc_retain);
+    insert_simple!("rt_rc_release", memory::rt_rc_release);
+    insert_simple!("rt_rc_count", memory::rt_rc_count);
+    insert_simple!("rt_heap_graph_bytes", memory::rt_heap_graph_bytes);
+    insert_simple!("rt_session_heap_begin", memory::rt_session_heap_begin);
+    insert_simple!("rt_session_heap_end", memory::rt_session_heap_end);
+    insert_simple!("rt_session_alloc_begin", memory::rt_session_alloc_begin);
+    insert_simple!("rt_session_alloc_end", memory::rt_session_alloc_end);
+    insert_simple!("rt_transient_heap_adopt", memory::rt_transient_heap_adopt);
+    insert_simple!("rt_session_heap_id", memory::rt_session_heap_id);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -1361,6 +1372,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dict_new", sffi_dict::rt_dict_new_fn);
     insert_simple!("rt_dict_set", sffi_dict::rt_dict_set_fn);
     insert_simple!("rt_dict_values", sffi_dict::rt_dict_values_fn);
+    insert_simple!("rt_dict_scope_read_bound_v1", sffi_dict::rt_dict_scope_read_bound_v1_fn);
+    insert_simple!("rt_dict_scope_read_owner_v1", sffi_dict::rt_dict_scope_read_owner_v1_fn);
+    insert_simple!("rt_dict_scope_read_epoch_v1", sffi_dict::rt_dict_scope_read_epoch_v1_fn);
+    insert_simple!("rt_dict_scope_read_meta_v1", sffi_dict::rt_dict_scope_read_meta_v1_fn);
+    insert_simple!("rt_dict_scope_read_slot_v1", sffi_dict::rt_dict_scope_read_slot_v1_fn);
     insert_simple!("rt_dir_create_all", file_io::rt_dir_create_all);
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);
@@ -3829,6 +3845,17 @@ mod tests {
             "rt_transient_heap_promote",
             "rt_transient_heap_promote_share_begin",
             "rt_transient_heap_promote_share_end",
+            "rt_rc_share",
+            "rt_rc_retain",
+            "rt_rc_release",
+            "rt_rc_count",
+            "rt_heap_graph_bytes",
+            "rt_session_heap_begin",
+            "rt_session_heap_end",
+            "rt_session_alloc_begin",
+            "rt_session_alloc_end",
+            "rt_transient_heap_adopt",
+            "rt_session_heap_id",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }

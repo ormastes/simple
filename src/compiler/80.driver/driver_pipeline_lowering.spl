@@ -44,7 +44,11 @@ use compiler.driver.driver_phase_gates.{
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context, driver_collection_target_options}
 use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
-use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1,
+    driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
+    driver_mir_entry_alias_projection_required_v1}
+use compiler.driver.driver_mir_provider_aliases.{driver_mir_checked_provider_alias_indices_v1}
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_admissible_v1,
     driver_native_prelower_module_keys_v1, driver_native_prelower_lookup_v1}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
@@ -811,6 +815,80 @@ impl CompilerDriver:
                 driver_source_entry_request(self.ctx) != "")
         if mir_phase2_projected_inventory:
             log_phase("aot:mir_physical_owners route=phase2-entry-projection retained={self.ctx.source_paths_owner.len()} selected={self.ctx.sources.len()} existing_schedule=1")
+        val mir_checked_entry_alias_inventory = driver_mir_entry_alias_projection_required_v1(
+            self.ctx.sources.len(), self.ctx.source_paths_owner.len(),
+            driver_source_entry_closure_enabled(self.ctx) or driver_source_entry_request(self.ctx) != "",
+            allow_bootstrap_shortcuts, (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1")
+        # The selected entry projection has its own source-index domain. Join
+        # its paths to retained admission instead of reusing retained indices.
+        # Keep the logical HIR dictionary: aliases still resolve by every name.
+        if mir_checked_entry_alias_inventory and
+                self.ctx.runtime_std_full_inventory_selection == nil and
+                self.ctx.demand_compile_execution == nil:
+            var retained_paths: [text] = []
+            for path in self.ctx.source_paths_owner:
+                retained_paths = retained_paths.push(_driver_physical_source_key(path))
+            var projected_paths: [text] = []
+            var projected_owners: [text] = []
+            for source in self.ctx.sources:
+                projected_paths = projected_paths.push(_driver_physical_source_key(source.path))
+                if go_to_end_enabled_v1() and self.go_to_end.is_excluded(source.module_name):
+                    projected_owners = projected_owners.push(source.module_name)
+                    continue
+                if not self.ctx.hir_modules.has(source.module_name):
+                    self.ctx.add_error("MIR projected ownership missing HIR for {source.module_name}")
+                    return false
+                val projected_hir: HirModule = self.ctx.hir_modules[source.module_name]
+                projected_owners = projected_owners.push(projected_hir.name)
+            val projection_identities = driver_mir_projected_source_identities_v1(
+                retained_paths, self.ctx.source_identities_owner, projected_paths)
+            if projection_identities.is_err():
+                self.ctx.add_error(projection_identities.unwrap_err())
+                return false
+            val projected_selection = driver_mir_physical_source_indices_v1(
+                projected_paths, projection_identities.unwrap(), projected_owners)
+            if projected_selection.is_err():
+                self.ctx.add_error(projected_selection.unwrap_err())
+                return false
+            var provider_paths: [text] = []
+            for provider in self.ctx.mir_feed_modules:
+                provider_paths = provider_paths.push(
+                    if provider.path == "": "" else: _driver_physical_source_key(provider.path))
+            val provider_selection = driver_mir_checked_provider_alias_indices_v1(
+                self.ctx.mir_feed_modules, provider_paths,
+                retained_paths, self.ctx.source_identities_owner)
+            if provider_selection.is_err():
+                self.ctx.add_error(provider_selection.unwrap_err())
+                return false
+            # The entry remains the first selected source. Provider dictionary
+            # iteration order cannot silently choose a different entry module.
+            mir_source_indices = projected_selection.unwrap()
+            self.ctx.mir_feed_modules = []
+            var scheduled_owners: Dict<text, bool> = {}
+            for selected_index in mir_source_indices:
+                val source_name = self.ctx.sources[selected_index].module_name
+                if go_to_end_enabled_v1() and self.go_to_end.is_excluded(source_name):
+                    continue
+                if not self.ctx.hir_modules.has(source_name):
+                    self.ctx.add_error("MIR projected ownership missing HIR for {source_name}")
+                    return false
+                val selected_hir: HirModule = self.ctx.hir_modules[source_name]
+                self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(selected_hir)
+                scheduled_owners[mir_provider_callable_key(selected_hir.name, "")] = true
+            # Preserve non-source/generated declaration providers. They are not
+            # invented source work rows and do not move the entry from slot 0.
+            for provider_index in provider_selection.unwrap():
+                val provider_key = feed_keys[provider_index]
+                if not self.ctx.hir_modules.has(provider_key):
+                    self.ctx.add_error("MIR projected provider disappeared: {provider_key}")
+                    return false
+                val provider_hir: HirModule = self.ctx.hir_modules[provider_key]
+                val provider_owner = mir_provider_callable_key(provider_hir.name, "")
+                if not scheduled_owners.has(provider_owner):
+                    self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(provider_hir)
+                    scheduled_owners[provider_owner] = true
+            mir_physical_ownership_active = true
+            log_phase("aot:mir_physical_owners route=checked-entry-projection logical={self.ctx.sources.len()} physical={mir_source_indices.len()} providers={self.ctx.mir_feed_modules.len()}")
         # Normal native entry/full-tool compilation owns physical outputs.
         # Cold archive receipts and demand publication retain their existing
         # logical-row authority; bootstrap-flat publication is also separate.
@@ -893,7 +971,9 @@ impl CompilerDriver:
                 mir_source_indices = physical_indices
             mir_physical_ownership_active = true
             log_phase("aot:mir_physical_owners logical={physical_owners.len()} physical={self.ctx.mir_feed_modules.len()}")
-        val mir_scheduled_count = if mir_physical_ownership_active:
+        val mir_scheduled_count = if mir_checked_entry_alias_inventory and mir_physical_ownership_active:
+            mir_source_indices.len()
+        elif mir_physical_ownership_active:
             self.ctx.mir_feed_modules.len()
         else:
             self.ctx.sources.len()
@@ -1486,10 +1566,16 @@ impl CompilerDriver:
                         # Bind concrete for the concrete HirModule param; the ICE
                         # gate guarantees presence (dead Err arm mirrors it).
                         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
+                        val module_lower_started_ms = time_now_monotonic_ms()
                         val scoped_entry: Result<MirModule, text> = if val scoped_hir = direct_hir:
                             direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
+                        # Per-module MIR cost receipt, slow modules only (bounded output):
+                        # the stage-3 log had no per-module MIR timing at all.
+                        val module_lower_ms = time_now_monotonic_ms() - module_lower_started_ms
+                        if module_lower_ms >= 2000:
+                            print "[mir-slow] dt_ms={module_lower_ms} module={name_direct}"
                         driver_trace_module_mir_errors(name_direct, src_direct.path,
                             direct_lowering.errors, module_errors_before)
                         if scoped_entry.is_err():
@@ -1575,6 +1661,10 @@ impl CompilerDriver:
             log_phase("aot:mir_diagnostics:advisories:start")
             driver_collect_mir_advisories(self.ctx, direct_lowering.mir_advisories)
             log_phase("aot:mir_diagnostics:advisories:done")
+            if self.native_staged_codegen.failed_batches.len() > 0:
+                val staged_failed = self.native_staged_codegen.failed_batches
+                val staged_failed_list = staged_failed.join("; ")
+                self.ctx.add_error("staged native codegen: {staged_failed.len()} batch(es) failed: {staged_failed_list}")
             if self.ctx.error_count_value != 0:
                 return false
             if not self.publish_runtime_std_mir_emissions_v1(): return false

@@ -389,7 +389,14 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
         }
         use std::os::windows::io::FromRawHandle;
         let file = unsafe { File::from_raw_handle(fd as *mut std::ffi::c_void) };
-        let ok = file.sync_all().is_ok();
+        // FlushFileBuffers on a handle opened without write access fails with
+        // ACCESS_DENIED, so every read-only open (every `file_read`) used to
+        // report "file text close failed" and `file_read` returned nothing.
+        // A read-only handle has nothing to flush: that error is a success.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        };
         drop(file);
         Ok(Value::Bool(ok))
     }
@@ -684,5 +691,20 @@ mod open_twin_tests {
         rt_io_file_close(&[fd]).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(rt_io_file_open_read(&[Value::Int(0), Value::Int(3)]).unwrap(), Value::Int(-1));
+    }
+}
+
+#[cfg(test)]
+mod close_read_only_tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_read_only_open_reports_success() {
+        let path = std::env::temp_dir().join(format!("simple_close_ro_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let fd = rt_io_file_open(&[Value::text(path.to_string_lossy().to_string()), Value::Int(0)]).unwrap();
+        assert!(matches!(fd, Value::Int(n) if n > 0), "read-only open: {fd:?}");
+        assert_eq!(rt_io_file_close_value(&[fd]).unwrap(), Value::Int(1));
+        let _ = std::fs::remove_file(&path);
     }
 }

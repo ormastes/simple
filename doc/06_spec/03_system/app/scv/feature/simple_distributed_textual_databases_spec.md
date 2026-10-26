@@ -1,5 +1,14 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
+**Manual freshness: STALE / UNEXECUTED (2026-10-20).** The three REQ-014
+causality scenarios now use the production durable queue and fresh-process
+readback. They verify Q -> P with concurrent R, arrival-independent scheduling,
+and missing-dependency preservation. This annotation records authored scope;
+regenerate this manual with the source-matched pure-Simple SPipe runner before
+claiming current generated documentation or PASS. The historical text/table
+below predates this change.
+
+
 **Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035, plus the REQ-030 hydration boundary and three REQ-032 local honesty scenarios, now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`

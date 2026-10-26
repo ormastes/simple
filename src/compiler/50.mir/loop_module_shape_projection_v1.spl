@@ -1,0 +1,382 @@
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+# One-operation projections. Rich values exist only after scalar admission.
+use compiler.mir.loop_module_shape_types_v1.{MirLoopShapeTagV1, MirLoopShapeErrorV1, mir_loop_shape_type_v1, mir_loop_shape_constant_v1, mir_loop_mir_binop_from_code_v1, mir_loop_mir_unaryop_from_code_v1}
+use compiler.mir.loop_module_shape_owner_v1.{MirLoopSealedViewV1, MirLoopTextExportPermitV1}
+use compiler.mir.loop_resource_account_v1.{MirLoopResourceKindV1}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue, LocalId, MirTypeDef, MirTypeDefKind, MirFieldDef, MirVariantDef}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, AggregateKind, BlockId}
+use compiler.mir.mir_instruction_graph.{MirInst, MirFunction, MirModule}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+
+fn mlp_cells(view: MirLoopSealedViewV1, cells: i64) -> Result<(), MirLoopShapeErrorV1>:
+    match view.account().reserve(cells, state_fields: cells):
+        case Ok(_): Ok(())
+        case Err(_): Err(MirLoopShapeErrorV1.Capacity)
+
+# Visit occurrences, not just distinct nodes: a shared scalar child can expand
+# multiple times in a rich tree. Work exhaustion refuses before rich projection.
+fn mlp_reserve_tree(view: MirLoopSealedViewV1, root: i64, inherited_copies: i64 = 0) -> Result<(), MirLoopShapeErrorV1>:
+    view.tag(root)?
+    mlp_cells(view, 3)?
+    var nodes: [i64] = [root]
+    var depths: [i64] = [0]
+    var copies: [i64] = [inherited_copies]
+    while nodes.len() > 0:
+        val node = nodes.pop().unwrap()
+        val depth = depths.pop().unwrap()
+        val inherited = copies.pop().unwrap()
+        if depth >= view.account().limits().max_depth: return Err(MirLoopShapeErrorV1.Capacity)
+        val children = view.child_count(node)?
+        # Local materializer DAG: constructor payload, wrapper, Ok, return,
+        # unwrap binding, caller argument. Ancestor transfers are additive.
+        # Each later vector/dictionary insertion may copy an earlier subtree.
+        val transfers = inherited + 6 + children
+        val fields = view.scalar_count(node)? + view.text_count(node)? + children + 4
+        if transfers > view.account().remaining(MirLoopResourceKindV1.StateFields) / fields:
+            return Err(MirLoopShapeErrorV1.Capacity)
+        mlp_cells(view, fields * transfers)?
+        var index = 0
+        while index < view.text_count(node)?:
+            val identity = view.text_id(node, index)?
+            if identity >= 0:
+                val bytes = view.text_length(identity)?
+                if bytes > 0 and transfers > view.account().remaining(MirLoopResourceKindV1.OutputBytes) / bytes:
+                    return Err(MirLoopShapeErrorV1.Capacity)
+                match view.account().reserve(bytes * transfers, output_bytes: bytes * transfers):
+                    case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+                    case Ok(_): ()
+            index = index + 1
+        index = 0
+        while index < children:
+            val child = view.child(node, index)?
+            if child >= 0:
+                mlp_cells(view, 3 * (nodes.len() + 1))?
+                nodes.push(child)
+                depths.push(depth + 1)
+                copies.push(transfers)
+            index = index + 1
+        val span = view.span(node)?
+        if span >= 0:
+            mlp_cells(view, 3 * (nodes.len() + 1))?
+            nodes.push(span)
+            depths.push(depth + 1)
+            copies.push(transfers)
+    Ok(())
+
+pub fn reserve_text_export_v1(view: MirLoopSealedViewV1, text_id: i64) -> Result<MirLoopTextExportPermitV1, MirLoopShapeErrorV1>:
+    view.reserve_text_export(text_id)
+
+fn mlp_text(view: MirLoopSealedViewV1, identity: i64) -> Result<text, MirLoopShapeErrorV1>:
+    reserve_text_export_v1(view, identity)?.copy_text()
+
+fn mlp_signature(view: MirLoopSealedViewV1, node: i64) -> Result<MirSignature, MirLoopShapeErrorV1>:
+    if view.tag(node)? != MirLoopShapeTagV1.Signature: return Err(MirLoopShapeErrorV1.InvalidTag)
+    val count = view.scalar(node, 2)?
+    var params: [MirType] = []
+    var declared: [MirType] = []
+    var index = 1
+    while index < view.child_count(node)?:
+        val type_ = mlp_type(view, view.child(node, index)?)?
+        if index <= count: params.push(type_)
+        else: declared.push(type_)
+        index = index + 1
+    Ok(MirSignature(params: params, return_type: mlp_type(view, view.child(node, 0)?)?,
+        is_variadic: view.scalar(node, 0)? == 1, params_known: view.scalar(node, 1)? == 1,
+        declared_params: declared, declared_params_known: view.scalar(node, 3)? == 1))
+
+fn mlp_type(view: MirLoopSealedViewV1, node: i64) -> Result<MirType, MirLoopShapeErrorV1>:
+    val tag = view.tag(node)?
+    match tag:
+        case TypeI8: Ok(MirType(kind: MirTypeKind.I8))
+        case TypeI16: Ok(MirType(kind: MirTypeKind.I16))
+        case TypeI32: Ok(MirType(kind: MirTypeKind.I32))
+        case TypeI64: Ok(MirType(kind: MirTypeKind.I64))
+        case TypeU8: Ok(MirType(kind: MirTypeKind.U8))
+        case TypeU16: Ok(MirType(kind: MirTypeKind.U16))
+        case TypeU32: Ok(MirType(kind: MirTypeKind.U32))
+        case TypeU64: Ok(MirType(kind: MirTypeKind.U64))
+        case TypeF32: Ok(MirType(kind: MirTypeKind.F32))
+        case TypeF64: Ok(MirType(kind: MirTypeKind.F64))
+        case TypeBool: Ok(MirType(kind: MirTypeKind.Bool))
+        case TypeChar: Ok(MirType(kind: MirTypeKind.Char))
+        case TypeUnit: Ok(MirType(kind: MirTypeKind.Unit))
+        case TypeNever: Ok(MirType(kind: MirTypeKind.Never))
+        case TypeVec4f: Ok(MirType(kind: MirTypeKind.Vec4f))
+        case TypeVec8f: Ok(MirType(kind: MirTypeKind.Vec8f))
+        case TypeVec4d: Ok(MirType(kind: MirTypeKind.Vec4d))
+        case TypeVec4i: Ok(MirType(kind: MirTypeKind.Vec4i))
+        case TypeVec8i: Ok(MirType(kind: MirTypeKind.Vec8i))
+        case TypeVec16f: Ok(MirType(kind: MirTypeKind.Vec16f))
+        case TypeVec8d: Ok(MirType(kind: MirTypeKind.Vec8d))
+        case TypeVec16i: Ok(MirType(kind: MirTypeKind.Vec16i))
+        case TypePtr: Ok(MirType(kind: MirTypeKind.Ptr(mlp_type(view, view.child(node, 0)?)?, view.scalar(node, 0)? == 1)))
+        case TypeRef: Ok(MirType(kind: MirTypeKind.Ref(mlp_type(view, view.child(node, 0)?)?, view.scalar(node, 0)? == 1)))
+        case TypeSlice: Ok(MirType(kind: MirTypeKind.Slice(mlp_type(view, view.child(node, 0)?)?)))
+        case TypePromise: Ok(MirType(kind: MirTypeKind.Promise(mlp_type(view, view.child(node, 0)?)?)))
+        case TypeActorType: Ok(MirType(kind: MirTypeKind.ActorType(mlp_type(view, view.child(node, 0)?)?)))
+        case TypeArray: Ok(MirType(kind: MirTypeKind.Array(mlp_type(view, view.child(node, 0)?)?, view.scalar(node, 0)?)))
+        case TypeScalableVec: Ok(MirType(kind: MirTypeKind.ScalableVec(mlp_type(view, view.child(node, 0)?)?, view.scalar(node, 0)?)))
+        case TypeDict: Ok(MirType(kind: MirTypeKind.Dict(mlp_type(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)))
+        case TypeResult: Ok(MirType(kind: MirTypeKind.Result(mlp_type(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)))
+        case TypeGenerator: Ok(MirType(kind: MirTypeKind.Generator(mlp_type(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)))
+        case TypeStruct: Ok(MirType(kind: MirTypeKind.Struct(SymbolId(id: view.canonical_nominal(view.scalar(node, 0)?)?))))
+        case TypeEnum: Ok(MirType(kind: MirTypeKind.Enum(SymbolId(id: view.canonical_nominal(view.scalar(node, 0)?)?))))
+        case TypeBits: Ok(MirType(kind: MirTypeKind.Bits(view.scalar(node, 0)?, view.scalar(node, 1)? == 1)))
+        case TypeOpaque: Ok(MirType(kind: MirTypeKind.Opaque(mlp_text(view, view.text_id(node, 0)?)?)))
+        case TypeFuncPtr: Ok(MirType(kind: MirTypeKind.FuncPtr(mlp_signature(view, view.child(node, 0)?)?)))
+        case TypeTuple | TypeUnion:
+            var elements: [MirType] = []
+            var index = 0
+            while index < view.child_count(node)?:
+                elements.push(mlp_type(view, view.child(node, index)?)?)
+                index = index + 1
+            if tag == MirLoopShapeTagV1.TypeTuple: return Ok(MirType(kind: MirTypeKind.Tuple(elements)))
+            Ok(MirType(kind: MirTypeKind.Union(elements)))
+        case _: Err(MirLoopShapeErrorV1.Unsupported)
+
+fn mlp_constant(view: MirLoopSealedViewV1, node: i64) -> Result<MirConstValue, MirLoopShapeErrorV1>:
+    val tag = view.tag(node)?
+    match tag:
+        case ConstInt: Ok(MirConstValue.Int(view.scalar(node, 0)?))
+        case ConstBool: Ok(MirConstValue.Bool(view.scalar(node, 0)? == 1))
+        case ConstFloat: Ok(MirConstValue.Float(view.real(node)?))
+        case ConstZero: Ok(MirConstValue.Zero)
+        case ConstText: Ok(MirConstValue.Str(mlp_text(view, view.text_id(node, 0)?)?))
+        case ConstFloatLexeme: Ok(MirConstValue.FloatLexeme(mlp_text(view, view.text_id(node, 0)?)?))
+        case ConstArray | ConstTuple:
+            var elements: [MirConstValue] = []
+            var index = 0
+            while index < view.child_count(node)?:
+                elements.push(mlp_constant(view, view.child(node, index)?)?)
+                index = index + 1
+            if tag == MirLoopShapeTagV1.ConstArray: return Ok(MirConstValue.Array(elements))
+            Ok(MirConstValue.Tuple(elements))
+        case ConstStruct:
+            var fields: Dict<text, MirConstValue> = {}
+            var index = 0
+            while index < view.child_count(node)?:
+                val field = view.child(node, index)?
+                val name = mlp_text(view, view.text_id(field, 0)?)?
+                if fields.has(name): return Err(MirLoopShapeErrorV1.Duplicate)
+                fields[name] = mlp_constant(view, view.child(field, 0)?)?
+                index = index + 1
+            Ok(MirConstValue.Struct(fields))
+        case _: Err(MirLoopShapeErrorV1.Unsupported)
+
+fn mlp_operand(view: MirLoopSealedViewV1, node: i64) -> Result<MirOperand, MirLoopShapeErrorV1>:
+    match view.tag(node)?:
+        case OperandCopy: Ok(MirOperand(kind: MirOperandKind.Copy(LocalId(id: view.scalar(node, 0)?))))
+        case OperandMove: Ok(MirOperand(kind: MirOperandKind.Move(LocalId(id: view.scalar(node, 0)?))))
+        case OperandConst: Ok(MirOperand(kind: MirOperandKind.Const(mlp_constant(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)))
+        case _: Err(MirLoopShapeErrorV1.Unsupported)
+
+fn mlp_span(view: MirLoopSealedViewV1, node: i64) -> Result<Span?, MirLoopShapeErrorV1>:
+    val identity = view.span(node)?
+    if identity < 0: return Ok(nil)
+    Ok(Some(Span(file: mlp_text(view, view.text_id(identity, 0)?)?, start: view.scalar(identity, 0)?, end: view.scalar(identity, 1)?, line: view.scalar(identity, 2)?, col: view.scalar(identity, 3)?, length: view.scalar(identity, 4)?)))
+
+fn mlp_instruction(view: MirLoopSealedViewV1, node: i64) -> Result<MirInst, MirLoopShapeErrorV1>:
+    val tag = view.tag(node)?
+    val kind: MirInstKind = match tag:
+        case InstNop: MirInstKind.Nop
+        case InstDebugValue: MirInstKind.DebugValue(LocalId(id: view.scalar(node, 0)?), mlp_text(view, view.text_id(node, 0)?)?)
+        case InstCall:
+            val destination: LocalId? = if view.scalar(node, 0)? == 1: Some(LocalId(id: view.scalar(node, 1)?)) else: nil
+            var arguments: [MirOperand] = []
+            var index = 1
+            while index < view.child_count(node)?:
+                arguments.push(mlp_operand(view, view.child(node, index)?)?)
+                index = index + 1
+            MirInstKind.Call(destination, mlp_operand(view, view.child(node, 0)?)?, arguments)
+        case InstConst: MirInstKind.Const(LocalId(id: view.scalar(node, 0)?), mlp_constant(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)
+        case InstCopy: MirInstKind.Copy(LocalId(id: view.scalar(node, 0)?), LocalId(id: view.scalar(node, 1)?))
+        case InstMove: MirInstKind.Move(LocalId(id: view.scalar(node, 0)?), LocalId(id: view.scalar(node, 1)?))
+        case InstDrop: MirInstKind.Drop(LocalId(id: view.scalar(node, 0)?))
+        case InstBinOp: MirInstKind.BinOp(LocalId(id: view.scalar(node, 0)?), mir_loop_mir_binop_from_code_v1(view.scalar(node, 1)?)?, mlp_operand(view, view.child(node, 0)?)?, mlp_operand(view, view.child(node, 1)?)?)
+        case InstUnaryOp: MirInstKind.UnaryOp(LocalId(id: view.scalar(node, 0)?), mir_loop_mir_unaryop_from_code_v1(view.scalar(node, 1)?)?, mlp_operand(view, view.child(node, 0)?)?)
+        case InstCast: MirInstKind.Cast(LocalId(id: view.scalar(node, 0)?), mlp_operand(view, view.child(node, 0)?)?, mlp_type(view, view.child(node, 1)?)?)
+        case InstGetField: MirInstKind.GetField(LocalId(id: view.scalar(node, 0)?), mlp_operand(view, view.child(node, 0)?)?, view.scalar(node, 1)?)
+        case InstAggregate:
+            val aggregate: AggregateKind = match view.scalar(node, 1)?:
+                case 0: AggregateKind.Array(mlp_type(view, view.child(node, 0)?)?)
+                case 1: AggregateKind.Tuple
+                case 2: AggregateKind.Struct(SymbolId(id: view.canonical_nominal(view.scalar(node, 2)?)?))
+                case 3: AggregateKind.Enum(SymbolId(id: view.canonical_nominal(view.scalar(node, 2)?)?), view.scalar(node, 3)?)
+                case _: return Err(MirLoopShapeErrorV1.InvalidField)
+            var operands: [MirOperand] = []
+            var index = 1
+            while index < view.child_count(node)?:
+                operands.push(mlp_operand(view, view.child(node, index)?)?)
+                index = index + 1
+            MirInstKind.Aggregate(LocalId(id: view.scalar(node, 0)?), aggregate, operands)
+        case _: return Err(MirLoopShapeErrorV1.Unsupported)
+    Ok(MirInst(kind: kind, span: mlp_span(view, node)?))
+
+pub class MirLoopTypeProjectionPermitV1:
+    view: MirLoopSealedViewV1
+    node: i64
+    consumed: bool
+
+    pub me materialize_type() -> Result<MirType, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(MirLoopShapeErrorV1.InvalidState)
+        self.consumed = true
+        mlp_type(self.view, self.node)
+
+pub fn reserve_type_renderer_v1(view: MirLoopSealedViewV1, node: i64) -> Result<MirLoopTypeProjectionPermitV1, MirLoopShapeErrorV1>:
+    if not mir_loop_shape_type_v1(view.tag(node)?): return Err(MirLoopShapeErrorV1.InvalidTag)
+    mlp_reserve_tree(view, node)?
+    mlp_cells(view, 3)?
+    Ok(MirLoopTypeProjectionPermitV1(view: view, node: node, consumed: false))
+
+pub class MirLoopOperandProjectionPermitV1:
+    view: MirLoopSealedViewV1
+    node: i64
+    consumed: bool
+
+    pub me materialize_operand() -> Result<MirOperand, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(MirLoopShapeErrorV1.InvalidState)
+        self.consumed = true
+        mlp_operand(self.view, self.node)
+
+pub fn reserve_operand_renderer_v1(view: MirLoopSealedViewV1, node: i64) -> Result<MirLoopOperandProjectionPermitV1, MirLoopShapeErrorV1>:
+    val tag = view.tag(node)?
+    if tag != MirLoopShapeTagV1.OperandCopy and tag != MirLoopShapeTagV1.OperandMove and tag != MirLoopShapeTagV1.OperandConst: return Err(MirLoopShapeErrorV1.InvalidTag)
+    mlp_reserve_tree(view, node)?
+    mlp_cells(view, 3)?
+    Ok(MirLoopOperandProjectionPermitV1(view: view, node: node, consumed: false))
+
+pub class MirLoopInstructionProjectionPermitV1:
+    view: MirLoopSealedViewV1
+    node: i64
+    consumed: bool
+
+    pub me materialize_instruction() -> Result<MirInst, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(MirLoopShapeErrorV1.InvalidState)
+        self.consumed = true
+        mlp_instruction(self.view, self.node)
+
+pub fn reserve_instruction_renderer_v1(view: MirLoopSealedViewV1, node: i64) -> Result<MirLoopInstructionProjectionPermitV1, MirLoopShapeErrorV1>:
+    match view.tag(node)?:
+        case InstCall | InstNop | InstDebugValue | InstConst | InstCopy | InstMove | InstDrop | InstBinOp | InstUnaryOp | InstCast | InstAggregate | InstGetField: ()
+        case _: return Err(MirLoopShapeErrorV1.Unsupported)
+    mlp_reserve_tree(view, node)?
+    mlp_cells(view, 3)?
+    Ok(MirLoopInstructionProjectionPermitV1(view: view, node: node, consumed: false))
+
+export MirLoopTypeProjectionPermitV1, MirLoopOperandProjectionPermitV1, MirLoopInstructionProjectionPermitV1
+
+# The only module projection is internal to the existing type planner. It has
+# actual declarations and function names/signatures, and no executable bodies.
+fn mlp_declaration(view: MirLoopSealedViewV1, node: i64) -> Result<MirTypeDef, MirLoopShapeErrorV1>:
+    val tag = view.tag(node)?
+    val kind: MirTypeDefKind = match tag:
+        case DeclStruct:
+            var fields: [MirFieldDef] = []
+            var index = 0
+            while index < view.child_count(node)?:
+                val field = view.child(node, index)?
+                fields.push(MirFieldDef(name: mlp_text(view, view.text_id(field, 0)?)?,
+                    type_: mlp_type(view, view.child(field, 0)?)?, offset: view.scalar(field, 0)?,
+                    has_bits_attr: view.scalar(field, 1)? == 1, bits_width: view.scalar(field, 2)?))
+                index = index + 1
+            MirTypeDefKind.Struct(fields)
+        case DeclEnum:
+            var variants: [MirVariantDef] = []
+            var index = 0
+            while index < view.child_count(node)?:
+                val variant = view.child(node, index)?
+                var payload: MirType? = nil
+                if view.child_count(variant)? == 1: payload = Some(mlp_type(view, view.child(variant, 0)?)?)
+                variants.push(MirVariantDef(name: mlp_text(view, view.text_id(variant, 0)?)?,
+                    discriminant: view.scalar(variant, 0)?, payload: payload))
+                index = index + 1
+            MirTypeDefKind.Enum(variants)
+        case DeclUnion:
+            var variants: [MirType] = []
+            var index = 0
+            while index < view.child_count(node)?:
+                variants.push(mlp_type(view, view.child(node, index)?)?)
+                index = index + 1
+            MirTypeDefKind.Union(variants)
+        case _: return Err(MirLoopShapeErrorV1.InvalidTag)
+    Ok(MirTypeDef(symbol: SymbolId(id: view.canonical_nominal(view.scalar(node, 0)?)?),
+        name: mlp_text(view, view.text_id(node, 0)?)?, kind: kind,
+        is_export_c: view.scalar(node, 1)? == 1, export_name: mlp_text(view, view.text_id(node, 1)?)?))
+
+fn mlp_function_signature(view: MirLoopSealedViewV1, node: i64) -> Result<MirFunction, MirLoopShapeErrorV1>:
+    # These neutral fields are a deliberate planner-only projection, never
+    # a source function or a verification artifact. Planner only reads name.
+    Ok(MirFunction(symbol: SymbolId(id: view.scalar(node, 0)?),
+        name: mlp_text(view, view.text_id(node, 0)?)?, signature: mlp_signature(view, view.child(node, 0)?)?,
+        locals: [], blocks: [], entry_block: BlockId(id: -1), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0, verification_contract: nil,
+        nogc_strict: false, short_call_contracts: {}, enum_matches: []))
+
+pub class MirLoopTypePlanProjectionPermitV1:
+    view: MirLoopSealedViewV1
+    consumed: bool
+
+    pub me materialize_type_plan() -> Result<MirModule, MirLoopShapeErrorV1>:
+        if self.consumed: return Err(MirLoopShapeErrorV1.InvalidState)
+        self.consumed = true
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        var functions: Dict<SymbolId, MirFunction> = {}
+        var index = 0
+        while index < self.view.declaration_count()?:
+            val node = self.view.declaration_at(index)?
+            val definition = mlp_declaration(self.view, node)?
+            if types.has(definition.symbol): return Err(MirLoopShapeErrorV1.Duplicate)
+            types[definition.symbol] = definition
+            index = index + 1
+        index = 0
+        while index < self.view.function_count()?:
+            val node = self.view.function_at(index)?
+            val function = mlp_function_signature(self.view, node)?
+            if functions.has(function.symbol): return Err(MirLoopShapeErrorV1.Duplicate)
+            functions[function.symbol] = function
+            index = index + 1
+        Ok(MirModule(name: mlp_text(self.view, self.view.namespace_text_id()?)?,
+            functions: functions, types: types, statics: {}, constants: {}))
+
+pub fn reserve_type_plan_projection_v1(view: MirLoopSealedViewV1) -> Result<MirLoopTypePlanProjectionPermitV1, MirLoopShapeErrorV1>:
+    val declarations = view.declaration_count()?
+    val functions = view.function_count()?
+    val namespace_bytes = view.text_length(view.namespace_text_id()?)?
+    # Beyond TextExport: mlp_text return, unwrap, module field/constructor,
+    # module Ok/return and caller binding. Namespace is not a graph node.
+    val namespace_copies = namespace_bytes + namespace_bytes + namespace_bytes + namespace_bytes + namespace_bytes + namespace_bytes
+    match view.account().reserve(namespace_copies, output_bytes: namespace_copies):
+        case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+        case Ok(_): ()
+    # Module's eight fields through constructor/Ok/return/binding plus permit.
+    mlp_cells(view, 8 + 8 + 8 + 8 + 2)?
+    var index = 0
+    while index < declarations:
+        # Dictionary insertion can copy all prior definitions; module wrapping,
+        # Ok, return and binding add four more complete payload transfers.
+        mlp_reserve_tree(view, view.declaration_at(index)?, declarations + 4)?
+        index = index + 1
+    index = 0
+    while index < functions:
+        val node = view.function_at(index)?
+        mlp_reserve_tree(view, view.child(node, 0)?, functions + 4)?
+        # Actual scalar skeleton: MirFunction36, Span6, ClockedMetadata8,
+        # HardwareMetadata6, SymbolId1 and BlockId1. No hidden rich body.
+        mlp_cells(view, (36 + 6 + 8 + 6 + 1 + 1) * (functions + 4))?
+        val name_bytes = view.text_length(view.text_id(node, 0)?)?
+        val copies = functions + 4
+        if name_bytes > 0 and copies > view.account().remaining(MirLoopResourceKindV1.OutputBytes) / name_bytes:
+            return Err(MirLoopShapeErrorV1.Capacity)
+        match view.account().reserve(name_bytes * copies, output_bytes: name_bytes * copies):
+            case Err(_): return Err(MirLoopShapeErrorV1.Capacity)
+            case Ok(_): ()
+        index = index + 1
+    Ok(MirLoopTypePlanProjectionPermitV1(view: view, consumed: false))
+
+export MirLoopTypePlanProjectionPermitV1

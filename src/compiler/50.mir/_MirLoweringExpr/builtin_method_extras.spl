@@ -34,6 +34,63 @@ fn builtin_extra_rt_operand(name: text, params: [MirType], return_type: MirType)
     ))
 
 impl MirLowering:
+    me try_lower_saturating_float_to_i64_v1(receiver: LocalId) -> LocalId?:
+        # Float.to_int/to_i64 truncate toward zero, saturate overflow and map
+        # NaN to zero. An unguarded LLVM fptosi is poison outside its range.
+        # Require concrete float storage independently of HIR receiver proof.
+        var narrow = false
+        if val storage = self.local_mir_type_of(receiver):
+            match storage.kind:
+                case MirTypeKind.F32: narrow = true
+                case MirTypeKind.F64: ()
+                case _: return nil
+        else:
+            return nil
+        var b = self.builder
+        var value = receiver
+        if narrow:
+            value = b.emit_cast(mir_operand_copy(receiver), MirType.f64())
+        val result = b.new_local(nil, MirType.i64(), LocalKind.Var)
+        val zero = b.emit_const_int(0)
+        val maximum = b.emit_const_int(9223372036854775807)
+        val minimum = b.emit_const_int(-9223372036854775807 - 1)
+        val upper_bound = b.new_temp(MirType.f64())
+        b.emit_const(upper_bound, MirConstValue.Float(9223372036854775808.0), MirType.f64())
+        val lower_bound = b.new_temp(MirType.f64())
+        b.emit_const(lower_bound, MirConstValue.Float(-9223372036854775808.0), MirType.f64())
+        val upper = b.new_block(Some("float_to_int_upper"))
+        val lower = b.new_block(Some("float_to_int_lower"))
+        val nan = b.new_block(Some("float_to_int_nan"))
+        val high = b.new_block(Some("float_to_int_max"))
+        val low = b.new_block(Some("float_to_int_min"))
+        val finite = b.new_block(Some("float_to_int_finite"))
+        val merge = b.new_block(Some("float_to_int_merge"))
+        # Eq is ordered for floats: unlike ordered Ne, self-Eq rejects NaN.
+        val ordered = b.emit_binop(MirBinOp.Eq, mir_operand_copy(value), mir_operand_copy(value), MirType.bool())
+        b.terminate_if(mir_operand_copy(ordered), upper, nan)
+        b.switch_to_block(nan)
+        b.emit_copy(result, zero)
+        b.terminate_goto(merge)
+        b.switch_to_block(upper)
+        val overflow = b.emit_binop(MirBinOp.Ge, mir_operand_copy(value), mir_operand_copy(upper_bound), MirType.bool())
+        b.terminate_if(mir_operand_copy(overflow), high, lower)
+        b.switch_to_block(high)
+        b.emit_copy(result, maximum)
+        b.terminate_goto(merge)
+        b.switch_to_block(lower)
+        val underflow = b.emit_binop(MirBinOp.Le, mir_operand_copy(value), mir_operand_copy(lower_bound), MirType.bool())
+        b.terminate_if(mir_operand_copy(underflow), low, finite)
+        b.switch_to_block(low)
+        b.emit_copy(result, minimum)
+        b.terminate_goto(merge)
+        b.switch_to_block(finite)
+        val truncated = b.emit_cast(mir_operand_copy(value), MirType.i64())
+        b.emit_copy(result, truncated)
+        b.terminate_goto(merge)
+        b.switch_to_block(merge)
+        self.builder = b
+        Some(result)
+
     me builtin_extra_fail_closed(message: text, span: Span?) -> LocalId:
         """Reject a form this table does not lower, closed on EVERY route.
 

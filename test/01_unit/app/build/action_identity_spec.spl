@@ -16,7 +16,9 @@ use app.build.targets.action_identity.{
     NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
     native_action_input_receipt_text_v1, parse_native_action_input_receipt_v1,
     native_action_input_error_v1, load_current_native_action_input_v1,
-    aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1
+    aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1,
+    darwin_object_target_identity_digest_v1, darwin_object_artifact_error_v1,
+    darwin_sdk_identity_v1
 }
 use app.build.targets.artifact_receipt.{
     ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
@@ -216,3 +218,90 @@ describe "aggregate action identity":
         ) == aggregate_action_identity_digest_v1(
             "x", "y\nproduct=z", "llvm", tool, dependencies
         )).to_equal(false)
+
+
+fn _object_identity() -> NativeActionInputIdentityV1:
+    var identity = _setup_identity()
+    val sdk = ACTION_IDENTITY_ROOT + "/sdk"
+    dir_create_all(sdk)
+    file_write(sdk + "/SDKSettings.json", "object-fixture-sdk-v1")
+    identity.target_triple = "aarch64-apple-darwin"
+    identity.architecture = "aarch64"
+    identity.cpu_features = "cpu=default|features=default"
+    identity.deployment_target = "13.0.0"
+    identity.sdk_identity = darwin_sdk_identity_v1(sdk)
+    identity.object_format = "mach-o"
+    identity.linker_policy = "darwin-relocatable-object-v1"
+    identity.linker_tool_identity = ""
+    identity.runtime_provider_receipt = sha256_text("actual-fixture-codegen-provider")
+    identity.runtime_artifact_digest = ""
+    identity.target_identity_digest = darwin_object_target_identity_digest_v1(
+        identity.target_triple, identity.architecture, identity.cpu_features,
+        identity.deployment_target, identity.sdk_identity, identity.backend,
+        identity.optimization, identity.object_format, identity.runtime_provider_receipt)
+    val namespace = target_cache_namespace_v1(
+        identity.producer_abi_digest, identity.target_identity_digest, identity.profile, "object")
+    identity.action_key = target_action_key_v1(
+        identity.target, identity.action, "P1", "B3", namespace,
+        identity.dependency_manifest_digest, identity.imported_closure_digest,
+        identity.tool_behavior_digest, "object")
+    identity
+
+fn _object_identity_error(identity: NativeActionInputIdentityV1, kind: text = "object") -> text:
+    native_action_input_error_v1(
+        ACTION_IDENTITY_ROOT, ACTION_IDENTITY_ROOT + "/build/target_cache/app",
+        "//app:main", "P1", "B3", "src/main.spl", kind,
+        identity.tool_artifact_digest, identity,
+        identity.target_triple, identity.architecture, identity.deployment_target,
+        identity.sdk_identity, identity.runtime_provider_receipt,
+        "", ACTION_IDENTITY_ROOT + "/sdk", "")
+
+describe "Darwin relocatable object action input contract":
+    it "admits an object input identity without inventing executable runtime linkage":
+        val identity = _object_identity()
+        expect(_object_identity_error(identity)).to_equal("")
+        expect(identity.linker_tool_identity).to_equal("")
+        expect(identity.runtime_artifact_digest).to_equal("")
+
+    it "rejects executable linker fields on the object contract":
+        var identity = _object_identity()
+        identity.linker_tool_identity = sha256_text("fabricated-executable-linker")
+        expect(_object_identity_error(identity)).to_equal(
+            "target-identity-error: object-runtime-linkage-not-applicable")
+
+    it "keeps runtime linkage mandatory for binary actions":
+        val identity = _object_identity()
+        expect(_object_identity_error(identity, "binary")).to_equal(
+            "target-identity-error: invalid-darwin-bound-identity")
+
+    it "retains current source admission for object actions":
+        val identity = _object_identity()
+        file_write(ACTION_IDENTITY_ROOT + "/src/main.spl", "fn main(): 1\n")
+        expect(_object_identity_error(identity) == "").to_equal(false)
+
+    it "retains current provider digest admission for object actions":
+        var identity = _object_identity()
+        identity.runtime_provider_receipt = "missing"
+        expect(_object_identity_error(identity)).to_equal(
+            "target-identity-error: invalid-darwin-bound-identity")
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _object_header_bytes(filetype: u8) -> [u8]:
+    [0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x0cu8, 0u8, 0u8, 1u8,
+     0u8, 0u8, 0u8, 0u8, filetype, 0u8, 0u8, 0u8,
+     0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+     0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+
+describe "Darwin object artifact kind admission":
+    it "accepts only actual MH_OBJECT bytes for the requested CPU":
+        val identity = _object_identity()
+        val artifact_path = ACTION_IDENTITY_ROOT + "/artifact.o"
+        expect(rt_file_write_bytes(artifact_path, _object_header_bytes(1u8))).to_be(true)
+        expect(darwin_object_artifact_error_v1(artifact_path, "aarch64")).to_equal("")
+        expect(darwin_object_artifact_error_v1(artifact_path, "x86_64") == "").to_equal(false)
+        expect(rt_file_write_bytes(artifact_path, _object_header_bytes(2u8))).to_be(true)
+        expect(darwin_object_artifact_error_v1(artifact_path, "aarch64")).to_equal(
+            "target-identity-error: object-artifact-kind-mismatch")
+        expect(rt_file_write_bytes(artifact_path, [0x21u8, 0x3cu8, 0x61u8])).to_be(true)
+        expect(darwin_object_artifact_error_v1(artifact_path, "aarch64") == "").to_equal(false)

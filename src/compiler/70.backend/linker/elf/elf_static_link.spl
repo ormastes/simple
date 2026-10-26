@@ -61,7 +61,7 @@ use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
-use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section}
+use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section_bytes}
 use compiler.backend.linker.elf.elf_operation_bindings.{
     ElfSealedOperationsV1, ElfComposedImageV1, elf_builtin_operations_v1
 }
@@ -404,25 +404,27 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
                 place_sec.push(si)
             si = si + 1
         oi = oi + 1
+    # Each buffer is allocated once at its final size and filled with
+    # native `write_span` copies straight from the input file bytes: no
+    # per-placement slice temporaries and no geometric regrowth.
     var out: [[u8]] = []
     var k: i64 = 0
     while k < inputs.outs.len():
         var buf: [u8] = []
-        if inputs.outs[k].name == ".rodata":
-            buf = elf_u8_from_i64(inputs.merge.data)
         if inputs.outs[k].sh_type != SHT_NOBITS_E:
+            buf = elf_u8_zeros(inputs.outs[k].size)
+            if inputs.outs[k].name == ".rodata" and inputs.merge.data.len() > 0:
+                buf.write_span(inputs.merge.data, 0, 0, inputs.merge.data.len())
             var pi: i64 = 0
             while pi < place_out.len():
                 if place_out[pi] == k:
                     val obj = inputs.objects[place_obj[pi]]
                     val sec = obj.sections[place_sec[pi]]
-                    val gap = inputs.sec_off[place_obj[pi]][place_sec[pi]] - buf.len()
-                    if gap > 0: buf.extend(elf_u8_zeros(gap))
                     # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                    buf.extend(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
+                    if sec.sh_size > 0:
+                        buf.write_span(obj.raw, inputs.sec_off[place_obj[pi]][place_sec[pi]],
+                            sec.sh_addr, sec.sh_size)
                 pi = pi + 1
-            val gap = inputs.outs[k].size - buf.len()
-            if gap > 0: buf.extend(elf_u8_zeros(gap))
         out.push(buf)
         k = k + 1
     out
@@ -1187,21 +1189,25 @@ fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
         if i != shstrndx and elf_u8_read_le(image, h + 4, 4) != SHT_NOBITS_E and elf_u8_read_le(image, h + 24, 8) + elf_u8_read_le(image, h + 32, 8) > old_off:
             return Err("internal: section header {i} has file data after .shstrtab; cannot append .symtab")
         i = i + 1
-    var b: [u8] = image[0:old_off]
-    val sym_off = align_up(b.len(), 8)
-    if sym_off > b.len(): b.extend(elf_u8_zeros(sym_off - b.len()))
-    b.extend(elf_u8_from_i64(st.symtab))
-    val str_off = b.len()
-    b.extend(elf_u8_from_i64(st.strtab))
-    val shstr_off = b.len()
-    b.extend(image[old_off:old_off + old_size])
-    b.extend(text_to_bytes(".symtab"))
-    b.push(0u8)
-    b.extend(text_to_bytes(".strtab"))
-    b.push(0u8)
-    val new_shoff = align_up(b.len(), 8)
-    if new_shoff > b.len(): b.extend(elf_u8_zeros(new_shoff - b.len()))
-    b.extend(image[shoff:shoff + shnum * 64])
+    # One allocation at the final size; pieces are placed with native
+    # `write_span` (no prefix slice of the whole image, no regrowth).
+    val sym_off = align_up(old_off, 8)
+    val str_off = sym_off + st.symtab.len()
+    val shstr_off = str_off + st.strtab.len()
+    val new_shoff = align_up(shstr_off + old_size + 16, 8)
+    var b: [u8] = elf_u8_zeros(new_shoff + (shnum + 2) * 64)
+    b.write_span(image, 0, 0, old_off)
+    val symtab_bytes = elf_u8_from_i64(st.symtab)
+    if symtab_bytes.len() > 0: b.write_span(symtab_bytes, sym_off, 0, symtab_bytes.len())
+    val strtab_bytes = elf_u8_from_i64(st.strtab)
+    if strtab_bytes.len() > 0: b.write_span(strtab_bytes, str_off, 0, strtab_bytes.len())
+    if old_size > 0: b.write_span(image, shstr_off, old_off, old_size)
+    var names: [u8] = text_to_bytes(".symtab")
+    names.push(0u8)
+    names.extend(text_to_bytes(".strtab"))
+    names.push(0u8)
+    b.write_span(names, shstr_off + old_size, 0, 16)
+    b.write_span(image, new_shoff, shoff, shnum * 64)
     # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md (inline header patches)
     val nssh = new_shoff + shstrndx * 64
     var pb: i64 = 0
@@ -1232,7 +1238,8 @@ fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     headers = write_u32_le(headers, 0)
     headers = write_u64_le(headers, 1)
     headers = write_u64_le(headers, 0)
-    b.extend(elf_u8_from_i64(headers))
+    val header_bytes = elf_u8_from_i64(headers)
+    b.write_span(header_bytes, new_shoff + shnum * 64, 0, header_bytes.len())
     pb = 0
     while pb < 8:
         b[0x28 + pb] = ((new_shoff >> (pb * 8)) & 0xff) as u8
@@ -1432,7 +1439,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         copy_offsets: copies.offsets, copy_out: copies.out_idx,
         runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style)
     elf_link_trace("copies placed")
-    var contents = elf_static_contents(inputs)
+    # Reuse the pre-copy contents instead of rebuilding every section's bytes:
+    # elf_place_copies only grows/appends NOBITS .bss, whose content is empty.
+    # Rebuilding allocated a second full copy of all section bytes, which the
+    # native runtime never frees.
+    var contents = initial_contents
+    while contents.len() < inputs.outs.len():
+        contents.push([])
     val eh_out = elf_find_out(inputs.outs, ".eh_frame")
     var eh_fdes: i64 = 0
     if eh_out >= 0:
@@ -1895,8 +1908,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if not strip_output:
         image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)?
     if riscv_attributes.len() > 0:
-        image = elf_u8_from_i64(elf_append_nonalloc_section(elf_i64_from_u8(image),
-            ".riscv.attributes", 0x70000003, riscv_attributes)?)
+        image = elf_append_nonalloc_section_bytes(image,
+            ".riscv.attributes", 0x70000003, riscv_attributes)?
     elf_link_trace("symtab appended")
     val digest = elf_build_id_digest(image)
     val note_off = note_start + 16

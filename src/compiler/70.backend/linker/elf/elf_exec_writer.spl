@@ -360,21 +360,22 @@ fn elf_write_image_bytes(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExe
         head = write_u64_le(head, seg.p_filesz)
         head = write_u64_le(head, seg.p_memsz)
         head = write_u64_le(head, seg.p_align)
-    var b: [u8] = elf_u8_from_i64(head)
+    # The image is allocated once at its final size (shoff + header table)
+    # and every piece is copied into place with native `write_span`, so the
+    # buffer never regrows and no padding temporaries are built.
+    var b: [u8] = elf_u8_zeros(shoff + shnum * ELF64_SHDR_SIZE)
+    val head_bytes = elf_u8_from_i64(head)
+    b.write_span(head_bytes, 0, 0, head_bytes.len())
 
     var i: i64 = 0
     while i < plan.secs.len():
         if plan.secs[i].sh_type != SHT_NOBITS_E:
-            val gap = plan.offsets[i] - b.len()
-            if gap > 0: b.extend(elf_u8_zeros(gap))
-            b.extend(contents[i])
+            val n = contents[i].len()
+            if n > 0: b.write_span(contents[i], plan.offsets[i], 0, n)
         i = i + 1
 
-    var gap = shstr_off - b.len()
-    if gap > 0: b.extend(elf_u8_zeros(gap))
-    b.extend(elf_u8_from_i64(shstr.data))
-    gap = shoff - b.len()
-    if gap > 0: b.extend(elf_u8_zeros(gap))
+    val shstr_bytes = elf_u8_from_i64(shstr.data)
+    if shstr_bytes.len() > 0: b.write_span(shstr_bytes, shstr_off, 0, shstr_bytes.len())
 
     # Section header table: null, output sections, .shstrtab.
     var tail: [i64] = []
@@ -394,7 +395,8 @@ fn elf_write_image_bytes(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExe
         sh_type: SHT_STRTAB_E, sh_flags: 0, sh_offset: shstr_off, sh_size: shstr.data.len(),
         sh_link: 0, sh_info: 0, sh_addralign: 1, sh_entsize: 0, data: [])
     tail = emit_section_header_at(tail, shstr_layout, 0)
-    b.extend(elf_u8_from_i64(tail))
+    val tail_bytes = elf_u8_from_i64(tail)
+    b.write_span(tail_bytes, shoff, 0, tail_bytes.len())
     b
 
 # ============================================================================

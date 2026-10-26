@@ -535,6 +535,7 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
             validated_remember(ptr as usize, epoch);
             // Caller just allocated the object; header is valid by contract.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            super::dict_scope_read::registered(ptr as usize, kind, bytes as u32);
             note_heap_alloc(kind, bytes);
             note_attr_alloc(ptr as usize, bytes);
         }
@@ -560,6 +561,7 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
             // Presence in the registry means not yet freed (the erasing call
             // is the one allowed to free), so this read is not use-after-free.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            super::dict_scope_read::unregistered(ptr as usize, kind);
             note_heap_free(kind, bytes);
             note_attr_free(ptr as usize, bytes);
             super::collections::transient_promote_share_forget(ptr as usize);
@@ -593,6 +595,7 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         .unwrap_or(false);
     if removed {
         let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+        super::dict_scope_read::unregistered(ptr as usize, kind);
         note_heap_free(kind, bytes);
         note_attr_free(ptr as usize, bytes);
         super::collections::transient_promote_share_forget(ptr as usize);
@@ -661,6 +664,7 @@ pub(crate) fn unregister_heap_ptrs_batch(
     for &(ptr, kind) in &out[start..] {
         // Erased by this call and not yet freed, so the header is readable.
         let bytes = unsafe { (*ptr).size as u64 };
+        super::dict_scope_read::unregistered(ptr as usize, kind as u8);
         note_heap_free(kind as u8, bytes);
         note_attr_free(ptr as usize, bytes);
         super::collections::transient_promote_share_forget(ptr as usize);
@@ -739,6 +743,7 @@ pub fn clear_heap_allocation_registry() {
                 shard.epoch.fetch_add(1, Ordering::AcqRel);
             });
         }
+        super::dict_scope_read::cleared();
     }
     // Peak intentionally survives a clear: it answers "how big did this
     // process get", which a bulk reset must not erase. Fold the pre-clear

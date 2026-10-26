@@ -61,12 +61,13 @@ after #4367 #4370 #4372 #4373 #4378 #4379 #4382 landed.
 
 ## 2. Per-file src→obj jobs (no stage barrier)
 
-**Superseded 2026-10-25:** the shard-based "Job unit" status below is history.
-The execution contract is now `true_per_file_pipeline_v1.md`; its opt-in
-`--file-worker` lane (`SIMPLE_FILE_WORKERS=1`, #4576 and follow-ups through
-#4603) runs HIR→mono→MIR→obj per claimed module. The default lane is still
-phase-barriered (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"`, #4592). Status:
-PARTIAL; no native first-object-overlap receipt yet.
+**Superseded 2026-10-25; default updated 2026-10-26:** the shard-based "Job unit"
+status below is history. The execution contract is now
+`true_per_file_pipeline_v1.md`; the `--file-worker` lane (#4576 and follow-ups
+through #4603) runs HIR→mono→MIR→obj per claimed module. Since 2026-10-26,
+unset `SIMPLE_FILE_WORKERS` selects that lane by default; explicit
+`SIMPLE_FILE_WORKERS=0` preserves the phase-batched route. Status: PARTIAL; no
+native first-object-overlap receipt yet.
 
 | Aspect | Design | Status |
 |---|---|---|

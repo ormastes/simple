@@ -604,6 +604,9 @@ pub(crate) struct ModuleImports {
     /// enough that the "most fields wins" ambiguity heuristic in
     /// `get_field_info` is unlikely to mis-resolve — currently set only for
     /// `--entry-closure` builds.
+    /// Canonical `module_prefix__Type` -> declared field `= default` exprs
+    /// (same owner keys as `struct_defs`).
+    pub struct_field_defaults: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>>,
     pub populate_global_struct_defs: bool,
     /// When true, pass `enum_defs` to the HIR lowerer so cross-module enum
     /// receivers (`TypeKind.Inferred`, `TokenKind.KwPub`, etc.) resolve via
@@ -1210,6 +1213,7 @@ impl NativeProjectBuilder {
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
                 method_param_defaults: std::sync::Arc::new(result.method_param_defaults),
+                struct_field_defaults: std::sync::Arc::new(result.struct_field_defaults),
                 populate_global_struct_defs: true,
                 populate_global_enum_defs: true,
             }
@@ -1233,6 +1237,7 @@ impl NativeProjectBuilder {
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
                 method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+                struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
                 populate_global_enum_defs: false,
             }

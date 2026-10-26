@@ -1,0 +1,227 @@
+# Diagnostic preserves the original expected-two specialization assertions.
+# Fresh direct-pass owner inspection separates tuple/state errors from binding.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, hir_type_key, hir_type_is_concrete}
+
+fn context_symbol_shape(module: HirModule, symbol: SymbolId):
+    if val row = module.symbols.get_symbol_raw(symbol.id):
+        var category = "other"
+        match row.kind:
+            case SymbolKind.Enum: category = "enum"
+            case SymbolKind.EnumVariant: category = "enum-variant"
+            case SymbolKind.Function: category = "function"
+            case SymbolKind.Method: category = "method"
+            case SymbolKind.Parameter: category = "parameter"
+            case _: ()
+        val declared = if row.type_ != nil: hir_type_key(row.type_) else: "none"
+        val owner = row.defining_module ?? ""
+        print "[context-symbol] id={symbol.id} name={row.name} kind={category} owner={owner} declared={declared}"
+
+fn context_block_shapes(module: HirModule, block: HirBlock, depth: i64):
+    if depth > 12: return
+    for statement in block.stmts:
+        match statement.kind:
+            case HirStmtKind.Expr(value): context_expr_shape(module, value, depth + 1)
+            case HirStmtKind.Let(_, _, value): context_expr_shape(module, value, depth + 1)
+            case HirStmtKind.Block(nested): context_block_shapes(module, nested, depth + 1)
+            case _: ()
+    if block.has: context_expr_shape(module, block.value, depth + 1)
+
+fn context_expr_shape(module: HirModule, expr: HirExpr, depth: i64):
+    if depth > 12: return
+    val stamp = if expr.has_type_ and expr.type_ != nil: hir_type_key(expr.type_) else: "none"
+    match expr.kind:
+        case HirExprKind.Call(callee, arguments, _):
+            print "[context-shape] call stamp={stamp} argc={arguments.len()}"
+            context_expr_shape(module, callee, depth + 1)
+            for argument in arguments: context_expr_shape(module, argument.value, depth + 1)
+        case HirExprKind.MethodCall(receiver, method, arguments, resolution):
+            print "[context-shape] method={method} stamp={stamp} argc={arguments.len()}"
+            match resolution:
+                case MethodResolution.InstanceMethod(owner, target):
+                    print "[context-resolution] instance owner={owner.id} target={target.id}"
+                    context_symbol_shape(module, target)
+                    if module.functions[target] != nil:
+                        val declaration: HirFunction = module.functions[target]
+                        print "[context-target] name={declaration.name} binders={declaration.type_params.len()} result={hir_type_key(declaration.return_type)}"
+                case MethodResolution.StaticMethod(owner, target):
+                    print "[context-resolution] static owner={owner.id} target={target.id}"
+                    context_symbol_shape(module, target)
+                    if module.functions[target] != nil:
+                        val declaration: HirFunction = module.functions[target]
+                        print "[context-target] name={declaration.name} binders={declaration.type_params.len()} result={hir_type_key(declaration.return_type)}"
+                case MethodResolution.Unresolved: print "[context-resolution] unresolved"
+                case _: print "[context-resolution] other"
+            context_expr_shape(module, receiver, depth + 1)
+            for argument in arguments: context_expr_shape(module, argument.value, depth + 1)
+        case HirExprKind.NamedVar(symbol, name):
+            print "[context-shape] named-var name={name} stamp={stamp}"
+            context_symbol_shape(module, symbol)
+        case HirExprKind.Var(symbol):
+            print "[context-shape] var stamp={stamp}"
+            context_symbol_shape(module, symbol)
+        case HirExprKind.EnumLit(type_, variant, payload):
+            print "[context-shape] enum variant={variant} type={hir_type_key(type_)} stamp={stamp}"
+            if val present = payload:
+                match present:
+                    case HirEnumPayload.Tuple(values):
+                        for value in values: context_expr_shape(module, value, depth + 1)
+                    case _: ()
+        case HirExprKind.Field(base, field, _):
+            print "[context-shape] field={field} stamp={stamp}"
+            context_expr_shape(module, base, depth + 1)
+        case HirExprKind.Return(value):
+            if val present = value: context_expr_shape(module, present, depth + 1)
+        case HirExprKind.If(_, then_, else_):
+            context_block_shapes(module, then_, depth + 1)
+            if val present = else_: context_block_shapes(module, present, depth + 1)
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms: context_block_shapes(module, arm.then_, depth + 1)
+            if val present = else_: context_block_shapes(module, present, depth + 1)
+        case _: print "[context-shape] leaf stamp={stamp}"
+
+fn inspect_direct_context(source: text, label: text):
+    val parsed = parse_full_frontend(source, "testdata/context_direct_{label}.spl", "context_direct", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/context_direct_{label}.spl")
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    for key in hir.functions.keys():
+        val function: HirFunction = hir.functions[key]
+        print "[context-before] case={label} name={function.name} binders={function.type_params.len()} template={function.is_generic_template} result={hir_type_key(function.return_type)}"
+    for key in hir.functions.keys():
+        val function: HirFunction = hir.functions[key]
+        print "[context-function-shapes] case={label} name={function.name}"
+        context_block_shapes(hir, function.body, 0)
+    var modules: Dict<text, HirModule> = {}
+    modules["context_direct"] = hir
+    var pass_ = MonomorphizationPass.create()
+    print "[context-start] case={label}"
+    val output = pass_.process_modules(modules)
+    print "[context-after] case={label} calls={pass_.stats.call_sites_found} created={pass_.stats.specializations_created} unresolved={pass_.stats.unresolved_generic_calls} queue={pass_.spec_queue.len()} symbols={pass_.spec_symbols.len()} bodies={pass_.specialized_functions.len()} diagnostics={pass_.diagnostics.len()}"
+    for diagnostic in pass_.diagnostics: print "[context-diagnostic] case={label} {diagnostic}"
+    val module: HirModule = output["context_direct"]
+    var concrete_bodies = 0
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        print "[context-output] case={label} name={function.name} binders={function.type_params.len()} result={hir_type_key(function.return_type)}"
+        if function.name.contains("$"):
+            expect(hir_type_is_concrete(function.return_type)).to_equal(true)
+            expect(function.type_params.len()).to_equal(0)
+            concrete_bodies = concrete_bodies + 1
+    expect(pass_.diagnostics.len()).to_equal(0)
+    expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+    expect(pass_.stats.specializations_created).to_equal(2)
+    expect(pass_.spec_symbols.len()).to_equal(2)
+    expect(pass_.spec_queue.len()).to_equal(2)
+    expect(pass_.specialized_functions.len()).to_equal(2)
+    expect(concrete_bodies).to_equal(2)
+
+describe "direct pass owner result-context diagnosis":
+    it "inspects partial_result without tuple stats transport":
+        val source = "enum FsError:\n    Busy\n    StaleHandle\n\nfn finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nfn flush(stale: bool, busy: bool) -> Result<bool, FsError>:\n    if stale:\n        return finish(Err(FsError.StaleHandle))\n    if busy:\n        return finish(Err(FsError.Busy))\n    finish(Ok(true))\n\nfn size() -> Result<i64, FsError>:\n    val r: Result<i64, FsError> = finish(Err(FsError.Busy))\n    r\n"
+        inspect_direct_context(source, "partial_result")
+    it "inspects impl_result without tuple stats transport":
+        val source = "enum FsError:\n    Busy\n    StaleHandle\n\nfn ns_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nstruct Driver:\n    id: i64\n\nimpl Driver:\n    fn stat_locked(path: text) -> Result<i64, FsError>:\n        Ok(self.id)\n    fn stat(path: text) -> Result<i64, FsError>:\n        ns_finish(self.stat_locked(path))\n    fn close(id: i64) -> Result<bool, FsError>:\n        if id <= 0: return ns_finish(Err(FsError.StaleHandle))\n        ns_finish(Ok(false))\n"
+        inspect_direct_context(source, "impl_result")
+
+val CONTEXT_RESULT_NEGATIVE_BASE = "enum ContextError:\n    Bad\n\nfn boundary<T>(value: Result<T, ContextError>) -> Result<T, ContextError>:\n    value\n"
+
+fn check_context_evidence_rejection(source: text, mode: text):
+    val parsed = parse_full_frontend(source, "testdata/context_negative.spl", "context_negative", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/context_negative.spl")
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "context_negative"
+    pass_.collect_generics(hir, "context_negative")
+    var checked = false
+    for key in hir.functions.keys():
+        val function: HirFunction = hir.functions[key]
+        if function.name != "subject": continue
+        val tail: HirExpr = function.body.value
+        match tail.kind:
+            case HirExprKind.Call(_, arguments, _):
+                var args: [HirCallArg] = arguments
+                if mode == "unknown":
+                    var argument: HirCallArg = args[0]
+                    argument.value = HirExpr(kind: HirExprKind.Error, has_type_: false, type_: nil, span: tail.span)
+                    args = [argument]
+                if mode == "shadow":
+                    expect(pass_.builtin_result_call_type_v1(args[0].value) == nil).to_equal(true)
+                val signature = pass_.template_signature_v1("boundary")
+                val result = pass_.resolve_call_type_args_signature_v1(signature, args, [], function.return_type)
+                expect(result.is_err()).to_equal(true)
+                if result.is_err():
+                    print "[context-rejection] mode={mode} reason={result.unwrap_err()}"
+                    if mode == "unknown": expect(result.unwrap_err().contains("no concrete local type")).to_equal(true)
+                    else: expect(result.unwrap_err().contains("conflict")).to_equal(true)
+                checked = true
+            case _: fail("negative fixture lost its generic call")
+    expect(checked).to_equal(true)
+
+describe "result argument evidence remains fail closed":
+    it "does not let expected Result authorize an unknown argument":
+        check_context_evidence_rejection(CONTEXT_RESULT_NEGATIVE_BASE + "\nfn subject() -> Result<bool, ContextError>:\n    boundary(Ok(true))\n", "unknown")
+
+    it "does not treat a user function named Ok as a builtin constructor":
+        check_context_evidence_rejection(CONTEXT_RESULT_NEGATIVE_BASE + "\nfn Ok(value: i64) -> i64:\n    value\n\nfn subject() -> Result<bool, ContextError>:\n    boundary(Ok(7))\n", "shadow")
+
+    it "rejects an active payload that conflicts with checked result context":
+        check_context_evidence_rejection(CONTEXT_RESULT_NEGATIVE_BASE + "\nfn subject() -> Result<bool, ContextError>:\n    boundary(Ok(7))\n", "mismatch")
+
+fn check_inherent_method_evidence(mode: text):
+    val source = CONTEXT_RESULT_NEGATIVE_BASE + "\nstruct EvidenceOwner:\n    id: i64\n\nimpl EvidenceOwner:\n    fn value() -> Result<bool, ContextError>:\n        Ok(true)\n    fn subject() -> Result<bool, ContextError>:\n        boundary(self.value())\n"
+    val parsed = parse_full_frontend(source, "testdata/inherent_evidence.spl", "inherent_evidence", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/inherent_evidence.spl")
+    var hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.impls.len()).to_equal(1)
+    if mode == "trait":
+        var trait_impl: HirImpl = hir.impls[0]
+        trait_impl.has_trait_ = true
+        hir.impls = [trait_impl]
+    elif mode == "collision" or mode == "collision_reverse":
+        val inherent_impl: HirImpl = hir.impls[0]
+        var trait_impl: HirImpl = inherent_impl
+        trait_impl.has_trait_ = true
+        hir.impls = if mode == "collision": [inherent_impl, trait_impl] else: [trait_impl, inherent_impl]
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "inherent_evidence"
+    pass_.collect_generics(hir, "inherent_evidence")
+    var checked = false
+    for key in hir.functions.keys():
+        val function: HirFunction = hir.functions[key]
+        if function.name != "subject": continue
+        for parameter in function.params: pass_.env[parameter.symbol.id] = parameter.type_
+        val tail: HirExpr = function.body.value
+        match tail.kind:
+            case HirExprKind.Call(_, arguments, _):
+                val value: HirExpr = arguments[0].value
+                match value.kind:
+                    case HirExprKind.MethodCall(receiver, method, _, resolution):
+                        val result = pass_.declared_local_method_return_v1(receiver, method, resolution)
+                        if mode == "positive":
+                            expect(result != nil).to_equal(true)
+                            if result != nil: expect(hir_type_key(result)).to_equal(hir_type_key(function.return_type))
+                        else: expect(result == nil).to_equal(true)
+                        checked = true
+                    case _: fail("method evidence fixture lost its receiver call")
+            case _: fail("method evidence fixture lost its generic boundary")
+    expect(checked).to_equal(true)
+
+describe "local method return inference requires positive inherent ownership":
+    it "uses the exact local nongeneric inherent method declaration":
+        check_inherent_method_evidence("positive")
+
+    it "rejects an unresolved method supplied only by a trait impl":
+        check_inherent_method_evidence("trait")
+
+    it "poisons a symbol associated with both inherent and trait impls":
+        check_inherent_method_evidence("collision")
+        check_inherent_method_evidence("collision_reverse")

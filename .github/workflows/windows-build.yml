@@ -14,8 +14,15 @@ on:
       - 'test/01_unit/scripts/bootstrap_rss_retry_test.shs'
       - 'test/01_unit/scripts/bootstrap_windows_transcribed_rss_inherit_test.shs'
       - 'scripts/check/check-bootstrap-windows-c-admission.shs'
+      - 'scripts/setup/materialize-symlinks-windows.shs'
+      - 'test/01_unit/scripts/materialize_symlinks_windows_real_checkout_test.shs'
       - '.github/workflows/windows-build.yml'
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Bootstrap parallel build jobs (1-64)'
+        type: number
+        default: 24
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -45,6 +52,17 @@ jobs:
       CC_x86_64_pc_windows_gnullvm: clang
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate bootstrap job count
+        shell: bash
+        env:
+          REQUESTED_BOOTSTRAP_JOBS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.jobs) || '24' }}
+        run: |
+          jobs=$REQUESTED_BOOTSTRAP_JOBS
+          case "$jobs" in ''|0*|*[!0-9]*) echo 'jobs must be an integer from 1 through 64' >&2; exit 2 ;; esac
+          [ "${#jobs}" -le 2 ] && [ "$jobs" -le 64 ] || { echo 'jobs must be an integer from 1 through 64' >&2; exit 2; }
+          echo "SIMPLE_WINDOWS_BOOTSTRAP_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "Windows bootstrap jobs: $jobs"
 
       - name: Cache LLVM 23.1.1
         id: llvm-cache
@@ -188,6 +206,11 @@ jobs:
           sh scripts/check/check-bootstrap-windows-c-admission.shs \
             "$clang_cl" "$PWD/build/bootstrap/windows-c-admission"
 
+      - name: Verify Windows checkout symlink normalization
+        shell: bash
+        timeout-minutes: 5
+        run: sh test/01_unit/scripts/materialize_symlinks_windows_real_checkout_test.shs
+
       - name: Build Rust seed
         working-directory: src/compiler_rust
         shell: bash
@@ -226,7 +249,7 @@ jobs:
             --stop-after-stage2 \
             --no-mcp \
             --verbose \
-            --jobs=2
+            --jobs="$SIMPLE_WINDOWS_BOOTSTRAP_JOBS"
           stage2="$PWD/build/bootstrap/stage2/${{ matrix.rust-target }}/simple.exe"
           test -x "$stage2"
           bootstrap_receipt="$PWD/build/bootstrap/windows-stage3-planner-admission-v2.env"

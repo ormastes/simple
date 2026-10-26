@@ -174,6 +174,9 @@ phase=""
 verification_backend=""
 stage3_provenance=""
 stage3_self_result=""
+manual_self_receipt=""
+manual_tool_qualifications=""
+manual_tool_phase=qualified
 stage3_self_sanity=""
 stage3_original_runtime=""
 compiler=""
@@ -219,6 +222,9 @@ for arg in "$@"; do
     --phase=*) phase=${arg#*=} ;;
     --backend=*) verification_backend=${arg#*=} ;;
     --stage3-provenance=*) stage3_provenance=${arg#*=} ;;
+    --stage3-retained-manual-receipt=*) manual_self_receipt=${arg#*=} ;;
+    --manual-tool-qualifications=*) manual_tool_qualifications=${arg#*=} ;;
+    --manual-tool-phase=*) manual_tool_phase=${arg#*=} ;;
     --stage3-self-rebuild-result=*) stage3_self_result=${arg#*=} ;;
     --stage3-self-sanity=*) stage3_self_sanity=${arg#*=} ;;
     --stage3-original-runtime=*) stage3_original_runtime=${arg#*=} ;;
@@ -270,7 +276,18 @@ esac
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
-if [ -n "$stage3_self_result$stage3_self_sanity$stage3_original_runtime" ]; then
+case "$manual_tool_phase" in objects|qualified) ;; *) die "--manual-tool-phase requires objects or qualified" ;; esac
+[ "$manual_tool_phase" = qualified ] || [ -n "$manual_self_receipt" ] || die "manual objects phase requires explicit manual receipt"
+if [ -n "$manual_self_receipt" ]; then
+  [ "$phase" = stage4 ] && [ -n "$stage3_original_runtime" ] && [ -n "$manual_tool_qualifications" ] || die "manual retained lane requires Stage4, original runtime and qualification directory"
+  [ -z "$stage3_self_result$stage3_self_sanity$stage3_provenance" ] || die "manual retained lane is mutually exclusive with legacy provenance"
+  if [ "$manual_tool_phase" = qualified ]; then
+    for manual_role in compiler_cli_build test_runner_build mcp_build lsp_build; do
+      [ -f "$manual_tool_qualifications/$manual_role.env" ] && [ ! -L "$manual_tool_qualifications/$manual_role.env" ] || die "manual retained lane requires reviewed tool objects; use --manual-tool-phase=objects first"
+    done
+  fi
+fi
+if [ -n "$stage3_self_result$stage3_self_sanity" ] || { [ -z "$manual_self_receipt" ] && [ -n "$stage3_original_runtime" ]; }; then
   [ "$phase" = stage4 ] && [ -n "$stage3_self_result" ] && [ -n "$stage3_self_sanity" ] && [ -n "$stage3_original_runtime" ] || die "retained self evidence requires Stage4 and all three explicit inputs"
 fi
 if [ "$phase" = stage3 ]; then
@@ -431,6 +448,47 @@ if [ -n "$stage3_self_result" ]; then
   phase4_controller_sha=$(hash_file "$phase4_controller")
   phase4_candidate_helper_sha=$(hash_file "$STAGE4_PROVENANCE_HELPER_PATH")
 fi
+if [ -n "$manual_self_receipt" ]; then
+  phase4_controller_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "controller root"
+  phase4_controller=$phase4_controller_root/scripts/bootstrap/bootstrap-phase-verification.shs
+  manual_validator=$phase4_controller_root/scripts/check/lib/stage4-retained-manual.py
+  BOOTSTRAP_STAGE3_FACADE_PATH=$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs
+  STAGE4_PROVENANCE_HELPER_PATH=$phase4_controller_root/scripts/check/lib/stage4-candidate-provenance.shs
+  export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH" || die "source provenance helpers"
+  . "$STAGE4_PROVENANCE_HELPER_PATH" || die "candidate helpers"
+  manual_self_sha=$(hash_file "$manual_self_receipt") || die "manual chain hash"
+  manual_controller_bundle=$work_root/manual-controller-inputs.manifest
+  if [ ! -e "$manual_controller_bundle" ]; then
+    (umask 077; set -C; for mb_path in "$phase4_controller" "$manual_validator" \
+      "$phase4_controller_root/scripts/bootstrap/run-retained-manual-command.shs" \
+      "$phase4_controller_root/scripts/check/lib/stage4-retained-self-evidence.py" \
+      "$STAGE4_PROVENANCE_HELPER_PATH"; do
+      printf '%s|%s\n' "$(hash_file "$mb_path")" "$mb_path" || exit 1
+    done >"$manual_controller_bundle") || die "manual controller bundle"
+  fi
+  manual_controller_bundle_sha=$(hash_file "$manual_controller_bundle") || die "manual controller bundle hash"
+  validate_manual_controller() {
+    [ "$(hash_file "$manual_self_receipt")" = "$manual_self_sha" ] || return 1
+    [ "$(hash_file "$manual_controller_bundle")" = "$manual_controller_bundle_sha" ] || return 1
+    mb_count=0
+    while IFS='|' read -r mb_expected mb_path mb_extra; do
+      mb_count=$((mb_count + 1))
+      [ -n "$mb_expected" ] && [ -n "$mb_path" ] && [ -z "$mb_extra" ] || return 1
+      [ "$(hash_file "$mb_path")" = "$mb_expected" ] || return 1
+    done <"$manual_controller_bundle"
+    [ "$mb_count" = 5 ] || return 1
+    for mb_path in "$phase4_controller" "$manual_validator" \
+      "$phase4_controller_root/scripts/bootstrap/run-retained-manual-command.shs" \
+      "$phase4_controller_root/scripts/check/lib/stage4-retained-self-evidence.py" "$STAGE4_PROVENANCE_HELPER_PATH"; do
+      awk -F'|' -v want="$mb_path" '$2==want {n++} END {exit n!=1}' "$manual_controller_bundle" || return 1
+    done
+  }
+  validate_manual_controller || die "manual controller bundle changed"
+  python3 "$manual_validator" verify-chain "$manual_self_receipt" "$compiler" "$source_root" "$stage3_original_runtime" || die "manual self chain is not qualified"
+  python3 "$phase4_controller_root/scripts/check/lib/stage4-retained-self-evidence.py" verify-capsule-copy "$runtime_path/phase2-runtime-capsule.env" "$compiler" "$source_root" "$stage3_original_runtime" || die "manual retained runtime copy changed"
+fi
+retained_stage4_active() { [ -n "$stage3_self_result$manual_self_receipt" ]; }
 if [ "$phase" = stage2 ]; then
   bound_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
     "$compiler" "$source_root" "$work_root") || die "Phase2 runtime binding is invalid"
@@ -812,6 +870,21 @@ run_task() {
       *) break ;;
     esac
   done
+  if [ -n "$manual_self_receipt" ]; then validate_manual_controller || die "manual controller changed before task"; fi
+  if [ -n "$manual_self_receipt" ] && [ "${1:-}" = "$compiler_snapshot" ] && [ "${2:-}" = native-build ]; then
+    case "$task" in
+      compiler_cli_build|test_runner_build|mcp_build|lsp_build)
+        shift
+        manual_prepare_arg=
+        [ "$manual_tool_phase" != objects ] || manual_prepare_arg=--prepare-only
+        set -- python3 "$manual_validator" build-tool --chain "$manual_self_receipt" --selected "$compiler" \
+          --source "$source_root" --original-runtime "$stage3_original_runtime" --runtime "$runtime_path" \
+          --producer "$compiler_snapshot" --role "$task" --work "$work_root/manual-tools/$task" \
+          --qualification "$manual_tool_qualifications/$task.env" --output "$expected_executable" $manual_prepare_arg -- "$@"
+        ;;
+      *) ;; # Other canonical gates are not replaced by manual readiness.
+    esac
+  fi
   # Inspect the actual compiler entry argument; never choose a probe by output name.
   sanity_entry=$task
   sanity_entry_count=0
@@ -840,7 +913,7 @@ run_task() {
   esac
   [ "$task" != lsp_build ] || sanity_review_required=1
   log="$logs/$task.log"
-  if [ -n "$stage3_self_result" ]; then
+  if retained_stage4_active; then
     printf '%s\n' "$@" >"$logs/$task.argv" || die "cannot retain Stage4 argv"
   fi
   active_rss_file="$logs/$task.max-rss-kib"
@@ -908,7 +981,7 @@ run_task() {
       HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate
       SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task"
       export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NO_BOOTSTRAP_DELEGATE SIMPLE_NATIVE_BUILD_CACHE_DIR
-      if [ -n "$stage3_self_result" ]; then
+      if retained_stage4_active; then
         SIMPLE_PROCESS_TREE_RSS_RECEIPT=$logs/$task.rss.env
         export SIMPLE_PROCESS_TREE_RSS_RECEIPT
       fi
@@ -918,7 +991,7 @@ run_task() {
       # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
-      if [ -n "$stage3_self_result" ]; then
+      if retained_stage4_active; then
         unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
         printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
           'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
@@ -1396,6 +1469,12 @@ validate_stage4_tooling_receipt() {
   [ "$(manifest_value command_owner_receipt_path "$vstr_receipt")" = "$command_owner_receipt" ] || return 1
   [ "$(manifest_value command_owner_receipt_sha256 "$vstr_receipt")" = "$command_owner_receipt_sha" ] || return 1
   validate_command_owner_receipt "$command_owner_receipt" || return 1
+  if [ -n "$manual_self_receipt" ]; then
+    validate_manual_controller || return 1
+    for manual_role in compiler_cli_build test_runner_build mcp_build lsp_build; do
+      python3 "$manual_validator" verify-product "$work_root/manual-tools/$manual_role/product.env" || return 1
+    done
+  fi
   [ "$(manifest_value hosted_runtime_path "$vstr_receipt")" = "$runtime_path" ] || return 1
   validate_hosted_runtime_authority "$runtime_path" || return 1
   # Revalidation refreshes hosted_runtime_sha from the current frozen authority.
@@ -1411,6 +1490,19 @@ validate_stage4_tooling_receipt() {
 }
 
 publish_retained_stage4_candidate() (
+  if [ -n "$manual_self_receipt" ]; then
+    validate_manual_controller || exit 1
+    validate_stage4_tooling_receipt "$stage4_tooling_receipt" || exit 1
+    python3 "$manual_validator" publish-candidate --chain "$manual_self_receipt" --selected "$compiler" \
+      --source "$source_root" --original-runtime "$stage3_original_runtime" --runtime "$runtime_path" \
+      --work "$work_root/manual-tools" --artifact "$compiler_cli" --command-owner "$command_owner_receipt" \
+      --tooling-owner "$stage4_tooling_receipt" --smoke "$logs/stage4_essential_tools.command.env" \
+      --smoke-log "$logs/stage4_essential_tools.log" --controller "$phase4_controller" --controller-bundle "$manual_controller_bundle" || exit 1
+    validate_manual_controller || exit 1
+    echo "stage4_candidate_provenance=$compiler_cli.provenance.env" >>"$summary"
+    echo "stage4_candidate_provenance_sha256=$(hash_file "$compiler_cli.provenance.env")" >>"$summary"
+    exit 0
+  fi
   [ "$(hash_file "$stage3_self_result")" = "$stage3_self_result_sha" ] &&
     [ "$(hash_file "$stage3_self_sanity")" = "$stage3_self_sanity_sha" ] &&
     [ "$(hash_file "$phase4_controller")" = "$phase4_controller_sha" ] &&
@@ -1905,7 +1997,7 @@ run_inventory_row() {
       # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
-      if [ -n "$stage3_self_result" ]; then
+      if retained_stage4_active; then
         unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
         printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
           'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
@@ -2258,7 +2350,7 @@ run_repository_full_tests() {
         # Keep ambient bootstrap routing out of direct repository-test rows;
         # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
         unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
-      if [ -n "$stage3_self_result" ]; then
+      if retained_stage4_active; then
         unset SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_TEST_RUNNER_RUST
         printf '%s\n' 'SIMPLE_BOOTSTRAP=absent' 'SIMPLE_NATIVE_BUILD_RUST=absent' \
           'SIMPLE_BOOTSTRAP_STAGE3=absent' 'SIMPLE_BOOTSTRAP_STAGE4=absent' \
@@ -2422,7 +2514,11 @@ run_native_aot_suite() {
 # terminalizes unlaunched work as SKIPPED and preserves the failure status.
 # Call-site prerequisite checks block tasks whose required artifacts are absent;
 # an unrelated earlier failure must not suppress useful diagnostic evidence.
-run_matrix_task compiler_version "$compiler_snapshot" --version
+if [ -n "$manual_self_receipt" ] && [ "$manual_tool_phase" = objects ]; then
+  printf 'manual_tool_phase=objects\ntool_link_route=retained-manual-system\n' >>"$summary"
+else
+  run_matrix_task compiler_version "$compiler_snapshot" --version
+fi
 hosted_runtime_ready=0
 if [ "$phase" = stage1 ]; then
   # Stage 1 is the Rust bootstrap seed. It accepts `check`/`test`, but its own
@@ -2599,6 +2695,30 @@ else
     record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
   fi
 
+  if [ -n "$manual_self_receipt" ] && [ "$manual_tool_phase" = objects ]; then
+    validate_manual_controller || die "manual controller changed during object preparation"
+    preparation_receipts=$work_root/manual-tools/preparation-controller
+    mkdir "$preparation_receipts" || die "preparation receipt directory must be fresh"
+    cp "$summary" "$preparation_receipts/summary.env" || die "retain preparation summary"
+    printf 'role\tbuild_raw_status\tobject_observation\tobject_path\n' >"$preparation_receipts/roles.tsv"
+    for manual_role in compiler_cli_build test_runner_build mcp_build lsp_build; do
+      manual_object=$work_root/manual-tools/$manual_role/aggregate.o
+      manual_build=$work_root/manual-tools/$manual_role/object-build.env
+      manual_raw=NOT_RUN
+      [ ! -f "$manual_build" ] || manual_raw=$(manifest_value raw_status "$manual_build")
+      manual_observation=missing
+      if [ -f "$manual_object" ] && [ ! -L "$manual_object" ]; then manual_observation=present-not-qualified; fi
+      printf '%s\t%s\t%s\t%s\n' "$manual_role" "$manual_raw" "$manual_observation" "$manual_object" >>"$preparation_receipts/roles.tsv"
+      for manual_suffix in log argv command.env selectors.env rss.env; do
+        manual_receipt_file=$logs/$manual_role.$manual_suffix
+        [ ! -f "$manual_receipt_file" ] || cp "$manual_receipt_file" "$preparation_receipts/$manual_role.$manual_suffix" || die "retain preparation command receipt"
+      done
+    done
+    printf 'schema=simple-stage4-manual-object-preparation-v1\nstatus=PREPARATION_ONLY\nexit_status=86\ncandidate_publication=NOT_ATTEMPTED\n' >"$preparation_receipts/result.env"
+    echo "Manual object preparation stopped; inspect per-role receipts; no P4 readiness or tests claimed: $preparation_receipts" >&2
+    exit 86
+  fi
+
   if ! run_failed_binary_module_inventory; then
     printf 'task=module_compile_campaign|result=INCOMPLETE|status=failed-or-unfinished-inventory|log=%s\n' "$work_root/module-compile-inventory.txt" >>"$summary"
     matrix_failed=1
@@ -2643,7 +2763,7 @@ else
       stage4_tooling_receipt_sha=$(hash_file "$stage4_tooling_receipt")
       echo "stage4_tooling_receipt=$stage4_tooling_receipt" >>"$summary"
       echo "stage4_tooling_receipt_sha256=$stage4_tooling_receipt_sha" >>"$summary"
-      if [ -n "$stage3_self_result" ]; then
+      if retained_stage4_active; then
         stage4_essential_owner=$source_root/scripts/check/check-bootstrap-essential-tools-smoke.shs
         run_matrix_task stage4_essential_tools --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
           env "SIMPLE_BINARY=$compiler_cli" sh "$stage4_essential_owner"

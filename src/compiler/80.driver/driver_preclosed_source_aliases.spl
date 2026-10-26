@@ -1,13 +1,16 @@
 # Replay import names without expanding the admitted physical source frontier.
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1,
+    driver_library_mode_native_owner_v1}
 use compiler.driver.driver_source_loading.{
     _driver_physical_source_key_strict_v1, _driver_entry_import_dirname,
     driver_closure_import_specs_v1, driver_resolve_closure_import_v1,
     driver_closure_native_owner_v1}
 
 pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
-        source_roots: [text], snapshot_root: text) -> Result<[SourceFile], text>:
+        source_roots: [text], snapshot_root: text, library_mode: text = "") -> Result<[SourceFile], text>:
     val snapshot = _driver_physical_source_key_strict_v1(snapshot_root)
     if snapshot == "": return Err("PRECLOSED_ALIAS_SNAPSHOT_INVALID")
     var physical_rows: Dict<text, i64> = {}
@@ -43,10 +46,12 @@ pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
             source.module_name[0:source.module_name.len() - 9]
         else: source.module_name
         for spec in driver_closure_import_specs_v1(source.path):
-            val alias = if spec.starts_with(".") and not spec.starts_with(".."):
+            val authored_alias = if spec.starts_with(".") and not spec.starts_with(".."):
                 importer_module + spec
             else: spec
-            val selected = driver_resolve_closure_import_v1(spec, source_roots, importer_dir)
+            val alias = library_mode_import_key_v1(authored_alias, library_mode, source.module_name)
+            if alias == "": return Err("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: " + source.path)
+            val selected = driver_library_mode_resolve_v1(spec, source_roots, importer_dir, library_mode, source.module_name)?
             val selected_path = match selected:
                 case SourceRootResolutionV1.Found(path): path
                 case SourceRootResolutionV1.Ambiguous(directory):
@@ -56,7 +61,7 @@ pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
                     if alias.contains("."):
                         return Err("PRECLOSED_ALIAS_IMPORT_MISSING: " + source.path + "|" + spec)
                     continue
-            val owner = driver_closure_native_owner_v1(selected_path, alias, importer_dir)
+            val owner = driver_library_mode_native_owner_v1(selected_path, spec, importer_dir, library_mode, source.module_name)
             val physical = _driver_physical_source_key_strict_v1(owner)
             if physical == "" or not physical.starts_with(snapshot + "/") or
                     not physical_rows.contains_key(physical):

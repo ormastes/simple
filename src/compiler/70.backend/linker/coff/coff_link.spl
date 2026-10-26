@@ -25,6 +25,7 @@ use compiler.backend.linker.coff.pe_import_builder.{
     pe_build_amd64_imports, pe_build_arm64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
 use compiler.backend.linker.coff.pe_export_builder.{pe_build_amd64_exports}
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros}
 use compiler.backend.linker.coff.coff_directives.{
     CoffExportDirective,
     coff_collect_directives, coff_alternate_name_map, coff_resolve_alternate_name,
@@ -573,16 +574,15 @@ fn _coff_merge_object_sections(contributions: [PeImageSection]) -> [PeImageSecti
             if contribution.name == name and contribution.data.len() > 0:
                 val contribution_raw_end = contribution.virtual_address - base + contribution.data.len()
                 if contribution_raw_end > raw_end: raw_end = contribution_raw_end
-        var data: [u8] = []
-        while data.len() < raw_end: data = data.push(0)
+        # Allocated once at its final size; contributions are copied in with
+        # native `write_span` instead of per-byte pushes and stores.
+        var data: [u8] = elf_u8_zeros(raw_end)
         for contribution in contributions:
             if contribution.name == name:
                 characteristics = characteristics | _coff_image_characteristics(contribution.characteristics)
-                var byte_index: i64 = 0
                 val offset = contribution.virtual_address - base
-                while byte_index < contribution.data.len():
-                    data[offset + byte_index] = contribution.data[byte_index]
-                    byte_index = byte_index + 1
+                val count = contribution.data.len()
+                if count > 0: data.write_span(contribution.data, offset, 0, count)
         result = result.push(PeImageSection(name: name, virtual_address: base,
             virtual_size: virtual_end - base, data: data,
             characteristics: characteristics))

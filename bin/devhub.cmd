@@ -49,7 +49,7 @@ rem executes a shell/runtime, while this branch receives the original argv.
 if not "%DEVHUB_SH%"=="" (
     setlocal DisableDelayedExpansion
     "%ComSpec%" /d /c call "%DEVHUB_SH%" "%SCRIPT_DIR%devhub" %*
-    exit /b %ERRORLEVEL%
+    goto :dispatch_done
 )
 
 set "HOST_ARCH=%PROCESSOR_ARCHITEW6432%"
@@ -95,6 +95,7 @@ if /I "%RUNTIME_EXT%"==".cmd" (
 ) else (
     "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
 )
+:dispatch_done
 exit /b %ERRORLEVEL%
 
 :try_runtime

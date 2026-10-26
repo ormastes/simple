@@ -18,11 +18,13 @@
 
 use std.io_runtime.{env_get, file_exists, exit, get_args}
 use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal}
+use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
 use .mcp_log_options
 
 extern fn stdin_read_char() -> text
-use std.nogc_async_mut.sosix.stdio.{sosix_print_raw as print_raw, sosix_stdout_flush}
+use app.protocol.wire_stdout.{wire_stdout_write as print_raw}
+use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
 
 var _MCP_TRANSPORT_MODE = "framed"
 
@@ -32,11 +34,8 @@ fn _mcp_error(scope: text, msg: text):
 # Deliberately NO std.mcp_sdk import: it co-compiled a second jo1..jo4 /
 # extract_json_* / make_tool_error set (String-typed) beside main_lazy_json's,
 # and the seed resolves such collisions by arg-type or last-definition
-# fallback, so a call could run the wrong body. The request helpers below
-# reuse main_lazy_json's scanner instead.
-fn _mcp_method_is(msg: text, name: text) -> bool:
-    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
-
+# fallback, so a call could run the wrong body. Root envelopes use the shared
+# protocol parser; isolated tool-argument helpers remain in main_lazy_json.
 fn _mcp_request_obj(json: text, key: text) -> text:
     val raw = extract_field_raw(json: json, key: key)
     if raw.starts_with(LB()):
@@ -261,17 +260,6 @@ fn _mcp_initialize_result() -> text:
     result = result + RB()
     result
 
-# Extract JSON-RPC id from message, with sensible fallbacks.
-fn _mcp_extract_id(msg: text, method: text) -> text:
-    val parsed = extract_field_raw(json: msg, key: "id")
-    if parsed != "" and parsed != "null":
-        return parsed
-    if method == "initialize":
-        return "\"1\""
-    if method == "tools/list":
-        return "\"2\""
-    parsed
-
 fn _mcp_read_line() -> text:
     var result = ""
     while true:
@@ -301,7 +289,7 @@ fn _mcp_strip_line_end(line: text) -> text:
 fn _mcp_parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
-fn _mcp_read_message() -> (text, bool):
+fn _mcp_read_message() -> text:
     var content_length = 0
     while true:
         var line = _mcp_read_line()
@@ -387,16 +375,23 @@ fn main() -> i64:
             exit(0)
             return 0
 
+        val envelope = mcp_parse_request_envelope_v1(msg)
+        if not envelope.valid:
+            val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
+            _mcp_write_message(make_error(envelope.request_id_raw, envelope.error_code, reason))
+            continue
+        val method = envelope.method
+
         # Core methods: delegate to the McpServer facade.
         # tools/list is handled locally so we return the full static-table tool list
         # without registry pagination (smoke check requires all tools in one response).
         var response = ""
-        if _mcp_method_is(msg, "initialize"):
-            val id = _mcp_extract_id(msg, "initialize")
+        if method == "initialize":
+            val id = envelope.request_id_raw
             response = make_json_result(id, _mcp_initialize_result())
-        elif _mcp_method_is(msg, "tools/call"):
-            val id = _mcp_extract_id(msg, "tools/call")
-            val params = _mcp_request_obj(msg, "params")
+        elif method == "tools/call":
+            val id = envelope.request_id_raw
+            val params = if envelope.params_raw.starts_with(LB()): envelope.params_raw else: ""
             var tool_name = ""
             var args_raw = "{}"
             if params != "":
@@ -405,59 +400,59 @@ fn main() -> i64:
                 if extracted_args != "":
                     args_raw = extracted_args
             response = _mcp_dispatch_tool_lazy(id, tool_name, args_raw)
-        elif _mcp_method_is(msg, "tools/list"):
-            val id = _mcp_extract_id(msg, "tools/list")
+        elif method == "tools/list":
+            val id = envelope.request_id_raw
             response = make_json_result(id, _mcp_tools_list_payload())
-        elif _mcp_method_is(msg, "notifications/initialized") or (
-            _mcp_method_is(msg, "notifications/cancelled")) or (
-            _mcp_method_is(msg, "notifications/roots/list_changed")) or (
-            _mcp_method_is(msg, "initialized")):
+        elif method == "notifications/initialized" or (
+            method == "notifications/cancelled") or (
+            method == "notifications/roots/list_changed") or (
+            method == "initialized"):
             response = ""
-        elif _mcp_method_is(msg, "shutdown"):
-            val id = _mcp_extract_id(msg, "shutdown")
+        elif method == "shutdown":
+            val id = envelope.request_id_raw
             response = make_json_result(id, "null")
-        elif _mcp_method_is(msg, "resources/list"):
-            val id = _mcp_extract_id(msg, "resources/list")
+        elif method == "resources/list":
+            val id = envelope.request_id_raw
             response = handle_resources_list(id)
-        elif _mcp_method_is(msg, "resources/templates/list"):
-            val id = _mcp_extract_id(msg, "resources/templates/list")
+        elif method == "resources/templates/list":
+            val id = envelope.request_id_raw
             response = handle_resource_templates_list(id)
-        elif _mcp_method_is(msg, "resources/read"):
-            val id = _mcp_extract_id(msg, "resources/read")
+        elif method == "resources/read":
+            val id = envelope.request_id_raw
             val uri = extract_nested(msg, "uri")
             response = handle_resources_read(id, uri)
-        elif _mcp_method_is(msg, "prompts/list"):
-            val id = _mcp_extract_id(msg, "prompts/list")
+        elif method == "prompts/list":
+            val id = envelope.request_id_raw
             response = handle_prompts_list(id)
-        elif _mcp_method_is(msg, "prompts/get"):
-            val id = _mcp_extract_id(msg, "prompts/get")
+        elif method == "prompts/get":
+            val id = envelope.request_id_raw
             val prompt_name = extract_nested(msg, "name")
             response = handle_prompts_get(id, prompt_name, msg)
-        elif _mcp_method_is(msg, "completion/complete") or _mcp_method_is(msg, "completions/complete"):
-            val id = _mcp_extract_id(msg, "completion/complete")
+        elif method == "completion/complete" or method == "completions/complete":
+            val id = envelope.request_id_raw
             response = handle_completion_req(id, msg)
-        elif _mcp_method_is(msg, "logging/setLevel"):
-            val id = _mcp_extract_id(msg, "logging/setLevel")
+        elif method == "logging/setLevel":
+            val id = envelope.request_id_raw
             val level = extract_nested(msg, "level")
             if level != "":
                 MCP_LOG_LEVEL = level
             response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-        elif _mcp_method_is(msg, "roots/list"):
-            val id = _mcp_extract_id(msg, "roots/list")
+        elif method == "roots/list":
+            val id = envelope.request_id_raw
             val cwd = get_cwd()
             var root = LB()
             root = root + jp("uri", js("file://" + cwd))
             root = root + "," + jp("name", js("workspace"))
             root = root + RB()
             response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-        elif _mcp_method_is(msg, "ping"):
-            val id = _mcp_extract_id(msg, "ping")
+        elif method == "ping":
+            val id = envelope.request_id_raw
             response = make_json_result(id, LB() + RB())
         else:
-            val id = _mcp_extract_id(msg, "")
+            val id = envelope.request_id_raw
             if id != "" and id != "null":
                 response = make_error(id, -32601, "Method not found")
-        if response != "":
+        if response != "" and envelope.has_id:
             _mcp_write_message(response)
             if _mcp_take_emit_list_changed():
                 val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"

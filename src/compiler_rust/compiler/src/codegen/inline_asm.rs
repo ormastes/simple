@@ -6,6 +6,7 @@ pub struct InlineAsmBlock {
     pub symbol: String,
     pub instructions: Vec<String>,
     pub volatile: bool,
+    pub dialect: crate::hir::AsmDialect,
 }
 
 static INLINE_ASM_BLOCKS: OnceLock<Mutex<BTreeMap<String, InlineAsmBlock>>> = OnceLock::new();
@@ -14,10 +15,19 @@ fn registry() -> &'static Mutex<BTreeMap<String, InlineAsmBlock>> {
     INLINE_ASM_BLOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn hash_asm(instructions: &[String], volatile: bool) -> u64 {
+fn hash_asm(instructions: &[String], volatile: bool, dialect: crate::hir::AsmDialect) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     hash ^= u64::from(volatile as u8);
     hash = hash.wrapping_mul(0x100000001b3);
+    // Preserve legacy default symbols; explicit syntax changes artifact identity.
+    if dialect != crate::hir::AsmDialect::Default {
+        hash ^= match dialect {
+            crate::hir::AsmDialect::Att => 1,
+            crate::hir::AsmDialect::Intel => 2,
+            crate::hir::AsmDialect::Default => unreachable!(),
+        };
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     for instruction in instructions {
         for byte in instruction.as_bytes() {
             hash ^= u64::from(*byte);
@@ -29,13 +39,14 @@ fn hash_asm(instructions: &[String], volatile: bool) -> u64 {
     hash
 }
 
-pub fn register_inline_asm(instructions: &[String], volatile: bool) -> String {
-    let hash = hash_asm(instructions, volatile);
+pub fn register_inline_asm(instructions: &[String], volatile: bool, dialect: crate::hir::AsmDialect) -> String {
+    let hash = hash_asm(instructions, volatile, dialect);
     let symbol = format!("__simple_asm_H{hash:016x}");
     let block = InlineAsmBlock {
         symbol: symbol.clone(),
         instructions: instructions.to_vec(),
         volatile,
+        dialect,
     };
     registry().lock().unwrap().entry(symbol.clone()).or_insert(block);
     symbol

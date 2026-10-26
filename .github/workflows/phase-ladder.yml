@@ -36,6 +36,10 @@ on:
         description: "Publish the reached phases as the next RC"
         type: boolean
         default: true
+      rc_tag:
+        description: "Optional exact next numbered RC tag (must equal the next available tag)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -97,10 +101,14 @@ jobs:
   publish:
     needs: [rung4, slow-rung4]
     if: always() && (github.event_name != 'workflow_dispatch' || inputs.publish)
+    concurrency:
+      group: numbered-prerelease-publish-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -109,37 +117,108 @@ jobs:
         with:
           pattern: ladder-*
           path: build/ladder/in
-          merge-multiple: true
-      - name: Package each lane's highest phase
-        id: pkg
-        run: |
-          version=$(cat VERSION)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "| lane | phase | essentials |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          for platform in $(ls build/ladder/in | sed 's/-p[0-9]*$//' | sort -u); do
-            for p in 4 3 2 1; do
-              dir=build/ladder/in/$platform-p$p
-              [ -d "$dir" ] && break
-            done
-            phase=$(cat "$dir/PHASE")
-            bin=$(ls "$dir"/simple "$dir"/simple.exe 2>/dev/null | head -1)
-            sh scripts/release/package-phase1-spk.shs "$version" "$platform" "$bin" "$phase" "$dir/essentials"
-            ess=$(tr '\n' ' ' < "$dir/essentials/STATUS" 2>/dev/null || echo "none recorded")
-            echo "| $platform | $phase | $ess |" >> "$GITHUB_STEP_SUMMARY"
-          done
-          ls simple-bootstrap-*.spk
-      - name: Publish next numbered RC
-        if: steps.pkg.outcome == 'success'
+          if-no-artifact-found: warn
+      - name: Download lane attempt receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-ladder-receipts-*
+          path: build/ladder/receipts
+          if-no-artifact-found: warn
+      - name: Select next numbered RC
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.pkg.outputs.version }}
+          VERSION_FILE: VERSION
+          REQUESTED_TAG: ${{ inputs.rc_tag }}
         run: |
-          BASE="${VERSION%%-*}"
+          BASE=$(sed 's/-.*$//' "$VERSION_FILE")
+          BASE_DOTS=$(printf '%s\n' "$BASE" | sed 's/\./\\./g')
           LAST=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
-            | sed -n "s/^rc-${BASE//./\\.}-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
-          TAG="rc-${BASE}-rc.$(( ${LAST:-0} + 1 ))"
+            | sed -n "s/^rc-$BASE_DOTS-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
+          if [ -z "$LAST" ]; then LAST=0; fi
+          TAG="rc-$BASE-rc.$((LAST + 1))"
+          if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "$TAG" ]; then
+            echo "requested RC tag must be the next available immutable tag: $TAG" >&2
+            exit 1
+          fi
+          mkdir -p build/ladder
+          set +e
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>build/ladder/tag-ref.stderr
+          api_status=$?
+          set -e
+          if [ "$api_status" -eq 0 ]; then
+            echo "RC tag already exists; refusing to attach or move it: $TAG" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'HTTP 404|Not Found' build/ladder/tag-ref.stderr; then
+            cat build/ladder/tag-ref.stderr >&2
+            echo "could not prove that the proposed RC tag is unused" >&2
+            exit 1
+          fi
+          VERSION=$(printf '%s\n' "$TAG" | sed 's/^rc-//')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Package each lane's highest phase
+        id: pkg
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir -p build/ladder
+          : > build/ladder/package-failures.txt
+          echo "| lane | phase | essentials |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for platform in linux-x86_64 linux-riscv64 darwin-arm64 darwin-x86_64 windows-x86_64 freebsd-x86_64; do
+            dir=
+            for p in 4 3 2 1; do
+              for rung in 4 3 2 1; do
+                candidate=build/ladder/in/ladder-$platform-r$rung/$platform-p$p
+                if [ -e "$candidate" ] || [ -L "$candidate" ]; then dir=$candidate; break 2; fi
+              done
+            done
+            [ -n "$dir" ] || continue
+            phase=$(cat "$dir/PHASE" 2>/dev/null || true)
+            bin="$dir/simple"
+            case "$platform" in windows-*) bin="$dir/simple.exe" ;; esac
+            if [ -z "$phase" ] || [ ! -s "$bin" ]; then
+              echo "$platform" >> build/ladder/package-failures.txt
+              echo "| $platform | invalid handoff | failed integrity |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if sh scripts/release/package-phase1-spk.shs "$VERSION" "$platform" "$bin" "$phase" "$dir/essentials"; then
+              ess=$(tr '\n' ' ' < "$dir/essentials/STATUS" 2>/dev/null || echo "none recorded")
+              echo "| $platform | $phase | $ess |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$platform" >> build/ladder/package-failures.txt
+              echo "| $platform | $phase | failed package integrity |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - name: Qualify prerelease matrix and write manifest
+        id: policy
+        env:
+          RC_TAG: ${{ steps.tag.outputs.tag }}
+          SOURCE_REVISION: ${{ github.sha }}
+          SELECTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'all' }}
+        run: |
+          sh scripts/release/phase-ladder-release-manifest.shs \
+            "$RC_TAG" "$SOURCE_REVISION" "$SELECTED_LANES" \
+            build/ladder/in build/ladder/receipts . \
+            build/ladder/package-failures.txt build/ladder/phase-ladder-release.sdn \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain prerelease matrix manifest
+        if: always() && steps.policy.outcome != 'skipped' && hashFiles('build/ladder/phase-ladder-release.sdn') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-ladder-release-manifest-${{ github.run_id }}
+          path: build/ladder/phase-ladder-release.sdn
+          retention-days: 90
+          if-no-files-found: error
+      - name: Publish next numbered RC
+        if: steps.policy.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
           gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
             --title "$TAG (phase ladder)" \
-            --notes "Phase-ladder RC from ${GITHUB_SHA}. Reached phases: see the run summary ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}." \
-            simple-bootstrap-*.spk simple-bootstrap-*.spk.sha256
+            --notes "Phase-ladder RC from $GITHUB_SHA. See the attached source-bound platform manifest and run summary $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID." \
+            simple-bootstrap-*.spk simple-bootstrap-*.spk.sha256 build/ladder/phase-ladder-release.sdn

@@ -410,7 +410,7 @@ cleanup_materializer() {
         kill "$batch_pid" 2>/dev/null || :
         wait "$batch_pid" 2>/dev/null || :
     fi
-    rm -f -- "$links_list" "$raw_links_list" "$records_file" "$work_dir/receipt" "$blob_file" "$work_dir/tracked" "$work_dir/api.ps1" "$work_dir/journal" "$work_dir/metadata" "$work_dir/policy" "$manifest_tmp"
+    rm -f -- "$links_list" "$raw_links_list" "$records_file" "$work_dir/receipt" "$blob_file" "$work_dir/tracked" "$work_dir/api.ps1" "$work_dir/journal" "$work_dir/metadata" "$work_dir/policy" "$work_dir/link-target.actual" "$work_dir/link-target.expected" "$manifest_tmp"
     rmdir -- "$work_dir"
 }
 trap cleanup_materializer EXIT
@@ -660,6 +660,10 @@ public static class MaterializerApi {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool FlushFileBuffers(SafeFileHandle h);
     [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool SetFilePointerEx(SafeFileHandle h, long distance, out long position, uint method);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool SetEndOfFile(SafeFileHandle h);
+    [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out TagInfo info, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] input, int inputSize,
@@ -720,6 +724,89 @@ public static class MaterializerApi {
         } finally { pinned.Free(); }
         if (!FlushFileBuffers(h)) throw Error("receipt.flush");
     }
+    static SafeFileHandle CreatePlaceholderInHeldParent(SafeFileHandle parent, string path) {
+        if (parent == null || parent.IsInvalid) throw new IOException("symlink.placeholder-parent");
+        string leaf = Path.GetFileName(path);
+        IntPtr buffer = Marshal.StringToHGlobalUni(leaf), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
+        try {
+            var u = new UnicodeName { Length = checked((ushort)(leaf.Length * 2)), MaximumLength = checked((ushort)(leaf.Length * 2)), Buffer = buffer };
+            Marshal.StructureToPtr(u, name, false);
+            var a = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Root = parent.DangerousGetHandle(), Name = name, Attributes = 0x40 };
+            SafeFileHandle h; IoStatus io;
+            int status = NtCreateFile(out h, 0x40100180u, ref a, out io, IntPtr.Zero, 0x80, 1, 2, 0x60, IntPtr.Zero, 0);
+            if (status < 0) { if (h != null) h.Dispose(); throw new IOException("symlink.placeholder-create:ntstatus=" + status); }
+            return h;
+        } finally { Marshal.FreeHGlobal(name); Marshal.FreeHGlobal(buffer); }
+    }
+    public static void NormalizeSymlink(string path) {
+        var held = new List<SafeFileHandle>();
+        try {
+            uint pathAttributes = GetFileAttributesW(path);
+            bool directoryHint = pathAttributes != 0xFFFFFFFFu && (pathAttributes & 0x10u) != 0;
+            SafeFileHandle parent = Parents(path, false, held, directoryHint);
+            // Open the reparse point itself and deny every writer/deleter while
+            // validating and replacing its contents through this same handle.
+            using (var h = CreateFileW(path, 0x40010100u, 1, IntPtr.Zero, 3,
+                0x02200000u, IntPtr.Zero)) {
+                if (h.IsInvalid) throw Error("symlink.normalize-open");
+                var tag = Tag(h);
+                if ((tag.Attributes & 0x400) == 0 || tag.Tag != 0xA000000Cu)
+                    throw new IOException("symlink.normalize-not-symbolic-link");
+                byte[] reparse = new byte[16384]; int returned;
+                if (!DeviceIoControl(h, 0x000900A8, null, 0, reparse, reparse.Length, out returned, IntPtr.Zero))
+                    throw Error("symlink.read-reparse");
+                if (returned < 20 || BitConverter.ToUInt32(reparse, 0) != 0xA000000Cu)
+                    throw new IOException("symlink.reparse-header");
+                int dataLength = BitConverter.ToUInt16(reparse, 4);
+                int substituteOffset = BitConverter.ToUInt16(reparse, 8);
+                int substituteLength = BitConverter.ToUInt16(reparse, 10);
+                int flags = BitConverter.ToInt32(reparse, 16);
+                if ((flags & 1) == 0 || (substituteLength & 1) != 0 ||
+                    20 + substituteOffset + substituteLength > 8 + dataLength || returned < 8 + dataLength)
+                    throw new IOException("symlink.reparse-relative-target");
+                string actual = new UnicodeEncoding(false, false, true).GetString(
+                    reparse, 20 + substituteOffset, substituteLength);
+                string expected = new UTF8Encoding(false, true).GetString(
+                    File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_BLOB"))).Replace('/', '\\');
+                if (!String.Equals(actual, expected, StringComparison.Ordinal))
+                    throw new IOException("symlink.target-differs-from-head");
+                byte[] blob = File.ReadAllBytes(Environment.GetEnvironmentVariable("MATERIALIZER_BLOB"));
+                long position;
+                if ((tag.Attributes & 0x10) != 0) {
+                    // Windows keeps the directory object after deleting its
+                    // reparse data, so it cannot become a file placeholder in
+                    // place. POSIX unlink semantics remove this exact entry;
+                    // FILE_CREATE relative to the held parent then refuses any
+                    // racing replacement instead of overwriting it.
+                    if (!SetFileInformationByHandle(h, 21, new byte[] {3,0,0,0}, 4))
+                        throw Error("symlink.directory-unlink");
+                    // Closing the delete-pending directory link completes its
+                    // removal before the exclusive file creation below.
+                    h.Dispose();
+                    using (var placeholder = CreatePlaceholderInHeldParent(parent, path)) {
+                        if (!SetFilePointerEx(placeholder, 0, out position, 0)) throw Error("symlink.seek-placeholder");
+                        WriteAndFlush(placeholder, blob);
+                        if (!SetEndOfFile(placeholder) || !FlushFileBuffers(placeholder)) throw Error("symlink.truncate-placeholder");
+                        var createdTag = Tag(placeholder); var createdIdentity = Identity(placeholder);
+                        if ((createdTag.Attributes & (0x400 | 0x10)) != 0 || createdIdentity.SizeHigh != 0 || createdIdentity.SizeLow != (uint)blob.Length)
+                            throw new IOException("symlink.placeholder-postcondition");
+                    }
+                    return;
+                }
+                byte[] delete = new byte[8];
+                Buffer.BlockCopy(BitConverter.GetBytes(0xA000000Cu), 0, delete, 0, 4);
+                if (!DeviceIoControl(h, 0x000900AC, delete, delete.Length, null, 0, out returned, IntPtr.Zero))
+                    throw Error("symlink.delete-reparse");
+                if (!SetFilePointerEx(h, 0, out position, 0)) throw Error("symlink.seek-placeholder");
+                WriteAndFlush(h, blob);
+                if (!SetEndOfFile(h) || !FlushFileBuffers(h)) throw Error("symlink.truncate-placeholder");
+                var after = Tag(h);
+                var identity = Identity(h);
+                if ((after.Attributes & 0x400) != 0 || identity.SizeHigh != 0 || identity.SizeLow != (uint)blob.Length)
+                    throw new IOException("symlink.placeholder-postcondition");
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
     static bool RenameNoReplace(SafeFileHandle h, byte[] rename, out int error) {
         IoStatus io;
         int status = NtSetInformationFile(h, out io, rename, (uint)rename.Length, 10);
@@ -758,7 +845,7 @@ public static class MaterializerApi {
     }
     // Retain handles without write/delete sharing through the protected action.
     // Starting at the volume/share root prevents ancestor rename/reparse swaps.
-    static SafeFileHandle Parents(string path, bool create, List<SafeFileHandle> held) {
+    static SafeFileHandle Parents(string path, bool create, List<SafeFileHandle> held, bool allowChildCreate = false) {
         string full = Path.GetFullPath(path), root = Path.GetPathRoot(full);
         string parent = Path.GetDirectoryName(full);
         if (String.IsNullOrEmpty(parent)) parent = root;
@@ -772,7 +859,9 @@ public static class MaterializerApi {
             uint attrs = GetFileAttributesW(candidate);
             if (attrs != 0xFFFFFFFFu && (attrs & 0x400u) != 0)
                 throw new IOException("ancestor.reparse:" + candidate);
-            var h = CreateFileW(candidate, 0, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
+            bool childCreateHandle = allowChildCreate && n == parts.Length - 1;
+            uint access = childCreateHandle ? 0x001000A3u : 0u;
+            var h = CreateFileW(candidate, access, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
             if (h.IsInvalid) {
                 int error = Marshal.GetLastWin32Error(); h.Dispose();
                 if (n >= 0 && error == 2) {
@@ -852,6 +941,13 @@ public static class MaterializerApi {
                 }
             }
         } finally { foreach (var h in held) h.Dispose(); }
+    }
+    public static string DirectoryStatus(string link, string target) {
+        using (var raw = Open(link, true, 0)) {
+            if (Tag(raw).Tag != 0xA0000003u) return "not-junction";
+        }
+        Validate(link, target, true);
+        return "junction";
     }
     public static void Create(string link, string target, bool directory) {
         var held = new List<SafeFileHandle>();
@@ -1238,10 +1334,12 @@ while ($null -ne ($request = [Console]::ReadLine())) {
     $answer = ""
 switch ($env:MATERIALIZER_ACTION) {
     "gitblob" { [MaterializerApi]::GitBlob($env:MATERIALIZER_LINK_WIN) }
+    "normalize-symlink" { [MaterializerApi]::NormalizeSymlink($env:MATERIALIZER_LINK_WIN) }
     "tracked" { $answer = [MaterializerApi]::IsTracked($env:MATERIALIZER_LINK_WIN) }
     "parse" { [MaterializerApi]::ParseMetadata($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
     "pending" { [MaterializerApi]::Pending($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
     "target" { [MaterializerApi]::ProbeTarget($env:MATERIALIZER_LINK_WIN) }
+    "directory-status" { $answer = [MaterializerApi]::DirectoryStatus($env:MATERIALIZER_LINK_WIN, $env:MATERIALIZER_TARGET_WIN) }
     "blob" {
         $text = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($env:MATERIALIZER_LINK_WIN))
         foreach ($part in $text.Split([char]47)) {
@@ -1313,7 +1411,7 @@ validate_materialized_file() {
     native_action file "$(to_win_path "$abs_link")" "$(to_win_path "$target_abs")"
 }
 validate_materialized_directory() {
-    native_action directory "$(to_win_path "$abs_link")" "$(to_win_path "$target_abs")"
+    [ "$(native_action directory-status "$(to_win_path "$abs_link")" "$(to_win_path "$target_abs")")" = junction ]
 }
 
 to_win_path() {
@@ -1451,6 +1549,42 @@ while IFS= read -r -d '' path && IFS= read -r -d '' oid; do
         continue
     }
     native_action target "$(to_win_path "$target_abs")" "" || materializer_fail "target path predicate: $path"
+
+    # MSYS reports NTFS junctions as -L too. Accept an already-materialized
+    # junction through the existing native receipt validator before treating
+    # any other -L path as a Git symlink.
+    if [ -L "$abs_link" ] && [ -d "$abs_link" ] && [ ! -f "$abs_link" ] && validate_materialized_directory; then
+        already_ok=$((already_ok + 1))
+        printf 'directory\t%s\n' "$path" >>"$manifest_tmp" || materializer_fail "cannot record undo manifest entry: $path"
+        record_link "$path" "$target_rel" directory already ||
+            materializer_fail "cannot record directory link: $path"
+        continue
+    fi
+
+    # A Windows checkout may have privilege to materialize Git's mode-120000
+    # entry as a real filesystem symlink. Normalize only an exact HEAD/index
+    # symlink back to Git's placeholder bytes before either the pending-target
+    # or hardlink/junction path. This avoids following a small target file and
+    # mistaking its contents for a placeholder. Exact NUL-terminated
+    # readlink/HEAD comparison and the unchanged index check keep this from
+    # rewriting an ordinary file or a user-retargeted symlink.
+    if [ -L "$abs_link" ]; then
+        readlink -z -- "$abs_link" >"$work_dir/link-target.actual" ||
+            materializer_fail "cannot read existing symlink: $path"
+        printf '%s\0' "$target_rel" >"$work_dir/link-target.expected" ||
+            materializer_fail "cannot record expected symlink target: $path"
+        cmp -s -- "$work_dir/link-target.actual" "$work_dir/link-target.expected" ||
+            materializer_fail "existing symlink target differs from HEAD: $path"
+        git -C "$repo_root" diff --cached --quiet "$head_sha" -- "$path" ||
+            materializer_fail "index symlink differs from HEAD: $path"
+        git -C "$repo_root" diff --cached --quiet "$head_sha" -- "$path" ||
+            materializer_fail "index symlink changed before normalization: $path"
+        native_action normalize-symlink "$(to_win_path "$abs_link")" "" ||
+            materializer_fail "cannot restore verified symlink placeholder: $path"
+        [ ! -L "$abs_link" ] && cmp -s -- "$abs_link" "$blob_file" ||
+            materializer_fail "verified symlink placeholder restore mismatch: $path"
+    fi
+
     if [ ! -e "$target_abs" ]; then
         cmp -s -- "$abs_link" "$blob_file" || materializer_fail "pending placeholder bytes: $path"
         if target_is_tracked "$target_abs"; then

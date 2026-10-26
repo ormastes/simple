@@ -1,0 +1,122 @@
+# REQ-CMUX-004/005: retained-content identity admission before geometry effects.
+# AUTHORED / NOT_RUN. Explicit-state controls do not prove native viewport sizes.
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.window_layout_service.{apply_window_viewports, resize_layout_children, resize_pane_plan, split_window_plan}
+use os.apps.smux.pane_presentation_service.{set_pane_border_plan}
+use os.apps.smux.split_checkpoint.{split_checkpoint_capture, split_checkpoint_restore}
+use std.common.contracts.mux.execution_v1.{MuxBorderV1}
+
+fn revision_setup() -> ServiceState:
+    val rects = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 80, rows: 24)]
+    var st = ServiceState.empty()
+    st = st.add_session(MuxSession.create("s", "revision"))
+    st = st.add_window(MuxWindow.create("w", "s", "revision").with_geometry(rects, 80, 24))
+    var pane = PaneRecord.create(MuxPane.create("p", "w", "s")).resize(80, 24)
+    pane.content_revision = 18446744073709551615u64
+    return st.add_pane(pane)
+
+describe "resize content revision admission":
+    it "preserves an exhausted identity for an exact viewport no-op":
+        step("Project unchanged geometry without consuming a content identity")
+        val st = revision_setup()
+        val result = apply_window_viewports(st, "s", "w")
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().get_pane(0).content_revision).to_equal(18446744073709551615u64)
+        expect(result.unwrap().get_pane(0).pane.cols).to_equal(80)
+
+    it "refuses pure projection before resizing the retained grid":
+        step("Reject changed viewport geometry at the content revision ceiling")
+        val st = revision_setup()
+        val rects = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 81, rows: 24)]
+        val planned = st.replace_window(0, st.get_window(0).with_geometry(rects, 81, 24))
+        val result = apply_window_viewports(planned, "s", "w")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content revision exhausted")
+        expect(st.get_pane(0).pane.cols).to_equal(80)
+        expect(st.get_pane(0).content_revision).to_equal(18446744073709551615u64)
+
+    it "admits one final content revision then refuses another geometry change":
+        step("Consume the final identity without wrapping it on a later resize")
+        var st = revision_setup()
+        var pane = st.get_pane(0)
+        pane.content_revision = 18446744073709551614u64
+        st = st.replace_pane(0, pane)
+        val first = resize_pane_plan(st, "s", "w", "p", 81, 24)
+        expect(first.is_ok()).to_equal(true)
+        val accepted = first.unwrap()
+        expect(accepted.get_pane(0).content_revision).to_equal(18446744073709551615u64)
+        expect(accepted.get_pane(0).pane.cols).to_equal(81)
+        val second = resize_pane_plan(accepted, "s", "w", "p", 82, 24)
+        expect(second.is_err()).to_equal(true)
+        expect(second.unwrap_err()).to_contain("content revision exhausted")
+        expect(accepted.get_pane(0).pane.cols).to_equal(81)
+
+    it "checks a later exhausted participant before the transaction effect loop":
+        step("Refuse the complete mapping when a later pane lacks revision capacity")
+        var st = revision_setup()
+        var first = st.get_pane(0)
+        first.content_revision = 7u64
+        st = st.replace_pane(0, first)
+        var second = PaneRecord.create(MuxPane.create("q", "w", "s")).resize(80, 24)
+        second.content_revision = 18446744073709551615u64
+        st = st.add_pane(second)
+        val targets = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 81, rows: 24),
+            MuxRect(pane_id: "q", col: 82, row: 0, cols: 81, rows: 24)]
+        val result = resize_layout_children(st, [0, 1], targets)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("exhausted: q")
+        expect(result.state.get_pane(0).content_revision).to_equal(7u64)
+        expect(result.state.get_pane(0).pane.cols).to_equal(80)
+        expect(result.state.get_pane(1).pane.cols).to_equal(80)
+        expect(result.uncertain).to_equal(false)
+        expect(st.get_pane(0).content_revision).to_equal(7u64)
+
+    it "returns the original transaction state on exhausted resize admission":
+        step("Reject before entering native effect dispatch")
+        val st = revision_setup()
+        val target = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 81, rows: 24)]
+        val result = resize_layout_children(st, [0], target)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content revision exhausted")
+        expect(result.state.get_pane(0).pane.cols).to_equal(80)
+        expect(result.state.get_pane(0).content_revision).to_equal(18446744073709551615u64)
+        expect(result.uncertain).to_equal(false)
+
+    it "propagates content admission failure from direct pane resize planning":
+        step("Keep direct pane plans from wrapping the retained identity")
+        val st = revision_setup()
+        val result = resize_pane_plan(st, "s", "w", "p", 81, 24)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content revision exhausted")
+        expect(st.get_pane(0).pane.cols).to_equal(80)
+
+    it "refuses presentation changes that need an exhausted child viewport":
+        step("Reject a border change before shrinking retained child content")
+        val st = revision_setup()
+        val result = set_pane_border_plan(st, "s", "w", "p", MuxBorderV1.Single)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content revision exhausted")
+        expect(st.get_pane(0).pane.cols).to_equal(80)
+        expect(st.get_pane(0).pane.rows).to_equal(24)
+
+    it "retains split ownership when checkpoint restoration lacks an identity":
+        step("Refuse rollback without dropping the added pane or wrapping content revision")
+        var before = revision_setup()
+        var original = before.get_pane(0)
+        original.content_revision = 10u64
+        before = before.replace_pane(0, original)
+        var split = split_window_plan(before, "q", "s", "w", "p", "vertical").unwrap()
+        val checkpoint = split_checkpoint_capture(before, split, "s", "w", "q")
+        var exhausted = split.get_pane(0)
+        exhausted.content_revision = 18446744073709551615u64
+        split = split.replace_pane(0, exhausted)
+        val result = split_checkpoint_restore(split, checkpoint)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("content revision exhausted")
+        expect(result.state.pane_count).to_equal(2)
+        expect(result.state.get_pane(0).pane.cols).to_equal(split.get_pane(0).pane.cols)
+        expect(result.state.get_pane(0).content_revision).to_equal(18446744073709551615u64)
+        expect(result.uncertain).to_equal(false)

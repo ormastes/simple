@@ -3,6 +3,7 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use std.string_core.{char_from_code}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -16,6 +17,65 @@ fn same_surface(path: text) -> bool:
     if a != b:
         print "SURFACE MISMATCH {path}"
     a == b and source.split("\n").len() == skeleton.split("\n").len()
+
+val LATE_LEXER_WRAPPERS: [text] = [
+    "core_lexer_next_token", "core_lexer_token_text",
+    "core_lexer_token_start", "core_lexer_token_end"
+]
+
+fn skeleton_preserves_tail_surface(path: text) -> bool:
+    val source = rt_file_read_text(path) ?? ""
+    val skeleton = module_surface_skeleton_v1(source)
+    val full = parse_full_frontend(source, path, "compiler.frontend.core.lexer_struct", Logger(level: 0))
+    val skel = parse_full_frontend(skeleton, path, "compiler.frontend.core.lexer_struct", Logger(level: 0))
+    var wrappers_match = true
+    for name in LATE_LEXER_WRAPPERS:
+        wrappers_match = wrappers_match and full.functions.contains_key(name) and
+            skel.functions.contains_key(name) and full.function_headers.contains_key(name) and
+            skel.function_headers.contains_key(name)
+    wrappers_match and
+        module_surface_canonical_digest_v1(full) == module_surface_canonical_digest_v1(skel) and
+        source.split("\n").len() == skeleton.split("\n").len()
+
+fn source_braced_expression(prefix: text, expression: text, suffix: text) -> text:
+    prefix + char_from_code(123) + expression + char_from_code(125) + suffix
+
+val COMMENT_DELIMITER_FIXTURES: [text] = [
+    ["fn body():", "    # prose with one triple delimiter \"\"\"", "    pass",
+     "fn tail_after_full_comment() -> i64:", "    1"].join("\n"),
+    ["fn body():", "    val x = 1 # inline prose with one triple delimiter '''", "    x",
+     "fn tail_after_inline_comment() -> i64:", "    2"].join("\n"),
+    ["@inline", "fn body() -> text:",
+     "    val ordinary = \"hash # and escaped \\\" quote and slash \\\\"",
+     "    val raw = r\"hash # and slash \\\"",
+     "    val continued = \"first\\",
+     source_braced_expression("    ", "items.join(\"'''\")", "\""),
+     source_braced_expression("    val single_outer = '", "items.join(\"'''\")", " '"),
+     "    ordinary",
+     "fn tail_after_ordinary_strings() -> i64:", "    3"].join("\n"),
+    ["@inline", "fn quoted() -> text:",
+     source_braced_expression("    val value = \"", "items.join(\"'''\")", "\""),
+     "    value",
+     "fn tail_after_nested_interpolation() -> i64:", "    4"].join("\n"),
+    ["@inline", "fn multiline() -> text:",
+     "    val single = '''",
+     "fn fake_single_string_member():",
+     "    pass",
+     "\"\"\" mismatched delimiter stays content",
+     "    '''",
+     "    val double = \"\"\"",
+     "fn fake_double_string_member():",
+     "    pass",
+     "''' mismatched delimiter stays content",
+     "    \"\"\"",
+     "    val raw = r\"\"\"",
+     "fn fake_raw_string_member():",
+     "    pass",
+     "    raw backslash \\\\ and " + char_from_code(123) + "literal braces" + char_from_code(125),
+     "    \"\"\"",
+     "    \"done\"",
+     "fn tail_after_multiline_strings() -> i64:", "    5"].join("\n")
+]
 
 val FIXTURE: text = "use std.x.a\nexport use std.y.z\n\n@inline\nfn twice(a: i64) -> i64:\n    a * 2\n\npub fn add(a: i64,\n        b: i64) -> i64:\n    val c = a + b\n    c\n\nfn first<T>(xs: [T]) -> T:\n    xs[0]\n\npub struct P:\n    x: i64\n\nimpl P:\n    fn len() -> i64:\n        self.x\n    static fn make() -> P:\n        P(x: 1)\n\ntrait Shape:\n    fn area() -> i64:\n        0\n\nval LIMIT: i64 = 4\n"
 
@@ -36,6 +96,38 @@ describe "module surface skeleton":
         val skel = parse_full_frontend(module_surface_skeleton_v1(FIXTURE), "fx.spl", "fx", Logger(level: 0))
         expect(module_surface_canonical_digest_v1(skel)).to_equal(module_surface_canonical_digest_v1(full))
 
+    it "ignores comment and ordinary-string delimiters while preserving later declarations":
+        for source in COMMENT_DELIMITER_FIXTURES[0:4]:
+            val skeleton = module_surface_skeleton_v1(source)
+            val full = parse_full_frontend(source, "comment-quotes.spl", "fx", Logger(level: 0))
+            val skel = parse_full_frontend(skeleton, "comment-quotes.spl", "fx", Logger(level: 0))
+            expect(source.split("\n").len()).to_equal(skeleton.split("\n").len())
+            expect(module_surface_canonical_digest_v1(skel)).to_equal(module_surface_canonical_digest_v1(full))
+        val tail = parse_full_frontend(module_surface_skeleton_v1(COMMENT_DELIMITER_FIXTURES[0]),
+            "comment-tail.spl", "fx", Logger(level: 0))
+        expect(tail.functions.contains_key("tail_after_full_comment")).to_equal(true)
+        val inline_tail = parse_full_frontend(module_surface_skeleton_v1(COMMENT_DELIMITER_FIXTURES[1]),
+            "inline-comment-tail.spl", "fx", Logger(level: 0))
+        expect(inline_tail.functions.contains_key("tail_after_inline_comment")).to_equal(true)
+        val ordinary_tail = parse_full_frontend(module_surface_skeleton_v1(COMMENT_DELIMITER_FIXTURES[2]),
+            "ordinary-string-tail.spl", "fx", Logger(level: 0))
+        expect(ordinary_tail.functions.contains_key("tail_after_ordinary_strings")).to_equal(true)
+        val nested_tail = parse_full_frontend(module_surface_skeleton_v1(COMMENT_DELIMITER_FIXTURES[3]),
+            "nested-interpolation-tail.spl", "fx", Logger(level: 0))
+        expect(nested_tail.functions.contains_key("tail_after_nested_interpolation")).to_equal(true)
+
+    it "keeps matching single, double and raw triple delimiters until their own close":
+        val source = COMMENT_DELIMITER_FIXTURES[4]
+        val skeleton = module_surface_skeleton_v1(source)
+        val full = parse_full_frontend(source, "triple-quotes.spl", "fx", Logger(level: 0))
+        val skel = parse_full_frontend(skeleton, "triple-quotes.spl", "fx", Logger(level: 0))
+        expect(source.split("\n").len()).to_equal(skeleton.split("\n").len())
+        expect(module_surface_canonical_digest_v1(skel)).to_equal(module_surface_canonical_digest_v1(full))
+        expect(skel.functions.contains_key("fake_single_string_member")).to_equal(false)
+        expect(skel.functions.contains_key("fake_double_string_member")).to_equal(false)
+        expect(skel.functions.contains_key("fake_raw_string_member")).to_equal(false)
+        expect(skel.functions.contains_key("tail_after_multiline_strings")).to_equal(true)
+
     it "yields the same canonical surface digest on real compiler sources":
         expect(same_surface("src/compiler/00.common/diagnostics/span.spl")).to_equal(true)
         expect(same_surface("src/compiler/80.driver/sif/sif.spl")).to_equal(true)
@@ -45,6 +137,9 @@ describe "module surface skeleton":
         expect(same_surface("src/compiler/20.hir/hir_lowering/module_surface_types.spl")).to_equal(true)
         expect(same_surface("src/lib/nogc_async_mut/async/future.spl")).to_equal(true)
         expect(same_surface("src/compiler/80.driver/cache/daemon/cache_daemon_main.spl")).to_equal(true)
+
+    it "retains lexer wrappers declared after the large implementation block":
+        expect(skeleton_preserves_tail_surface("src/compiler/10.frontend/core/lexer_struct.spl")).to_equal(true)
 
     it "is a real 64-hex digest that distinguishes different surfaces":
         val a = parse_full_frontend(FIXTURE, "fx.spl", "fx", Logger(level: 0))

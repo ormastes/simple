@@ -1,3 +1,4 @@
+use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 # Module-surface registry construction and compatibility lookup.
 
 use compiler.common.driver_core_types.{SourceFile}
@@ -55,8 +56,8 @@ impl ModuleSurfacesByName:
             surfaces, index_by_name, ordered_names, ordered_indices)
 
 impl ModuleSurfaceBuilder:
-    static fn new() -> ModuleSurfaceBuilder:
-        ModuleSurfaceBuilder(
+    static fn new(library_mode: text = "") -> ModuleSurfaceBuilder:
+        ModuleSurfaceBuilder(library_mode: library_mode,
             surfaces: [], index_by_name: {}, index_by_path: {},
             ordered_names: [], ordered_indices: [], frozen: false,
             index_by_path_keys: [], index_by_path_values: [],
@@ -320,7 +321,7 @@ impl ModuleSurfaceBuilder:
             return Err("module surface builder is frozen")
         val result = module_surfaces_by_name_from_parts(
             self.surfaces, self.index_by_name,
-            self.ordered_names, self.ordered_indices)
+            self.ordered_names, self.ordered_indices, self.library_mode)
         if result.is_ok():
             self.frozen = true
         result
@@ -338,6 +339,8 @@ impl ModuleSurfaceBuilder:
             self.ordered_names, self.ordered_indices)
         if validation.is_err():
             return validation.unwrap_err()
+        if library_mode_policy_v1(self.library_mode).is_err(): return "LIBRARY_MODE_INVALID: surface builder"
+        registry.library_mode = self.library_mode
         registry.surfaces = self.surfaces
         registry.index_by_name = self.index_by_name
         registry.ordered_names = self.ordered_names
@@ -352,13 +355,14 @@ pub(package) fn module_surfaces_by_name_from_parts(
     surfaces: [ModuleSurface],
     index_by_name: Dict<text, i64>,
     ordered_names: [text],
-    ordered_indices: [i64]
+    ordered_indices: [i64], library_mode: text = ""
 ) -> Result<ModuleSurfacesByName, text>:
     val validation = module_surfaces_validate_index_alignment(
         surfaces, index_by_name, ordered_names, ordered_indices)
     if validation.is_err():
         return Err(validation.unwrap_err())
-    var registry = ModuleSurfacesByName(
+    if library_mode_policy_v1(library_mode).is_err(): return Err("LIBRARY_MODE_INVALID: surface registry")
+    var registry = ModuleSurfacesByName(library_mode: library_mode,
         surfaces: surfaces,
         index_by_name: index_by_name,
         ordered_names: ordered_names,
@@ -383,10 +387,10 @@ pub(package) fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: t
     index_by_name[name] = surface_index
     Ok(index_by_name)
 
-pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile], library_mode: text = "") -> Result<ModuleSurfacesByName, text>:
     if modules == nil:
         return Err("missing parsed module dictionary")
-    var builder = ModuleSurfaceBuilder.new()
+    var builder = ModuleSurfaceBuilder.new(library_mode)
     if builder == nil:
         return Err("unable to allocate module surface builder")
     var source_index = 0
@@ -630,6 +634,7 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
         module_surface_promote_fields(surface)
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
+    if registry.library_mode != "": roots.push(ModuleSurfaceRoot.Texts([registry.library_mode]))
     roots.push(ModuleSurfaceRoot.Registry(registry))
     if not module_surface_promote_roots(roots):
         return "registry root carrier (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()} names={registry.ordered_names.len()} indices={registry.ordered_indices.len()} dict={registry.index_by_name.len()})"

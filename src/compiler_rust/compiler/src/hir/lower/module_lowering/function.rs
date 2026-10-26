@@ -1244,9 +1244,13 @@ impl Lowerer {
         }
         if declared_return_type.is_some() {
             if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
-                if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
-                    eprintln!("return-type mismatch in function {}: {error:?}", func_name);
-                }
+                // Unconditional: the error variant carries only two TypeIds, so
+                // without this line a strict-JIT refusal names no function.
+                eprintln!(
+                    "error: declared return type mismatch in function `{}` ({}): {error:?}",
+                    func_name,
+                    self.current_file.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                );
                 return Err(error);
             }
         }
