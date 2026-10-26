@@ -15,7 +15,7 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # Base-repair (mirrors origin/main): run_command_text calls process_run_bounded
 # with these bounds, but the merge left them undefined here.
-val LSP_COMMAND_TIMEOUT_MS: i64 = 10000
+val LSP_COMMAND_TIMEOUT_MS: i64 = 30000
 val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
 
 fn lsp_query_path() -> text:
@@ -34,10 +34,14 @@ fn command_failure(code: i64, stderr: text, stdout: text) -> text:
         return prefix
     prefix + ": " + detail
 
+val LSP_TIMEOUT_PREFIX = "lsp request timed out after "
+
 fn run_command_text(binary: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run_bounded(
         binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
+    if _lsp_child_timed_out(code, stderr):
+        return LSP_TIMEOUT_PREFIX + str(LSP_COMMAND_TIMEOUT_MS) + " ms"
     if code == 0:
         return clean
     command_failure(code, stderr, clean)
@@ -410,6 +414,12 @@ fn detect_tool_name(body: text) -> text:
         return "saml_analyze"
     ""
 
+# A timed-out child becomes a JSON-RPC error; the server loop keeps serving.
+fn position_result(id: text, out: text) -> text:
+    if out.starts_with(LSP_TIMEOUT_PREFIX):
+        return jsonrpc_error(id, -32001, out)
+    make_tool_result(id, out)
+
 fn handle_tool_call(id: text, body: text) -> text:
     val tool_name = detect_tool_name(body)
     if tool_name == "":
@@ -433,22 +443,22 @@ fn handle_tool_call(id: text, body: text) -> text:
         lsp_record_location(file, line0)
 
         if tool_name == "lsp_definition":
-            return make_tool_result(id, run_lsp_query(subcmd: "definition", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "definition", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_references":
-            return make_tool_result(id, run_lsp_query(subcmd: "references", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "references", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_hover":
-            return make_tool_result(id, run_visibility_hover(file: file, line0: line0, char0: char0, requester: hover_requester))
+            return position_result(id, run_visibility_hover(file: file, line0: line0, char0: char0, requester: hover_requester))
         if tool_name == "lsp_completion":
-            return make_tool_result(id, run_visibility_query(subcmd: "completions", file: file, line0: line0, char0: char0))
+            return position_result(id, run_visibility_query(subcmd: "completions", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_type_at":
-            return make_tool_result(id, run_lsp_query(subcmd: "type-at", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "type-at", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_signature_help":
-            return make_tool_result(id, run_lsp_query(subcmd: "signature-help", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "signature-help", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_implementation":
-            return make_tool_result(id, run_lsp_query(subcmd: "implementation", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "implementation", file: file, line0: line0, char0: char0))
         if tool_name == "lsp_document_highlight":
-            return make_tool_result(id, run_lsp_query(subcmd: "document-highlight", file: file, line0: line0, char0: char0))
-        return make_tool_result(id, run_lsp_query(subcmd: "type-definition", file: file, line0: line0, char0: char0))
+            return position_result(id, run_lsp_query(subcmd: "document-highlight", file: file, line0: line0, char0: char0))
+        return position_result(id, run_lsp_query(subcmd: "type-definition", file: file, line0: line0, char0: char0))
 
     # Requester-scoped two-set view; `file` defaults to the requester's file.
     if tool_name == "lsp_visibility":
@@ -500,3 +510,14 @@ export handle_resource_read
 export handle_prompts_list
 export handle_roots_list
 export handle_logging_set_level
+
+# Mirrors std process_ops.process_bounded_timed_out (anchored trailing marker,
+# exit -1). Inlined to keep this server off the heavy std io import graph.
+fn _lsp_child_timed_out(exit_code: i64, stderr: text) -> bool:
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")
