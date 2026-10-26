@@ -93,3 +93,5 @@ Pattern qualification completed: requested jobs=80; actual production-owner
 `optional pattern substitution: 5 cases, 2 passes each`. Both touched payload
 helpers now have focused native runtime evidence. General SSpec/manual/core
 CLI gates remain TEST_BLOCKED; overall Phase 3 and root-fix status stay OPEN.
+
+Landing source commit after clean rebase onto release `80a2b590c14`: `cf4eec3a9ff` (same workaround patch as tested local `9bebc55105d`). Upstream advance was the unrelated DevHub deflate change; focused native criteria were not replayed.

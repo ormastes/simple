@@ -220,3 +220,5 @@ bounded native qualification cycle, not accepted as green.
 | `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
 | `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80-run.log` | `bcff6f9f76e88ea1529f3d69661873214c0bc1cfc20401a2b12b33bdeb2200f5` |
 | `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80-run.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
+
+Landing source commit after clean rebase onto release `80a2b590c14`: `cf4eec3a9ff` (same workaround patch as tested local `9bebc55105d`). Upstream advance was the unrelated DevHub deflate change; focused native criteria were not replayed.
