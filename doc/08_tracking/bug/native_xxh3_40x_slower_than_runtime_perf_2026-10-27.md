@@ -68,3 +68,32 @@ the caller), not one oversize array. A packed byte array (`rt_byte_array_new`,
    per-byte flag test; replace the spin-locked registry probe by a per-thread last-validated-pointer cache. Expected ~2-3x.
 Repro: `.prof/mb.spl` shape above (bench sources are not committed); build with
 `stage2.exe native-build mb.spl -o mb.exe`.
+
+## Fix (pending native proof)
+
+`rt_typed_bytes_u64_le_at` / `rt_typed_bytes_u32_le_at` (and the `rt_bytes_*`
+spellings) are now lowered inline by the self-hosted LLVM backend
+(`_MirToLlvm/core_codegen.spl` `translate_call_at` ->
+`asm_constraints_helpers.spl` `emit_inline_typed_bytes_le`), mirroring the Rust
+seed's `compile_inline_typed_bytes_le_unchecked`. Hosted x86_64/aarch64
+(linux/windows/macos/freebsd) only; freestanding targets keep the call.
+
+Kept per call (cheap, no memory-order cost): heap tag == 1, raw >= 4096, header
+kind == array, negative-index wrap, and `0 <= idx <= len - width` (OOB and
+non-array still return 0). Dropped: the spin lock + global probe in
+`rt_core_is_registered_immortal_ptr` and the `len <= cap` / capacity
+re-validation (same trust as the seed's inline path). The lowering is
+branch-free (selects against a shared zero global) because the LLVM emitter's
+successor phis name `%bbN`, so a call site must not open a new block. Per-loop
+hoisting of the validation is NOT done: the MIR optimiser has no loop-invariant
+array-validation fact (`typed_byte_canon` is a skeleton), so validation stays
+per call, minus the lock.
+
+Expected gain: the ~89% of XXH3 time spent in the registry lock + probe
+(plus call overhead) is replaced by ~35 register ops and 2-3 loads per 8 bytes,
+i.e. the record's estimate of 18 ns -> a few ns per load (roughly 5-10x on xxh3_64,
+200 -> 1000-2000 MB/s; slot-layout arrays decode 8 slots so stay below the
+packed-byte ideal), to be measured. Native proof comes
+with the next stage2/stage3 rebuild (no compiler was rebuilt for this change);
+spec: `test/01_unit/compiler/50.mir/inline_typed_bytes_load_spec.spl`
+(IR-level). The Cranelift adapter path is not changed.
