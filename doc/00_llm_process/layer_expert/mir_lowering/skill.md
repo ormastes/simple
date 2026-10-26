@@ -555,3 +555,14 @@ programs never change layout. Rules to keep when editing:
   lanes differ for release builds until the parser reads the profile.
 - `target_presets.spl` names these triples `thumbv7em`/`thumbv8m.main`/`thumbv6m` (arch field).
   Spec: `test/01_unit/compiler/50.mir/mir_cfg_select_cross_target_spec.spl` (10 examples).
+- **Imported trait method returns:** a consumer's table holds an imported
+  trait SYMBOL but no method symbols, so `lookup_trait_method` misses and a
+  bare `Ok`/`Err` arm on `recv.method()` was "ambiguous" (stage3
+  `SIMPLE_BOOTSTRAP=1`, e.g. `self.codegen.compile_module(...)`). Both
+  prescans (`prescan_declaration_callables_v1`, `prescan_module_functions_v1`)
+  now register each trait method signature in the name-keyed
+  `bootstrap_fn_ret_hir_type_*` registry under
+  `mir_trait_method_ret_key_v1` = `trait-ret:{canonical module}.{Trait}::{method}`;
+  `enum_match_expr_type` falls back to it. Symbol-free returns only (the
+  registry rejects `Named` payloads, which are table-local ids).
+  Spec: `test/01_unit/compiler/mir/imported_trait_method_declared_return_spec.spl`.

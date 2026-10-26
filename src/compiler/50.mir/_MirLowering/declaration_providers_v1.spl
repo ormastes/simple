@@ -37,6 +37,24 @@ use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
 use compiler.mir.hir_declaration_variant_identity_v1.{mir_hir_global_variant_identity_v1}
 use std.common.crypto.sha256.{sha256_text}
 
+# Name-keyed declared-return key for a trait method, computed from ONE
+# table's own trait symbol: (canonical defining module, trait name, method).
+# Provider and consumer fold their two module spellings (file path vs dotted
+# import) onto the same key; a missing/unnamed trait yields "".
+pub fn mir_trait_method_ret_key_v1(symbols: SymbolTable, raw_trait: i64, method: text) -> text:
+    if not symbols.symbols.has(raw_trait): return ""
+    match symbols.symbols[raw_trait].kind:
+        case SymbolKind.Trait: ()
+        case _: return ""
+    val trait_name = symbols.symbol_name_scalar_raw(raw_trait)
+    if trait_name == "": return ""
+    var bare_method = method
+    val sep = method.last_index_of("::")
+    if sep >= 0: bare_method = method.substring(sep + 2)
+    if bare_method == "": return ""
+    val owner = mir_layout_canonical_module_name(symbols.symbol_defining_module_scalar_raw(raw_trait))
+    "trait-ret:{owner}.{trait_name}::{bare_method}"
+
 fn mir_hir_field_names_v1(fields: [MirHirFieldDeclarationV1]) -> [text]:
     var names: [text] = []
     for raw_field in fields:
@@ -642,6 +660,19 @@ impl MirLowering:
                     val prescan_param: MirHirParamDeclarationV1 = raw_prescan_param
                     prescan_param_tys.push(prescan_param.type_)
                 bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
+        # Trait method SIGNATURES are not functions, so the loop above never
+        # registered them. A consumer matching on `recv.method()` through an
+        # IMPORTED trait-typed receiver finds no method symbol in its own
+        # table and lost the declared return (`Result<...>`), so bare
+        # `Ok`/`Err` arms became ambiguous. Register under a module-canonical
+        # key that both sides compute from their own table.
+        for raw_prescan_trait in module.traits:
+            val prescan_trait: MirHirTraitDeclarationV1 = raw_prescan_trait
+            for raw_trait_method in prescan_trait.methods:
+                val trait_method: MirHirFunctionDeclarationV1 = raw_trait_method
+                val trait_ret_key = mir_trait_method_ret_key_v1(module.symbols, prescan_trait.symbol.id, trait_method.name)
+                if trait_ret_key != "":
+                    bootstrap_fn_ret_hir_type_register(trait_ret_key, trait_method.return_type)
 
     me register_native_trait_declarations_from_declarations_v1(module: MirHirModuleDeclarationsV1):
         for raw_declaration in module.traits:
