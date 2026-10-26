@@ -6,6 +6,9 @@
 
 use std.common.text_bytes.{bytes_to_text}
 
+# IMAGE_FILE_MACHINE_UNKNOWN: machine-neutral library members such as the
+# symbol-only alias objects in oldnames.lib.
+pub val COFF_MACHINE_UNKNOWN: i64 = 0
 pub val COFF_MACHINE_AMD64: i64 = 0x8664
 pub val COFF_MACHINE_ARM64: i64 = 0xaa64
 val COFF_HEADER_SIZE: i64 = 20
@@ -213,7 +216,8 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
     if _coff_u16(data, 0) == 0 and _coff_u16(data, 2) == 0xffff and not bigobj:
         return Err("invalid COFF bigobj signature, version, or class identifier")
     val machine = if bigobj: _coff_u16(data, 6) else: _coff_u16(data, 0)
-    if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64:
+    if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64 and
+            machine != COFF_MACHINE_UNKNOWN:
         return Err("unsupported COFF machine {machine}")
     if bigobj and _coff_u16(data, 4) < 2:
         return Err("COFF bigobj version must be at least 2")
@@ -364,6 +368,13 @@ fn coff_symbol_resolution_name(object: CoffObject, symbol: CoffSymbol) -> Result
     if target.is_weak_external():
         return Err("weak external COFF symbol '{symbol.name}' cannot alias another weak external")
     Ok(target.name)
+
+fn coff_is_weak_alias(symbol: CoffSymbol) -> bool:
+    """A weak external with IMAGE_WEAK_EXTERN_SEARCH_ALIAS: `name` is another
+    spelling of its default symbol (oldnames.lib: __imp_mkdir -> __imp__mkdir).
+    lld-link lists it in the archive index, so it selects its member."""
+    symbol.name != "" and symbol.is_weak_external() and
+        symbol.weak_characteristics == COFF_WEAK_SEARCH_ALIAS
 
 fn coff_weak_primary_for_fallback(object: CoffObject, table_index: i64) -> Option<text>:
     for candidate in object.symbols:
@@ -574,7 +585,7 @@ fn coff_apply_arm64_section_relocation(relocation_type: i64, instruction: i64,
         error: "unsupported ARM64 section-relative relocation type {relocation_type}")
 
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
-export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
+export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_UNKNOWN
 export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC, COFF_STORAGE_CLASS_WEAK_EXTERNAL
 export COFF_WEAK_SEARCH_NOLIBRARY, COFF_WEAK_SEARCH_LIBRARY, COFF_WEAK_SEARCH_ALIAS
 export COFF_SECTION_CNT_UNINITIALIZED_DATA, COFF_SECTION_LNK_INFO
@@ -592,7 +603,7 @@ export COFF_REL_ARM64_SECTION, COFF_REL_ARM64_ADDR64
 export COFF_REL_ARM64_BRANCH19, COFF_REL_ARM64_BRANCH14, COFF_REL_ARM64_REL32
 export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name
 export coff_is_bigobj
-export coff_weak_primary_for_fallback
+export coff_weak_primary_for_fallback, coff_is_weak_alias
 export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
 export coff_apply_amd64_relocation
 export coff_apply_arm64_relocation
