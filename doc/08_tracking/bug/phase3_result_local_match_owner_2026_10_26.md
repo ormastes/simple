@@ -81,6 +81,10 @@ The working/staged direct-env guards passed; executable specs under
 
 ## Renewed codec repair batch, 2026-10-26
 
+Codec workaround commit:
+[`14a38034b41`](https://github.com/ormastes/simple/commit/14a38034b41).
+Its parent `626fea7f91a` preserves the separately checked six method sites.
+
 After the first three-cycle escalation, the user renewed the binary-first
 request and authorized a new bounded repair batch. This batch also stopped
 after three source/verification cycles. The producer and runtime lineage stayed
