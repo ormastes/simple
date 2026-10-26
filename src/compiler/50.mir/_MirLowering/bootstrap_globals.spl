@@ -92,78 +92,30 @@ fn bootstrap_hir_function_symbol_name(module: HirModule, func: HirFunction, is_e
 fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
     bootstrap_hir_function_symbol_name(module, func)
 
-var _bootstrap_mir_functions: [MirFunction] = []
-pub var _bootstrap_mir_function_names: [text] = []
-var _bootstrap_mir_function_modules: [i64] = []
-var _bootstrap_mir_function_return_type_tags: [i64] = []
-var _bootstrap_mir_function_return_unsigned: [bool] = []
-var _bootstrap_mir_function_param_starts: [i64] = []
-var _bootstrap_mir_function_param_counts: [i64] = []
-var _bootstrap_mir_function_param_type_tags: [i64] = []
-var _bootstrap_mir_module_count_value: i64 = 0
-var _bootstrap_mir_static_modules: [i64] = []
-var _bootstrap_mir_static_symbol_ids: [i64] = []
-var _bootstrap_mir_static_names: [text] = []
-var _bootstrap_mir_static_type_tags: [i64] = []
-var _bootstrap_mir_static_init_kinds: [i64] = []
-var _bootstrap_mir_static_init_payloads: [text] = []
-var _bootstrap_mir_static_alignments: [i64] = []
-var _bootstrap_mir_static_visibilities: [i64] = []
-var _bootstrap_mir_static_externals: [bool] = []
-var _bootstrap_function_value_names: [text] = []
-var _bootstrap_callable_link_names: Dict<text, text> = {}
-var _bootstrap_callable_text_value_abi: Dict<text, bool> = {}
+# The flat registries live on one owner, `BootstrapMirStore`
+# (bootstrap_mir_store.spl, BSM P3). Every helper below forwards to it.
+use compiler.mir._MirLowering.bootstrap_mir_store.{bootstrap_mir_store_add_function, bootstrap_mir_store_add_function_value, bootstrap_mir_store_add_module_statics, bootstrap_mir_store_callable_link_names, bootstrap_mir_store_callable_text_value_abi, bootstrap_mir_store_function_at, bootstrap_mir_store_function_count, bootstrap_mir_store_function_module_at, bootstrap_mir_store_function_name_at, bootstrap_mir_store_function_param_count_at, bootstrap_mir_store_function_param_type_tag_at, bootstrap_mir_store_function_return_type_tag_at, bootstrap_mir_store_function_return_unsigned_at, bootstrap_mir_store_function_value_names, bootstrap_mir_store_lens_diag, bootstrap_mir_store_module_count, bootstrap_mir_store_promote_legacy, bootstrap_mir_store_publish_module, bootstrap_mir_store_reset, bootstrap_mir_store_reset_function_values, bootstrap_mir_store_set_callable, bootstrap_mir_store_static_alignment_at, bootstrap_mir_store_static_count, bootstrap_mir_store_static_external_at, bootstrap_mir_store_static_init_kind_at, bootstrap_mir_store_static_init_payload_at, bootstrap_mir_store_static_module_at, bootstrap_mir_store_static_name_at, bootstrap_mir_store_static_symbol_id_at, bootstrap_mir_store_static_type_tag_at, bootstrap_mir_store_static_visibility_at}
 
 fn bootstrap_mir_registries_promote() -> bool:
-    """Promote every flat `_bootstrap_mir_*` accumulator (plus the sibling
-    `_bootstrap_function_value_names`) out of the active per-module transient
-    scope, mirroring 20.hir's `bootstrap_hir_modules_promote_last`
-    (hir_lowering/_Items/lowering_helpers.spl). These registries are read
-    ACROSS modules (cross-module return-type/prescan lookups via
-    `mir_data.spl`'s `_bootstrap_fn_*` — see `bootstrap_fn_registries_promote`)
-    and again after the whole entry-closure lowering loop ends
-    (70.backend/_MirToLlvm/core_codegen.spl:2818/2827 calls
-    `bootstrap_llvm_exact_function_index` / `bootstrap_llvm_module_local_function_index`,
-    which read `_bootstrap_mir_function_names` lazily via
-    `bootstrap_llvm_name_index_ensure`), so they must outlive the module whose
-    scope wrote into them. Promoting each OUTER array (not just the pushed
-    element) is required, not optional: `.push()` reassigns the backing
-    array (see the `bs_modules = _bootstrap_mir_static_modules` /
-    `_bootstrap_mir_static_modules = bs_modules` copy-modify-reassign pattern
-    above), so any backing-store reallocation that happened while a scope was
-    active must be adopted before that scope ends -- exactly the contract
-    `lower_module_transient_scoped`'s docstring requires and the reason this
-    escape set used to be excluded rather than assumed safe."""
-    val fns_ok = rt_transient_heap_promote(_bootstrap_mir_functions)
-    val names_ok = rt_transient_heap_promote(_bootstrap_mir_function_names)
-    val modules_ok = rt_transient_heap_promote(_bootstrap_mir_function_modules)
-    val ret_tags_ok = rt_transient_heap_promote(_bootstrap_mir_function_return_type_tags)
-    val ret_unsigned_ok = rt_transient_heap_promote(_bootstrap_mir_function_return_unsigned)
-    val p_starts_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_starts)
-    val p_counts_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_counts)
-    val p_tags_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_type_tags)
-    val static_modules_ok = rt_transient_heap_promote(_bootstrap_mir_static_modules)
-    val static_symbol_ids_ok = rt_transient_heap_promote(_bootstrap_mir_static_symbol_ids)
-    val static_names_ok = rt_transient_heap_promote(_bootstrap_mir_static_names)
-    val static_type_tags_ok = rt_transient_heap_promote(_bootstrap_mir_static_type_tags)
-    val static_init_kinds_ok = rt_transient_heap_promote(_bootstrap_mir_static_init_kinds)
-    val static_init_payloads_ok = rt_transient_heap_promote(_bootstrap_mir_static_init_payloads)
-    val static_alignments_ok = rt_transient_heap_promote(_bootstrap_mir_static_alignments)
-    val static_visibilities_ok = rt_transient_heap_promote(_bootstrap_mir_static_visibilities)
-    val static_externals_ok = rt_transient_heap_promote(_bootstrap_mir_static_externals)
-    val value_names_ok = rt_transient_heap_promote(_bootstrap_function_value_names)
-    val callable_links_ok = rt_transient_heap_promote(_bootstrap_callable_link_names)
-    val callable_text_abi_ok = rt_transient_heap_promote(_bootstrap_callable_text_value_abi)
-    fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
-        p_starts_ok and p_counts_ok and p_tags_ok and static_modules_ok and
-        static_symbol_ids_ok and static_names_ok and static_type_tags_ok and
-        static_init_kinds_ok and static_init_payloads_ok and
-        static_alignments_ok and static_visibilities_ok and static_externals_ok and value_names_ok and callable_links_ok and callable_text_abi_ok
+    """Per-module publish point for the flat bootstrap MIR registries, called
+    with the module scope PAUSED (`lower_module_transient_scoped`). These
+    registries are read ACROSS modules and again after the whole entry-closure
+    lowering loop ends (70.backend/_MirToLlvm/core_codegen.spl calls
+    `bootstrap_llvm_exact_function_index` / `bootstrap_llvm_module_local_function_index`),
+    so a row written during module i's scope must outlive that scope.
+
+    With a live build session the store adopts only this module's staged rows
+    and appends them under the session allocator (BSM I1-I3) — the outer
+    arrays are never walked. Without one, `bootstrap_mir_registries_promote_legacy`
+    promotes every OUTER array exactly as before (`.push()` reassigns the
+    backing array, so a reallocation inside the scope must be adopted)."""
+    bootstrap_mir_store_publish_module()
+
+fn bootstrap_mir_registries_promote_legacy() -> bool:
+    bootstrap_mir_store_promote_legacy()
 
 fn bootstrap_function_value_names_reset():
-    _bootstrap_function_value_names = []
-    _bootstrap_callable_link_names = {}
-    _bootstrap_callable_text_value_abi = {}
+    bootstrap_mir_store_reset_function_values()
 
 fn bootstrap_register_function_value_module(module: HirModule):
     val module_name = bootstrap_mir_logical_module_name(module.name)
@@ -177,13 +129,11 @@ fn bootstrap_register_function_value_module(module: HirModule):
             continue
         if source_name == nil or source_name == "":
             continue
-        _bootstrap_callable_link_names[mir_provider_callable_key(module_name, source_name)] = function_name
-        _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, source_name)] = not func.is_extern
+        bootstrap_mir_store_set_callable(mir_provider_callable_key(module_name, source_name), function_name, not func.is_extern)
         if not func.is_method and not func.is_static:
             if func.name != nil and func.name != "":
-                _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
-                _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, func.name)] = not func.is_extern
-        _bootstrap_function_value_names.push(function_name)
+                bootstrap_mir_store_set_callable(mir_provider_callable_key(module_name, func.name), function_name, not func.is_extern)
+        bootstrap_mir_store_add_function_value(function_name)
 
 fn bootstrap_register_fn_ret_types_module(module: HirModule):
     """Pre-register Str-returning functions' return types under every call-site
@@ -219,54 +169,21 @@ fn bootstrap_register_fn_ret_types_module(module: HirModule):
 # native-build worker is one process per build, so no reset is needed at all.
 fn bootstrap_mir_functions_reset():
     _bootstrap_llvm_name_index_epoch = _bootstrap_llvm_name_index_epoch + 1
-    _bootstrap_mir_functions = []
-    _bootstrap_mir_function_names = []
-    _bootstrap_mir_function_modules = []
-    _bootstrap_mir_function_return_type_tags = []
-    _bootstrap_mir_function_return_unsigned = []
-    _bootstrap_mir_function_param_starts = []
-    _bootstrap_mir_function_param_counts = []
-    _bootstrap_mir_function_param_type_tags = []
-    _bootstrap_mir_module_count_value = 0
-    _bootstrap_mir_static_modules = []
-    _bootstrap_mir_static_symbol_ids = []
-    _bootstrap_mir_static_names = []
-    _bootstrap_mir_static_type_tags = []
-    _bootstrap_mir_static_init_kinds = []
-    _bootstrap_mir_static_init_payloads = []
-    _bootstrap_mir_static_alignments = []
-    _bootstrap_mir_static_visibilities = []
-    _bootstrap_mir_static_externals = []
+    bootstrap_mir_store_reset()
 
 fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
     val return_type_tag = bootstrap_mir_static_type_tag(fn_.signature.return_type)
     val return_unsigned = bootstrap_mir_return_type_unsigned(fn_.signature.return_type)
-    val param_start = _bootstrap_mir_function_param_type_tags.len()
-    val param_count = fn_.signature.params.len()
-    # Accumulate param tags in a LOCAL, then reassign the module global ONCE
-    # at straight-line level. The seed rejects `global = global.push(...)`
-    # INSIDE a loop body ("cannot reassign to immutable variable",
-    # rMCP19/20) but accepts it straight-line (see the names/functions
-    # reassigns below, unchanged from the original). Reassign is REQUIRED —
-    # bare `.push()` on a module global silently drops elements (81 of 842),
-    # desyncing the parallel accumulator arrays (rMCP17 OOB 761/761).
-    var jn_param_tags = _bootstrap_mir_function_param_type_tags
+    var param_tags: [i64] = []
     var jn_param_i = 0
     while jn_param_i < fn_.signature.params.len():
-        jn_param_tags = jn_param_tags.push(bootstrap_mir_static_type_tag(fn_.signature.params[jn_param_i]))
+        param_tags = param_tags.push(bootstrap_mir_static_type_tag(fn_.signature.params[jn_param_i]))
         jn_param_i = jn_param_i + 1
-    _bootstrap_mir_function_param_type_tags = jn_param_tags
-    _bootstrap_mir_function_return_type_tags = _bootstrap_mir_function_return_type_tags.push(return_type_tag)
-    _bootstrap_mir_function_return_unsigned = _bootstrap_mir_function_return_unsigned.push(return_unsigned)
-    _bootstrap_mir_function_param_starts = _bootstrap_mir_function_param_starts.push(param_start)
-    _bootstrap_mir_function_param_counts = _bootstrap_mir_function_param_counts.push(param_count)
     var stored_fn = fn_
     val rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if rewritten.applied:
         stored_fn.blocks = rewritten.blocks
-    _bootstrap_mir_function_names = _bootstrap_mir_function_names.push(name)
-    _bootstrap_mir_functions = _bootstrap_mir_functions.push(stored_fn)
-    _bootstrap_mir_function_modules = _bootstrap_mir_function_modules.push(module_index)
+    bootstrap_mir_store_add_function(name, stored_fn, module_index, return_type_tag, return_unsigned, param_tags)
 
 fn bootstrap_mir_static_type_tag(type_: MirType) -> i64:
     match type_.kind:
@@ -316,19 +233,18 @@ fn bootstrap_mir_static_visibility_tag(visibility: Visibility) -> i64:
         case Visibility.Private: 5
 
 fn bootstrap_mir_modules_add(module: MirModule):
-    val module_index = _bootstrap_mir_module_count_value
-    # Accumulate into LOCALS inside the loop, reassign each module global
-    # ONCE at straight-line level after — same seed reassign-in-loop rule +
-    # bare-push element-drop rationale as bootstrap_mir_functions_add above.
-    var bs_modules = _bootstrap_mir_static_modules
-    var bs_symbol_ids = _bootstrap_mir_static_symbol_ids
-    var bs_names = _bootstrap_mir_static_names
-    var bs_type_tags = _bootstrap_mir_static_type_tags
-    var bs_init_kinds = _bootstrap_mir_static_init_kinds
-    var bs_init_payloads = _bootstrap_mir_static_init_payloads
-    var bs_alignments = _bootstrap_mir_static_alignments
-    var bs_visibilities = _bootstrap_mir_static_visibilities
-    var bs_externals = _bootstrap_mir_static_externals
+    val module_index = bootstrap_mir_store_module_count()
+    # Accumulate this module's rows into LOCALS, then hand them to the store
+    # once (it stages or appends them; see bootstrap_mir_store.spl).
+    var bs_modules: [i64] = []
+    var bs_symbol_ids: [i64] = []
+    var bs_names: [text] = []
+    var bs_type_tags: [i64] = []
+    var bs_init_kinds: [i64] = []
+    var bs_init_payloads: [text] = []
+    var bs_alignments: [i64] = []
+    var bs_visibilities: [i64] = []
+    var bs_externals: [bool] = []
     val bs_static_vals = module.statics.values()
     var bs_si = 0
     while bs_si < bs_static_vals.len():
@@ -356,16 +272,8 @@ fn bootstrap_mir_modules_add(module: MirModule):
         bs_visibilities = bs_visibilities.push(bootstrap_mir_static_visibility_tag(static_.visibility))
         bs_externals = bs_externals.push(static_.is_external)
         bs_si = bs_si + 1
-    _bootstrap_mir_static_modules = bs_modules
-    _bootstrap_mir_static_symbol_ids = bs_symbol_ids
-    _bootstrap_mir_static_names = bs_names
-    _bootstrap_mir_static_type_tags = bs_type_tags
-    _bootstrap_mir_static_init_kinds = bs_init_kinds
-    _bootstrap_mir_static_init_payloads = bs_init_payloads
-    _bootstrap_mir_static_alignments = bs_alignments
-    _bootstrap_mir_static_visibilities = bs_visibilities
-    _bootstrap_mir_static_externals = bs_externals
-    _bootstrap_mir_module_count_value = module_index + 1
+    bootstrap_mir_store_add_module_statics(module_index, bs_modules, bs_symbol_ids, bs_names,
+        bs_type_tags, bs_init_kinds, bs_init_payloads, bs_alignments, bs_visibilities, bs_externals)
 
 # The real HIR module for the bootstrap entry, set by the driver
 # (bootstrap_lower_to_mir_context) from ctx.hir_modules before MIR lowering.
@@ -439,12 +347,10 @@ fn bootstrap_register_flat_function_values():
             val func = bootstrap_hir_module_function_at(module_index, function_index)
             val function_name = mir_provider_function_name(module_name, symbols, func, module_index == bootstrap_hir_entry_index())
             val source_name = symbols.symbol_display_name(func.symbol, func.name)
-            _bootstrap_callable_link_names[mir_provider_callable_key(module_name, source_name)] = function_name
-            _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, source_name)] = not func.is_extern
+            bootstrap_mir_store_set_callable(mir_provider_callable_key(module_name, source_name), function_name, not func.is_extern)
             if not func.is_method and not func.is_static:
-                _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
-                _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, func.name)] = not func.is_extern
-            _bootstrap_function_value_names.push(function_name)
+                bootstrap_mir_store_set_callable(mir_provider_callable_key(module_name, func.name), function_name, not func.is_extern)
+            bootstrap_mir_store_add_function_value(function_name)
             if not func.is_method and not func.is_static:
                 # Cross-module declared HIR return types (name-keyed; see
                 # bootstrap_fn_ret_hir_type_register in mir_data.spl).
@@ -526,9 +432,9 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # module's own composite layouts stop being excluded and a type can be
     # attributed to the wrong owner.
     lowering.current_module_id = mir_layout_canonical_module_name(module_name)
-    lowering.current_function_names = _bootstrap_function_value_names
-    lowering.callable_link_names = _bootstrap_callable_link_names
-    lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+    lowering.current_function_names = bootstrap_mir_store_function_value_names()
+    lowering.callable_link_names = bootstrap_mir_store_callable_link_names()
+    lowering.callable_text_value_abi = bootstrap_mir_store_callable_text_value_abi()
     lowering = bootstrap_register_imported_exact_externs_with_context_v1(lowering, logical_module_name, module_index)
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
     # an enum-variant const (not a field-load on an undefined base) and `S(..)`
@@ -580,7 +486,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         lowering.lower_static(const_)
     if bootstrap_reject_fatal_mir_errors(lowering):
         exit(1)
-    val mir_module_index = _bootstrap_mir_module_count_value
+    val mir_module_index = bootstrap_mir_store_module_count()
     lowering.lower_runtime_module_initializers_named(module_name, constants, mir_module_index)
 
     var lowered_module = lowering.builder.module
@@ -677,31 +583,31 @@ fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, t
     entry_module
 
 fn bootstrap_mir_function_count() -> i64:
-    _bootstrap_mir_functions.len()
+    bootstrap_mir_store_function_count()
 
 fn bootstrap_mir_function_at(index: i64) -> MirFunction:
-    _bootstrap_mir_functions[index]
+    bootstrap_mir_store_function_at(index)
 
 fn bootstrap_mir_function_name_at(index: i64) -> text:
-    _bootstrap_mir_function_names[index]
+    bootstrap_mir_store_function_name_at(index)
 
 fn bootstrap_mir_accumulator_lens_diag():
-    print "[acc-lens] fns={_bootstrap_mir_functions.len()} names={_bootstrap_mir_function_names.len()} modules={_bootstrap_mir_function_modules.len()} ret_tags={_bootstrap_mir_function_return_type_tags.len()} ret_unsigned={_bootstrap_mir_function_return_unsigned.len()} p_starts={_bootstrap_mir_function_param_starts.len()} p_counts={_bootstrap_mir_function_param_counts.len()} p_tags={_bootstrap_mir_function_param_type_tags.len()} statics={_bootstrap_mir_static_names.len()}"
+    print bootstrap_mir_store_lens_diag()
 
 fn bootstrap_mir_function_module_at(index: i64) -> i64:
-    _bootstrap_mir_function_modules[index]
+    bootstrap_mir_store_function_module_at(index)
 
 fn bootstrap_mir_function_return_type_tag_at(index: i64) -> i64:
-    _bootstrap_mir_function_return_type_tags[index]
+    bootstrap_mir_store_function_return_type_tag_at(index)
 
 fn bootstrap_mir_function_return_unsigned_at(index: i64) -> bool:
-    _bootstrap_mir_function_return_unsigned[index]
+    bootstrap_mir_store_function_return_unsigned_at(index)
 
 fn bootstrap_mir_function_param_count_at(index: i64) -> i64:
-    _bootstrap_mir_function_param_counts[index]
+    bootstrap_mir_store_function_param_count_at(index)
 
 fn bootstrap_mir_function_param_type_tag_at(function_index: i64, param_index: i64) -> i64:
-    _bootstrap_mir_function_param_type_tags[_bootstrap_mir_function_param_starts[function_index] + param_index]
+    bootstrap_mir_store_function_param_type_tag_at(function_index, param_index)
 
 # --- Flat signature-name index ------------------------------------------------
 # Perf owner for the bootstrap LLVM emitter's signature lookups
@@ -790,7 +696,7 @@ fn bootstrap_llvm_name_index_ensure():
     (epoch, count) identifies the table contents and a rebuild after a reset
     that happens to restore the same count is still forced."""
     if _bootstrap_llvm_name_index_built_epoch == _bootstrap_llvm_name_index_epoch and
-       _bootstrap_llvm_name_index_built_count == _bootstrap_mir_function_names.len():
+       _bootstrap_llvm_name_index_built_count == bootstrap_mir_store_function_count():
         return
     var exact_digests: [i64] = []
     var exact_functions: [i64] = []
@@ -798,8 +704,8 @@ fn bootstrap_llvm_name_index_ensure():
     var base_digests: [i64] = []
     var base_functions: [i64] = []
     var index = 0
-    while index < _bootstrap_mir_function_names.len():
-        val name = _bootstrap_mir_function_names[index]
+    while index < bootstrap_mir_store_function_count():
+        val name = bootstrap_mir_store_function_name_at(index)
         exact_digests = exact_digests.push(bootstrap_llvm_name_digest(name))
         exact_functions = exact_functions.push(index)
         exact_aliases = exact_aliases.push(0)
@@ -839,7 +745,7 @@ fn bootstrap_llvm_name_index_ensure():
     _bootstrap_llvm_base_key_digests = sorted_base_digests
     _bootstrap_llvm_base_key_functions = sorted_base_functions
     _bootstrap_llvm_name_index_built_epoch = _bootstrap_llvm_name_index_epoch
-    _bootstrap_llvm_name_index_built_count = _bootstrap_mir_function_names.len()
+    _bootstrap_llvm_name_index_built_count = bootstrap_mir_store_function_count()
 
 fn bootstrap_llvm_name_index_lower_bound(digests: [i64], key: i64) -> i64:
     var low = 0
@@ -865,7 +771,7 @@ fn bootstrap_llvm_exact_function_index(lookup_name: text) -> i64:
         val entry_name = if _bootstrap_llvm_exact_key_is_emitted_alias[cursor] == 1:
             "__simple_main"
         else:
-            _bootstrap_mir_function_names[function_index]
+            bootstrap_mir_store_function_name_at(function_index)
         if entry_name == lookup_name:
             if found >= 0:
                 return -1
@@ -884,8 +790,8 @@ fn bootstrap_llvm_module_local_function_index(lookup_name: text, module_index: i
     var cursor = bootstrap_llvm_name_index_lower_bound(_bootstrap_llvm_base_key_digests, key)
     while cursor < _bootstrap_llvm_base_key_digests.len() and _bootstrap_llvm_base_key_digests[cursor] == key:
         val function_index = _bootstrap_llvm_base_key_functions[cursor]
-        if _bootstrap_mir_function_modules[function_index] == module_index and
-           bootstrap_llvm_name_basename(_bootstrap_mir_function_names[function_index]) == lookup_name:
+        if bootstrap_mir_store_function_module_at(function_index) == module_index and
+           bootstrap_llvm_name_basename(bootstrap_mir_store_function_name_at(function_index)) == lookup_name:
             if found >= 0:
                 return -1
             found = function_index
@@ -893,34 +799,34 @@ fn bootstrap_llvm_module_local_function_index(lookup_name: text, module_index: i
     found
 
 fn bootstrap_mir_static_count() -> i64:
-    _bootstrap_mir_static_names.len()
+    bootstrap_mir_store_static_count()
 
 fn bootstrap_mir_static_module_at(index: i64) -> i64:
-    _bootstrap_mir_static_modules[index]
+    bootstrap_mir_store_static_module_at(index)
 
 fn bootstrap_mir_static_symbol_id_at(index: i64) -> i64:
-    _bootstrap_mir_static_symbol_ids[index]
+    bootstrap_mir_store_static_symbol_id_at(index)
 
 fn bootstrap_mir_static_name_at(index: i64) -> text:
-    _bootstrap_mir_static_names[index]
+    bootstrap_mir_store_static_name_at(index)
 
 fn bootstrap_mir_static_type_tag_at(index: i64) -> i64:
-    _bootstrap_mir_static_type_tags[index]
+    bootstrap_mir_store_static_type_tag_at(index)
 
 fn bootstrap_mir_static_init_kind_at(index: i64) -> i64:
-    _bootstrap_mir_static_init_kinds[index]
+    bootstrap_mir_store_static_init_kind_at(index)
 
 fn bootstrap_mir_static_init_payload_at(index: i64) -> text:
-    _bootstrap_mir_static_init_payloads[index]
+    bootstrap_mir_store_static_init_payload_at(index)
 
 fn bootstrap_mir_static_alignment_at(index: i64) -> i64:
-    _bootstrap_mir_static_alignments[index]
+    bootstrap_mir_store_static_alignment_at(index)
 
 fn bootstrap_mir_static_visibility_at(index: i64) -> i64:
-    _bootstrap_mir_static_visibilities[index]
+    bootstrap_mir_store_static_visibility_at(index)
 
 fn bootstrap_mir_static_external_at(index: i64) -> bool:
-    _bootstrap_mir_static_externals[index]
+    bootstrap_mir_store_static_external_at(index)
 
 fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
     if index == 0:
@@ -996,8 +902,8 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
                 mir_layout_canonical_module_name(hir_module.name), declaration, declaration.symbol
             )
             lowering.record_exact_extern_declaration_v1(declaration)
-        lowering.callable_link_names = _bootstrap_callable_link_names
-        lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+        lowering.callable_link_names = bootstrap_mir_store_callable_link_names()
+        lowering.callable_text_value_abi = bootstrap_mir_store_callable_text_value_abi()
         lowering.record_imported_exact_extern_modules_with_context_v1(hir_module.name, hir_module.path, providers)
         lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
@@ -1019,11 +925,11 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
                     bootstrap_fn_ret_type_register(func.name, bg_ret_ty)
                     bootstrap_fn_ret_type_register(bootstrap_hir_function_symbol_name(hir_module, func), bg_ret_ty)
                 case _: ()
-        for function_name in _bootstrap_function_value_names:
+        for function_name in bootstrap_mir_store_function_value_names():
             function_names.push(function_name)
         lowering.current_function_names = function_names
         val const_vals = hir_module.constants.values()
-        val module_index = _bootstrap_mir_module_count_value
+        val module_index = bootstrap_mir_store_module_count()
         # Two passes; see the constants loop above.
         for const_ in const_vals:
             lowering.lower_const(const_)
@@ -1095,7 +1001,7 @@ fn bootstrap_lower_extra_hir_module_to_mir(hir_module: HirModule) -> i64:
 
 fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, target_context: MirTargetContext, providers: [HirModule] = []) -> i64:
     """Lower one additional (non-entry) closure module's functions to MIR,
-    APPENDING to the same flat _bootstrap_mir_functions/_bootstrap_mir_function_names
+    APPENDING to the same flat BootstrapMirStore function rows
     accumulator that bootstrap_lower_hir_globals_to_mir_module() populates for the
     entry module. Does NOT call bootstrap_mir_functions_reset() -- callers must
     lower the entry first via bootstrap_lower_hir_globals_to_mir_module(), then
@@ -1121,8 +1027,8 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
             mir_layout_canonical_module_name(hir_module.name), declaration, declaration.symbol
         )
         lowering.record_exact_extern_declaration_v1(declaration)
-    lowering.callable_link_names = _bootstrap_callable_link_names
-    lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+    lowering.callable_link_names = bootstrap_mir_store_callable_link_names()
+    lowering.callable_text_value_abi = bootstrap_mir_store_callable_text_value_abi()
     lowering.record_imported_exact_extern_modules_with_context_v1(hir_module.name, hir_module.path, providers)
     lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
@@ -1154,11 +1060,11 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
                 if not func.is_method:
                     bootstrap_fn_ret_type_register(bootstrap_hir_accumulator_name(hir_module, func), bx_ret_ty)
             case _: ()
-    for function_name in _bootstrap_function_value_names:
+    for function_name in bootstrap_mir_store_function_value_names():
         function_names.push(function_name)
     lowering.current_function_names = function_names
     val const_vals = hir_module.constants.values()
-    val module_index = _bootstrap_mir_module_count_value
+    val module_index = bootstrap_mir_store_module_count()
     for const_ in const_vals:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
@@ -1188,8 +1094,8 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         val qualified_fn_name = bootstrap_hir_accumulator_name(hir_module, hir_fn)
         var already_added = false
         var dup_i = 0
-        while dup_i < _bootstrap_mir_function_names.len():
-            if _bootstrap_mir_function_names[dup_i] == qualified_fn_name:
+        while dup_i < bootstrap_mir_store_function_count():
+            if bootstrap_mir_store_function_name_at(dup_i) == qualified_fn_name:
                 already_added = true
             dup_i = dup_i + 1
         if fn_name != "" and not already_added:

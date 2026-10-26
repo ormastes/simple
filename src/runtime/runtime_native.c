@@ -228,6 +228,8 @@ const char* rt_random_hex(int64_t len) {
     return encoded;
 }
 
+static int rt_dir_create_all_cpath(const char* path);
+
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
 bool rt_dir_create_cpath(const char* path, bool recursive) {
@@ -240,35 +242,10 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #endif
     }
 
-    char* tmp = spl_strdup(path);
-    if (!tmp) return false;
-    size_t len = strlen(tmp);
-    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
-        tmp[--len] = '\0';
-    }
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            char saved = *p;
-            *p = '\0';
-#if defined(_WIN32)
-            if (_mkdir(tmp) != 0 && errno != EEXIST) {
-#else
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-#endif
-                *p = saved;
-                free(tmp);
-                return false;
-            }
-            *p = saved;
-        }
-    }
-#if defined(_WIN32)
-    bool ok = _mkdir(tmp) == 0 || errno == EEXIST;
-#else
-    bool ok = mkdir(tmp, 0755) == 0 || errno == EEXIST;
-#endif
-    free(tmp);
-    return ok;
+    /* Keep one recursive walk: it skips Windows drive/extended-path roots
+     * rather than trying mkdir("C:"), and treats backslashes as ordinary
+     * filename bytes on POSIX. */
+    return rt_dir_create_all_cpath(path) != 0;
 }
 
 #define RT_VALUE_TAG_MASK 0x7ULL
@@ -1462,6 +1439,10 @@ int64_t rt_host_gpu_queue_last_payload_text(void) {
  * that scope.  Keep this in the existing reserved word so the native string
  * layout and every data offset remain unchanged. */
 #define RT_CORE_STRING_FLAG_TRANSIENT 2u
+/* Set together with TRANSIENT on a string owned by the thread's live build
+ * session (BSM T1) rather than its module scope: a module-scope end skips it,
+ * rt_session_heap_end frees it. Same reserved word, layout unchanged (I6). */
+#define RT_CORE_STRING_FLAG_SESSION 4u
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -1591,6 +1572,18 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §2-§4). One live session per thread; its id
+ * comes from the module-scope id space so tags never collide. Objects it owns
+ * live on their own list so rt_transient_array_scope_begin's empty-list guard
+ * is unaffected. */
+static _Thread_local uint32_t rt_core_session_heap_live_id = 0;
+static _Thread_local int32_t rt_core_session_alloc_depth = 0;
+static _Thread_local void** rt_core_session_heap_objects = NULL;
+static _Thread_local size_t rt_core_session_heap_object_len = 0;
+static _Thread_local size_t rt_core_session_heap_object_cap = 0;
+/* Nodes the last rt_transient_heap_adopt visited (I2 pruning evidence). */
+static _Thread_local uint64_t rt_core_session_adopt_visits = 0;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 extern int32_t rt_transient_raw_scope_begin(void);
 extern int32_t rt_transient_raw_scope_pause(void);
@@ -1632,6 +1625,13 @@ static uint32_t rt_core_registered_object_kind(void* ptr) {
 }
 
 static uint32_t rt_core_transient_scope_for_new_object(void) {
+    /* A live session owns what a paused/absent module scope would have left
+     * permanent, and everything inside rt_session_alloc_begin/end (I3). */
+    if (rt_core_session_heap_live_id &&
+        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
+         rt_core_transient_array_scope_paused)) {
+        return rt_core_session_heap_live_id;
+    }
     return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
         ? rt_core_transient_array_scope_id
         : 0;
@@ -1639,7 +1639,30 @@ static uint32_t rt_core_transient_scope_for_new_object(void) {
 
 #define RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ((size_t)1 << 24)
 
+/* Make room for `extra` more session-list entries; 0 on failure. */
+static int core_session_reserve(size_t extra) {
+    size_t need = rt_core_session_heap_object_len + extra;
+    if (need <= rt_core_session_heap_object_cap) return 1;
+    size_t next_cap = rt_core_session_heap_object_cap ? rt_core_session_heap_object_cap : 64;
+    while (next_cap < need) {
+        if (next_cap > SIZE_MAX / 2 / sizeof(void*)) return 0;
+        next_cap *= 2;
+    }
+    void** next = (void**)rt_observed_realloc_v1(
+        rt_core_session_heap_objects, next_cap * sizeof(void*));
+    if (!next) return 0;
+    rt_core_session_heap_objects = next;
+    rt_core_session_heap_object_cap = next_cap;
+    return 1;
+}
+
 static int rt_core_track_transient_immortal(void* ptr) {
+    if (rt_core_session_heap_live_id &&
+        rt_core_transient_scope_for_new_object() == rt_core_session_heap_live_id) {
+        if (!core_session_reserve(1)) return 0;
+        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = ptr;
+        return 1;
+    }
     if (rt_core_transient_heap_scope_object_len == rt_core_transient_heap_scope_object_cap) {
         size_t next_cap = rt_core_transient_heap_scope_object_cap == 0
             ? 64
@@ -1676,16 +1699,24 @@ static int rt_core_register_scoped_immortal(void* ptr, uint32_t* object_scope_id
         rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == ptr) {
         rt_core_transient_heap_scope_object_len--;
     }
+    if (*object_scope_id && rt_core_session_heap_object_len > 0 &&
+        rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == ptr) {
+        rt_core_session_heap_object_len--;
+    }
     *object_scope_id = 0;
     return 0;
 }
 
 static int rt_core_register_string(RtCoreString* s) {
     if (!s) return 0;
-    if (rt_core_transient_scope_for_new_object() != 0) {
-        s->reserved |= RT_CORE_STRING_FLAG_TRANSIENT;
+    const uint32_t owner_scope = rt_core_transient_scope_for_new_object();
+    if (owner_scope != 0) {
+        const uint32_t flags = owner_scope == rt_core_session_heap_live_id
+            ? RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION
+            : RT_CORE_STRING_FLAG_TRANSIENT;
+        s->reserved |= flags;
         if (!rt_core_track_transient_immortal(s)) {
-            s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            s->reserved &= ~flags;
             return 0;
         }
         if (rt_core_register_immortal_ptr(s)) return 1;
@@ -1693,7 +1724,11 @@ static int rt_core_register_string(RtCoreString* s) {
             rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == s) {
             rt_core_transient_heap_scope_object_len--;
         }
-        s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+        if (rt_core_session_heap_object_len > 0 &&
+            rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == s) {
+            rt_core_session_heap_object_len--;
+        }
+        s->reserved &= ~flags;
         return 0;
     }
     return rt_core_register_immortal_ptr(s);
@@ -1701,7 +1736,7 @@ static int rt_core_register_string(RtCoreString* s) {
 
 static int rt_core_register_persistent_string(RtCoreString* s) {
     if (!s) return 0;
-    s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+    s->reserved &= ~(RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION);
     return rt_core_register_immortal_ptr(s);
 }
 
@@ -2427,6 +2462,71 @@ static int rt_core_unregister_immortal_ptr(void* ptr) {
     return erased;
 }
 
+/* Free one tracked object if it is still registered and still owned by
+ * `scope_id` (strings: transient, unshared, and session-flagged exactly when
+ * `session`). Caller holds the heap lifecycle lock. Shared by module-scope end
+ * and rt_session_heap_end (BSM I4). */
+static void core_reclaim_tracked_object_locked(void* ptr, uint32_t scope_id, int session) {
+    if (!rt_core_is_registered_immortal_ptr(ptr)) return;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    uint32_t* object_scope = NULL;
+    int reclaim_string = 0;
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING: {
+            RtCoreString* string = (RtCoreString*)ptr;
+            reclaim_string =
+                (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0 &&
+                ((string->reserved & RT_CORE_STRING_FLAG_SESSION) != 0) == (session != 0);
+            break;
+        }
+        case RT_VALUE_HEAP_ARRAY:
+            object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_DICT:
+            object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_ENUM:
+            object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_CLOSURE:
+            object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
+            object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
+            break;
+        default:
+            break;
+    }
+    if (!reclaim_string && (!object_scope || *object_scope != scope_id)) return;
+    if (kind == RT_VALUE_HEAP_CLOSURE) {
+        /* Pinned by a pending consumer: the last rt_closure_release frees it. */
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
+        if (pin) {
+            pin->orphaned = 1;
+            return;
+        }
+    }
+    rt_core_immortal_registry_acquire();
+    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
+    rt_core_immortal_registry_release();
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    switch (rt_core_registered_object_kind(ptr)) {
+        case RT_VALUE_HEAP_ARRAY:
+            free(((RtCoreArray*)ptr)->data);
+            break;
+        case RT_VALUE_HEAP_DICT:
+            free(((RtCoreDict*)ptr)->entries);
+            break;
+        default:
+            break;
+    }
+    free(ptr);
+}
+
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
     rt_core_heap_lifecycle_acquire();
     /* Scope-correct reclaim (doc: stage2_mir_shard_flat_pool_text_len_minus1):
@@ -2447,63 +2547,7 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
             kept++;
             continue;
         }
-        if (!rt_core_is_registered_immortal_ptr(ptr)) continue;
-        uint32_t kind = rt_core_registered_object_kind(ptr);
-        uint32_t* object_scope = NULL;
-        int reclaim_string = 0;
-        switch (kind) {
-            case RT_VALUE_HEAP_STRING: {
-                RtCoreString* string = (RtCoreString*)ptr;
-                reclaim_string =
-                    (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
-                    (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
-                break;
-            }
-            case RT_VALUE_HEAP_ARRAY:
-                object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_DICT:
-                object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_ENUM:
-                object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_CLOSURE:
-                object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_FLOAT:
-            case RT_VALUE_HEAP_INT:   /* identical leaf layout */
-            case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
-                object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
-                break;
-            default:
-                break;
-        }
-        if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;
-        if (kind == RT_VALUE_HEAP_CLOSURE) {
-            /* Pinned by a pending consumer: the last rt_closure_release frees it. */
-            RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
-            if (pin) {
-                pin->orphaned = 1;
-                continue;
-            }
-        }
-        rt_core_immortal_registry_acquire();
-        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-        rt_core_immortal_registry_release();
-        if (!erased) continue;
-        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-        switch (rt_core_registered_object_kind(ptr)) {
-            case RT_VALUE_HEAP_ARRAY:
-                free(((RtCoreArray*)ptr)->data);
-                break;
-            case RT_VALUE_HEAP_DICT:
-                free(((RtCoreDict*)ptr)->entries);
-                break;
-            default:
-                break;
-        }
-        free(ptr);
+        core_reclaim_tracked_object_locked(ptr, scope_id, 0);
     }
     rt_core_transient_heap_scope_object_len = kept;
     /* String-heavy parses can briefly track millions of pointers. Do not pin
@@ -3282,6 +3326,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
             }
         }
     }
+    /* BSM compatibility alias (design §4): with a live session, promotion
+     * retags module-owned nodes to the SESSION instead of making them
+     * permanent. It keeps the FULL walk above (no I2 pruning) because legacy
+     * callers may still violate I1 (e8152c252ad: unowned roots holding
+     * module-owned children). With no session this block is unchanged. */
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    if (ok && session_id && !core_session_reserve(plan.len)) ok = 0;
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
         for (size_t i = 0; i < plan.len; i++) {
@@ -3289,7 +3340,12 @@ int8_t rt_transient_heap_promote(int64_t value) {
             uint32_t* object_scope = NULL;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
-                    ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    if (!session_id) {
+                        ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    } else if ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0) {
+                        ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                    }
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
@@ -3307,9 +3363,218 @@ int8_t rt_transient_heap_promote(int64_t value) {
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) *object_scope = 0;
+            if (object_scope && *object_scope == scope_id) {
+                *object_scope = session_id;
+                if (session_id) {
+                    rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                }
+            }
         }
         if (ok) core_transient_share_record(&plan);
+    }
+    free(plan.nodes);
+    free(plan.seen);
+    rt_core_heap_lifecycle_release();
+    return ok ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Build session heap (BSM T1) — design §3 I2-I4, §4.
+ * -------------------------------------------------------------------------- */
+
+static uint32_t core_session_next_id(void) {
+    uint32_t next_id =
+        atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
+    while (next_id != 0) {
+        uint32_t successor = next_id == UINT32_MAX ? 0 : next_id + 1;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_core_transient_array_scope_next_id, &next_id, successor,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+    }
+    return next_id;
+}
+
+/* 0 on failure: a session is already live on this thread, a module scope is
+ * active on this thread, or the id space is exhausted. */
+uint32_t rt_session_heap_begin(void) {
+    if (rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    uint32_t id = core_session_next_id();
+    if (!id) return 0;
+    rt_core_session_heap_live_id = id;
+    rt_core_session_alloc_depth = 0;
+    rt_core_session_heap_object_len = 0;
+    return id;
+}
+
+/* Frees every object still tagged `s` in ONE pass over the session list (I4).
+ * Tag-0 and other-scope objects are never touched. */
+int8_t rt_session_heap_end(uint32_t s) {
+    if (!s || s != rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    rt_core_heap_lifecycle_acquire();
+    for (size_t i = 0; i < rt_core_session_heap_object_len; i++) {
+        core_reclaim_tracked_object_locked(rt_core_session_heap_objects[i], s, 1);
+    }
+    free(rt_core_session_heap_objects);
+    rt_core_session_heap_objects = NULL;
+    rt_core_session_heap_object_len = 0;
+    rt_core_session_heap_object_cap = 0;
+    rt_core_session_heap_live_id = 0;
+    rt_core_session_alloc_depth = 0;
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+/* Depth-counted: while > 0, new objects get the SESSION id even inside a
+ * running module scope (I3: session containers grow under the session). */
+int8_t rt_session_alloc_begin(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth == INT32_MAX) return 0;
+    rt_core_session_alloc_depth++;
+    return 1;
+}
+
+int8_t rt_session_alloc_end(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth <= 0) return 0;
+    rt_core_session_alloc_depth--;
+    return 1;
+}
+
+uint32_t rt_session_heap_id(void) {
+    return rt_core_session_heap_live_id;
+}
+
+/* Debug evidence for I2: nodes visited by the last rt_transient_heap_adopt. */
+uint64_t spl_session_adopt_visits_debug(void) {
+    return rt_core_session_adopt_visits;
+}
+
+/* I2: is `node` owned by the active module scope `module_id`? Anything else
+ * (session, permanent, other scope) is a prune point. */
+static int core_adopt_module_owned(const RtCoreTransientNode* node, uint32_t module_id) {
+    switch (node->kind) {
+        case RT_CORE_TRANSIENT_STRING:
+            return (((RtCoreString*)node->ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0;
+        case RT_CORE_TRANSIENT_ARRAY: return ((RtCoreArray*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_DICT: return ((RtCoreDict*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_ENUM: return ((RtCoreEnum*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_FLOAT: return ((RtCoreFloat*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_CLOSURE: return ((RtCoreClosure*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+            return 1; /* ownership not visible here: walk (conservative) */
+#else
+            RtCoreTransientRawAlloc* raw = rt_core_transient_raw_lookup((uintptr_t)node->ptr);
+            return raw && (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+#endif
+        }
+        default:
+            return 0;
+    }
+}
+
+/* 1 = handled (pushed or pruned), -1 = invalid node / allocation failure. */
+static int core_adopt_add(RtCoreTransientPlan* plan, int64_t value, uint32_t module_id) {
+    RtCoreTransientNode node;
+    int classified = rt_core_transient_classify(value, &node);
+    if (classified < 0) return -1;
+    if (classified == 0) return 1;
+    rt_core_session_adopt_visits++;
+    if (!core_adopt_module_owned(&node, module_id)) return 1; /* I2 prune */
+    int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
+    if (seen < 0) return -1;
+    if (!seen) return 1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
+}
+
+/* Move the module-owned part of v's graph to the live session: retag nodes
+ * tagged with the ACTIVE module scope id to the session id and put them on
+ * the session list; stop at any node with another tag (I2), so the cost is
+ * O(nodes the module allocated), never O(session). Root classification as in
+ * rt_transient_heap_promote: scalars and registered non-module roots are a
+ * no-op success. Raw struct blocks are promoted (made permanent) exactly as
+ * promote does — v1 sessions do not own raw blocks. 0 without a live session
+ * or a paused module scope owned by this thread. */
+int8_t rt_transient_heap_adopt(int64_t value) {
+    rt_core_session_adopt_visits = 0;
+    if (!rt_core_session_heap_live_id || !rt_core_transient_array_scope_active ||
+            !rt_core_transient_array_scope_paused ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    const uint32_t module_id = rt_core_transient_array_scope_id;
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    rt_core_heap_lifecycle_acquire();
+    RtCoreTransientNode root;
+    int root_class = rt_core_transient_classify(value, &root);
+    if (root_class == 0) {
+        int ok_noop = !rt_core_is_heap(value) || rt_core_is_registered_immortal_ptr(
+            (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK));
+        rt_core_heap_lifecycle_release();
+        return ok_noop ? 1 : 0;
+    }
+    RtCoreTransientPlan plan = {0};
+    int ok = root_class == 1 && core_adopt_add(&plan, value, module_id) == 1;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
+            RtCoreArray* array = (RtCoreArray*)node.ptr;
+            if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+            for (int64_t j = 0; j < array->len && ok; j++) {
+                ok = core_adopt_add(&plan, ((int64_t*)array->data)[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_DICT) {
+            RtCoreDict* dict = (RtCoreDict*)node.ptr;
+            for (int64_t j = 0; j < dict->cap && ok; j++) {
+                RtCoreDictEntry* entry = &dict->entries[j];
+                if (entry->occupied != 1) continue;
+                ok = core_adopt_add(&plan, entry->key, module_id) == 1 &&
+                    core_adopt_add(&plan, entry->value, module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_ENUM) {
+            ok = core_adopt_add(&plan, ((RtCoreEnum*)node.ptr)->payload, module_id) == 1;
+        } else if (node.kind == RT_CORE_TRANSIENT_CLOSURE) {
+            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
+            for (int64_t j = 0; j < closure->capture_count && ok; j++) {
+                ok = core_adopt_add(&plan, closure->captures[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_RAW) {
+            for (size_t offset = 0; offset + sizeof(int64_t) <= node.bytes && ok;
+                    offset += sizeof(int64_t)) {
+                int64_t child;
+                memcpy(&child, (const uint8_t*)node.ptr + offset, sizeof(child));
+                ok = core_adopt_add(&plan, child, module_id) == 1;
+            }
+        }
+    }
+    if (ok && !core_session_reserve(plan.len)) ok = 0;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        uint32_t* object_scope = NULL;
+        switch (node.kind) {
+            case RT_CORE_TRANSIENT_STRING:
+                ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                break;
+            case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+                if (!rt_transient_raw_promote((uintptr_t)node.ptr)) ok = 0;
+#else
+                RtCoreTransientRawAlloc* raw =
+                    rt_core_transient_raw_lookup((uintptr_t)node.ptr);
+                if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+#endif
+                break;
+            }
+        }
+        if (object_scope && *object_scope == module_id) {
+            *object_scope = session_id;
+            rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+        }
     }
     free(plan.nodes);
     free(plan.seen);
@@ -9761,6 +10026,122 @@ int64_t rt_sha384_digest(int64_t data_value) {
         0x67332667ffc00b31ull, 0x8eb44a8768581511ull, 0xdb0c2e0d64f98fa7ull, 0x47b5481dbefa4fa4ull
     };
     return spl_sha2_512_family_digest(data_value, iv, 48u);
+}
+
+/* Native twin of value/pbkdf2_native.rs. Reuse the SHA-512 compression owner,
+ * and keep the iteration loop allocation-free rather than retaining one
+ * registered runtime array per intermediate HMAC. */
+static const uint64_t spl_pbkdf512_iv[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull,
+    0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+    0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+};
+
+static void spl_pbkdf512_clear(void* memory, size_t length) {
+    volatile uint8_t* bytes = (volatile uint8_t*)memory;
+    while (length--) *bytes++ = 0;
+}
+
+/* state already includes prefix whole blocks (128 bytes for HMAC). */
+static void spl_pbkdf512_finish(uint64_t state[8], const uint8_t* data,
+                                size_t length, uint64_t prefix, uint8_t out[64]) {
+    uint8_t block[256];
+    size_t offset = 0;
+    while (length - offset >= 128u) {
+        spl_sha512_compress(state, data + offset);
+        offset += 128u;
+    }
+    size_t remaining = length - offset;
+    memset(block, 0, sizeof(block));
+    if (remaining) memcpy(block, data + offset, remaining);
+    block[remaining] = 0x80u;
+    size_t final_bytes = remaining < 112u ? 128u : 256u;
+    uint64_t total = prefix + (uint64_t)length;
+    uint64_t bits = total << 3;
+    for (unsigned i = 0; i < 8; ++i)
+        block[final_bytes - 1u - i] = (uint8_t)(bits >> (8u * i));
+    block[final_bytes - 9u] = (uint8_t)(total >> 61);
+    spl_sha512_compress(state, block);
+    if (final_bytes == 256u) spl_sha512_compress(state, block + 128u);
+    for (unsigned i = 0; i < 64; ++i)
+        out[i] = (uint8_t)(state[i / 8u] >> (56u - 8u * (i % 8u)));
+    spl_pbkdf512_clear(block, sizeof(block));
+}
+
+static void spl_pbkdf512_hmac(const uint64_t inner[8], const uint64_t outer[8],
+                             const uint8_t* data, size_t length, uint8_t out[64]) {
+    uint64_t state[8];
+    uint8_t digest[64];
+    memcpy(state, inner, sizeof(state));
+    spl_pbkdf512_finish(state, data, length, 128u, digest);
+    memcpy(state, outer, sizeof(state));
+    spl_pbkdf512_finish(state, digest, sizeof(digest), 128u, out);
+    spl_pbkdf512_clear(state, sizeof(state));
+    spl_pbkdf512_clear(digest, sizeof(digest));
+}
+
+int64_t rt_pbkdf2_hmac_sha512(int64_t password_value, int64_t salt_value,
+                             int64_t iterations, int64_t dk_len) {
+    int64_t password_len = rt_array_bytes_validate(password_value);
+    int64_t salt_len = rt_array_bytes_validate(salt_value);
+    if (password_len < 0 || salt_len < 0) return rt_core_nil();
+    /* Preserve the Rust twin's nonpositive length/round semantics. Enforce
+     * PBKDF2's four-byte block-index limit before allocating. */
+    if (dk_len <= 0) return (int64_t)(uintptr_t)rt_byte_array_new_len(0);
+    if ((uint64_t)dk_len > (uint64_t)UINT32_MAX * 64u ||
+        (uint64_t)dk_len > SIZE_MAX || (uint64_t)password_len > SIZE_MAX ||
+        (uint64_t)salt_len > SIZE_MAX - 4u) return rt_core_nil();
+    uint32_t rounds = iterations <= 0 ? 1u :
+        ((uint64_t)iterations > UINT32_MAX ? UINT32_MAX : (uint32_t)iterations);
+    uint8_t* password = (uint8_t*)malloc(password_len ? (size_t)password_len : 1u);
+    uint8_t* salt = (uint8_t*)malloc((size_t)salt_len + 4u);
+    uint8_t key_block[128] = {0}, u[64], accumulated[64];
+    uint64_t inner[8], outer[8], state[8];
+    int64_t result = rt_core_nil();
+    if (!password || !salt) goto cleanup;
+    if (rt_array_bytes_copy_checked(password_value, password, password_len) != password_len ||
+        rt_array_bytes_copy_checked(salt_value, salt, salt_len) != salt_len) goto cleanup;
+    if (password_len > 128) {
+        memcpy(state, spl_pbkdf512_iv, sizeof(state));
+        spl_pbkdf512_finish(state, password, (size_t)password_len, 0, key_block);
+    } else if (password_len) {
+        memcpy(key_block, password, (size_t)password_len);
+    }
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u;
+    memcpy(inner, spl_pbkdf512_iv, sizeof(inner));
+    spl_sha512_compress(inner, key_block);
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u ^ 0x5cu;
+    memcpy(outer, spl_pbkdf512_iv, sizeof(outer));
+    spl_sha512_compress(outer, key_block);
+    SplArray* array = rt_byte_array_new_len((uint64_t)dk_len);
+    RtCoreArray* output = rt_core_array_ptr(array);
+    if (!output || !output->data) goto cleanup;
+    for (uint64_t offset = 0, block_index = 1; offset < (uint64_t)dk_len;
+         offset += 64u, ++block_index) {
+        for (unsigned i = 0; i < 4; ++i)
+            salt[(size_t)salt_len + i] = (uint8_t)(block_index >> (24u - 8u * i));
+        spl_pbkdf512_hmac(inner, outer, salt, (size_t)salt_len + 4u, u);
+        memcpy(accumulated, u, sizeof(u));
+        for (uint32_t round = 1; round < rounds; ++round) {
+            spl_pbkdf512_hmac(inner, outer, u, sizeof(u), u);
+            for (unsigned i = 0; i < 64; ++i) accumulated[i] ^= u[i];
+        }
+        size_t count = (uint64_t)dk_len - offset < 64u ?
+            (size_t)((uint64_t)dk_len - offset) : 64u;
+        memcpy((uint8_t*)output->data + (size_t)offset, accumulated, count);
+    }
+    result = (int64_t)(uintptr_t)array;
+cleanup:
+    if (password) { spl_pbkdf512_clear(password, (size_t)password_len); free(password); }
+    if (salt) { spl_pbkdf512_clear(salt, (size_t)salt_len + 4u); free(salt); }
+    spl_pbkdf512_clear(key_block, sizeof(key_block));
+    spl_pbkdf512_clear(u, sizeof(u));
+    spl_pbkdf512_clear(accumulated, sizeof(accumulated));
+    spl_pbkdf512_clear(inner, sizeof(inner));
+    spl_pbkdf512_clear(outer, sizeof(outer));
+    spl_pbkdf512_clear(state, sizeof(state));
+    return result;
 }
 
 /* `[u8]` -> text, bytes copied verbatim (the interpreter's

@@ -159,6 +159,7 @@ evicted graphs are `S`-owned, not permanent.
 | **P4** | Refcount: registry meta row, `rt_rc_*`, `rt_heap_graph_bytes`, debug cycle check | C + Rust twins + tests | dual-impl ratchet |
 | **P5** | `GlobalDataset` (count+bytes, LRU, pinned-by-rc); wire TLDR surfaces + interned strings | `src/lib/nogc_sync_mut/mem/`, `module_surface_registry.spl` | unit specs, daemon RSS |
 | **P6** | Session `end()` in daemon/LSP/test-runner; per-module sub-scope freed after object emit | `80.driver`, `app/mcp`, `app/test_runner_new` | request-loop RSS flat over 100 requests |
+|  | **P6 status (landed narrowed):** `BuildSession.end(kept)` + `CompilerDriver.compile()` wiring, fail-closed, **opt-in** (`SIMPLE_BUILD_SESSION_END=1`; default skipped, logged once `build-session: end disabled (opt-in)`). Flip the default after one green s3 run with `SIMPLE_BUILD_SESSION_END=1` (only a natively compiled compiler frees; the interpreter refuses `rt_rc_share`). After end, `build_session_end_reset_globals_v1()` resets HIR/MIR bootstrap stores + aspect/effect/rt_criticality/layer_eq registries. Session-fed globals left dangling after end() (no exported reset; unsafe to read after compile() returns): `resource_registry` (reset not exported), `_bootstrap_fn_*` dicts/journals in `50.mir/mir_data.spl` (only private `_bootstrap_fn_delta_reset`), aspect/effect/layer_field pending scalars are text/bool (reset by their own `*_pending_reset`, not needed). `module_surface_registry` has no module globals (driver-owned); HirLowering phase memos/symbol tables are per-instance (die with the driver); no global frontend parser identity receipt found. No in-process request loop calls `compile()` (daemon/LSP/MCP/test-runner spawn processes), so per-request lifecycle = per-compile begin/end. GlobalDataset surface consumer NOT wired: surfaces are rebuilt per compile and held raw by `streaming_module_surfaces_owner`, no cross-compile reuse exists to acquire/release. Per-module sub-scope release N/A: P2/P3 adopt rows into the session, none is an rc root. | | |
 
 P0 and P1 may land in either order; P2 requires P1; P3 requires P2; P4 is
 independent of P1–P3; P5 requires P4; P6 requires P2 and P5.
@@ -178,3 +179,30 @@ and the spec result line. No PR lands with a regression in any of the three.
 - A caller that still promotes an outer container pays O(N) once; it is a
   review finding, not a crash. `SIMPLE_TRANSIENT_PROMOTE_DEBUG=1` reports it.
 - The registry meta row adds 8 bytes per heap object in the side table.
+
+## 10. Landing status (2026-10-25)
+
+All packages landed on `release/1.0.0` the same day: design #4783, P0 #4802,
+P1 #4811, P2 #4837, P3 #4841, P4 #4799, P5 #4804, P6 #4842 (plus bug record
+#4806). Measured so far (micro-level; the Stage-3 figure is still pending):
+
+| What | Before | After |
+|---|---|---|
+| Outer-array adopt, N=2000 rows (Rust / C) | 40,335 ms / 24,777 ms (promote) | 92 ms / 52 ms (adopt visits 1 node) |
+| Rust promote, address-collision fallback, N=2000 | 2,717 ms | 33 ms |
+| MIR store publish bench, 1000 modules x 50 fns (fake port) | 577.2 s, outer arrays walked 1000x | 163.5 s, walked 0x |
+| rc share+release, 100k-object graph (C) | 146.6 MB peak (leak) | 21.8 MB peak |
+
+Still on the legacy `promote` alias (full walk, retags to the session):
+HIR `hir_module`, diagnostics, phase memos, symbol tables, frontend registries,
+module surfaces; MIR owner roots (drafts #4761/#4762) and `_bootstrap_fn_*`
+(already delta-only). Moving the growing HIR containers (phase memos, symbol
+tables) under the session allocator is the next perf step.
+
+`BuildSession.end()` is OPT-IN (`SIMPLE_BUILD_SESSION_END=1`) until one green
+native Stage-3 run; under the interpreter `rt_rc_share` refuses, so `end()` is
+always skipped there. Globals still dangling after an `end()`:
+`resource_registry` (reset not exported) and `mir_data` `_bootstrap_fn_*`.
+Kill-switches: `SIMPLE_BUILD_SESSION=0` (no session), `SIMPLE_BUILD_SESSION_END=0`.
+Next s3 run should record HIR/MIR per-module time and `PeakWorkingSet64`
+with and without `SIMPLE_BUILD_SESSION_END=1` (method: HIR perf lane, #4764 body).

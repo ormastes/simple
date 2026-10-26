@@ -5,7 +5,7 @@ use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 # separate gates; source presence alone is not a durability acceptance receipt.
 use std.spec.{describe, it, expect, step}
 use app.io.mod (cwd, dir_create, file_read, file_write, file_exists, file_delete)
-use app.scv.db.local_store.{db_store_read, db_store_commit, db_store_commit_held, db_local_path_scope}
+use app.scv.db.local_store.{db_store_read, db_store_read_accounted, db_store_commit, db_store_commit_held, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
@@ -156,4 +156,38 @@ describe "SJ-owned distributed database local generation store":
         expect(file_write("{root}/.scv/db/HEAD", "{first.head}\n")).to_be(true)
         val (_out, _err, code) = process_run_timeout("truncate", ["-s", "67108865", "{root}/.scv/db/objects/{first.head}.scvg"], 30000)
         expect(code).to_equal(0)
+        expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")
+
+
+describe "operation-budgeted local generation reads":
+    it "charges zero content bytes for an absent channel even with a zero budget":
+        step("Read an absent channel without reserving a full generation")
+        val root = setup_item2_store()
+        val result = db_store_read_accounted(root, 0u64).unwrap()
+        expect(result.view.code).to_equal("empty")
+        expect(result.io_bytes).to_equal(0u64)
+
+    it "charges actual HEAD and generation bytes at the exact budget boundary":
+        step("Publish an actual immutable generation and measure its encoded files")
+        val root = setup_item2_store()
+        val written = db_store_commit(root, "", sha256_text("accounted-read"), "small state")
+        expect(written.code).to_equal("ok")
+        val pointer = file_read(root + "/.scv/db/HEAD")
+        val encoded = file_read(root + "/.scv/db/objects/" + written.head + ".scvg")
+        val actual = (pointer.len() + encoded.len()) as u64
+        step("Admit the exact byte allowance and reject one byte less")
+        val result = db_store_read_accounted(root, actual).unwrap()
+        expect(result.view).to_equal(written)
+        expect(result.io_bytes).to_equal(actual)
+        expect(db_store_read_accounted(root, actual - 1u64)).to_equal(Err("SCVDB_STORE_READ_QUOTA"))
+        expect(db_store_read_accounted(root, 64u64)).to_equal(Err("SCVDB_STORE_READ_QUOTA"))
+        expect(db_store_read(root)).to_equal(written)
+
+    it "preserves corruption rejection under the compatibility reader":
+        step("Corrupt an existing immutable object's bytes")
+        val root = setup_item2_store()
+        val written = db_store_commit(root, "", sha256_text("corrupt-accounted"), "original")
+        expect(written.code).to_equal("ok")
+        expect(file_write(root + "/.scv/db/objects/" + written.head + ".scvg", "tampered")).to_be(true)
+        expect(db_store_read_accounted(root, 67108929u64)).to_equal(Err("SCVDB_STORE_OBJECT_CORRUPT"))
         expect(db_store_read(root).code).to_equal("SCVDB_STORE_OBJECT_CORRUPT")

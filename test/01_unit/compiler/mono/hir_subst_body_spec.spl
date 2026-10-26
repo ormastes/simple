@@ -138,8 +138,7 @@ fn tp_pattern(p: HirPattern) -> i64:
                 n = n + tp_pattern(fpt)
         case HirPatternKind.Enum(ty, _, payload):
             n = n + tp_type(ty)
-            if payload != nil:
-                val pl: HirPatternPayload = payload
+            if val pl = payload:
                 match pl:
                     case HirPatternPayload.Tuple(ps):
                         for q in ps:
@@ -206,8 +205,7 @@ fn tp_expr(x: HirExpr) -> i64:
                 n = n + tp_expr(fvt)
         case HirExprKind.EnumLit(ty, _, payload):
             n = n + tp_type(ty)
-            if payload != nil:
-                val pl: HirEnumPayload = payload
+            if val pl = payload:
                 match pl:
                     case HirEnumPayload.Tuple(vs): n = n + tp_exprs(vs)
                     case HirEnumPayload.Struct(fs):
@@ -395,3 +393,56 @@ describe "nullable let annotation substitution":
                 expect(init.has_type_).to_be(true)
                 expect(init.type_.kind).to_equal(HirTypeKind.Int(64, true))
             case _: fail("substitution did not retain the let binding")
+
+describe "optional payload owner substitution":
+    it "substitutes direct and explicitly wrapped expression payloads twice":
+        val t = t_param("T")
+        val value = var_(1, t)
+        val payloads: [HirEnumPayload?] = [
+            HirEnumPayload.Tuple([value]),
+            Some(HirEnumPayload.Tuple([value])),
+            HirEnumPayload.Struct([("value", value)]),
+            Some(HirEnumPayload.Struct([("value", value)]))
+        ]
+        for candidate in payloads:
+            val payload: HirEnumPayload? = candidate
+            val input = blk([], e(HirExprKind.EnumLit(t_opt(t), "Some", payload), t_opt(t)))
+            expect(tp_block(input)).to_be_greater_than(0)
+            val first = subst_hir_body_with_report(input, subst_t_to_i64())
+            expect(first.diagnostics.len()).to_equal(0)
+            expect(tp_block(first.body)).to_equal(0)
+            val second = subst_hir_body_with_report(first.body, subst_t_to_i64())
+            expect(second.diagnostics.len()).to_equal(0)
+            expect(tp_block(second.body)).to_equal(0)
+
+    it "substitutes direct and explicitly wrapped pattern payloads twice":
+        val t = t_param("T")
+        val binding = pat(HirPatternKind.Binding(SymbolId(id: 2), false), t)
+        val payloads: [HirPatternPayload?] = [
+            HirPatternPayload.Tuple([binding]),
+            Some(HirPatternPayload.Tuple([binding])),
+            HirPatternPayload.Struct([("value", binding)]),
+            Some(HirPatternPayload.Struct([("value", binding)]))
+        ]
+        for candidate in payloads:
+            val payload: HirPatternPayload? = candidate
+            val pattern = pat(HirPatternKind.Enum(t_opt(t), "Some", payload), t_opt(t))
+            val input = blk([], e(HirExprKind.MatchCase(var_(1, t_opt(t)),
+                [arm(pattern, blk([], var_(2, t)))]), t))
+            expect(tp_block(input)).to_be_greater_than(0)
+            val first = subst_hir_body_with_report(input, subst_t_to_i64())
+            expect(first.diagnostics.len()).to_equal(0)
+            expect(tp_block(first.body)).to_equal(0)
+            val second = subst_hir_body_with_report(first.body, subst_t_to_i64())
+            expect(second.diagnostics.len()).to_equal(0)
+            expect(tp_block(second.body)).to_equal(0)
+
+    it "preserves an absent enum payload while substituting its owner type":
+        val t = t_param("T")
+        val input = blk([], e(HirExprKind.EnumLit(t_opt(t), "None", nil), t_opt(t)))
+        val output = subst_hir_body_with_report(input, subst_t_to_i64())
+        expect(output.diagnostics.len()).to_equal(0)
+        expect(tp_block(output.body)).to_equal(0)
+        match output.body.value.kind:
+            case HirExprKind.EnumLit(_, _, payload): expect(payload).to_be_nil()
+            case _: fail("substitution did not retain the enum expression")

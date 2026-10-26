@@ -26,7 +26,8 @@ use Errno qw(ESRCH ENOENT EINTR);
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
 $SIG{PIPE} = 'IGNORE';
 
-my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
+my %opt = ( 'max-phys-footprint-kib' => ($ENV{SIMPLE_BOOTSTRAP_PROCESS_TREE_PHYS_FOOTPRINT_CAP_KIB} // 0),
+            'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
             'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
             'budget-scope' => 'compiler', 'scope-group' => 0,
@@ -34,13 +35,19 @@ my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
+    $arg =~ /^--(max-phys-footprint-kib|max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
     $opt{$key} = $value;
 }
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
+$opt{'max-phys-footprint-kib'} =~ /\A[0-9]{1,16}\z/ &&
+    $opt{'max-phys-footprint-kib'} <= 1099511627776
+    or die "rss-guard: invalid physical footprint cap\n";
+!$opt{'max-phys-footprint-kib'} || $^O eq 'darwin'
+    or die "rss-guard: physical footprint cap requires Darwin libproc\n";
+
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
 $opt{'scope-group'} =~ /\A[01]\z/ or die "rss-guard: invalid scope-group\n";
@@ -266,6 +273,7 @@ my $leader = 0;
 my %known;
 my %groups;
 my $identity_lost = 0;
+my ($peak_phys_footprint, $peak_single_phys_footprint, $phys_footprint_samples) = (undef, undef, 0);
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
 my $started = checked_monotonic_startup_time();
@@ -566,13 +574,23 @@ sub native_snapshot {
     }
     $complete && %all or die "incomplete process metadata";
     for my $pid ($metadata_only ? () : members(\%all)) {
-        print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
+        my $request = $opt{'max-phys-footprint-kib'} ? 'F' : 'R';
+        print {$observer_write} "$request $pid $all{$pid}{identity}\n" or die "process observer write failed";
         my $line = observer_line();
         detail_eof($pid, \%all) unless defined($line);
         if ($line eq "R $pid gone\n") { $all{$pid}{zombie} = 1; next }
-        $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
-        $all{$pid}{rss} = 0+$1;
-        my $sid = 0+$2;
+        my ($rss, $sid);
+        if ($opt{'max-phys-footprint-kib'}) {
+            $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*) ([0-9]+)\n\z/
+                or die "malformed process footprint detail";
+            ($rss, $sid) = (0+$1, 0+$2);
+            $3 <= 1099511627776 or die "invalid process footprint size";
+            $all{$pid}{phys_footprint} = 0+$3;
+        } else {
+            $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
+            ($rss, $sid) = (0+$1, 0+$2);
+        }
+        $all{$pid}{rss} = $rss;
         ++$session_checks;
         $session_root_confirmed = 1 if $pid == $leader && $sid == $session_id;
         $unexpected_sid{$pid} = $sid if $sid != $session_id &&
@@ -1391,6 +1409,37 @@ sub quiesce {
     return 0;
 }
 
+# Same selected live members as RSS; sequential observations share the bounded
+# sample window, not an atomic snapshot. Peak is max of CURRENT tree sums.
+sub observe_phys_footprint {
+    my ($all, @live) = @_;
+    return 0 unless $opt{'max-phys-footprint-kib'};
+    my $sum = 0;
+    for my $pid (@live) {
+        defined($all->{$pid}{phys_footprint})
+            or die "missing live process footprint";
+        my $current = $all->{$pid}{phys_footprint};
+        $sum += $current;
+        $peak_single_phys_footprint = $current
+            if !defined($peak_single_phys_footprint) || $current > $peak_single_phys_footprint;
+    }
+    ++$phys_footprint_samples;
+    $peak_phys_footprint = $sum
+        if !defined($peak_phys_footprint) || $sum > $peak_phys_footprint;
+    return $sum >= $opt{'max-phys-footprint-kib'};
+}
+
+sub phys_footprint_receipt {
+    return "phys_footprint_cap_enforced=0\nphys_footprint_metric=disabled\n"
+        unless $opt{'max-phys-footprint-kib'};
+    return "phys_footprint_cap_enforced=1\nmax_phys_footprint_kib=$opt{'max-phys-footprint-kib'}\n" .
+        "peak_phys_footprint_kib=" . (defined($peak_phys_footprint) ? $peak_phys_footprint : 'unavailable') . "\n" .
+        "peak_single_phys_footprint_kib=" . (defined($peak_single_phys_footprint) ? $peak_single_phys_footprint : 'unavailable') . "\n" .
+        "phys_footprint_samples=$phys_footprint_samples\n" .
+        "phys_footprint_metric=darwin_ri_phys_footprint_current_tree_sum\n" .
+        "phys_footprint_sample_semantics=sequential_current_values_within_bounded_observation_window\n";
+}
+
 sub receipt {
     my ($status, $code, $quiet) = @_;
     if ($freebsd) {
@@ -1401,6 +1450,7 @@ sub receipt {
     }
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
+        phys_footprint_receipt() .
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
@@ -1540,9 +1590,12 @@ while (1) {
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
     $peak = $rss if $rss > $peak;
+    my $footprint_breach = eval { observe_phys_footprint($all, @live) };
+    if ($@) { ($status, $code) = ('phys-footprint-measurement-failed', 89); last }
     if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) {
         ($status, $code) = ('rss-cap-exceeded', 88); last;
     }
+    if ($footprint_breach) { ($status, $code) = ('phys-footprint-cap-exceeded', 88); last }
     my $controller_lost = getppid() != $controller_pid;
     if (!$released && $controller_lost) {
         $interrupted = 143;
@@ -1596,7 +1649,10 @@ if ($code == 124 || $interrupted) {
         last unless @live;
         my $rss = 0; $rss += $all->{$_}{rss} for @live;
         $peak = $rss if $rss > $peak;
+        my $footprint_breach = eval { observe_phys_footprint($all, @live) };
+        if ($@) { ($status, $code) = ('phys-footprint-measurement-failed', 89); last }
         if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) { ($status, $code) = ('rss-cap-exceeded', 88); last }
+        if ($footprint_breach) { ($status, $code) = ('phys-footprint-cap-exceeded', 88); last }
         sleep 0.02;
     }
 }

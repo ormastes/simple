@@ -509,6 +509,22 @@ int8_t rt_rc_retain(int64_t value);
 int8_t rt_rc_release(int64_t value);
 int64_t rt_rc_count(int64_t value);
 int64_t rt_heap_graph_bytes(int64_t value);
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §4). One live session per thread; begin
+ * returns its id (0 on failure / while a module scope is active), end frees
+ * every object still tagged with it in one sweep (refused while a module scope
+ * is active or for a non-live id). alloc_begin/end are depth-counted: inside,
+ * new objects belong to the session even in a running module scope. adopt
+ * retags the ACTIVE paused module scope's part of v's graph to the session,
+ * pruning at any node with another tag. While a session is live, promote
+ * retags module nodes to the session (full walk) instead of making them
+ * permanent. */
+uint32_t rt_session_heap_begin(void);
+int8_t   rt_session_heap_end(uint32_t session);
+int8_t   rt_session_alloc_begin(void);
+int8_t   rt_session_alloc_end(void);
+int8_t   rt_transient_heap_adopt(int64_t value);
+uint32_t rt_session_heap_id(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
@@ -644,6 +660,7 @@ double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_sha512_digest(int64_t data);
+int64_t  rt_pbkdf2_hmac_sha512(int64_t password, int64_t salt, int64_t iterations, int64_t dk_len);
 int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);

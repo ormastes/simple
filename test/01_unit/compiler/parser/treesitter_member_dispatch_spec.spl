@@ -1,0 +1,40 @@
+# Class and actor member routing must retain TokenKind ownership when the
+# lowering pass cannot infer the peek() receiver return type.
+use std.spec
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter, treesitter_new}
+use compiler.frontend.treesitter.outline.*
+use compiler.frontend.treesitter.outline_decls.*
+use compiler.common.dependency.visibility.{Visibility}
+
+describe "TreeSitter member token dispatch":
+    it "keeps class fields separate from static and mutable methods":
+        var parser = treesitter_new("class Counter:\n    count: i64\n    static fn zero() -> i64:\n        0\n    me reset():\n        0\n")
+        val outline = parser.parse_class_outline(Visibility.Private, nil, [])
+        expect(parser.errors.len()).to_equal(0)
+        expect(outline.fields.len()).to_equal(1)
+        expect(outline.fields[0].name).to_equal("count")
+        expect(outline.methods.len()).to_equal(2)
+        expect(outline.methods[0].name).to_equal("zero")
+        expect(outline.methods[0].is_static).to_equal(true)
+        expect(outline.methods[1].name).to_equal("reset")
+        expect(outline.methods[1].is_mutable).to_equal(true)
+
+    it "keeps actor fields separate from static and ordinary methods":
+        var parser = treesitter_new("actor Counter:\n    count: i64\n    static fn zero() -> i64:\n        0\n    fn read() -> i64:\n        0\n")
+        val outline = parser.parse_actor_outline(Visibility.Private, nil, [])
+        expect(parser.errors.len()).to_equal(0)
+        expect(outline.fields.len()).to_equal(1)
+        expect(outline.fields[0].name).to_equal("count")
+        expect(outline.methods.len()).to_equal(2)
+        expect(outline.methods[0].name).to_equal("zero")
+        expect(outline.methods[0].is_static).to_equal(true)
+        expect(outline.methods[1].name).to_equal("read")
+        expect(outline.methods[1].is_static).to_equal(false)
+
+    it "rejects a nonmember token instead of treating it as a static method":
+        var parser = treesitter_new("class Invalid:\n    42\n")
+        val outline = parser.parse_class_outline(Visibility.Private, nil, [])
+        expect(parser.errors.len()).to_be_greater_than(0)
+        expect(parser.errors[0].message).to_equal("expected field or method in class")
+        expect(outline.fields.len()).to_equal(0)
+        expect(outline.methods.len()).to_equal(0)

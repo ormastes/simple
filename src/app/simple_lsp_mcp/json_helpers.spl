@@ -10,7 +10,24 @@ use app.io.minimal_runtime_ops.{env_get, file_exists, process_run}
 use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal}
 
 extern fn stdin_read_char() -> text
-use std.nogc_async_mut.sosix.stdio.{sosix_print_raw as print_raw, sosix_stdout_flush}
+use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
+use std.nogc_sync_mut.sffi.fs.{io_file_write_all}
+use std.nogc_sync_mut.io.external_text_io.{io_text_encode, io_text_error_message}
+use std.common.encoding.external_text.{utf8_format}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_text_check_size}
+
+# MCP stdout is a byte-framed transport, including on Windows. The ordinary
+# SOSIX console provider rejects Windows; the checked descriptor-write owner
+# already supports its binary CRT descriptors without charset inference.
+fn print_raw(value: text):
+    match sosix_text_check_size(value):
+        case Err(error): panic(io_text_error_message(error))
+        case Ok(_): ()
+    val bytes = match io_text_encode(value, utf8_format()):
+        case Ok(encoded): encoded
+        case Err(error): panic(io_text_error_message(error))
+    if not io_file_write_all(1, bytes):
+        panic("LSP MCP stdout transport write failed; output may be partial")
 
 # --- JSON building helpers ---
 
@@ -384,7 +401,10 @@ fn read_stdin_message() -> text:
     val first_line = _read_line()
     if first_line.len() == 0:
         return ""
-    val use_content_length = first_line.starts_with("Content-Length:")
+    # A framed client may send Content-Type before Content-Length. Only a JSON
+    # object line selects JSONL; otherwise consume the complete header block.
+    val first_content = first_line.trim_start()
+    val use_content_length = not first_content.starts_with("{")
     if not use_content_length:
         _TRANSPORT_MODE = "jsonl"
         return _strip_line_end(first_line)

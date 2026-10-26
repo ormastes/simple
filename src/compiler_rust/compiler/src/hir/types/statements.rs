@@ -2,6 +2,34 @@ use super::contracts::HirContractClause;
 use super::*;
 use simple_parser::ast::Mutability;
 
+/// Assembly syntax is semantic metadata, independent of memory clobbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum AsmDialect {
+    /// Preserve each backend's established syntax when no option is written.
+    #[default]
+    Default,
+    Att,
+    Intel,
+}
+
+impl AsmDialect {
+    pub fn from_options<'a>(options: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        let mut explicit = None;
+        for option in options {
+            let dialect = match option {
+                "att_syntax" => Self::Att,
+                "intel_syntax" => Self::Intel,
+                _ => continue, // Unrelated options retain their existing policy.
+            };
+            if explicit.is_some_and(|previous| previous != dialect) {
+                return Err("E-ASM-DIALECT: conflicting att_syntax and intel_syntax options".to_string());
+            }
+            explicit = Some(dialect);
+        }
+        Ok(explicit.unwrap_or_default())
+    }
+}
+
 /// HIR statement
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirStmt {
@@ -114,6 +142,7 @@ pub enum HirStmt {
     /// and substitute `{name}` placeholders. `clobbers` lists `clobber(reg)`
     /// register names.
     InlineAsm {
+        dialect: AsmDialect,
         instructions: Vec<String>,
         volatile: bool,
         operands: Vec<HirAsmOperand>,

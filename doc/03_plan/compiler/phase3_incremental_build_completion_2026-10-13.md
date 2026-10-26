@@ -90,3 +90,16 @@ Retain the447 sealed successes. Retry affected failures after a concrete source/
 Each PR carries exact source scope, reproducer/prevention results, known issues, workaround/recovery links and unrun qualification explicitly. Check duplication, review comments and genuine failing checks before landing. Do not merge another session's active draft merely because it contains a useful candidate. Documentation landing is not compiler admission or a release tag.
 
 Phase3 is complete only when the required compiler closure yields authenticated objects, its genuine compiler executable links, and that compiler builds/runs Hello World. Record unresolved optional/host-disabled modules separately using actual host configuration. Full feature completion additionally requires the matrix above and supported Phase4 build/sanity results. No overall goal-complete claim is authorized by partial object totals or this plan.
+
+
+## Evidence reconciliation — 2026-10-26
+
+The October 13 baseline above is historical. The latest retained whole-program
+stage3 run failed with 3,104 MIR errors. An older stage2 comparison also failed
+in that lane; a new-producer regression is not established. Smaller closure
+results separate successful compilation from the remaining optional payload
+pattern, method-resolution and substitution failures. See the
+[retained evidence and full remaining acceptance ledger](../evidence/cache_perfile_phase3_reconciliation_2026-10-26.md)
+and [updated cache/per-file index](cache/cache_perfile_plan_index_2026-10-25.md).
+All feature-matrix and historical acceptance requirements remain in scope.
+No Phase 3, per-file-default, SPipe verification, or overall completion is claimed.

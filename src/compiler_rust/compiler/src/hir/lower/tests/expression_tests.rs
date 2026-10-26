@@ -1756,3 +1756,48 @@ fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
         module.err()
     );
 }
+
+/// Bug native_struct_field_default_dropped_on_reexport_2026-10-25: a struct
+/// known here only through the global layout map (never `register_struct`ed
+/// locally, e.g. reached via a glob re-export) must still fill an omitted
+/// field from its declared `= default`, not the nil tag. Mirrors
+/// `HirSymbol(...)` omitting `generic_param_count: i64 = 0` in the stage2 seed
+/// build.
+#[test]
+fn test_lower_omitted_field_uses_global_declared_default() {
+    let decl = Parser::new("struct Sym:\n    a: i64\n    gpc: i64 = 12345\n    tag: text = \"t\"\n")
+        .parse()
+        .expect("parse decl");
+    let mut defaults: HashMap<String, HashMap<String, simple_parser::ast::Expr>> = HashMap::new();
+    for item in &decl.items {
+        if let simple_parser::ast::Node::Struct(s) = item {
+            defaults.insert(
+                s.name.clone(),
+                s.fields
+                    .iter()
+                    .filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d)))
+                    .collect(),
+            );
+        }
+    }
+    let module = Parser::new("fn test(n: i64) -> Sym:\n    return Sym(a: n)\n")
+        .parse()
+        .expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_strict_mode(false);
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Sym".to_string(),
+        vec![
+            ("a".to_string(), Type::Simple("i64".to_string())),
+            ("gpc".to_string(), Type::Simple("i64".to_string())),
+            ("tag".to_string(), Type::Simple("text".to_string())),
+        ],
+    )])));
+    lowerer.set_global_struct_field_defaults(Arc::new(defaults));
+
+    let lowered = lowerer.lower_module(&module).expect("lower failed");
+    let body = format!("{:?}", lowered.functions[0].body);
+    assert!(body.contains("Integer(12345)"), "omitted gpc must lower its declared default: {body}");
+    assert!(!body.contains("kind: Nil"), "no omitted field may fall back to the nil tag: {body}");
+}

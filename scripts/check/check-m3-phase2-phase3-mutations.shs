@@ -39,7 +39,9 @@ mutate() {
   old=$3
   new=$4
   target="$temporary_root/$file"
-  OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/' "$target"
+  MUTATE_FUNCTION=${5:-}
+  export MUTATE_FUNCTION
+  OLD="$old" NEW="$new" perl -0pi -e 'if ($ENV{MUTATE_FUNCTION}) { s{(^fn \Q$ENV{MUTATE_FUNCTION}\E\(.*?)(?=^fn |\z)}{my $body = $1; $body =~ s/\Q$ENV{OLD}\E/$ENV{NEW}/; $body}mse } else { s/\Q$ENV{OLD}\E/$ENV{NEW}/ }' "$target"
   if cmp -s "$root/$file" "$target"; then
     echo "FAIL mutation absent: $label" >&2
     exit 1
@@ -58,6 +60,22 @@ mutate owner-generation src/compiler/00.common/cache/phase_compatibility_manifes
   'manifest.m2_owner_generation != expected.m2_owner_generation or' 'false or'
 mutate root-generation src/compiler/00.common/cache/phase_compatibility_manifest.spl \
   'manifest.m2_root_generation != expected.m2_root_generation:' 'false:'
+mutate canonical-spelling-comparison src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if path != canonical:' 'if false:'
+mutate canonical-root src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_root):' 'if false:'
+mutate canonical-artifact src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_path):' 'if false:' phase_compatibility_existing_artifact_io_v1
+mutate canonical-manifest src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_path_canonical_spelling_io_v1(spelling, canonical_path):' 'if false:' phase_compatibility_existing_manifest_io_v1
+mutate root-directory-chain src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_directory_chain_io_v1(canonical_root):' 'if false:'
+mutate artifact-directory-chain src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_directory_chain_io_v1(phase_compatibility_path_parent_io_v1(canonical_path)):' 'if false:' phase_compatibility_existing_artifact_io_v1
+mutate manifest-directory-chain src/compiler/00.common/cache/phase_compatibility_path_io.spl \
+  'if not phase_compatibility_directory_chain_io_v1(phase_compatibility_path_parent_io_v1(canonical_path)):' 'if false:' phase_compatibility_existing_manifest_io_v1
+mutate phase2-cache-immutability scripts/bootstrap/bootstrap-from-scratch.sh \
+  'bootstrap_stage3_require_equal "Phase 2 cache immutability"' 'true'
 mutate projection-membership src/compiler/80.driver/cache/reverse_reference_receipt.spl \
   'if not reverse_reference_receipt_contains_projection_v1(' 'if not reverse_reference_receipt_contains_key_v1('
 mutate manifest-nofollow src/compiler/80.driver/cache/phase_compatibility_admission.spl \
@@ -85,4 +103,4 @@ mutate native-reuse-ledger src/compiler/80.driver/driver_aot_native_output.spl \
 mutate frontend-reuse-ledger src/compiler/80.driver/cache/phase_compatibility_admission.spl \
   'schema=simple-phase2-phase3-reuse-ledger-v1 kind=frontend hits=' 'schema=removed kind=frontend hits='
 
-echo 'PASS: 16/16 structural mutations rejected'
+echo 'PASS: 24/24 structural mutations rejected'

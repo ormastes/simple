@@ -2570,6 +2570,335 @@ fn transient_heap_promotion_walks_unowned_root_with_owned_children() {
     super::rt_array_free(owned_child);
 }
 
+// BSM P0 (build_session_memory_model_v1.md §6): scope compaction is deferred
+// to scope end. Each case runs on both the indexed path and the forced
+// ambiguous-index fallback (the one that used to `retain` per promote).
+fn bsm_p0_promote_then_end_frees_only_unpromoted(ambiguous: bool) {
+    assert!(super::rt_transient_array_scope_begin());
+    let kept = super::rt_array_new(1);
+    let kept_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(kept, kept_child));
+    let dropped = super::rt_array_new(1);
+    let dropped_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(dropped, dropped_child));
+    if ambiguous {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(kept));
+    // Double promote is idempotent.
+    assert!(super::rt_transient_heap_promote(kept));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(super::rt_array_len(kept), 1);
+    assert_eq!(super::rt_array_len(kept_child), 0);
+    assert_eq!(super::rt_array_len(dropped), -1);
+    assert_eq!(super::rt_array_len(dropped_child), -1);
+    super::rt_array_free(kept_child);
+    super::rt_array_free(kept);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_indexed() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(false);
+}
+
+#[test]
+fn bsm_p0_promote_then_end_frees_only_unpromoted_ambiguous() {
+    bsm_p0_promote_then_end_frees_only_unpromoted(true);
+}
+
+#[test]
+fn bsm_p0_ambiguous_unowned_root_keeps_owned_children() {
+    assert!(super::rt_transient_array_scope_begin());
+    let owned_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(owned_child, RuntimeValue::from_int(7)));
+    super::transient_scope_force_index_ambiguous();
+    assert!(super::rt_transient_array_scope_pause());
+    let unowned_root = crate::value::objects::rt_enum_new(1, 0, owned_child);
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_array_scope_end());
+    assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
+    assert_eq!(super::rt_array_len(owned_child), 1);
+    super::rt_array_free(owned_child);
+}
+
+/// The `bootstrap_hir_modules_promote_last` pattern
+/// (src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl): per module,
+/// one transient scope builds 7 rows (each an array of 50 small arrays); after
+/// pause each row is appended to its persistent outer array, then the row AND
+/// all 7 outer arrays are promoted. N from `BSM_BENCH_N` (default 200 to keep
+/// the debug suite bounded; the PR measurement uses 2000 in release).
+#[test]
+fn bsm_p0_promote_last_pattern_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let outers: Vec<RuntimeValue> = (0..7).map(|_| super::rt_array_new(0)).collect();
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let rows: Vec<RuntimeValue> = (0..7)
+            .map(|_| {
+                let row = super::rt_array_new(50);
+                for k in 0..50 {
+                    let leaf = super::rt_array_new(1);
+                    assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                    assert!(super::rt_array_push(row, leaf));
+                }
+                row
+            })
+            .collect();
+        assert!(super::rt_transient_array_scope_pause());
+        for (outer, row) in outers.iter().zip(rows.iter()) {
+            assert!(super::rt_array_push(*outer, *row));
+            assert!(super::rt_transient_heap_promote(*row));
+        }
+        for outer in &outers {
+            assert!(super::rt_transient_heap_promote(*outer));
+        }
+        assert!(super::rt_transient_array_scope_end());
+    }
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=promote_last n={} wall_ms={}", n, elapsed.as_millis());
+    bsm_p0_check_outers(&outers, n);
+}
+
+fn bsm_p0_check_outers(outers: &[RuntimeValue], n: usize) {
+    for outer in outers {
+        assert_eq!(super::rt_array_len(*outer), n as i64);
+        let last = super::rt_array_get(*outer, n as i64 - 1);
+        assert_eq!(super::rt_array_len(last), 50);
+    }
+}
+
+/// The path the deferred compaction targets: ONE scope tracking N rows of 50
+/// small arrays, ambiguous index, N separate promotes. Before BSM P0 every
+/// promote ran `objects.retain` over all ~51*N tracked objects (O(N^2)).
+#[test]
+fn bsm_p0_ambiguous_many_promotes_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    assert!(super::rt_transient_array_scope_begin());
+    let rows: Vec<RuntimeValue> = (0..n)
+        .map(|_| {
+            let row = super::rt_array_new(50);
+            for k in 0..50 {
+                let leaf = super::rt_array_new(1);
+                assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+                assert!(super::rt_array_push(row, leaf));
+            }
+            row
+        })
+        .collect();
+    // A real header-address collision (free + same-size reuse inside the
+    // running scope) makes the index ambiguous for the rest of the scope.
+    let mut collided = false;
+    for _ in 0..64 {
+        let freed = super::rt_array_new(1);
+        let addr = freed.as_heap_ptr();
+        super::rt_array_free(freed);
+        let reused = super::rt_array_new(1);
+        if reused.as_heap_ptr() == addr {
+            collided = true;
+            break;
+        }
+    }
+    if !collided {
+        super::transient_scope_force_index_ambiguous();
+    }
+    assert!(super::rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    for row in rows.iter().step_by(2) {
+        assert!(super::rt_transient_heap_promote(*row));
+    }
+    assert!(super::rt_transient_array_scope_end());
+    let elapsed = started.elapsed();
+    eprintln!("bsm-bench: pattern=ambiguous_many_promotes n={} wall_ms={}", n, elapsed.as_millis());
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(super::rt_array_len(*row), if i % 2 == 0 { 50 } else { -1 });
+    }
+}
+
+// BSM P1: build session heap (T1) twin of src/runtime/test/rt_session_heap_selfcheck.c.
+fn bsm_p1_row(width: i64) -> RuntimeValue {
+    let row = super::rt_array_new(width as u64);
+    for k in 0..width {
+        let leaf = super::rt_array_new(1);
+        assert!(super::rt_array_push(leaf, RuntimeValue::from_int(k)));
+        assert!(super::rt_array_push(row, leaf));
+    }
+    row
+}
+
+fn bsm_p1_live(value: RuntimeValue) -> bool {
+    crate::value::heap::is_registered_heap_ptr(value.as_heap_ptr())
+}
+
+#[test]
+fn bsm_p1_session_outside_module_freed_at_end() {
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0 && super::rt_session_heap_id() == s);
+    let row = bsm_p1_row(4);
+    assert!(super::session_heap_owns(row));
+    let leaf = super::rt_array_get(row, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(row) && !bsm_p1_live(leaf));
+    assert_eq!(super::rt_session_heap_id(), 0);
+    let again = super::rt_session_heap_begin();
+    assert!(again != 0 && again != s);
+    assert!(super::rt_session_heap_end(again));
+}
+
+/// BSM P1 x P4: an rc root leaves the session; session end must not free it.
+#[test]
+fn bsm_p1_rc_shared_row_survives_session_end() {
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0);
+    let row = bsm_p1_row(3);
+    let leaf = super::rt_array_get(row, 0);
+    assert!(super::session_heap_owns(row) && super::session_heap_owns(leaf));
+    assert!(crate::value::rt_rc_share(row));
+    assert!(!super::session_heap_owns(row) && !super::session_heap_owns(leaf));
+    assert!(super::rt_session_heap_end(s));
+    assert!(bsm_p1_live(row) && bsm_p1_live(leaf), "rc root and its owned graph outlive the session");
+    assert_eq!(crate::value::rt_rc_count(row), 1);
+    assert!(crate::value::rt_rc_release(row));
+    assert!(!bsm_p1_live(row) && !bsm_p1_live(leaf));
+}
+
+#[test]
+fn bsm_p1_module_scope_inside_session() {
+    let s = super::rt_session_heap_begin();
+    assert!(super::rt_transient_array_scope_begin());
+    let kept = bsm_p1_row(3);
+    let dropped = bsm_p1_row(3);
+    assert!(!super::session_heap_owns(kept));
+    assert!(super::rt_transient_array_scope_pause());
+    let paused = super::rt_array_new(1);
+    assert!(super::session_heap_owns(paused), "paused-module allocation goes to the session");
+    assert!(super::rt_transient_heap_adopt(kept));
+    assert!(super::rt_transient_heap_adopt(kept), "adopt is idempotent");
+    assert!(super::session_heap_owns(kept));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!bsm_p1_live(dropped));
+    assert!(bsm_p1_live(kept) && bsm_p1_live(paused));
+    assert_eq!(super::rt_array_len(kept), 3);
+    let kept_leaf = super::rt_array_get(kept, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(kept) && !bsm_p1_live(kept_leaf) && !bsm_p1_live(paused));
+}
+
+/// (c) adopt prunes (I2) and the outer array grows under the session (I3).
+/// N from `BSM_BENCH_N` (default 200); the PR measures 2000 in release.
+#[test]
+fn bsm_p1_adopt_prunes_at_session_nodes() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let s = super::rt_session_heap_begin();
+    let outer = super::rt_array_new(0);
+    assert!(super::session_heap_owns(outer));
+    let mut max_outer_visits = 0;
+    let mut row_visits = 0;
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let row = bsm_p1_row(50);
+        assert!(super::rt_transient_array_scope_pause());
+        assert!(super::rt_transient_heap_adopt(row)); // adopt BEFORE publish (I1)
+        row_visits = super::session_adopt_visits_debug();
+        assert!(super::rt_session_alloc_begin());
+        assert!(super::rt_array_push(outer, row));
+        assert!(super::rt_session_alloc_end());
+        assert!(super::session_heap_owns(outer) && super::session_heap_owns(row));
+        assert!(super::rt_transient_heap_adopt(outer));
+        max_outer_visits = max_outer_visits.max(super::session_adopt_visits_debug());
+        assert!(super::rt_transient_array_scope_end());
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "bsm-bench: pattern=session_adopt n={} wall_ms={} max_outer_visits={} row_visits={}",
+        n,
+        elapsed.as_millis(),
+        max_outer_visits,
+        row_visits
+    );
+    assert_eq!(row_visits, 51);
+    assert_eq!(max_outer_visits, 1);
+    assert_eq!(super::rt_array_len(outer), n as i64);
+    let first = super::rt_array_get(outer, 0);
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(outer) && !bsm_p1_live(first));
+}
+
+/// Baseline for `bsm_p1_adopt_prunes_at_session_nodes`: the same rows and ONE
+/// outer array, published the legacy way (no session, promote row + outer).
+#[test]
+fn bsm_p1_legacy_promote_one_outer_benchmark() {
+    let n: usize = std::env::var("BSM_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let outer = super::rt_array_new(0);
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        assert!(super::rt_transient_array_scope_begin());
+        let row = bsm_p1_row(50);
+        assert!(super::rt_transient_array_scope_pause());
+        assert!(super::rt_array_push(outer, row));
+        assert!(super::rt_transient_heap_promote(row));
+        assert!(super::rt_transient_heap_promote(outer));
+        assert!(super::rt_transient_array_scope_end());
+    }
+    eprintln!("bsm-bench: pattern=legacy_promote_one_outer n={} wall_ms={}", n, started.elapsed().as_millis());
+    assert_eq!(super::rt_array_len(outer), n as i64);
+}
+
+#[test]
+fn bsm_p1_promote_without_session_unchanged() {
+    assert_eq!(super::rt_session_heap_id(), 0);
+    assert!(super::rt_transient_array_scope_begin());
+    let row = bsm_p1_row(2);
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(row));
+    assert!(super::rt_transient_array_scope_end());
+    assert_eq!(super::rt_array_len(row), 2);
+    assert!(!super::session_heap_owns(row));
+}
+
+#[test]
+fn bsm_p1_promote_with_session_moves_to_session() {
+    let s = super::rt_session_heap_begin();
+    assert!(super::rt_transient_array_scope_begin());
+    let child = bsm_p1_row(1);
+    assert!(super::rt_transient_array_scope_pause());
+    // Unowned root holding a module-owned child: promote keeps the FULL walk.
+    let root = crate::value::objects::rt_enum_new(1, 0, child);
+    assert!(super::rt_transient_heap_promote(root));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(bsm_p1_live(child) && super::session_heap_owns(child));
+    assert!(super::rt_session_heap_end(s));
+    assert!(!bsm_p1_live(child));
+}
+
+#[test]
+fn bsm_p1_refusals() {
+    assert!(!super::rt_session_heap_end(0));
+    assert!(!super::rt_session_alloc_begin());
+    assert!(!super::rt_session_alloc_end());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    let s = super::rt_session_heap_begin();
+    assert!(s != 0);
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(!super::rt_session_heap_end(s + 1));
+    assert!(!super::rt_session_alloc_end());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    assert!(super::rt_transient_array_scope_begin());
+    assert!(!super::rt_transient_heap_adopt(RuntimeValue::from_int(1)));
+    assert!(!super::rt_session_heap_end(s));
+    assert!(super::rt_transient_array_scope_end());
+    let foreign = std::thread::spawn(move || super::rt_session_heap_end(s)).join().unwrap();
+    assert!(!foreign, "a foreign thread cannot end this thread's session");
+    assert!(super::rt_session_heap_end(s));
+    assert!(super::rt_transient_array_scope_begin());
+    assert_eq!(super::rt_session_heap_begin(), 0);
+    assert!(super::rt_transient_array_scope_end());
+}
+
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
 /// now emit. Two things have to hold at once and they pull in opposite
 /// directions, which is why they are asserted together:

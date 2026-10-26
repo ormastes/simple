@@ -1593,6 +1593,80 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
 
+    me lower_unresolved_array_insert_v1(receiver_local: LocalId, args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        if not self.runtime_array_locals.contains(receiver_local.id):
+            return self.reject_runtime_array_slice("array insert requires a proven runtime array handle", nil)
+        # Evaluate arguments once, including for an out-of-range no-op. The
+        # reference insert saturates negative indices to zero and returns self.
+        val raw_index = self.lower_expr(args[0].value)
+        if not self.array_slice_bound_is_integer(args[0].value, raw_index):
+            return self.reject_runtime_array_slice("array insert index must be an integer", Some(args[0].value.span))
+        if val index_type = self.local_mir_type_of(raw_index):
+            match index_type.kind:
+                case MirTypeKind.U64:
+                    return self.reject_runtime_array_slice("array insert requires a signed-representable index", Some(args[0].value.span))
+                case _: ()
+        val raw_value = self.lower_expr(args[1].value)
+        self.note_container_elem_type(receiver_local, raw_value)
+        val tagged_value = self.box_runtime_value(raw_value)
+        val value_operand = self.aggregate_literal_operand(args[1].value, raw_value, tagged_value)
+        val set_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_array_set"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))))
+        var b = self.builder
+        val zero = b.emit_const_int(0)
+        val one = b.emit_const_int(1)
+        val index = b.new_local(nil, MirType.i64(), LocalKind.Var)
+        val widened_index = b.emit_cast(mir_operand_copy(raw_index), MirType.i64())
+        b.emit_copy(index, widened_index)
+        val old_len = b.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(receiver_local)], MirType.i64())
+        val clamp = b.new_block(Some("array_insert_clamp"))
+        val bounds = b.new_block(Some("array_insert_bounds"))
+        val append = b.new_block(Some("array_insert_append"))
+        val condition = b.new_block(Some("array_insert_shift_cond"))
+        val shift = b.new_block(Some("array_insert_shift"))
+        val store = b.new_block(Some("array_insert_store"))
+        val done = b.new_block(Some("array_insert_done"))
+        val cursor = b.new_local(nil, MirType.i64(), LocalKind.Var)
+        b.emit_copy(cursor, old_len)
+        val negative = b.emit_binop(MirBinOp.Lt, mir_operand_copy(index), mir_operand_copy(zero), MirType.bool())
+        b.terminate_if(mir_operand_copy(negative), clamp, bounds)
+        b.switch_to_block(clamp)
+        b.emit_copy(index, zero)
+        b.terminate_goto(bounds)
+        b.switch_to_block(bounds)
+        val in_bounds = b.emit_binop(MirBinOp.Le, mir_operand_copy(index), mir_operand_copy(old_len), MirType.bool())
+        b.terminate_if(mir_operand_copy(in_bounds), append, done)
+        b.switch_to_block(append)
+        # Append must succeed before any existing slot can be overwritten.
+        val pushed = b.emit_call_value(self.rt_array_push_operand(), [mir_operand_copy(receiver_local), value_operand], MirType(kind: MirTypeKind.I8))
+        val push_zero = b.emit_cast(mir_operand_copy(zero), MirType(kind: MirTypeKind.I8))
+        val push_ok = b.emit_binop(MirBinOp.Ne, mir_operand_copy(pushed), mir_operand_copy(push_zero), MirType.bool())
+        val retain = b.new_block(Some("array_insert_retain_slot"))
+        b.terminate_if(mir_operand_copy(push_ok), retain, done)
+        b.switch_to_block(retain)
+        # The source may have moved into push. Read its stored tagged slot
+        # once before shifting, rather than moving the source a second time.
+        val inserted_slot = b.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(receiver_local), mir_operand_copy(old_len)], MirType.i64())
+        b.terminate_goto(condition)
+        b.switch_to_block(condition)
+        val more = b.emit_binop(MirBinOp.Gt, mir_operand_copy(cursor), mir_operand_copy(index), MirType.bool())
+        b.terminate_if(mir_operand_copy(more), shift, store)
+        b.switch_to_block(shift)
+        val previous = b.emit_binop(MirBinOp.Sub, mir_operand_copy(cursor), mir_operand_copy(one), MirType.i64())
+        # Preserve tagged slots without an additional decode/box operation.
+        val slot = b.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(receiver_local), mir_operand_copy(previous)], MirType.i64())
+        b.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(cursor), mir_operand_copy(slot)], MirType(kind: MirTypeKind.I8))
+        b.emit_copy(cursor, previous)
+        b.terminate_goto(condition)
+        b.switch_to_block(store)
+        b.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(index), mir_operand_copy(inserted_slot)], MirType(kind: MirTypeKind.I8))
+        b.terminate_goto(done)
+        b.switch_to_block(done)
+        self.builder = b
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, receiver_local)
+        receiver_local
+
     me array_concat_element_authority_v1(expression: HirExpr, local: LocalId) -> HirType?:
         # A direct empty literal has no element authority. A typed variable
         # or cast keeps its declared element type even when its value is empty.
@@ -4585,6 +4659,8 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "insert" and args.len() == 2 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
+                    return self.lower_unresolved_array_insert_v1(unresolved_receiver_local, args, wb_kind, wb_base, wb_index, wb_field_idx)
                 if method == "merge" and args.len() == 1:
                     return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
@@ -4775,7 +4851,11 @@ impl MirLowering:
                     if (method == "to_int" or method == "to_i64") and self.local_is_proven_numeric_scalar(unresolved_receiver_local):
                         if val numeric_receiver_type = self.option_map_value_hir_type(unresolved_receiver_local, receiver.span):
                             match numeric_receiver_type.kind:
-                                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_):
+                                case HirTypeKind.Float(_):
+                                    if val saturated = self.try_lower_saturating_float_to_i64_v1(unresolved_receiver_local):
+                                        return saturated
+                                    return self.builtin_extra_fail_closed("float integer conversion requires concrete float MIR storage", Some(receiver.span))
+                                case HirTypeKind.Int(_, _):
                                     var numeric_builder = self.builder
                                     val integer_value = numeric_builder.emit_cast(mir_operand_copy(unresolved_receiver_local), MirType.i64())
                                     self.builder = numeric_builder
@@ -5093,6 +5173,8 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "insert" and args.len() == 2 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
+                    return self.lower_unresolved_array_insert_v1(unresolved_receiver_local, args, wb_kind, wb_base, wb_index, wb_field_idx)
                 if method == "concat" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local):
                     val left_element = self.array_concat_element_authority_v1(receiver, unresolved_receiver_local)
                     # Contextual literals use the existing element adaptation

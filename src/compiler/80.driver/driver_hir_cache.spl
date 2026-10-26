@@ -543,28 +543,38 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
             _hir_cache_refuse("selfcheck")
             _hir_cache_selfcheck_failed = _hir_cache_selfcheck_failed + 1
             return false
-    elif hir_module_decode_stable(blob) == nil:
-        # Same fail-closed gate without the named diagnostic when the knob is
-        # not due -- but the stable check collapses two distinct failures
-        # (hir_codec.spl: hir_module_decode_stable): a blob the decoder
-        # refuses, and a decodable blob whose re-encode differs byte-for-byte
-        # (encoder non-determinism). The first can never be cached: a hit
-        # could not decode. The second is admitted only under the explicit
-        # opt-in SIMPLE_HIR_CACHE_ADMIT_REENCODE=1, and what is published is
-        # the re-encode fixed point, so a hit decodes a self-consistent frame
+    elif (sosix_env_get_nullable("SIMPLE_HIR_CACHE_ADMIT_REENCODE") ?? "") == "1":
+        # Explicit opt-in SIMPLE_HIR_CACHE_ADMIT_REENCODE=1: the stable check
+        # separates a blob the decoder refuses from a decodable blob whose
+        # re-encode differs byte-for-byte (encoder non-determinism); the second
+        # is published as the re-encode fixed point
         # (see _hir_cache_admit_reencode_blob_v1).
-        if hir_module_decode(blob) == nil:
-            _hir_cache_refuse("decode")
-            if not _hir_cache_decode_refusal_noted:
-                _hir_cache_note_first_refusal("decode", module.path)
-            return false
-        val admitted = _hir_cache_admit_reencode_blob_v1(module.path, blob)
-        if admitted == "":
-            _hir_cache_refuse("reencode")
-            if not _hir_cache_reencode_refusal_noted:
-                _hir_cache_note_first_refusal("reencode", module.path)
-            return false
-        blob = admitted
+        if hir_module_decode_stable(blob) == nil:
+            if hir_module_decode(blob) == nil:
+                _hir_cache_refuse("decode")
+                if not _hir_cache_decode_refusal_noted:
+                    _hir_cache_note_first_refusal("decode", module.path)
+                return false
+            val admitted = _hir_cache_admit_reencode_blob_v1(module.path, blob)
+            if admitted == "":
+                _hir_cache_refuse("reencode")
+                if not _hir_cache_reencode_refusal_noted:
+                    _hir_cache_note_first_refusal("reencode", module.path)
+                return false
+            blob = admitted
+    elif hir_module_decode(blob) == nil:
+        # Not due for the full self-check: one decode, no re-encode. A blob the
+        # decoder refuses can never be cached (a hit could not decode), so this
+        # stays fail-closed. Before 2026-10-25 this branch ran
+        # hir_module_decode_stable (decode + full re-encode) on EVERY store,
+        # so "sampled" mode sampled nothing and each store paid encode twice
+        # (stage3_hir_phase_cost_breakdown_2026-10-25.md, store ~374 ms/module).
+        # Re-encode drift is still caught by the due self-check (every store
+        # with SIMPLE_HIR_CACHE_SELFCHECK=1, every 8th in bootstrap lanes).
+        _hir_cache_refuse("decode")
+        if not _hir_cache_decode_refusal_noted:
+            _hir_cache_note_first_refusal("decode", module.path)
+        return false
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key, parser_classification != "")

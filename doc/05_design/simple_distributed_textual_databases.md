@@ -1155,3 +1155,50 @@ The same-epoch checkpoint effect owner is now implemented in source. Prepare aut
 Preflight generations reserve their actual storage ceiling before IO. Cached record decoding, distinct requested proof pages and authorization policy bytes consume the same operation budget. Prepare reserves recovery-specific overhead before publishing Prepared. Immutable staging and importer scratch IO have separate owner limits; held publication/readback uses existing per-object limits but its aggregate has not been independently qualified. There is no 1 GiB whole-install claim.
 
 Source regressions cover cache reuse/eviction, pre-read quota refusal, Reference image limits, budgets shared with pending classification, a valid paged pending create, and recovery refusal without active publication. The seven new reader regressions and all earlier install tests remain unexecuted. Source review repaired the concrete budget defects and fixture admission precondition; runtime, crash, host, coverage and performance gates remain open.
+
+## Local-store checkpoint accounting continuation — 2026-10-20
+
+The current release_phase3 reader reserves 67108929 bytes for each normal
+channel read, including empty channels. Replace that reservation with an
+owner-provided `DbStoreReadAccounting { view, io_bytes }`. The operation gives
+`db_store_read_accounted` the smaller remaining IO/work allowance. The store
+checks this limit before reading HEAD and before the bounded generation read;
+it charges actual HEAD framing plus actual encoded generation bytes. An absent
+channel costs zero content bytes. All corrupt, aliased or over-budget reads
+abort with typed errors; they do not return an uncharged success.
+
+`db_store_read` remains the compatibility projection with its original maximum
+read limits and error codes. Immutable-object hashing, payload hashing, path
+scope checks and no-follow reads remain in the single owner. The checkpoint
+reader carries the returned IO/work charge across repeated reads and does not
+refund it. This budget counts encoded work/IO, not full process RSS. Page,
+policy and checkpoint-object reservations remain separate explicit follow-ups;
+this change does not certify Operating-B resource targets.
+
+Trace: REQ-034, NFR-005/006/013. Regressions exercise zero-cost absent channels,
+exact limits and boundary-minus-one, corrupted immutable bytes, cumulative
+reads and whichever remaining allowance is smaller. A separately compiled
+native probe exercises actual filesystem operations under the admitted
+pure-Simple Stage2 producer; the complete system suite still requires its
+canonical runtime/provenance admission. No selected requirement is waived.
+
+## Explicit native value-record equality — 2026-10-20
+
+The native operator dispatcher requires an equality owner for a struct. The
+existing database callers compare DbPageQuota, DbPageEntry, DbPageRecord,
+DbPageContext, EntityRef and DbStoreView, but those records lacked operators.
+Each now declares __eq__ with exact field comparisons. Page payloads compare
+length and every scalar byte rather than array identity. Entity references
+compare both optional representations and every namespace/kind/actor/counter
+or epoch/sequence field, including invalid shapes as values. Validation and
+authorization remain separate owners; equality grants no validity or trust.
+No IO, policy encoding or digest allocation occurs in these comparisons.
+
+The compiler inequality prerequisite invokes __eq__ once then negates its
+boolean result. This matches equality semantics while retaining the existing
+missing-owner diagnostic and nil-presence path. Tests cover individual field
+drift, enum payloads, byte length/content, optional shape, unchanged namespace
+and generation bindings, and custom equality dispatch. These source regressions
+remain unexecuted pending the refreshed compiler. DbPolicyConfig equality is
+still open and must receive its own complete semantics, not a revision-only
+shortcut or an implicit authority claim.

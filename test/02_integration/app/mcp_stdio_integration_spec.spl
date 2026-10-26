@@ -16,6 +16,12 @@ fn mcp_msg(body: text) -> text:
 fn mcp_jsonl(body: text) -> text:
     body + "\n"
 
+fn mcp_ping_body(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":\"ping\"" + "}"
+
+fn mcp_ping_reply(id_raw: text) -> text:
+    "{" + "\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"result\":" + "{" + "}" + "}" + "\n"
+
 fn init_request(id: text) -> text:
     val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
     mcp_msg(body)
@@ -50,13 +56,33 @@ fn parse_nonnegative_i64(value: text) -> i64:
         elif ch == "9": digit = 9
         if digit < 0:
             return -1
+        if n > 922337203685477580 or (n == 922337203685477580 and digit > 7):
+            return -1
         n = n * 10 + digit
         i = i + 1
     n
 
 fn has_valid_content_length_frames(output: text) -> bool:
-    val parts = output.split("Content-Length:")
-    parts.len() >= 3 and not output.contains("Content-Length: 2305843009213693951")
+    var remaining = output
+    var frame_count = 0
+    while remaining != "":
+        if not remaining.starts_with("Content-Length: "):
+            return false
+        val header_end = remaining.index_of("\r\n\r\n") ?? -1
+        if header_end < 0:
+            return false
+        val header = remaining.slice(0, header_end)
+        val body_length = parse_nonnegative_i64(header.replace("Content-Length:", "").trim())
+        val body_start = header_end + 4
+        if body_length < 2 or body_length > remaining.len() - body_start:
+            return false
+        val body_end = body_start + body_length
+        val body = remaining.slice(body_start, body_end)
+        if not body.starts_with("{") or not body.ends_with("}"):
+            return false
+        remaining = remaining.slice(body_end, remaining.len())
+        frame_count = frame_count + 1
+    frame_count == 2
 
 # Keep shell metacharacters inside a single pathname argument. Windows cmd
 # expands percent variables even inside quotes, so those paths fail closed.
@@ -98,6 +124,54 @@ fn send_mcp(messages: text) -> text:
     stdout
 
 describe "MCP Protocol Runtime":
+    it "checks complete frame boundaries instead of counting header strings":
+        step("Reject truncated lengths, invalid lengths and trailing bytes in captured server output")
+        val body = "{" + "}"
+        val valid = mcp_msg(body) + mcp_msg(body)
+        expect(has_valid_content_length_frames(valid)).to_equal(true)
+        expect(has_valid_content_length_frames("Content-Length: 1\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: -1\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: 999\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames("Content-Length: 18446744073709551618\r\n\r\n" + body + mcp_msg(body))).to_equal(false)
+        expect(has_valid_content_length_frames(valid + "unexpected stdout")).to_equal(false)
+
+    it "rejects non-object JSONL roots and still handles the following request":
+        step("Send an invalid JSON value followed by a correlated ping over real stdin")
+        val invalid_roots = ["[]", "null", "true", "7", "\"text\""]
+        val invalid_reply = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"error\":" + "{" + "\"code\":-32600,\"message\":\"Invalid Request\"" + "}" + "}" + "\n"
+        for invalid_root in invalid_roots:
+            val output = send_mcp(mcp_jsonl(invalid_root) + mcp_jsonl(mcp_ping_body("43")))
+            expect(output).to_equal(invalid_reply + mcp_ping_reply("43"))
+
+    it "does not answer no-ID requests or promote nested IDs into request IDs":
+        step("Send two notifications followed by one correlated ping")
+        val no_id = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"ping\"" + "}"
+        val nested = "{" + "\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":" + "{" + "\"clientInfo\":" + "{" + "\"id\":\"nested-client\"" + "}" + "}" + "}"
+        val output = send_mcp(mcp_jsonl(no_id) + mcp_jsonl(nested) + mcp_jsonl(mcp_ping_body("37")))
+        expect(output).to_equal(mcp_ping_reply("37"))
+
+    it "does not dispatch a nested method instead of the root method":
+        step("Put a known method inside params of an unknown root request")
+        val params = "{" + "\"method\":\"ping\",\"id\":99" + "}"
+        val output = send_mcp(generic_request("root-method", "not/a/method", params))
+        expect(output.contains("\"id\":\"root-method\"")).to_equal(true)
+        expect(output.contains("\"code\":-32601")).to_equal(true)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "rejects an explicit null ID without inventing initialize ID one":
+        step("Send an invalid null-ID MCP request")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"initialize\"" + "}"
+        val output = send_mcp(mcp_jsonl(request))
+        expect(output.contains("\"id\":null")).to_equal(true)
+        expect(output.contains("\"code\":-32600")).to_equal(true)
+        expect(output.contains("\"id\":\"1\"")).to_equal(false)
+        expect(output.contains("\"result\":")).to_equal(false)
+
+    it "decodes escaped protocol key and method spellings":
+        step("Resolve JSON Unicode escapes before selecting the ping handler")
+        val request = "{" + "\"jsonrpc\":\"2.0\",\"id\":41,\"me\\u0074hod\":\"pi\\u006eg\"" + "}"
+        expect(send_mcp(mcp_jsonl(request))).to_equal(mcp_ping_reply("41"))
+
     it "quotes Windows stdin paths with spaces and command metacharacters":
         val command = match mcp_stdin_command("C:/Program Files/MCP & Tools/server.exe", "C:/private scope/input.txt", true):
             Ok(value): value

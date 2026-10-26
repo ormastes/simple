@@ -7,6 +7,10 @@ use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_module_count,
     bootstrap_hir_modules_rollback_last,
+    bootstrap_hir_modules_has_pending,
+    bootstrap_hir_modules_publish_pending,
+    bootstrap_hir_modules_discard_pending,
+    bootstrap_hir_modules_promote_last_legacy,
     bootstrap_hir_module_names_outer_len,
     bootstrap_hir_module_symbols_outer_len,
     bootstrap_hir_module_functions_outer_len,
@@ -55,6 +59,8 @@ extern fn rt_exit(code: i64)
 extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 
 pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
+    # A staged (session-path) row was never appended; dropping it suffices.
+    bootstrap_hir_modules_discard_pending()
     val actual_count = bootstrap_hir_module_count()
     if actual_count == expected_count:
         return
@@ -655,3 +661,21 @@ pub fn driver_validate_value_struct_layout_declarations_v1(
 
 export driver_hir_module_dict_dropped_values
 export use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{driver_print_post_hir_validation_fatal}
+
+# Publish this module's flat HIR row with the module scope PAUSED (BSM P2).
+# Session: adopt the staged row then append under the session allocator (I1-I3),
+# never walking the outer arrays. No session: promote the new row + outer
+# arrays exactly as before.
+pub fn driver_publish_flat_hir_row_v1(session_active: bool, expected_count: i64) -> bool:
+    if bootstrap_hir_modules_has_pending():
+        return session_active and bootstrap_hir_modules_publish_pending()
+    val after = bootstrap_hir_module_count()
+    if after == expected_count:
+        return true
+    if after != expected_count + 1:
+        return false
+    # Appended immediately (no running scope): with a live session that row
+    # was allocated session-owned already, so nothing needs adopting.
+    if session_active:
+        return true
+    bootstrap_hir_modules_promote_last_legacy()

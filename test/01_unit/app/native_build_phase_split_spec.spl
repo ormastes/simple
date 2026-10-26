@@ -1,0 +1,102 @@
+# @cover src/app/io/_CliCompile/compile_targets.spl
+use std.spec.*
+use app.io._CliCompile.compile_targets.{cli_native_build_parse_options_v1,
+    cli_native_build_restore_result_env_v1}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_remove_process}
+
+describe "fixed-producer native CLI parse phase":
+    it "retains entry/output/closure and object flags":
+        val parsed = cli_native_build_parse_options_v1([
+            "native-build", "--entry=src/main.spl", "--output=build/main.o",
+            "--source", "src", "--entry-closure", "--emit-object", "--threads=2"])
+        expect(parsed.ok).to_be(true)
+        expect(parsed.status).to_equal(0)
+        expect(parsed.entry_point).to_equal("src/main.spl")
+        expect(parsed.output).to_equal("build/main.o")
+        expect(parsed.output_explicit).to_be(true)
+        expect(parsed.source_dirs.len()).to_equal(1)
+        expect(parsed.source_dirs[0]).to_equal("src")
+        expect(parsed.entry_closure).to_be(true)
+        expect(parsed.emit_object).to_be(true)
+        expect(parsed.native_threads).to_equal(2)
+
+    it "retains positional entry and last optimization choice":
+        val parsed = cli_native_build_parse_options_v1([
+            "native-build", "src/main.spl", "--release", "--opt-level=0", "--mode=one-binary"])
+        expect(parsed.ok).to_be(true)
+        expect(parsed.entry_point).to_equal("src/main.spl")
+        expect(parsed.release).to_be(false)
+        expect(parsed.opt_level).to_equal(0)
+        expect(parsed.optimization_requested).to_be(true)
+        expect(parsed.build_mode).to_equal("one-binary")
+
+    it "retains early parse failure status without executing build phases":
+        val parsed = cli_native_build_parse_options_v1(["native-build", "--threads=0"])
+        expect(parsed.ok).to_be(false)
+        expect(parsed.status).to_equal(1)
+
+    it "retains the clean flag side effect at its original parse position":
+        val previous = env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? ""
+        val previous_absent = env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN").is_none()
+        env_set("SIMPLE_NATIVE_BUILD_CLEAN", "before")
+        val parsed = cli_native_build_parse_options_v1(["native-build", "--clean", "--threads=0"])
+        val after = env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? ""
+        if previous_absent: env_remove_process("SIMPLE_NATIVE_BUILD_CLEAN")
+        else: env_set("SIMPLE_NATIVE_BUILD_CLEAN", previous)
+        expect(parsed.ok).to_be(false)
+        expect(after).to_equal("1")
+
+describe "native CLI complete-result environment restoration":
+    it "preserves every conditional restoration combination":
+        print "[cli-restore-stage] before-env-snapshot"
+        val names = ["SIMPLE_OS_LOG_MODE", "SIMPLE_NATIVE_BUILD_EMIT_OBJECT",
+            "SIMPLE_NATIVE_BUILD_NO_MANGLE", "SIMPLE_NATIVE_BUILD_CACHE_DIR",
+            "SIMPLE_NATIVE_ARENA_DECLS", "SIMPLE_NATIVE_BUILD_ENTRY",
+            "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_RUNTIME_PATH",
+            "SIMPLE_CORE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+            "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_CPU", "SIMPLE_NATIVE_BUILD_THREADS"]
+        val prior = ["prior-log", "prior-emit", "prior-mangle", "prior-cache",
+            "prior-arena", "prior-entry", "prior-closure", "prior-runtime",
+            "prior-core", "prior-bundle", "prior-target", "prior-cpu", "prior-threads"]
+        var previous: [text] = []
+        var previous_absent: [bool] = []
+        for name in names:
+            previous.push(env_get(name) ?? "")
+            previous_absent.push(env_get_opt(name).is_none())
+        print "[cli-restore-stage] after-env-snapshot"
+        var mismatches: [text] = []
+        # @workaround bug=retained_seed_test_loop_binding_2026_10_25 reason=diagnostic_unique_binding_after_flags_bitop_array_coercion OPEN; root cause unproven
+        for cli_restore_case_bits in 0..16:
+            print "[cli-restore-stage] flags-loop-entered"
+            for name in names: env_set(name, "current")
+            print "[cli-restore-stage] after-current-env"
+            val bundle = (cli_restore_case_bits & 1) != 0
+            print "[cli-restore-stage] after-bundle"
+            val target = (cli_restore_case_bits & 2) != 0
+            print "[cli-restore-stage] after-target"
+            val cpu = (cli_restore_case_bits & 4) != 0
+            print "[cli-restore-stage] after-cpu"
+            val threads = if (cli_restore_case_bits & 8) != 0: 2 else: 0
+            print "[cli-restore-stage] after-threads"
+            print "[cli-restore-stage] before-restore-call"
+            cli_native_build_restore_result_env_v1(
+                prior[0], prior[1], prior[2], prior[3], prior[4], prior[5], prior[6],
+                prior[7], prior[8], prior[9], prior[10], prior[11], prior[12],
+                bundle, target, cpu, threads)
+            print "[cli-restore-stage] after-restore-call"
+            print "[cli-restore-stage] before-expected-loop"
+            var index = 0
+            for name in names:
+                val expected = if index < 9 or (index == 9 and bundle) or
+                        (index == 10 and target) or (index == 11 and cpu) or
+                        (index == 12 and threads > 0): prior[index] else: "current"
+                if (env_get(name) ?? "") != expected: mismatches.push(name)
+                index = index + 1
+        var index = 0
+        for name in names:
+            if previous_absent[index]: env_remove_process(name)
+            else: env_set(name, previous[index])
+            index = index + 1
+        print "[cli-restore-stage] after-test-env-restoration"
+        expect(mismatches.len()).to_equal(0)
