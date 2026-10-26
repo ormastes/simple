@@ -125,6 +125,30 @@ bootstrap_cache_archive_prior() (
     mv "$bc_prior" "$bc_destination"
   fi
 )
+# Keep the newest $2 attempt archives under provenance dir $1; evict older
+# attempts together with their *.prior-<attempt> and *.working-<attempt> dirs
+# (each stage2-runtime-authority copy is ~190 MB, and nothing else removed them).
+bootstrap_cache_prune_attempts() (
+  bc_pr_dir=$1 bc_pr_keep=$2
+  case "$bc_pr_keep" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$bc_pr_dir/attempts" ] && [ ! -L "$bc_pr_dir/attempts" ] || return 0
+  bc_pr_list=$(ls -1 "$bc_pr_dir/attempts") || bootstrap_cache_error "cannot list $bc_pr_dir/attempts" || return 1
+  bc_pr_total=$(printf '%s\n' "$bc_pr_list" | grep -c '^attempt-[A-Za-z0-9_.-]*$')
+  bc_pr_drop=$((bc_pr_total - bc_pr_keep))
+  [ "$bc_pr_drop" -gt 0 ] || return 0
+  # attempt-<UTC stamp>-<pid> sorts chronologically by name.
+  printf '%s\n' "$bc_pr_list" | grep '^attempt-[A-Za-z0-9_.-]*$' | LC_ALL=C sort | head -n "$bc_pr_drop" |
+  while IFS= read -r bc_pr_attempt; do
+    for bc_pr_victim in "$bc_pr_dir"/*.prior-"$bc_pr_attempt" "$bc_pr_dir"/*.working-"$bc_pr_attempt" \
+        "$bc_pr_dir/attempts/$bc_pr_attempt"; do
+      [ -e "$bc_pr_victim" ] || [ -L "$bc_pr_victim" ] || continue
+      [ ! -L "$bc_pr_victim" ] || { rm -f "$bc_pr_victim" || exit 1; continue; }
+      chmod -R u+w "$bc_pr_victim" 2>/dev/null
+      rm -rf "$bc_pr_victim" || exit 1
+    done
+    echo "bootstrap-cache: evicted attempt $bc_pr_attempt from $bc_pr_dir" >&2
+  done
+)
 bootstrap_cache_freeze_attempt() (
   [ -d "$1" ] && [ ! -L "$1" ] || return 1
   bootstrap_cache_new_path_validate "$1" || return 1
