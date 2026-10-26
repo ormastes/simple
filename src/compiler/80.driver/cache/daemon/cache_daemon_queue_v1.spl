@@ -28,6 +28,7 @@ use std.nogc_sync_mut.io_runtime.{dir_list, file_read_bytes, file_write_bytes, d
 use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.thread.{thread_sleep_ms}
 use compiler.driver.cache.daemon.cache_daemon_main.{CacheDaemonHost}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{hash_algorithm_by_name_v1, digest_admits_identity_v1}
 use compiler.driver.cache.gc.cache_eviction_plan_v1.{CacheEntryUseV1}
 use compiler.driver.cache.metadata.cache_limits.{cache_retention_limits_load_v1}
 
@@ -38,8 +39,11 @@ pub fn cache_queue_digest_admitted_v1(digest: text) -> bool:
     val colon = digest.index_of(":")
     if colon <= 0 or colon + 1 >= digest.len():
         return false
-    val algo = digest.substring(0, colon)
-    algo == "sha256" or algo == "blake3" or algo == "xxh3-128"
+    # A-2: a request digest is untrusted identity; only collision-resistant
+    # algorithms may be its sole proof (xxh3/crc32 are fast indexes, not identity).
+    match hash_algorithm_by_name_v1(digest.substring(0, colon)):
+        case Some(algo): digest_admits_identity_v1(algo.id)
+        case nil: false
 
 pub fn cache_queue_field_v1(request: text, key: text) -> text:
     for line in request.split("\n"):
