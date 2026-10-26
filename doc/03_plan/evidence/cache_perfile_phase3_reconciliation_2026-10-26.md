@@ -149,3 +149,76 @@ Current release was fetched at continuation start: `194243b52bb`.
 The clean existing `wt-bisect` worktree now owns branch
 `work/cache-perfile-phase3-20261026`; no new worktree was created and no
 unrelated main-worktree changes are included.
+
+## Canonical linker correction and source repair — 2026-10-26
+
+The preceding manual archive-only links omitted the canonical linker's fresh C
+runtime objects, generated entry point and runtime-owner processing. Their
+errors do **not** establish a production runtime archive defect. Source audit:
+`llvm_native_link_orchestrator.spl` compiles C runtime objects unconditionally,
+then generates the entry point and applies the runtime owner before linking.
+
+A canonical native-build retry of the retained unwrapped probe with the owned
+absolute CC path succeeded (rc=0) and its executable printed **`7 8 0`**,
+covering implicit optional conversion, explicit Some and absence. Log/rc and
+runtime output are retained under the original probe directory as
+`owned-cc.log`, `owned-cc.rc`, `owned-cc-run.log`, `owned-cc-run.rc`.
+The existing `cache-unwrapped` was retained; no cache-hit count is claimed
+because successful parent output did not report one. This is a focused
+Stage 2 native behavior result, not SPipe or full Phase 3 qualification.
+
+The isolated release-based branch `work/phase3-optional-payload-20261026`
+now changes the actual `hs_enum_payload` / `hs_pattern_payload` helpers to unwrap
+before matching the distinct payload owners. The existing exhaustive match
+and unhandled diagnostic remain. Added regression scenarios cover direct and
+wrapped tuple/struct expression and pattern payloads, two substitution passes,
+and absent payloads; their counting oracle also unwraps before reading payloads.
+
+An actual-owner native diagnostic fixture imports the production substitution
+functions. Its first launch was refused with SCV-E-ADMISSION for missing
+first-checkout compile journal. The retry uses the documented cold-init flag
+and the same cache, with the original refusal log preserved. No source
+admission was bypassed. Build output is under
+`C:/dev/wt-bisect/build/native_probe/phase3_optional_payload_subst/stage2-acfedbebd1db/`.
+Qualification is pending; no changed-source test, manual, smoke, or merge is
+claimed yet. General SPipe/docgen remains TEST_BLOCKED until an admitted
+full pure-Simple runner is available; Stage 2 native diagnostics cannot replace it.
+
+## Optional payload workaround native qualification
+
+Workaround source commit: `9bebc55105d`; stable bug ID
+`native_optional_payload_owner_dispatch_2026_10_26`; recovery base `b9f082ef085`.
+Underlying optional-pattern/compiler compatibility work remains OPEN. Qualified
+bug DB writer unavailable; dated canonical record retains pending reconciliation.
+
+Both actual-owner fixtures import production substitution helpers rather than
+copying the walk. The existing admitted Stage 2 was reused without rebuilding
+Phase 2. Expression fixture: native build rc=0, run rc=0, output
+`optional payload substitution: 5 cases, 2 passes each`. Pattern fixture:
+requested jobs=80, native build rc=0, run rc=0, output
+`optional pattern substitution: 5 cases, 2 passes each`. Each selected a
+124-module closure. Counts cover direct/Some tuple/struct payloads, absence,
+and a second substitution pass. Actual 80-way CPU utilization was not measured
+and is not inferred from the requested job count. Do not rerun these green
+criteria unchanged.
+
+The SSpec additions, docgen/maintenance and compiler/lib/MCP full-CLI checks
+are TEST_BLOCKED by the lack of an admitted general pure-Simple CLI runner.
+These focused Stage 2 diagnostic results qualify this workaround's behavior,
+not overall SPipe PASS, Phase 3 completion or a release. The next compilation
+must contain the workaround to apply it; old immutable compiler bytes are
+unchanged. The separate Future.then caller workaround remains under its
+bounded native qualification cycle, not accepted as green.
+
+| Qualified artifact | SHA-256 |
+| --- | --- |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\build-coldinit.log` | `c3b79b60626850ce57ca885dc48d111103cad14423575beeb177b578be84a44b` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\build-coldinit.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\run.log` | `300d285460e328a1f7239db3ac8af6f2d7b812fafad55d22514ab225db1436cd` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\run.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80.log` | `490e83292208680240e59d9cad5d6765a4c27abe878aac6d75da11d11dc85172` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80-run.log` | `bcff6f9f76e88ea1529f3d69661873214c0bc1cfc20401a2b12b33bdeb2200f5` |
+| `build\native_probe\phase3_optional_payload_subst\stage2-acfedbebd1db\patterns-80-run.rc` | `13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354` |
+
+Landing source commit after clean rebase onto release `80a2b590c14`: `cf4eec3a9ff` (same workaround patch as tested local `9bebc55105d`). Upstream advance was the unrelated DevHub deflate change; focused native criteria were not replayed.
