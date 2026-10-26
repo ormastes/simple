@@ -1,6 +1,7 @@
 # Authored UNRUN. Actual ordinary frontend/lowering mechanics, not archive or
 # SOURCE admission. No synthetic MIR function, default frame or receipt.
 use std.spec.{describe, it, expect, fail}
+use std.io_runtime.{read_file}
 use compiler.common.config.{Logger}
 use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -12,6 +13,10 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.source_region_default_schedule_v1.*
 use compiler.mir.mir_json.{serialize_mir_function}
 use compiler.mir.hir_expression_artifact_v1.{mir_hir_expression_encode_v1}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
 
 fn default_schedule_test_account_v1(work: i64 = 1048576) -> MirLoopResourceAccountV1:
     var limits = MirLoopResourceLimitsV1()
@@ -38,7 +43,57 @@ fn default_schedule_test_prepare_v1(mut owner: MirLowering, source: HirModule,
         case Ok(_): ()
         case Err(error): fail(error)
 
+fn default_schedule_constructor_counts_v1(field: text) -> (i64, i64, i64):
+    # Lower the production field declaration in a small real constructor.
+    # The fixture's nominal payload is never constructed or treated as a
+    # scheduler authority; only its absent carrier representation is tested.
+    val source = default_schedule_test_source_v1(
+        "class MirSourceRegionDefaultScheduleV1:\n    value: i64\n" +
+        "class ConstructorProbe:\n" + field + "\n" +
+        "fn absent() -> ConstructorProbe:\n    ConstructorProbe()\n")
+    val symbol = default_schedule_test_symbol_v1(source, "absent")
+    var owner = MirLowering.new(source.symbols)
+    var builder = owner.builder
+    builder.canonical_enum_builtin_capture_enabled_v1 = true
+    builder.canonical_enum_builtin_compile_account_v1 = Some(default_schedule_test_account_v1())
+    owner.builder = builder
+    val output = owner.lower_module(source)
+    expect(owner.errors.len()).to_equal(0)
+    expect(owner.builder.canonical_enum_builtin_error_v1).to_equal("")
+    var news = 0
+    for site in owner.builder.canonical_enum_builtin_sites_v1:
+        if site.owner.id == symbol.id and site.operation == CanonicalEnumBuiltinOperationV1.New:
+            news = news + 1
+    var enum_calls = 0
+    var normalization = 0
+    for block in output.functions[symbol].blocks:
+        if (block.label ?? "").starts_with("option_norm_"): normalization = normalization + 1
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str("rt_enum_new"), _):
+                            enum_calls = enum_calls + 1
+                        case _: ()
+                case _: ()
+    (news, enum_calls, normalization)
+
 describe("selected ordinary default scheduling"):
+    it("keeps the actual disabled carrier unboxed while an Optional control allocates"):
+        val types = read_file("src/compiler/50.mir/mir_lowering_types.spl")
+        var declaration = ""
+        var matches = 0
+        for line in types.split("\n"):
+            if line.starts_with("    source_region_default_schedule_v1:"):
+                declaration = line
+                matches = matches + 1
+        expect(matches).to_equal(1)
+        expect(default_schedule_constructor_counts_v1(declaration)).to_equal((0, 0, 0))
+        val control = default_schedule_constructor_counts_v1(
+            "    source_region_default_schedule_v1: MirSourceRegionDefaultScheduleV1? = nil")
+        expect(control.0).to_be_greater_than(0)
+        expect(control.1).to_be_greater_than(0)
+
     it("discovers an originally earlier helper during root emission and emits every recursive body once"):
         val program = "fn schedule_a() -> i64:\n    schedule_b()\n" +
             "fn schedule_b() -> i64:\n    schedule_c()\n" +
@@ -57,7 +112,7 @@ describe("selected ordinary default scheduling"):
         expect(owner.errors.len()).to_equal(0)
         expect(owner.verification_capture_enabled).to_equal(false)
         expect(owner.source_region_finish_default_schedule_v1()).to_equal(Ok(()))
-        val scope = owner.source_region_default_schedule_v1.unwrap()
+        val scope = owner.source_region_default_schedule_v1
         expect(scope.completed.len()).to_equal(3)
         expect(scope.completed[0].id).to_equal(root.id)
         var earlier_count = 0
@@ -91,7 +146,7 @@ describe("selected ordinary default scheduling"):
         owner.lower_module(source)
         expect(owner.errors.len()).to_equal(0)
         expect(owner.source_region_finish_default_schedule_v1()).to_equal(Ok(()))
-        val scope = owner.source_region_default_schedule_v1.unwrap()
+        val scope = owner.source_region_default_schedule_v1
         expect(scope.completed.len()).to_equal(3)
         expect(scope.completed[2].id).to_equal(leaf.id)
         expect(scope.occurrences.len()).to_equal(1)
@@ -144,7 +199,7 @@ describe("selected ordinary default scheduling"):
         expect(account.reserve(work: left)).to_equal(Ok(()))
         val output = owner.lower_module(source)
         expect(owner.source_region_default_failed_v1()).to_equal(true)
-        expect(owner.source_region_default_schedule_v1.unwrap().completed.len()).to_equal(0)
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
         expect(output.functions.has(selected)).to_equal(false)
         expect(output.functions.has(remainder)).to_equal(false)
         expect(owner.errors.len()).to_equal(1)
@@ -160,7 +215,7 @@ describe("selected ordinary default scheduling"):
         var owner = MirLowering.new(source.symbols)
         default_schedule_test_prepare_v1(owner, source, selected, selected, default_schedule_test_account_v1())
         val output = owner.lower_module(source)
-        expect(owner.source_region_default_schedule_v1.unwrap().completed.len()).to_equal(0)
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
         expect(owner.source_region_default_failed_v1()).to_equal(true)
         expect(owner.errors.len()).to_be_greater_than(0)
         expect(output.functions.has(remainder)).to_equal(false)
@@ -174,7 +229,7 @@ describe("selected ordinary default scheduling"):
         var owner = MirLowering.new(source.symbols)
         default_schedule_test_prepare_v1(owner, source, selected, selected, default_schedule_test_account_v1())
         val output = owner.lower_module(source, archive_function_symbols: Some([remainder.id]))
-        expect(owner.source_region_default_schedule_v1.unwrap().completed.len()).to_equal(0)
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
         expect(owner.source_region_default_failed_v1()).to_equal(true)
         expect(output.functions.has(remainder)).to_equal(false)
         owner.source_region_clear_default_scope_v1()

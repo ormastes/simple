@@ -1,6 +1,6 @@
-# Selected ordinary default scheduling, checkpoint1
+# Selected ordinary default scheduling, checkpoint2
 
-Status: source implementation for independent review. All seven authored SSpec
+Status: source implementation for independent review. All eight authored SSpec
 controls are UNRUN. No driver activation, replay permission or general default
 P1 closure is claimed. Root owns landing; the actual archive owner owns its
 private entry/error/lifetime hooks and has not installed this scope yet.
@@ -66,6 +66,16 @@ field and its default-subtree callee; stale prepared graph cannot replace the
 actual ordinary body; one-short preparation; exhaustion stopping remainder and
 one diagnostic; extern/filter refusal never completing a skipped body. No fake
 MirFunction, default capture or admission receipt is used.
+
+The disabled carrier is a nullable nominal class reference, not an Optional.
+This follows existing nominal nil fields such as HirParam.default: HirExpr.
+An Optional default would invoke ensure_option_handle during every ordinary
+MirLowering constructor and allocate a canonical None even with capture off.
+The added constructor control reads the actual production field declaration,
+lowers it through the real frontend/emitter, and requires zero canonical New
+origins, enum allocation calls, and option-normalization blocks. An Optional
+control must produce a real canonical New and runtime allocation. This control
+is authored UNRUN; it is not a native allocation/performance measurement.
 
 Required next boundaries: actual referenced target-symbol/type/layout closure
 snapshots, unchanged binding validation allowing unrelated plan additions,
