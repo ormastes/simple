@@ -6,9 +6,9 @@
 # always give the same answer, so one HIR serves every target.
 # Plan: doc/03_plan/compiler/hir_target_neutral_mir_target_plan.md
 
-use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_normalize_arch}
-use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_os_is_unix, cfg_normalize_os}
-use compiler.core.parser_preprocessor.{_pp_tokenize_condition}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_os_is_unix}
+use compiler.core.parser_preprocessor.{_pp_tokenize_condition, _pp_os_name, _pp_arch_name}
 
 struct MirCfgStep:
     value: bool
@@ -18,43 +18,47 @@ struct MirCfgStep:
 fn _mcs_tok(tokens: [text], pos: i64) -> text:
     if pos < tokens.len(): tokens[pos] else: ""
 
-fn _mcs_os_match(raw: text, target: MirTargetContext) -> bool:
-    val wanted = cfg_normalize_os(raw)
+# Atom vocabulary is the preprocessor's exact alias tables (_pp_os_name /
+# _pp_arch_name), so both lanes accept and reject the same atoms.
+fn _mcs_os_match(wanted: text, target: MirTargetContext) -> bool:
     if wanted == "unix": return cfg_os_is_unix(target.os)
-    wanted != "" and wanted == target.os
+    # MirTargetContext spells bare-metal `*-none` triples as "baremetal".
+    if wanted == "none": return target.os == "none" or target.os == "baremetal"
+    wanted == target.os
 
-fn _mcs_arch_name(raw: text) -> text:
-    val v = raw.trim().lower()
-    if v == "x86" or v == "i386" or v == "i686" or v == "x86_64" or v == "amd64" or
-            v == "x64" or v == "aarch64" or v == "arm64" or v == "arm" or
-            v == "riscv64" or v == "riscv32":
-        return mir_target_context_normalize_arch(v)
-    ""
+# Thumb/armv sub-arch atoms only match when the context carries that exact
+# arch; MirTargetContext normalizes them to "arm" today (plan risk item).
+fn _mcs_arch_match(wanted: text, target: MirTargetContext) -> bool:
+    wanted == _pp_arch_name(target.arch) or wanted == target.arch
 
 fn _mcs_atom(token: text, target: MirTargetContext, features: [text]) -> MirCfgStep:
     val t = cfg_strip_quotes(token).trim()
     val lowered = t.lower()
     if lowered == "true": return MirCfgStep(value: true, pos: 0, ok: true)
     if lowered == "false": return MirCfgStep(value: false, pos: 0, ok: true)
-    val arch = _mcs_arch_name(t)
-    if arch != "": return MirCfgStep(value: arch == target.arch, pos: 0, ok: true)
-    if cfg_normalize_os(t) != "" and not t.contains("="):
-        return MirCfgStep(value: _mcs_os_match(t, target), pos: 0, ok: true)
+    if _pp_os_name(t) != "": return MirCfgStep(value: _mcs_os_match(_pp_os_name(t), target), pos: 0, ok: true)
+    if _pp_arch_name(t) != "": return MirCfgStep(value: _mcs_arch_match(_pp_arch_name(t), target), pos: 0, ok: true)
     val parts = if t.contains("=="): t.split("==") else: t.split("=")
     if parts.len() == 2:
         val key = cfg_strip_quotes(parts[0]).trim()
         val value = cfg_strip_quotes(parts[1]).trim()
         if key == "os" or key == "platform" or key == "target_os":
-            return MirCfgStep(value: _mcs_os_match(value, target), pos: 0, ok: true)
+            val wanted_os = _pp_os_name(value)
+            if wanted_os != "": return MirCfgStep(value: _mcs_os_match(wanted_os, target), pos: 0, ok: true)
         if key == "family" or key == "target_family":
             val fam = value.lower()
             if fam == "unix": return MirCfgStep(value: cfg_os_is_unix(target.os), pos: 0, ok: true)
             if fam == "windows": return MirCfgStep(value: target.os == "windows", pos: 0, ok: true)
         if key == "arch" or key == "target_arch" or key == "cpu":
-            val wanted = _mcs_arch_name(value)
-            if wanted != "": return MirCfgStep(value: wanted == target.arch, pos: 0, ok: true)
+            val wanted = _pp_arch_name(value)
+            if wanted != "": return MirCfgStep(value: _mcs_arch_match(wanted, target), pos: 0, ok: true)
+        # `features` = the TargetSpec's enabled feature tags (build features
+        # and cpu features), compared case-insensitively.
         if key == "feature" or key == "target_feature":
-            return MirCfgStep(value: features.contains(value), pos: 0, ok: true)
+            val want = value.lower()
+            for f in features:
+                if f.lower() == want: return MirCfgStep(value: true, pos: 0, ok: true)
+            return MirCfgStep(value: false, pos: 0, ok: true)
     # Unknown atoms are an error, never a silent false.
     MirCfgStep(value: false, pos: 0, ok: false)
 

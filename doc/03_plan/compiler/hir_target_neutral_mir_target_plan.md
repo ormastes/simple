@@ -45,6 +45,7 @@ identity lives in MIR/object cache keys only.
 - Pointer width / ABI sizes used by HIR typing and const-eval (`size_of`, struct layout asserts in `_TypeLayout/c_assert_gen.spl`).
 - Name resolution across arms: two arms may declare the same symbol with different signatures; typecheck each arm, require compatible signatures for neutral callers.
 - Arms referencing target-only imports must typecheck lazily (unresolved import inside a non-selected arm is not an error).
+- Selector gaps: `debug/release/compiled/interpreter` atoms need a TargetSpec options field (return -2 today); `MirTargetContext` folds thumbv*/armv* to `arm`, so sub-arch atoms need an exact arch field.
 - Cache transition: until step 3 lands, the HIR key is target-blind over target-stripped input (pre-existing hazard).
 
 ## Cross-target spec
