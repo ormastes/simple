@@ -43,10 +43,11 @@ use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
-    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1,
+    SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
     shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1}
 use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
 use app.io.sysinfo_ops.{process_peak_rss_kb, cpu_count}
@@ -59,7 +60,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_V1, NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, native_file_worker_pool_request_v1,
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
-    NativeFileWorkerReceiptV1, native_file_workers_selected_v1, native_file_worker_spec_from_args_v1,
+    NativeFileWorkerReceiptV1, native_bootstrap_stage3_per_file_selected_v1, native_file_worker_spec_from_args_v1,
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
@@ -653,6 +654,13 @@ fn native_build_last_diagnostic_line(output: text) -> text:
 # the real build parses them itself, exactly as it would have without
 # sharding. Sharding is a pure optimisation and must never be able to turn a
 # working build into a broken one.
+# Any shard/unit child (parse, HIR or MIR role) is one process and never fans
+# out parse shards. Checking only SIMPLE_PARSE_SHARD let every HIR/MIR unit
+# child spawn its own parse shards (phase 3: 21 workers each "[shard]
+# threads=14", 69.5 GB tree, 0 objects).
+pub fn native_build_shard_child_env_v1(parse: text, hir: text, mir: text) -> bool:
+    parse != "" or hir != "" or mir != ""
+
 fn native_build_parse_shard_count(args: [text]) -> i64:
     # Shard children do not install collection feedback. Their unprofiled
     # parser cache is bypassed by the real profiled build, so warming it wastes
@@ -660,7 +668,8 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
     for arg in args:
         if arg == "--collection-profile" or arg.starts_with("--collection-profile="):
             return 0
-    if (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
+    if native_build_shard_child_env_v1(env_get("SIMPLE_PARSE_SHARD") ?? "",
+            env_get("SIMPLE_HIR_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD") ?? ""):
         return 0      # already a shard child; never recurse
     if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
         return 0      # nothing to warm
@@ -852,7 +861,8 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
 # A failed shard preserves completed cache entries but fails the build. Only
 # unfinished modules are visited by replacement workers; linking needs PASS.
 fn native_build_hir_shard_count(args: [text]) -> i64:
-    if (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
+    if native_build_shard_child_env_v1(env_get("SIMPLE_PARSE_SHARD") ?? "",
+            env_get("SIMPLE_HIR_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD") ?? ""):
         return 0      # already a shard child; never recurse
     if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
         return 0      # nothing to fill
@@ -962,7 +972,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val producer_key = if producer == "": "unknown" else: producer
     val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
     val old_dataset_cap = env_get("SIMPLE_GLOBAL_DATASET_MAX_BYTES") ?? ""
-    val static_kib = if label == "mir-shard": shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000) else: shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
+    val static_kib = if label == "mir-shard": shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1) else: shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1)
     val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
     var observed_peak_kib: i64 = 0
     # Commit is measured from the registered host headroom probe only (works
@@ -1168,7 +1178,7 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
             (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
         eprint "[mir-shard] disabled: output format re-reads MIR set"
         return 0
-    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
     if requested > 0: requested else: 1
 
 fn native_build_mir_selective_parallel_v1(args: [text]) -> i64:
@@ -1330,16 +1340,16 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         print "[capsule-shard] parse shards={parse_count}"
         run_parse_shards_with_base(base, parse_count, simple_bin, timeout_ms)
     # The opt-in per-file worker pool (explicit SIMPLE_FILE_WORKERS=1)
-    # replaces the HIR pass + MIR pass below with one claim-loop pool;
-    # "skip" = not admitted, continue with the two-pass path.
-    if allow_mir and native_file_workers_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1) and
+    # replaces the HIR pass + MIR pass below with one claim-loop pool. A refused
+    # pool returns "fail" (error on stderr); it never continues to the two-pass path.
+    if allow_mir and native_bootstrap_stage3_per_file_selected_v1(env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+            env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "") and
             (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
         val file_result = run_file_worker_pool_v1(base, args, simple_bin, timeout_ms)
-        if file_result != "skip":
-            env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
-            env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
-            env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
-            return file_result
+        env_set("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
+        env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
+        env_set("SIMPLE_BUILD_PROGRESS_EVENTS", old_progress_events)
+        return file_result
     var hir_ok = true
     val hir_count = if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
             env_get("SIMPLE_HIR_SHARDING") ?? "") == 1: native_build_hir_shard_count(args) else: 0
@@ -1358,7 +1368,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0" and (env_get("SIMPLE_MIR_SELECTIVE") ?? "") != "1":
-        val parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+        val parallel = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
         if parallel > 1:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
             if mir_queue != "":
@@ -1386,8 +1396,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
 # Coordinator side: one pool of `--file-worker=i/n` processes over a fresh HIR
 # ledger and a fresh MIR ledger, admitted by the same memory caps as the two
 # passes it replaces (HIR count, MIR per-worker budget; the smaller wins).
-# Returns the MIR ledger to link from, "fail", "" (in-process fallback) or
-# "skip" (pool not admitted; caller runs the two-pass path).
+# Returns the MIR ledger to link from, "fail" (including a refused pool), or ""
+# (no verdict; the per-file route refuses it in bootstrap_main).
 fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout_ms: i64) -> text:
     # Admission-only argv: an unrequested thread count defaults to the host CPU
     # count (native_file_worker_pool_request_v1). Children keep the original argv.
@@ -1397,18 +1407,28 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if requested <= 0 and pool_request > 1:
         admit_args = admit_args.push("--threads={pool_request}")
     val hir_count = native_build_hir_shard_count(admit_args)
-    val mir_parallel = native_build_shard_threads(admit_args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", 16000000))
+    val mir_parallel = native_build_shard_threads(admit_args, shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1))
     val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
-    if parallel <= 1:
-        eprint "[file-worker] not admitted hir_count={hir_count} mir_parallel={mir_parallel}; two-pass path"
-        return "skip"
+    val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
+        elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
+        else: ""
+    # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
+    val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, shard_mem_available_kb(),
+        shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", SHARD_HIR_WORKER_KB_V1),
+        shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", SHARD_MIR_WORKER_KB_V1),
+        native_build_requested_shard_threads(admit_args), hir_disabled_by)
+    if refusal != "":
+        eprint refusal
+        return "fail"
     val hir_queue = shard_ledger_queue_dir(args, "queue", "hir-shard")
     val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if hir_queue == "" or mir_queue == "":
-        return "skip"
+        eprint "error: per-file worker pool ledger directory unavailable; no fallback"
+        return "fail"
     val old_hir_queue = env_get(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1) ?? ""
     if not env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, hir_queue):
-        return "skip"
+        eprint "error: per-file worker pool could not publish the HIR queue; no fallback"
+        return "fail"
     print "[file-worker] workers={parallel} hir_ledger={hir_queue} mir_ledger={mir_queue}"
     # P-E incremental: reuse cached objects for modules the planner keeps.
     val inc_output = output_path_arg(args)
@@ -1466,8 +1486,8 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if outcome == "fail":
         eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"
         return "fail"
-    eprint "[file-worker] no MIR module verdict; falling back to in-process build"
-    ""
+    eprint "[file-worker] no MIR module verdict; per-file pool selected, no in-process fallback"
+    "fail"
 
 # P-G6/P-G7: after every module object exists (no barrier before the first
 # one), plan the needed generic instances from the fresh TLDR lists and run

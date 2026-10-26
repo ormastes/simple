@@ -9,7 +9,10 @@ use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_pointer_content_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
     compile_source_inventory_revalidate_verified_pointer_v1,
-    compile_source_inventory_event_path_v1}
+    compile_source_inventory_event_path_v1, compile_source_inventory_read_at_pointer_v1,
+    compile_source_inventory_filesystem_event_v1, CompileSourceInventoryEntryV1,
+    COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io.file_ops.{
     file_atomic_write, file_delete, file_is_regular_no_follow, file_size,
@@ -998,6 +1001,107 @@ fn compiler_inventory_refresh_cost_v1(
     compiler_inventory_refresh_traced_cost_v1(root, cache_root, source_roots, cold_init,
         env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? "", cost)
 
+# True when this checkout ever committed an inventory pointer or a legacy
+# cursor. Only a checkout with neither may be auto cold-initialized; a present
+# but invalid cursor stays a fail-closed refresh error.
+fn compiler_inventory_cursor_present_v1(cache_root: text) -> bool:
+    # Raw presence, not the bounded reader: an oversized, empty or linked
+    # CURRENT must stay a fail-closed refresh error, never be replaced.
+    val pointer = cache_root + "/source-inventory/CURRENT"
+    val cursor = compiler_inventory_cursor_path_v1(cache_root)
+    file_exists(pointer) or file_is_regular_no_follow(pointer) or
+        file_exists(cursor) or file_is_regular_no_follow(cursor)
+
+fn _compiler_inventory_extra_root_any_seen_v1(seen: Dict<text, bool>, extra: text) -> bool:
+    for identity in seen.keys():
+        if identity == extra or identity.starts_with(extra + "/"): return true
+    false
+
+fn _compiler_inventory_extra_root_owns_v1(extra_roots: [text], identity: text) -> bool:
+    for extra in extra_roots:
+        if identity == extra or identity.starts_with(extra + "/"): return true
+    false
+
+# SCV auto-add + commit for selectors outside the closed event families (an
+# entry such as build/hw/hello.spl). Under the refresh lock, re-derive their
+# rows from the filesystem and publish one generation that keeps the current
+# event cursor, so later family refreshes stay warm. Unchanged rows publish
+# nothing. A source mutated after this commit is refused by the snapshot
+# (snapshot-index-drift): freezing remains fail-closed.
+fn compiler_inventory_admit_extra_roots_v1(
+    root: text, cache_root: text, extra_roots: [text]
+) -> CompilerInventoryRefreshV1:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return compiler_inventory_invalid_v1("inventory-cache-root-invalid")
+    val event_root = compiler_inventory_event_root_v1(cache_root)
+    if not dir_create(event_root, true):
+        return compiler_inventory_invalid_v1("compile-event-refresh-lock-directory-failed")
+    val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
+    if refresh_lock < 0:
+        return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
+    val result = _compiler_inventory_admit_extra_roots_locked_v1(root, cache_root, extra_roots)
+    if not file_unlock(refresh_lock):
+        return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
+    result
+
+fn _compiler_inventory_admit_extra_roots_locked_v1(
+    root: text, cache_root: text, extra_roots: [text]
+) -> CompilerInventoryRefreshV1:
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
+    if not cursor.valid:
+        return compiler_inventory_invalid_v1("extra-root-admission-cursor-invalid")
+    val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
+    if not current.valid or current.inventory == nil or
+            current.digest != cursor.inventory_digest:
+        return compiler_inventory_invalid_v1("extra-root-admission-binding-mismatch")
+    var admitted: Dict<text, CompileSourceInventoryEntryV1> = {}
+    for entry in current.inventory!.entries:
+        if _compiler_inventory_extra_root_owns_v1(extra_roots, entry.source_identity):
+            admitted[entry.source_identity] = entry
+    var events: [CompileSourceEventV1] = []
+    var seen: Dict<text, bool> = {}
+    for extra in extra_roots:
+        val base = root + "/" + extra
+        val paths = if file_is_regular_no_follow(base): [base] else: dir_walk(base)
+        var contributed = 0
+        for path in paths:
+            val identity = compile_source_inventory_event_path_v1(root, path)
+            if seen.has(identity) or not compile_source_inventory_path_valid_v1(identity) or
+                    not _compiler_inventory_extra_root_owns_v1(extra_roots, identity):
+                continue
+            seen[identity] = true
+            contributed = contributed + 1
+            val content = match file_read_regular_no_follow_bounded(
+                    path, COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1):
+                case Ok(value): value
+                case Err(_): return compiler_inventory_invalid_v1("extra-root-read-failed:{identity}")
+            val event = compile_source_inventory_filesystem_event_v1(
+                if admitted.has(identity): "modify" else: "create", identity, content)
+            if admitted.has(identity):
+                val old = admitted[identity]
+                if old.content_digest == event.content_digest and old.byte_count == event.byte_count:
+                    continue
+            events.push(event)
+        if contributed == 0 and not _compiler_inventory_extra_root_any_seen_v1(seen, extra):
+            return compiler_inventory_invalid_v1("extra-root-admitted-nothing:{extra}")
+    for identity in admitted.keys():
+        if not seen.has(identity):
+            events.push(compile_source_inventory_filesystem_event_v1("delete", identity, ""))
+    if events.len() == 0:
+        return CompilerInventoryRefreshV1(
+            true, "ok", cursor.inventory_digest, cursor.inventory_generation)
+    val inventory = compile_source_inventory_apply_observed_events_v1(
+        root, cache_root, events, [], cursor.git_head, cursor.filesystem_rows,
+        cursor.filesystem_digest, sha256_text(pointer_content), false,
+        cursor.untracked_src_digest, cursor.untracked_test_digest,
+        cursor.untracked_membership_digest, cursor.untracked_examples_tooling_digest)
+    if not inventory.valid:
+        return compiler_inventory_invalid_v1("extra-root-admission-apply:" + inventory.reason)
+    CompilerInventoryRefreshV1(
+        true, "ok", inventory.digest, inventory.inventory!.generation)
+
+export compiler_inventory_cursor_present_v1, compiler_inventory_admit_extra_roots_v1
 export compiler_inventory_refresh_traced_v1
 export compiler_inventory_refresh_traced_cost_v1
 export CompilerInventoryRefreshV1

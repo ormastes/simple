@@ -1,0 +1,25 @@
+# Per-file worker pool fail-closed refusal. Pure so a spec can drive it.
+# "" = admitted (>= 2 workers fit); otherwise the stderr error text naming the
+# cause: HIR sharding disabled (hir_disabled_by names the switch), a single
+# requested worker (threads <= 1), or memory (usable memory is 60% of free, so
+# 2 workers need 2 * budget / 0.6 free).
+pub fn file_worker_pool_refusal_v1(hir_count: i64, mir_parallel: i64, avail_kb: i64,
+        hir_budget_kb: i64, mir_budget_kb: i64, threads: i64 = 2, hir_disabled_by: text = "") -> text:
+    val parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
+    if parallel > 1:
+        return ""
+    val budget = if hir_budget_kb > mir_budget_kb: hir_budget_kb else: mir_budget_kb
+    val needed_kb = (budget * 2 * 10 + 5) / 6
+    var causes: [text] = []
+    if hir_count < 2 and hir_disabled_by != "":
+        causes = causes.push("HIR sharding is disabled by {hir_disabled_by}")
+    if threads <= 1:
+        causes = causes.push("only {threads} worker was requested (--threads / SIMPLE_NATIVE_BUILD_THREADS)")
+    var memory_note = ""
+    if causes.len() == 0:
+        causes = causes.push("not enough free memory for 2 workers")
+        memory_note = " Free memory={avail_kb} kB, per-worker budget={budget} kB (HIR {hir_budget_kb} kB, MIR {mir_budget_kb} kB), need >= {needed_kb} kB free. Override the budgets with SIMPLE_MIR_SHARD_WORKER_KB / SIMPLE_HIR_SHARD_WORKER_KB."
+    var cause_text = ""
+    for c in causes:
+        cause_text = if cause_text == "": c else: "{cause_text}; {c}"
+    "error: per-file worker pool refused (hir_workers={hir_count} mir_workers={mir_parallel}, need >= 2): {cause_text}.{memory_note} No fallback to the two-pass or in-process whole-program build; set SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 for the explicit single-process build."
