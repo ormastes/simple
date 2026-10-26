@@ -417,6 +417,27 @@ fn compile_source_inventory_read_text_v1(path: text) -> text?:
         return nil
     rt_file_read_regular_no_follow_bounded(path, size)
 
+# @workaround bug=native_raw_integer_optional_presence_2026_10_26
+# OPEN: doc/08_tracking/bug/native_inventory_decimal_optional_2026_10_26.md
+# The retained native to_i64 provider returns a raw i64, while ?? tests Option
+# presence (including reserved small words). Parse the wire grammar directly;
+# an explicit validity bit keeps every nonnegative i64 distinct from failure.
+fn compile_source_inventory_decimal_v1(value: text) -> (bool, i64):
+    if value == "" or (value.len() > 1 and value.byte_at(0) == 48):
+        return (false, 0)
+    var result: i64 = 0
+    var index = 0
+    while index < value.len():
+        val code = value.byte_at(index)
+        if code < 48 or code > 57: return (false, 0)
+        val digit = code - 48
+        if result > 922337203685477580 or
+                (result == 922337203685477580 and digit > 7):
+            return (false, 0)
+        result = result * 10 + digit
+        index = index + 1
+    (true, result)
+
 fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
     compile_source_inventory_decode_content_v1(content, "")
 
@@ -431,9 +452,9 @@ fn compile_source_inventory_decode_content_v1(
             not lines[1].starts_with("generation=") or
             not lines[2].starts_with("count="):
         return CompileSourceInventoryReadV1(false, "inventory-header-invalid", "", nil)
-    val generation = lines[1].substring(11).to_i64() ?? -1
-    val count = lines[2].substring(6).to_i64() ?? -1
-    if generation < 0 or count < 0 or lines.len() != count + 3:
+    val (generation_valid, generation) = compile_source_inventory_decimal_v1(lines[1].substring(11))
+    val (count_valid, count) = compile_source_inventory_decimal_v1(lines[2].substring(6))
+    if not generation_valid or not count_valid or count != lines.len() - 3:
         return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
     var entries: [CompileSourceInventoryEntryV1] = []
     var index = 3
@@ -441,9 +462,11 @@ fn compile_source_inventory_decode_content_v1(
         val fields = lines[index].split("|")
         if fields.len() != 7:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
+        val (size_valid, size) = compile_source_inventory_decimal_v1(fields[6])
+        if not size_valid:
+            return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
         entries = entries.push(CompileSourceInventoryEntryV1(
-            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
-            fields[6].to_i64() ?? -1))
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size))
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, entries)
     if compile_source_inventory_encode_v1(inventory) != content:
