@@ -254,3 +254,38 @@ links and executes3 actual assertions. This is stronger boundary evidence,
 not a root-cause proof or general SSpec PASS. Six shared compiler/runner
 diagnostic attempts are now accounted. Stop this repair/build loop pending an
 explicit extension; preserve the failed and passing inputs without green reruns.
+
+## Astra-guided completion pass
+
+User explicitly requested Astra guidance/review and renewed feature completion
+with Phase2, followed by GitHub landing. Four disjoint owners resumed under a
+bounded three-cycle extension, with root scheduling compiler/cache access and
+Astra reviewing actual diffs. Original failures and passing evidence remain.
+
+Shared cycle1 traced the original fixture: native139 after module MIR complete.
+Cycle2 authenticated alternate pure-Simple Phase2 SHA17d1a40abc390c08c05cec3ba13db41eb12ee5709126c6636fe974f753f7e5ac
+and matching runtime; fresh Hello compile/run passed, original Result fixture
+still crashed139. Cycle3 captured a native nullread under LLDB. The debugger
+itself exited0, which is NOT compiler success; no executable was emitted.
+Initial debugger launch failed before compiler execution on missing python310
+DLL; using the already-installed matching Python resolved that setup failure.
+All receipts/logs are retained under build/tooling-phase2/astra-alt/.
+
+Static PE mapping identifies fault RVA0x6fae60 in alternate17d as
+mir_verify_type_unresolved_reason, dereferencing absent MirType before kind
+matching. This replaces the earlier speculative diagnostic-iteration theory.
+An actual verifier-owner repair with mandatory error admission is in review;
+current source edits cannot repair either immutable old compiler executable.
+No new compiler qualification or canonical SSpec PASS is claimed.
+
+Markdown extension cycle1 compiled/linked the reviewed parsed-code guards and
+passed exact native fenced hover=null, definition=null, action=[], outside
+heading hover positive, complete correlated frames and exit0. Evidence:
+astra-markdown/code-guards/ and sibling stdout/stderr captures. Seven authored
+stdio SSpecs remain unrun; they use the existing native process/spec framework.
+
+CMM owner consolidated duplicate parser methods under explicit strict/tolerant
+recovery policy after Astra reviewed the differing bodies. Native production
+probe is running (session37004, astra-cmm/probe-run). Historical system suites
+with local fake parsers are being replaced with production-owner assertions;
+their previous pass claims are not accepted as feature evidence.
