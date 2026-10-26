@@ -2,6 +2,7 @@
 # parsed source surfaces, registration publication, and frozen source replay.
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_hir_archive_schedule_owner_v1.*
+use compiler.driver.cache.driver_hir_archive_schedule_v1.{DriverHirArchiveScheduleV1}
 use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
 use compiler.driver.driver_hir_pipeline_lowering.*
 use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
@@ -402,6 +403,48 @@ fn semantic_prerequisite_controls(driver: CompilerDriver, boundary: DriverHirArc
     checks = checks + 1
     Ok(checks)
 
+# Exercise production input admission with the genuinely published owners.
+# Every mutation is restored before the next independent negative control.
+fn source_binding_controls(driver: CompilerDriver) -> Result<i64, text>:
+    val actual = driver_hir_weave_inputs_v1(driver)?
+    val journal = actual.journal
+    val schedule = actual.schedule
+    val policy = actual.policy
+    if journal.source_binding == schedule.source_binding or
+            policy.source_binding != schedule.source_binding:
+        return Err("fixture source digest domains or policy owner differ")
+    val journal_source = journal.source_binding
+    journal.source_binding = sha256_text("tampered actual journal source binding")
+    val journal_refused = driver_hir_weave_inputs_v1(driver).is_err()
+    journal.source_binding = journal_source
+    if not journal_refused or driver_hir_weave_inputs_v1(driver).is_err():
+        return Err("fixture journal source tamper accepted or restore failed")
+    driver.hir_archive_schedule = Some(DriverHirArchiveScheduleV1(..schedule,
+        source_binding: sha256_text("tampered actual schedule source binding")))
+    val schedule_refused = driver_hir_weave_inputs_v1(driver).is_err()
+    driver.hir_archive_schedule = Some(schedule)
+    if not schedule_refused or driver_hir_weave_inputs_v1(driver).is_err():
+        return Err("fixture schedule source tamper accepted or restore failed")
+    driver.hir_archive_post_validation_policy = Some(DriverHirPostValidationPolicyOwnerV1(..policy,
+        source_binding: sha256_text("tampered policy schedule source binding")))
+    val policy_refused = driver_hir_weave_inputs_v1(driver).is_err()
+    driver.hir_archive_post_validation_policy = Some(policy)
+    if not policy_refused or driver_hir_weave_inputs_v1(driver).is_err():
+        return Err("fixture policy source tamper accepted or restore failed")
+    driver.hir_archive_post_validation_policy = Some(DriverHirPostValidationPolicyOwnerV1(..policy,
+        journal_key: sha256_text("tampered policy journal key")))
+    val key_refused = driver_hir_weave_inputs_v1(driver).is_err()
+    driver.hir_archive_post_validation_policy = Some(policy)
+    if not key_refused or driver_hir_weave_inputs_v1(driver).is_err():
+        return Err("fixture journal predecessor tamper accepted or restore failed")
+    driver.hir_archive_post_validation_policy = Some(DriverHirPostValidationPolicyOwnerV1(..policy,
+        schedule_digest: sha256_text("tampered policy schedule digest")))
+    val digest_refused = driver_hir_weave_inputs_v1(driver).is_err()
+    driver.hir_archive_post_validation_policy = Some(policy)
+    if not digest_refused or driver_hir_weave_inputs_v1(driver).is_err():
+        return Err("fixture schedule predecessor tamper accepted or restore failed")
+    Ok(6)
+
 fn main() -> i64:
     val selected_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
         env_get("SIMPLE_NATIVE_BUILD_TARGET"), env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE"))
@@ -476,6 +519,11 @@ fn main() -> i64:
     if granted.is_err(): return 38
     rt_bound_manifest_replace([granted.unwrap()])
     if driver.capture_hir_archive_post_validation_policy_v1().is_err(): return 12
+    val binding_controls = source_binding_controls(driver)
+    if binding_controls.is_err():
+        print "weave source binding controls failed: {binding_controls.unwrap_err()}"
+        return 54
+    if binding_controls.unwrap() != 6: return 55
     val captured = driver_hir_archive_weave_boundary_capture_v1(driver)
     if captured.is_err():
         print "weave capture failed: {captured.unwrap_err()}"
@@ -603,5 +651,7 @@ fn main() -> i64:
     if semantics.unwrap() != 8: return 52
     checks = checks + semantics.unwrap()
     if checks != 49: return 53
+    checks = checks + binding_controls.unwrap()
+    if checks != 55: return 56
     print "HIR archive weave boundary: {checks} checks passed"
     0
