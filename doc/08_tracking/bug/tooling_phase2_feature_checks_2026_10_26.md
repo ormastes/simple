@@ -244,3 +244,13 @@ t32-session-facades/. Source migration is reviewed but runtime UNVERIFIED;
 do not merge it merely because the guard is green. The same underlying compiler
 boundary blocks MCP/LSP and these leaf consumers. Retain their independent
 failure rows rather than repeating the unchanged shared failure.
+
+## Shared payload crash reduced to one module
+
+See phase2_result_payload_native_crash_2026_10_26.md and the paired canonical
+fixtures under test/fixtures/compiler/phase2_result_byte_codec/. The Result
+composition crashes before object generation; direct payload control compiles,
+links and executes3 actual assertions. This is stronger boundary evidence,
+not a root-cause proof or general SSpec PASS. Six shared compiler/runner
+diagnostic attempts are now accounted. Stop this repair/build loop pending an
+explicit extension; preserve the failed and passing inputs without green reruns.
