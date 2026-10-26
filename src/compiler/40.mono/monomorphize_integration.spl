@@ -294,6 +294,10 @@ class MonomorphizationPass:
     # rewritten, and an unresolvable generic call there is E-MONO-040.
     module_scoped_v1: bool = false
     module_scoped_target_v1: text = ""
+    # Derived lookup index only; never serialized into archive facts. Values
+    # remain in named_symbol_names so same-key updates cannot stale the index.
+    named_symbol_suffix_index: Dict<text, [text]> = {}
+    named_symbol_index_count: i64 = -1
 
 pub struct MonoInvocationOutputV1:
     modules: Dict<text, HirModule>
@@ -342,6 +346,8 @@ impl MonomorphizationPass:
             named_types: {},
             named_ambiguous: {},
             named_symbol_names: {},
+            named_symbol_suffix_index: {},
+            named_symbol_index_count: -1,
             field_types: {},
             field_owner_modules: {},
             enum_payload_types: {},
@@ -2052,13 +2058,29 @@ impl MonomorphizationPass:
         val k = mono_sym_key(module_name, sym.id)
         if self.named_symbol_names.has(k):
             return self.named_symbol_names[k]
+        # Collection/archive scratch loading can fill the authoritative map
+        # directly. Build on the first fallback, and after key-count growth.
+        # Whole-map replacement must reset named_symbol_index_count (the archive
+        # scratch owner does so). No owned writer deletes/replaces keys in place.
+        if self.named_symbol_index_count != self.named_symbol_names.len():
+            var suffix_index: Dict<text, [text]> = {}
+            for key in self.named_symbol_names.keys():
+                val kt: text = key
+                val separator = kt.rfind("#")
+                if separator < 0: continue
+                val key_suffix = kt.substring(separator)
+                var bucket: [text] = suffix_index[key_suffix] ?? []
+                bucket.push(kt)
+                suffix_index[key_suffix] = bucket
+            self.named_symbol_suffix_index = suffix_index
+            self.named_symbol_index_count = self.named_symbol_names.len()
         val suffix = "#{sym.id}"
+        val candidates: [text] = self.named_symbol_suffix_index[suffix] ?? []
         var found = ""
         var distinct = 0
-        for key in self.named_symbol_names.keys():
-            val kt: text = key
-            if not kt.ends_with(suffix):
-                continue
+        # Each bucket keeps the authoritative dictionary's traversal order,
+        # including the legacy empty-name behavior. Do not sort or deduplicate.
+        for kt in candidates:
             val n: text = self.named_symbol_names[kt]
             if n != found:
                 distinct = distinct + 1
