@@ -11,3 +11,4 @@ Plan: `doc/03_plan/test/language_primitive_mdsoc_visibility_test_plan.md`.
 - REQ-MDSOC-MEMBER-VIS-001: member visibility enforcement works correctly in HIR lowering.
 - REQ-LSP-MATRIX-002: lsp_visibility derives the same repo-relative module/feature ids for an absolute (Windows) path as for the repo-relative path.
 - REQ-LSP-FORWARD-001: lsp_hover and lsp_definition on a forwarded member (`recv.x` -> field, get_x, is_x, method x; `recv.x = v` -> field, set_x; `recv.m()` via `alias Trait = field` -> the field type's method) resolve to the forwarding target; real fields and explicit outer methods win.
+- REQ-LSP-UTF8-001: simple-lsp-mcp JSON scanners and argument/diagnostic parsers use one index unit per scan (char or byte, never mixed), so non-ASCII paths and argument values round-trip exactly and scans stay linear in the char count.

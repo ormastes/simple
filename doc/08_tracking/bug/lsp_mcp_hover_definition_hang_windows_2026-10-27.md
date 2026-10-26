@@ -23,3 +23,15 @@
 - lsp_visibility, symbols, diagnostics and saml_analyze still wrap a timeout inside a success result.
 - origin/main has the same infinite loop (json_helpers.spl:332) and needs this fix forward-ported.
 - lsp_command_bounded_spec has 2 failures that already exist at base 1.0.0 (stale source-text oracles: json_helpers still contains `process_run(binary, args)`, and the SIMPLE_LIB repo_bin lookup is gone). They are not caused by this PR.
+
+## Resolution: byte/char index mixing (REQ-LSP-UTF8-001, 2026-10-27)
+
+Fixed in `src/app/simple_lsp_mcp/json_helpers.spl` and `tools.spl`: the JSON
+scanners (`_find_json_value_start`, `extract_field`, `extract_id`) and
+`arg_field` / `arg_int_field` now bound char-indexed `_char_at`/`_slice_text`
+loops by a char count (`_char_len`) instead of byte `len()`; `arg_field` and the
+`path:line:col:` diagnostic parser slice with `_slice_text` instead of
+byte-indexed `substring`. Red (4/7 failed: path truncated to `module.s`)
+-> green (7/7) in `test/01_unit/app/simple_lsp_mcp/lsp_non_ascii_paths_spec.spl`.
+Left over: `_char_at` is O(i), so scans remain O(n^2) in char count (no longer
+inflated by multibyte bytes); a single-pass char-array scanner would fix it.
