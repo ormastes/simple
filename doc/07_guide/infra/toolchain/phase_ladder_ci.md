@@ -39,6 +39,44 @@ Two workflows implement the first slice of
 A lane that fails one rung is retried by the next rung from the same input.
 Other lanes keep climbing.
 
+### Release producer selection
+
+For release qualification, choose the highest phase whose **actual compiler
+binary** has a known-success receipt for that platform, then choose the most
+recent qualifying producer within that phase. Bind the receipt to the binary
+digest, source revision/digest, toolchain/runtime identity and digest, and the
+exact Hello source/build/output evidence: compile succeeded, the emitted executable
+ran with exit status 0, and produced the expected output. The `PHASE` file,
+directory name, version banner, or resolver's Hello smoke by itself is not a
+release producer receipt.
+
+Skip lower phases already proven for the required release contract. If a
+verified Phase 3 candidate exists, use that exact immutable binary to produce
+Phase 3 (P3 -> P3), then build the Phase 4 full CLI from that output and run
+the required tests.
+A missing or incompatible candidate permits only an explicit, bounded fallback
+to the next known-success candidate that supports the task; record why the
+fallback was needed. Do not rebuild lower phases solely because the default
+pipeline starts from the Rust seed, and do not fall through to the seed
+implicitly. Keep each producer frozen and its outputs/cache private. Use the
+normal cache policy and the release build's LLVM/LLD configuration with 24
+build jobs for P3 -> P3 and Phase 4 native builds. Use any receipt-bound stage
+resume command unchanged when it pins its own worker count. This is a selection
+policy, not a claim that a Phase 3 candidate is currently admitted.
+
+The existing `config/bootstrap.sdn` keys (`compiler: auto` and
+`compiler_release: latest`) remain the selector inputs. The resolver's
+`auto` ordering is a candidate-discovery convenience; its smoke result does not
+replace the stronger release evidence above or add another configuration
+layer. See the [release qualification guide](../release_full_bootstrap.md).
+
+For a prerelease or beta, platform qualification may be partial only when at
+least one platform binary is genuinely qualified and every missing or failed
+platform is explicitly reported. Zero qualified artifacts, or any security or
+artifact-integrity failure, cannot be reported as PASS. Stable releases retain
+the complete required platform and release gates. This qualification policy
+does not define tag triggers or infer which workflow a tag invokes.
+
 ### Publishing moves the default compiler
 
 The `publish` job packages each lane's highest phase with

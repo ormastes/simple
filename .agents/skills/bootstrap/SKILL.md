@@ -5,6 +5,10 @@ description: Build and advance Simple compiler generations across LLVM or Cranel
 
 # Bootstrap
 
+For release compiler selection, apply the
+[phase ladder producer-selection policy](../../../doc/07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+before starting or resuming a phase build.
+
 Read the [bootstrap rules](../../../.claude/rules/bootstrap.md) and the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md).
 Use [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md)

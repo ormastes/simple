@@ -184,8 +184,18 @@ Miscompile catalog: [Stage 2 native miscompile classes](../../../07_guide/compil
   below it, not above.
 - Stage 3 built from `bootstrap_main.spl` is the bootstrap CLI only
   (`compile`/`native-build`). A release needs a full-CLI Phase 3 link.
-- User policy: release goes Phase 3 -> Phase 3 (the working Phase 3 compiler
-  rebuilds itself and picks up the compiler-side fixes); no full bootstrap.
+- Release producer selection follows the
+  [phase ladder policy](../../../07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection):
+  use the highest known-success actual phase binary, skip already-proven lower
+  phases, and use the exact Phase 3 compiler to rebuild Phase 3 (P3 -> P3) when
+  it qualifies. Then build the Phase 4 full CLI and run its required tests.
+  Bind evidence to producer/source/tool/runtime digests and Hello compile plus
+  output execution receipts; phase labels and banners are insufficient. Keep
+  producers immutable, use private outputs/cache with default cache behavior,
+  LLVM/LLD and 24 build jobs for P3 -> P3 and Phase 4 native builds; preserve
+  worker limits in receipt-bound stage resumes. See the release qualification
+  guide for bounded explicit fallback and partial prerelease/beta platform
+  qualification.
 - With < 30 go-to-end failures, compile the missing modules by hand and link
   with trap stubs; the in-process bypass (positional `native-build`, no
   `--entry`/`--source`) skips the worker child.
