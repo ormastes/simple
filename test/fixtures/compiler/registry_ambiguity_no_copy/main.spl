@@ -1,0 +1,111 @@
+use compiler.hir.hir_types.{HirType}
+use compiler.mir.mir_data.{bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup, bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup}
+use compiler.mir.mir_data.{bootstrap_fn_registries_promote, bootstrap_fn_registries_last_promote_roots_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+fn check_scoped_ambiguity() -> i64:
+    if not transient_scope_begin(): return 20
+    for index in 0..64:
+        val name = "registry.native.scoped.{index}"
+        val scalar = HirType.named("i32")
+        bootstrap_fn_ret_hir_type_register(name, scalar)
+        bootstrap_fn_param_hir_types_register(name, [scalar])
+    # A duplicate in the insertion scope must keep its original delta roots.
+    bootstrap_fn_ret_hir_type_register("registry.native.scoped.1", HirType.named("i64"))
+    bootstrap_fn_param_hir_types_register("registry.native.scoped.1", [HirType.named("i64")])
+    val first_paused = transient_scope_pause()
+    val first_promoted = if first_paused: bootstrap_fn_registries_promote() else: false
+    val first_ended = transient_scope_end()
+    if not first_paused or not first_promoted or not first_ended: return 21
+    if not transient_scope_begin(): return 22
+    val index = 0
+    val conflict = "registry.native.scoped.{index}"
+    bootstrap_fn_ret_hir_type_register(conflict, HirType.named("i64"))
+    bootstrap_fn_param_hir_types_register(conflict, [HirType.named("i64")])
+    val paused = transient_scope_pause()
+    val promoted = if paused: bootstrap_fn_registries_promote() else: false
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: return 23
+    val ambiguity_roots = bootstrap_fn_registries_last_promote_roots_v1()
+    print("scoped ambiguity promotion roots: {ambiguity_roots}")
+    for index in 0..64:
+        val name = "registry.native.scoped.{index}"
+        val ret = bootstrap_fn_ret_hir_type_lookup(name)
+        val params = bootstrap_fn_param_hir_types_lookup(name)
+        if index < 2:
+            if ret != nil or params != nil:
+                print("scoped ambiguity became visible: {name}")
+                return 25
+        else:
+            if ret == nil or params == nil: return 26
+    # Adding unrelated persistent metadata must not increase the work done
+    # when the next ambiguity key is promoted out of its transient scope.
+    for growth_index in 0..64:
+        val name = "registry.native.unrelated-growth.{growth_index}"
+        val scalar = HirType.named("i32")
+        bootstrap_fn_ret_hir_type_register(name, scalar)
+        bootstrap_fn_param_hir_types_register(name, [scalar])
+    if not transient_scope_begin(): return 32
+    val next_conflict = "registry.native.scoped.2"
+    bootstrap_fn_ret_hir_type_register(next_conflict, HirType.named("i64"))
+    bootstrap_fn_param_hir_types_register(next_conflict, [HirType.named("i64")])
+    val growth_paused = transient_scope_pause()
+    val growth_promoted = if growth_paused: bootstrap_fn_registries_promote() else: false
+    val growth_ended = transient_scope_end()
+    if not growth_paused or not growth_promoted or not growth_ended: return 33
+    val growth_roots = bootstrap_fn_registries_last_promote_roots_v1()
+    print("after unrelated metadata growth, ambiguity promotion roots: {growth_roots}")
+    if growth_roots > ambiguity_roots + 1: return 24
+    if bootstrap_fn_ret_hir_type_lookup(next_conflict) != nil: return 34
+    if bootstrap_fn_param_hir_types_lookup(next_conflict) != nil: return 35
+    for growth_index in 0..64:
+        val name = "registry.native.unrelated-growth.{growth_index}"
+        if bootstrap_fn_ret_hir_type_lookup(name) == nil: return 36
+        if bootstrap_fn_param_hir_types_lookup(name) == nil: return 37
+    if not transient_scope_begin(): return 27
+    bootstrap_fn_ret_hir_type_register(conflict, HirType.named("i32"))
+    bootstrap_fn_param_hir_types_register(conflict, [HirType.named("i32")])
+    val repeated_paused = transient_scope_pause()
+    val repeated_promoted = if repeated_paused: bootstrap_fn_registries_promote() else: false
+    val repeated_ended = transient_scope_end()
+    if not repeated_paused or not repeated_promoted or not repeated_ended: return 28
+    val repeated_roots = bootstrap_fn_registries_last_promote_roots_v1()
+    if bootstrap_fn_ret_hir_type_lookup(conflict) != nil: return 30
+    if bootstrap_fn_param_hir_types_lookup(conflict) != nil: return 31
+    if repeated_roots != 0: return 29
+    0
+
+fn main() -> i64:
+    val scalar: HirType = HirType.named("i32")
+    val other: HirType = HirType.named("i64")
+    val keeper = "registry.native.keeper"
+    bootstrap_fn_ret_hir_type_register(keeper, scalar)
+    bootstrap_fn_param_hir_types_register(keeper, [scalar])
+    for index in 0..256:
+        val key = "registry.native.duplicate.{index}"
+        bootstrap_fn_ret_hir_type_register(key, scalar)
+        bootstrap_fn_param_hir_types_register(key, [scalar])
+        if bootstrap_fn_ret_hir_type_lookup(key) == nil: return 1
+        if bootstrap_fn_param_hir_types_lookup(key) == nil: return 2
+    for index in 0..256:
+        val key = "registry.native.duplicate.{index}"
+        bootstrap_fn_ret_hir_type_register(key, other)
+        bootstrap_fn_param_hir_types_register(key, [other])
+        if bootstrap_fn_ret_hir_type_lookup(key) != nil: return 3
+        if bootstrap_fn_param_hir_types_lookup(key) != nil: return 4
+        # Repeated registration cannot resurrect the ambiguous bare name.
+        bootstrap_fn_ret_hir_type_register(key, scalar)
+        bootstrap_fn_param_hir_types_register(key, [scalar])
+        if bootstrap_fn_ret_hir_type_lookup(key) != nil: return 5
+        if bootstrap_fn_param_hir_types_lookup(key) != nil: return 6
+    if bootstrap_fn_ret_hir_type_lookup(keeper) == nil: return 7
+    if bootstrap_fn_param_hir_types_lookup(keeper) == nil: return 8
+    val same = "registry.native.same-signature"
+    bootstrap_fn_ret_hir_type_register(same, scalar)
+    bootstrap_fn_ret_hir_type_register(same, scalar)
+    if bootstrap_fn_ret_hir_type_lookup(same) != nil: return 9
+    val scoped_result = check_scoped_ambiguity()
+    if scoped_result != 0: return scoped_result
+    print("registry ambiguity: 256 duplicate names rejected; unrelated metadata retained")
+    print("registry ambiguity: scope cleanup preserves metadata; unrelated HIR growth adds no promotion work")
+    0

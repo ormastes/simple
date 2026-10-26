@@ -7,6 +7,7 @@
 use std.spec.*
 use compiler.mir.mir_types.*
 use compiler.mir.mir_data.*
+use compiler.hir.hir_types.{HirType}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
 
@@ -63,6 +64,7 @@ fn delta_window_has(lines: [text], center: i64, before: i64, after: i64, needle:
 fn delta_is_registry_name(trimmed: text) -> bool:
     (trimmed.starts_with("_bootstrap_fn_") or trimmed.starts_with("_bootstrap_default_provider_")) and
         not trimmed.starts_with("_bootstrap_fn_journal_") and not trimmed.starts_with("_bootstrap_fn_replaced_") and
+        not trimmed.starts_with("_bootstrap_fn_dirty_") and
         not trimmed.starts_with("_bootstrap_fn_registries_adopted") and not trimmed.starts_with("_bootstrap_fn_promote_last_roots") and
         not trimmed.starts_with("_bootstrap_fn_delta_")
 
@@ -85,7 +87,9 @@ fn delta_unjournaled_writes() -> [text]:
             if trimmed.contains("] = "):
                 val key = trimmed.split("[")[1].split("]")[0]
                 val value = trimmed.split("] = ")[1]
-                if not delta_window_has(lines, line_index, 3, 3, "_bootstrap_fn_delta_text({key})"):
+                val actual_key_owner = trimmed.starts_with("_bootstrap_fn_ret_hir_ambig[") and
+                    delta_window_has(lines, line_index, 0, 2, "_bootstrap_fn_dirty_ret_hir_ambig =")
+                if not actual_key_owner and not delta_window_has(lines, line_index, 3, 3, "_bootstrap_fn_delta_text({key})"):
                     missing.push("key:{line_index + 1}:{trimmed}")
                 if value != "true" and value != "\"\"" and
                         not delta_window_has(lines, line_index, 0, 3, "({value})"):
@@ -139,3 +143,67 @@ describe "bootstrap fn registry promotion is per-module delta":
         expect(missing.len()).to_equal(0)
         if missing.len() > 0:
             print missing.join("\n")
+
+    it "keeps ambiguity promotion independent of unrelated HIR metadata growth":
+        expect(transient_scope_begin()).to_equal(true)
+        for index in 0..64:
+            val name = "delta.hir.retained.{index}"
+            val scalar = HirType.named("i32")
+            bootstrap_fn_ret_hir_type_register(name, scalar)
+            bootstrap_fn_param_hir_types_register(name, [scalar])
+        val initially_paused = transient_scope_pause()
+        val initially_promoted = if initially_paused: bootstrap_fn_registries_promote() else: false
+        val initially_ended = transient_scope_end()
+        expect(initially_paused and initially_promoted and initially_ended).to_equal(true)
+
+        expect(transient_scope_begin()).to_equal(true)
+        val conflict = "delta.hir.retained.0"
+        bootstrap_fn_ret_hir_type_register(conflict, HirType.named("i64"))
+        bootstrap_fn_param_hir_types_register(conflict, [HirType.named("i64")])
+        val paused = transient_scope_pause()
+        val promoted = if paused: bootstrap_fn_registries_promote() else: false
+        val ended = transient_scope_end()
+        expect(paused and promoted and ended).to_equal(true)
+        # Native stores box keys independently of the text journal, so the
+        # actual ambiguity dictionary must be promoted. Its cost must not
+        # grow with unrelated return/parameter metadata dictionaries.
+        val ambiguity_roots = bootstrap_fn_registries_last_promote_roots_v1()
+        expect(bootstrap_fn_ret_hir_type_lookup(conflict) == nil).to_equal(true)
+        expect(bootstrap_fn_param_hir_types_lookup(conflict) == nil).to_equal(true)
+        for index in 1..64:
+            val name = "delta.hir.retained.{index}"
+            expect(bootstrap_fn_ret_hir_type_lookup(name) != nil).to_equal(true)
+            expect(bootstrap_fn_param_hir_types_lookup(name) != nil).to_equal(true)
+
+        for index in 0..64:
+            val name = "delta.hir.unrelated-growth.{index}"
+            val scalar = HirType.named("i32")
+            bootstrap_fn_ret_hir_type_register(name, scalar)
+            bootstrap_fn_param_hir_types_register(name, [scalar])
+        expect(transient_scope_begin()).to_equal(true)
+        val next_conflict = "delta.hir.retained.1"
+        bootstrap_fn_ret_hir_type_register(next_conflict, HirType.named("i64"))
+        bootstrap_fn_param_hir_types_register(next_conflict, [HirType.named("i64")])
+        val growth_paused = transient_scope_pause()
+        val growth_promoted = if growth_paused: bootstrap_fn_registries_promote() else: false
+        val growth_ended = transient_scope_end()
+        expect(growth_paused and growth_promoted and growth_ended).to_equal(true)
+        val growth_roots = bootstrap_fn_registries_last_promote_roots_v1()
+        expect(growth_roots <= ambiguity_roots + 1).to_equal(true)
+        expect(bootstrap_fn_ret_hir_type_lookup(next_conflict) == nil).to_equal(true)
+        expect(bootstrap_fn_param_hir_types_lookup(next_conflict) == nil).to_equal(true)
+        for index in 0..64:
+            val name = "delta.hir.unrelated-growth.{index}"
+            expect(bootstrap_fn_ret_hir_type_lookup(name) != nil).to_equal(true)
+            expect(bootstrap_fn_param_hir_types_lookup(name) != nil).to_equal(true)
+
+        expect(transient_scope_begin()).to_equal(true)
+        bootstrap_fn_ret_hir_type_register(conflict, HirType.named("i32"))
+        bootstrap_fn_param_hir_types_register(conflict, [HirType.named("i32")])
+        val repeated_paused = transient_scope_pause()
+        val repeated_promoted = if repeated_paused: bootstrap_fn_registries_promote() else: false
+        val repeated_ended = transient_scope_end()
+        expect(repeated_paused and repeated_promoted and repeated_ended).to_equal(true)
+        expect(bootstrap_fn_registries_last_promote_roots_v1()).to_equal(0)
+        expect(bootstrap_fn_ret_hir_type_lookup(conflict) == nil).to_equal(true)
+        expect(bootstrap_fn_param_hir_types_lookup(conflict) == nil).to_equal(true)

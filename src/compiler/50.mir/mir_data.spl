@@ -2365,10 +2365,12 @@ var _bootstrap_fn_ret_types: Dict<text, MirType> = {}
 # modules/min after #3919). Promotion only has to adopt what the scope
 # allocated: the dict handles predate the scope and their bucket storage is
 # plain calloc (runtime `rt_core_dict_resize`), so an in-scope write adds only
-# transient KEYS and VALUES. Every write path below journals exactly those
-# while a scope is live, and marks a registry REPLACED when a rebuild/reset
-# assigns it a new (in-scope) handle; `bootstrap_fn_registries_promote`
-# promotes the journal plus only the replaced handles.
+# transient KEYS and VALUES. Write paths journal their retained values while
+# a scope is live. Ambiguity text keys need their actual dictionary promoted
+# because native stores box separately from the text journal. A rebuild/reset
+# marks a registry REPLACED when it assigns a new (in-scope) handle;
+# `bootstrap_fn_registries_promote` promotes the journal, replaced handles,
+# and any ambiguity dictionary with newly stored scoped keys.
 # doc/08_tracking/bug/stage3_bootstrap_closure_promote_walks_full_registry_2026_10_20.md
 var _bootstrap_fn_journal_texts: [text] = []
 var _bootstrap_fn_journal_mir_types: [MirType] = []
@@ -2378,6 +2380,11 @@ var _bootstrap_fn_journal_params: [[HirParam]] = []
 var _bootstrap_fn_journal_symbol_tables: [SymbolTable] = []
 var _bootstrap_fn_journal_consts: [[HirConst]] = []
 var _bootstrap_fn_replaced_ret_hir_types = false
+# A native text-key store boxes separately from the text journal. When an
+# ambiguity key is inserted in scope, promote its actual dictionary owner.
+# WORKAROUND native_boxed_dictionary_key_journal_identity_2026_10_26:
+# remove the whole-dictionary promotion only after key-identity scope tests pass.
+var _bootstrap_fn_dirty_ret_hir_ambig = false
 var _bootstrap_fn_replaced_ret_shapes = false
 var _bootstrap_fn_replaced_ret_array_element_shapes = false
 var _bootstrap_fn_replaced_ret_ok_shapes = false
@@ -2446,6 +2453,7 @@ fn _bootstrap_fn_delta_reset():
     _bootstrap_fn_journal_symbol_tables = []
     _bootstrap_fn_journal_consts = []
     _bootstrap_fn_replaced_ret_hir_types = false
+    _bootstrap_fn_dirty_ret_hir_ambig = false
     _bootstrap_fn_replaced_ret_shapes = false
     _bootstrap_fn_replaced_ret_array_element_shapes = false
     _bootstrap_fn_replaced_ret_ok_shapes = false
@@ -2479,26 +2487,26 @@ fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
 var _bootstrap_fn_ret_hir_types: Dict<text, HirType> = {}
 var _bootstrap_fn_ret_hir_ambig: Dict<text, bool> = {}
 
+fn _bootstrap_fn_ret_hir_mark_ambiguous(name: text):
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        return
+    _bootstrap_fn_ret_hir_ambig[name] = true
+    _bootstrap_fn_dirty_ret_hir_ambig = _bootstrap_fn_dirty_ret_hir_ambig or _bootstrap_fn_delta_live()
+
 fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
     if not hir_type_metadata_symbol_free(ty):
-        _bootstrap_fn_ret_hir_ambig[name] = true
-        _bootstrap_fn_delta_text(name)
+        _bootstrap_fn_ret_hir_mark_ambiguous(name)
         return
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
         return
     if _bootstrap_fn_ret_hir_types.contains_key(name):
-        _bootstrap_fn_ret_hir_ambig[name] = true
-        _bootstrap_fn_delta_text(name)
-        # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
-        # natively (rt_dict_remove); assigning it back destroys the map on the
-        # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
-        # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
-        var _kept_bootstrap_fn_ret_hir_types: Dict<text, HirType> = {}
-        for _k in _bootstrap_fn_ret_hir_types.keys():
-            if _k != name:
-                _kept_bootstrap_fn_ret_hir_types[_k] = _bootstrap_fn_ret_hir_types[_k]
-        _bootstrap_fn_ret_hir_types = _kept_bootstrap_fn_ret_hir_types
-        _bootstrap_fn_replaced_ret_hir_types = _bootstrap_fn_replaced_ret_hir_types or _bootstrap_fn_delta_live()
+        _bootstrap_fn_ret_hir_mark_ambiguous(name)
+        # Both HIR lookups veto this name before reading stored metadata.
+        # Keep the existing value: rebuilding the entire registry
+        # for every duplicate makes closure prescan quadratic and promotes
+        # unrelated rows again. The ambiguity dictionary itself owns the
+        # stored boxed key; a separately boxed text journal is insufficient.
+        # doc/bug_report/mir_hir_registry_ambiguity_copy_2026-10-26.md
         return
     _bootstrap_fn_ret_hir_types[name] = ty
     _bootstrap_fn_delta_text(name)
@@ -2708,17 +2716,9 @@ fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
             _bootstrap_fn_delta_text(name)
             return
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):
-        if _bootstrap_fn_param_hir_types.contains_key(name):
-            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
-            # natively (rt_dict_remove); assigning it back destroys the map on the
-            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
-            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
-            var _kept_bootstrap_fn_param_hir_types: Dict<text, [HirType]> = {}
-            for _k in _bootstrap_fn_param_hir_types.keys():
-                if _k != name:
-                    _kept_bootstrap_fn_param_hir_types[_k] = _bootstrap_fn_param_hir_types[_k]
-            _bootstrap_fn_param_hir_types = _kept_bootstrap_fn_param_hir_types
-            _bootstrap_fn_replaced_param_hir_types = _bootstrap_fn_replaced_param_hir_types or _bootstrap_fn_delta_live()
+        # The ambiguity veto also hides any earlier parameter metadata.
+        # Its original insertion owns the key/list; no replacement or new
+        # transient root is needed here. See the return-registry note above.
         return
     if _bootstrap_fn_param_hir_types.contains_key(name):
         # Per-consumer provider prescan re-registers the same declaration:
@@ -2951,9 +2951,10 @@ fn bootstrap_fn_registries_promote() -> bool:
     module i's transient scope must survive into module i+1's scope and
     beyond.
 
-    Delta, not wholesale: the journal (see `_bootstrap_fn_journal_texts`)
-    holds every key/value an in-scope write stored, and a registry whose
-    handle a rebuild/reset replaced in scope is promoted whole. Everything
+    The journals retain inserted values. A registry whose handle a
+    rebuild/reset replaced in scope is promoted whole. Newly inserted HIR
+    ambiguity keys also require promotion of their actual dictionary owner
+    because the text journal boxes independently on the native path. Everything
     else in the registries is already persistent and has no transient child,
     because the bucket storage is not scope-allocated. The promoted-root count
     is published for the scaling spec
@@ -2968,6 +2969,9 @@ fn bootstrap_fn_registries_promote() -> bool:
         ok = _bootstrap_fn_registries_promote_all()
         _bootstrap_fn_registries_adopted = ok
     else:
+        if _bootstrap_fn_dirty_ret_hir_ambig:
+            roots = roots + _bootstrap_fn_ret_hir_ambig.len()
+            ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_ambig) and ok
         if _bootstrap_fn_replaced_ret_hir_types:
             roots = roots + _bootstrap_fn_ret_hir_types.len()
             ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_types) and ok
