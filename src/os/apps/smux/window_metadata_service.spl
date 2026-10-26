@@ -1,0 +1,28 @@
+# Pure metadata transform. The API owns publication and closing/write guards.
+use os.apps.smux.contract.{MuxWindow}
+use os.apps.smux.service.{ServiceState}
+use std.common.contracts.mux.request_validation_v1.{mux_validate_name_v1}
+
+pub fn rename_window_state(st: ServiceState, session_id: text, window_id: text, name: text) -> Result<ServiceState, text>:
+    """Rename one existing member without changing identity, geometry or children."""
+    val index = st.find_window_idx(window_id)
+    if st.find_session_idx(session_id) < 0 or index < 0:
+        return Err("unknown session or window")
+    val window = st.get_window(index)
+    if window.session_id != session_id: return Err("window does not belong to session")
+    val valid = mux_validate_name_v1(name)
+    if valid.is_err(): return Err(valid.unwrap_err().detail)
+    var i = 0
+    while i < st.window_count:
+        val other = st.get_window(i)
+        if other.session_id == session_id and other.id != window_id and (other.name == name or other.id == name):
+            return Err("window name conflicts with another window")
+        i = i + 1
+    if name == window.name: return Ok(st)
+    val renamed = MuxWindow(id: window.id, session_id: window.session_id, name: name,
+        is_active: window.is_active, layout: window.layout,
+        canvas_cols: window.canvas_cols, canvas_rows: window.canvas_rows,
+        manual_rects: window.manual_rects, manual_cols: window.manual_cols,
+        manual_rows: window.manual_rows, zoom_pane: window.zoom_pane,
+        presentation: window.presentation)
+    return Ok(st.replace_window(index, renamed))

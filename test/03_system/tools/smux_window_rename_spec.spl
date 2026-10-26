@@ -1,0 +1,120 @@
+"""
+REQ-CMUX-004/005/008: checked window rename through the persistent API owner.
+Authored NOT_RUN. No CoreMux network route is claimed. The child case requires
+the actual Windows ConPTY provider and observes child output and cleanup.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_create_session, smux_new_window, smux_list_windows,
+    smux_list_panes, smux_rename_window, smux_configuration_revision,
+    smux_kill_session, smux_pane_spawn_pty, smux_send_command, smux_capture,
+    smux_owner_snapshot, smux_attach, smux_detach_from, smux_split_pane,
+    smux_toggle_zoom, smux_zoomed_pane, smux_set_pane_title}
+use os.apps.smux.pane_presentation.{pane_presentation}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.sosix.process.{sosix_process_exists}
+
+fn rename_cleanup(session: text) -> bool:
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var outcome = smux_kill_session(session)
+    var attempts = 0
+    while outcome.is_err() and attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        sosix_sleep_ms(25)
+        outcome = smux_kill_session(session)
+        attempts = attempts + 1
+    return outcome.is_ok()
+
+fn rename_metadata_checks(session: text) -> Result<bool, text>:
+    val windows = smux_list_windows(session)
+    if windows.len() != 1: return Err("initial window unavailable")
+    val first = windows[0]
+    val sibling = smux_new_window(session, "sibling")
+    if sibling.id == "": return Err("sibling admission failed")
+    val before = smux_configuration_revision().value
+    val renamed = smux_rename_window(session, first.id, "한 😀 window")?
+    if renamed.id != first.id or renamed.session_id != session: return Err("rename changed identity")
+    if smux_configuration_revision().value != before + 1: return Err("rename publication missing")
+    val _same = smux_rename_window(session, first.id, "한 😀 window")?
+    if smux_configuration_revision().value != before + 1: return Err("no-op advanced revision")
+    if smux_rename_window(session, first.id, sibling.id).is_ok(): return Err("ID collision accepted")
+    if smux_rename_window(session, first.id, "sibling").is_ok(): return Err("name collision accepted")
+    if smux_rename_window(session, first.id, "a\nb").is_ok(): return Err("control name accepted")
+    if smux_rename_window("missing", first.id, "new").is_ok(): return Err("foreign session accepted")
+    if smux_configuration_revision().value != before + 1: return Err("refusal changed revision")
+    return Ok(true)
+
+fn rename_child_checks(session: text, window: text, pane: text, pid: i64) -> Result<bool, text>:
+    val _split = smux_split_pane(session, window, pane, "vertical")?
+    val _title = smux_set_pane_title(session, window, pane, "retained title 한")?
+    val _zoomed = smux_toggle_zoom(session, window, pane)?
+    val initial = smux_owner_snapshot()
+    val before = initial.get_pane(initial.find_pane_idx(pane))
+    if not smux_attach(session, "rename-viewer", 80, 24).attached: return Err("attach failed")
+    if not smux_detach_from(session, "rename-viewer"): return Err("detach failed")
+    val renamed = smux_rename_window(session, window, "background 한 😀")?
+    if renamed.id != window: return Err("window identity changed")
+    val snapshot = smux_owner_snapshot()
+    val after = snapshot.get_pane(snapshot.find_pane_idx(pane))
+    val retained_window = snapshot.get_window(snapshot.find_window_idx(window))
+    if smux_zoomed_pane(session, window) != pane: return Err("rename lost zoom")
+    if pane_presentation(retained_window, pane).title != "retained title 한": return Err("rename lost presentation")
+    if after.pane.cols != before.pane.cols or after.pane.rows != before.pane.rows: return Err("rename changed child viewport")
+    if after.child_pid != pid or after.pty_fd != before.pty_fd or after.child_incarnation != before.child_incarnation:
+        return Err("rename changed retained child authority")
+    if not sosix_process_exists(pid): return Err("child disappeared during rename")
+    # Expected output is not present contiguously in the echoed command.
+    val _sent = smux_send_command(session, window, pane, "powershell.exe -NoProfile -Command \"Write-Output ('RENAME_' + (6*7))\"")?
+    val deadline = sosix_time_now_monotonic_ms() + 5000
+    var attempts = 0
+    while attempts < 200 and sosix_time_now_monotonic_ms() < deadline:
+        val captured = smux_capture(session, window, pane, 60)?
+        if captured.content.contains("RENAME_42"): return Ok(true)
+        sosix_sleep_ms(25)
+        attempts = attempts + 1
+    return Err("renamed background child produced no expected output")
+
+fn rename_native_scenario(session: text) -> Result<bool, text>:
+    val windows = smux_list_windows(session)
+    if windows.len() != 1: return Err("initial window unavailable")
+    val window = windows[0]
+    val panes = smux_list_panes(session, window.id)
+    if panes.len() != 1: return Err("initial pane unavailable")
+    val pane = panes[0]
+    val spawned = smux_pane_spawn_pty(session, window.id, pane.id, "cmd.exe /Q")
+    if spawned.is_err(): return Err(spawned.unwrap_err())
+    return rename_child_checks(session, window.id, pane.id, spawned.unwrap())
+
+describe "RenameWindow persistent owner integration":
+    it "publishes the rename once and refuses invalid changes without altering revision":
+        step("Create real service windows and rename one by its stable identity")
+        val session = smux_create_session("rename-metadata")
+        val outcome = if session.id == "": Err("session admission failed") else: rename_metadata_checks(session.id)
+        val cleaned = if session.id == "": true else: rename_cleanup(session.id)
+        step("Complete owned session cleanup before asserting the observations")
+        expect(cleaned).to_equal(true)
+        expect(outcome.is_ok()).to_equal(true)
+
+    it "renames a detached live ConPTY window without replacing its child":
+        step("Start a real Windows child in the persistent service owner")
+        val session = smux_create_session("rename-child")
+        val outcome = if session.id == "": Err("session admission failed") else: rename_native_scenario(session.id)
+        # Preserve actual retained child identities before checked cleanup,
+        # including a failed launch which published deferred native ownership.
+        val snapshot = smux_owner_snapshot()
+        var owned_pids: [i64] = []
+        var index = 0
+        while index < snapshot.pane_count:
+            val record = snapshot.get_pane(index)
+            if record.pane.session_id == session.id and record.child_pid > 0:
+                owned_pids.push(record.child_pid)
+            index = index + 1
+        step("Observe the same child after detach and rename, then release its owner")
+        val cleaned = if session.id == "": true else: rename_cleanup(session.id)
+        var absent = true
+        for pid in owned_pids:
+            if sosix_process_exists(pid): absent = false
+        expect(cleaned).to_equal(true)
+        expect(absent).to_equal(true)
+        expect(outcome.is_ok()).to_equal(true)
