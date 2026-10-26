@@ -235,6 +235,16 @@ fn _bytes_hex(bytes: [u8]) -> text:
         parts.push(digits.char_at(b % 16))
     parts.join("")
 
+# Validate a reference row's module key hex; return None if empty (would emit
+# a short row that the reader rejects). Testable directly in specs.
+pub fn _xref_row_v1(hex: text) -> [u8]?:
+    if hex == "":
+        return None
+    val bytes = _hex_bytes(hex)
+    if bytes.len() != 16:
+        return None
+    bytes
+
 # ---- caller-supplied identity ------------------------------------------------
 
 pub struct SpabDigestV1:
@@ -585,9 +595,18 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
     sections.push(_Section(id: SPAB_SECTION_STR_CHILDREN, encoding: KIND_STR, data: emit.str_children))
     sections.push(_Section(id: SPAB_SECTION_PAIR_CHILDREN, encoding: KIND_PAIR, data: emit.pair_children))
     # Lazy cross-module references, UNFILLED: resolution happens in RAM.
-    var xref: [u8] = []
+    # Validate all module keys before writing rows: an empty key would emit a
+    # short xref row that the reader rejects.
+    var module_keys: [text] = []
     for r in refs:
-        xref = _append(xref, _hex_bytes(xxh3_128_text(r.module_path)))
+        val key = xxh3_128_text(r.module_path)
+        match _xref_row_v1(key):
+            case Some(_): module_keys.push(key)
+            case None: return []
+    var xref: [u8] = []
+    var ref_idx = 0
+    for r in refs:
+        xref = _append(xref, _hex_bytes(module_keys[ref_idx]))
         xref = _put_le(xref, SPAB_UNRESOLVED_U32, 4)
         var z = 0
         while z < 16:
@@ -597,6 +616,7 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
         xref = _put_le(xref, emit.string_index[r.module_path], 4)
         xref = _put_le(xref, r.decl_index, 4)
         xref = _put_le(xref, 0, 4)
+        ref_idx = ref_idx + 1
     sections.push(_Section(id: SPAB_SECTION_XREF, encoding: KIND_XREF, data: xref))
     # Set-once map: every reference row's resolved target may be filled once.
     var set_once: [u8] = []
