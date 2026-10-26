@@ -1,0 +1,185 @@
+# Bounded request identity/receipt owner. Authenticate the lease before calling.
+# Canonical payload bytes come from the reviewed codec, never peer hashes.
+use std.common.contracts.mux.core_v1.{MuxHandleV1, MuxErrorV1, MuxErrorKindV1, MuxCommitStateV1}
+use std.common.contracts.mux.execution_v1.{MuxOperationV1}
+use std.common.contracts.mux.observation_v1.{MuxRequestReceiptV1, MuxRequestKnowledgeV1}
+use std.common.contracts.mux.validation_v1.{mux_validate_handle_v1}
+use std.common.string_core.{text_to_bytes}
+
+pub struct CoreMuxRequestEntry:
+    handle: MuxHandleV1
+    request_id: u64
+    operation: MuxOperationV1
+    deadline_ms: i64
+    payload: [u8]
+    response: [u8]
+    receipt: MuxRequestReceiptV1
+    pending: bool
+    retired: bool
+    control: bool
+    reply_budget: i64
+
+pub struct CoreMuxRequestLedger:
+    entries: [CoreMuxRequestEntry]
+    max_per_lease: i64
+    max_entries: i64
+    max_bytes: i64
+    control_slots: i64
+    used_bytes: i64
+
+pub struct CoreMuxRequestReservation:
+    ledger: CoreMuxRequestLedger
+    index: int
+    replay: bool
+
+fn error(kind: MuxErrorKindV1, id: u64, detail: text, commitment: MuxCommitStateV1 = MuxCommitStateV1.NotApplied) -> MuxErrorV1:
+    return MuxErrorV1(kind: kind, detail: detail, request_id: id, commit_state: commitment,
+        observed_revision: nil, affected: [], cleanup_pending: false)
+
+pub fn core_mux_requests_new(max_per_lease: i64 = 4096, max_entries: i64 = 8192,
+    max_bytes: i64 = 134217728, control_slots: i64 = 16) -> Result<CoreMuxRequestLedger, MuxErrorV1>:
+    if max_per_lease < 2 or max_per_lease > 4096 or max_entries < control_slots + 1 or max_entries > 8192:
+        return Err(error(MuxErrorKindV1.InvalidRequest, 0, "request ledger count limits invalid"))
+    if control_slots < 1 or control_slots > 16 or max_bytes < control_slots * 131072 + 65536 or max_bytes > 134217728:
+        return Err(error(MuxErrorKindV1.InvalidRequest, 0, "request ledger byte limits invalid"))
+    return Ok(CoreMuxRequestLedger(entries: [], max_per_lease: max_per_lease, max_entries: max_entries,
+        max_bytes: max_bytes, control_slots: control_slots, used_bytes: 0))
+
+fn same_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    return true
+
+fn same_handle(a: MuxHandleV1, b: MuxHandleV1) -> bool:
+    return a.owner_id == b.owner_id and a.owner_generation == b.owner_generation and a.lease_id == b.lease_id
+
+# Fixed conservative allowance covers the bounded typed receipt/array metadata;
+# variable request/result buffers are charged separately, including reservations.
+fn charge(entry: CoreMuxRequestEntry) -> i64:
+    var response_bytes = entry.response.len()
+    if entry.pending: response_bytes = entry.reply_budget
+    if entry.retired and not entry.control: response_bytes = 0
+    return 32768 + entry.payload.len() + response_bytes
+
+fn rebuild(st: CoreMuxRequestLedger, entries: [CoreMuxRequestEntry], bytes: i64) -> CoreMuxRequestLedger:
+    return CoreMuxRequestLedger(entries: entries, max_per_lease: st.max_per_lease, max_entries: st.max_entries,
+        max_bytes: st.max_bytes, control_slots: st.control_slots, used_bytes: bytes)
+
+pub fn core_mux_request_index(st: CoreMuxRequestLedger, handle: MuxHandleV1, id: u64) -> int:
+    var i = 0
+    while i < st.entries.len():
+        if st.entries[i].request_id == id and same_handle(st.entries[i].handle, handle): return i
+        i = i + 1
+    return -1
+
+# Reserve BEFORE effects. Live request IDs are never evicted. The final slot per
+# lease and global control reserve keep disconnect/rollover available at capacity.
+pub fn core_mux_request_reserve(st: CoreMuxRequestLedger, handle: MuxHandleV1, id: u64,
+    operation: MuxOperationV1, payload: [u8], deadline_ms: i64, now_ms: i64, reply_budget: i64) -> Result<CoreMuxRequestReservation, MuxErrorV1>:
+    mux_validate_handle_v1(handle)?
+    if operation == MuxOperationV1.Connect or operation == MuxOperationV1.Snapshot or operation == MuxOperationV1.ResolveTarget or operation == MuxOperationV1.Capture or operation == MuxOperationV1.CurrentContext or operation == MuxOperationV1.RequestStatus or operation == MuxOperationV1.Capabilities or operation == MuxOperationV1.PollEvents:
+        return Err(error(MuxErrorKindV1.InvalidRequest, id, "operation is not a receipt-bearing mutation"))
+    if id == 0: return Err(error(MuxErrorKindV1.InvalidRequest, id, "request ID must be nonzero"))
+    val existing = core_mux_request_index(st, handle, id)
+    if existing >= 0:
+        val entry = st.entries[existing]
+        if entry.retired and not entry.control:
+            return Err(error(MuxErrorKindV1.Unavailable, id, "retired request permits status only", MuxCommitStateV1.Unknown))
+        if entry.operation != operation or not same_bytes(entry.payload, payload):
+            return Err(error(MuxErrorKindV1.InvalidRequest, id, "request ID payload collision"))
+        return Ok(CoreMuxRequestReservation(ledger: st, index: existing, replay: true))
+    if now_ms < 0 or deadline_ms <= now_ms or deadline_ms - now_ms > 30000:
+        return Err(error(MuxErrorKindV1.Timeout, id, "request deadline invalid or elapsed"))
+    val control = operation == MuxOperationV1.Disconnect
+    if payload.len() == 0 or payload.len() > 1048576 or reply_budget < 4096 or reply_budget > 1048576:
+        return Err(error(MuxErrorKindV1.InvalidRequest, id, "request buffer budget invalid"))
+    if control and (payload.len() > 4096 or reply_budget > 65536):
+        return Err(error(MuxErrorKindV1.InvalidRequest, id, "disconnect exceeds reserved control budget"))
+    var count = 0
+    var controls = 0
+    for entry in st.entries:
+        if same_handle(entry.handle, handle): count = count + 1
+        if entry.control: controls = controls + 1
+    val lease_limit = if control: st.max_per_lease else: st.max_per_lease - 1
+    val entry_limit = if control: st.max_entries else: st.max_entries - st.control_slots
+    if count >= lease_limit or st.entries.len() >= entry_limit or (control and controls >= st.control_slots):
+        return Err(error(MuxErrorKindV1.Busy, id, "request ledger full; disconnect and reconnect without stopping children"))
+    val receipt = MuxRequestReceiptV1(handle: handle, request_id: id, operation: Some(operation),
+        knowledge: MuxRequestKnowledgeV1.Pending, commit_state: MuxCommitStateV1.Unknown,
+        prior_revision: nil, observed_revision: nil, affected: [], error_kind: nil,
+        detail: "request reserved; completion not established", cleanup_pending: false)
+    val entry = CoreMuxRequestEntry(handle: handle, request_id: id, operation: operation,
+        deadline_ms: deadline_ms, payload: payload, response: [], receipt: receipt,
+        pending: true, retired: false, control: control, reply_budget: reply_budget)
+    val reserve = if control: 0 else: st.control_slots * 131072
+    if charge(entry) > st.max_bytes - reserve - st.used_bytes:
+        return Err(error(MuxErrorKindV1.Busy, id, "request byte budget full; disconnect and reconnect without stopping children"))
+    var entries = st.entries
+    entries.push(entry)
+    return Ok(CoreMuxRequestReservation(ledger: rebuild(st, entries, st.used_bytes + charge(entry)), index: entries.len() - 1, replay: false))
+
+fn receipt_bounded(receipt: MuxRequestReceiptV1) -> bool:
+    if text_to_bytes(receipt.detail).len() > 1024 or receipt.affected.len() > 32: return false
+    for item in receipt.affected:
+        if text_to_bytes(item.owner_id).len() > 128 or text_to_bytes(item.object_id).len() > 128: return false
+    return true
+
+pub fn core_mux_request_finish(st: CoreMuxRequestLedger, handle: MuxHandleV1, id: u64,
+    receipt: MuxRequestReceiptV1, response: [u8]) -> Result<CoreMuxRequestLedger, MuxErrorV1>:
+    val idx = core_mux_request_index(st, handle, id)
+    if idx < 0: return Err(error(MuxErrorKindV1.Unavailable, id, "request binding unavailable", MuxCommitStateV1.Unknown))
+    val old = st.entries[idx]
+    if not old.pending: return Err(error(MuxErrorKindV1.InvalidRequest, id, "request already completed", MuxCommitStateV1.Unknown))
+    if not same_handle(receipt.handle, handle) or receipt.request_id != id or not receipt_bounded(receipt):
+        return Err(error(MuxErrorKindV1.InvalidRequest, id, "receipt identity or budget invalid", MuxCommitStateV1.Unknown))
+    match receipt.operation:
+        case Some(operation):
+            if operation != old.operation: return Err(error(MuxErrorKindV1.InvalidRequest, id, "receipt operation mismatch", MuxCommitStateV1.Unknown))
+        case nil: return Err(error(MuxErrorKindV1.InvalidRequest, id, "receipt operation missing", MuxCommitStateV1.Unknown))
+    if receipt.knowledge != MuxRequestKnowledgeV1.Retained or response.len() > old.reply_budget or ((not old.retired or old.control) and response.len() == 0):
+        return Err(error(MuxErrorKindV1.InvalidRequest, id, "completion exceeds reservation", MuxCommitStateV1.Unknown))
+    val retained_response: [u8] = if old.retired and not old.control: [] else: response
+    val retained_payload: [u8] = if old.retired and not old.control: [] else: old.payload
+    val entry = CoreMuxRequestEntry(handle: old.handle, request_id: old.request_id, operation: old.operation,
+        deadline_ms: old.deadline_ms, payload: retained_payload, response: retained_response, receipt: receipt,
+        pending: false, retired: old.retired, control: old.control, reply_budget: 0)
+    var entries = st.entries
+    entries[idx] = entry
+    return Ok(rebuild(st, entries, st.used_bytes - charge(old) + charge(entry)))
+
+# Normal payload/result buffers are dispensable only after authority revocation.
+# Compact typed receipts and exact IDs survive; disconnect replay stays exact.
+pub fn core_mux_requests_retire(st: CoreMuxRequestLedger, token: text) -> CoreMuxRequestLedger:
+    var entries: [CoreMuxRequestEntry] = []
+    var bytes: i64 = 0
+    for old in st.entries:
+        var entry = old
+        if old.handle.lease_id == token:
+            entry = CoreMuxRequestEntry(handle: old.handle, request_id: old.request_id, operation: old.operation,
+                deadline_ms: old.deadline_ms, payload: if old.control or old.pending: old.payload else: [],
+                response: if old.control: old.response else: [], receipt: old.receipt,
+                pending: old.pending, retired: true, control: old.control, reply_budget: old.reply_budget)
+        entries.push(entry)
+        bytes = bytes + charge(entry)
+    return rebuild(st, entries, bytes)
+
+pub fn core_mux_requests_forget(st: CoreMuxRequestLedger, token: text) -> Result<CoreMuxRequestLedger, MuxErrorV1>:
+    var entries: [CoreMuxRequestEntry] = []
+    var bytes: i64 = 0
+    for entry in st.entries:
+        if entry.handle.lease_id == token:
+            if not entry.retired: return Err(error(MuxErrorKindV1.InvalidRequest, entry.request_id, "cannot evict executable request binding"))
+        else:
+            entries.push(entry)
+            bytes = bytes + charge(entry)
+    return Ok(rebuild(st, entries, bytes))
+
+# The caller first authenticates live/retained lease authority. Missing IDs do
+# not fabricate an operation, receipt or a NotApplied conclusion.
+pub fn core_mux_request_status(st: CoreMuxRequestLedger, handle: MuxHandleV1, id: u64) -> Result<MuxRequestReceiptV1, MuxErrorV1>:
+    val idx = core_mux_request_index(st, handle, id)
+    if idx < 0: return Err(error(MuxErrorKindV1.Unavailable, id, "request status unknown", MuxCommitStateV1.Unknown))
+    return Ok(st.entries[idx].receipt)

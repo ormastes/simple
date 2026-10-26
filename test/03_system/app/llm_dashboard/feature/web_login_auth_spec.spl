@@ -1,0 +1,127 @@
+"""
+Configured dashboard authentication and session lifecycle.
+NOT_RUN: requires the admitted Phase3 native test runner and real entropy,
+filesystem and monotonic-time providers. Runs serially in a fresh process.
+SIMPLE_TEST_PRIVATE_ROOT must name an existing absolute fixture-owned directory.
+The known verifier below was independently derived using Python hashlib PBKDF2.
+The public fixture password is never an operator credential.
+# @manual: primary
+# @capture: text
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.llm_dashboard.web_login.{
+    auth_ensure_bootstrap, auth_authenticate_form, auth_session_lookup,
+    auth_session_from_headers, auth_delete_session, auth_login_cookie_header,
+    auth_login_page
+}
+use app.io.env_ops.{env_get, env_set}
+use app.io.mod.{secure_temp_dir, file_create_exclusive, file_write, file_delete, dir_remove}
+use std.nogc_sync_mut.io.crypto_sffi.{entropy_hex_valid_for}
+use std.nogc_sync_mut.sosix.time.{sosix_sleep_ms}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{crypto_text_to_bytes, bytes_to_hex}
+
+fn dashboard_auth_config(ttl: i64) -> text:
+    "username: \"fixture_operator\"\n" +
+    "password_salt_hex: \"00112233445566778899aabbccddeeff\"\n" +
+    "password_hash_hex: \"e2078866307ca787b9cda2a9e4931bb4738a396d66a067bbd448a1cda573e268\"\n" +
+    "iterations: 600000\nsession_ttl_seconds: " + str(ttl) + "\nmax_sessions: 2\n"
+
+fn dashboard_auth_check(condition: bool, failure: text) -> Result<bool, text>:
+    if condition: Ok(true) else: Err(failure)
+
+# Every early return passes through the caller's environment/file cleanup.
+fn dashboard_auth_exercise(path: text) -> Result<bool, text>:
+    # Valid U+FFFD is a real password character, not evidence of malformed UTF8.
+    val valid_form = "username=fixture_operator&password=fixture-only-%EF%BF%BD-password"
+    step("Reject absent configuration and the historical fabricated cookie")
+    if not env_set("DASH_AUTH_FILE", path + ".missing"): return Err("cannot select missing fixture config")
+    auth_ensure_bootstrap()
+    dashboard_auth_check(auth_authenticate_form(valid_form).0 == nil, "missing config authenticated")?
+    dashboard_auth_check(auth_session_lookup("local") == nil, "static token authenticated")?
+
+    step("Load a private configured verifier and reject wrong or incomplete credentials")
+    if not env_set("DASH_AUTH_FILE", path): return Err("cannot select fixture config")
+    auth_ensure_bootstrap()
+    dashboard_auth_check(auth_authenticate_form("username=fixture_operator&password=wrong").0 == nil, "wrong password authenticated")?
+    dashboard_auth_check(auth_authenticate_form("username=fixture_operator").0 == nil, "missing password authenticated")?
+    dashboard_auth_check(auth_authenticate_form("username=fixture_operator&password=fixture-only-%FF-password").0 == nil, "malformed UTF8 authenticated through replacement")?
+
+    step("Authenticate the configured password and resolve its real opaque cookie")
+    val first = auth_authenticate_form(valid_form).0
+    if first == nil: return Err("configured positive login failed")
+    dashboard_auth_check(first!.username == "fixture_operator", "incorrect stored identity")?
+    dashboard_auth_check(entropy_hex_valid_for(first!.session_id, 32), "token lacks checked 256-bit format")?
+    val token_a = first!.session_id
+    val digest_cookie = bytes_to_hex(sha256_bytes(crypto_text_to_bytes(token_a)))
+    dashboard_auth_check(digest_cookie.len() == 64, "token digest control failed")?
+    dashboard_auth_check(auth_session_lookup(digest_cookie) == nil, "stored token hash was accepted as a bearer cookie")?
+    auth_delete_session(digest_cookie)
+    dashboard_auth_check(auth_session_lookup(token_a) != nil, "hash-as-token logout revoked the real bearer")?
+    val resolved = auth_session_from_headers("Host: localhost\r\ncOoKiE: unrelated=ok; llm_dashboard_session=" + token_a + "\r\n")
+    dashboard_auth_check(resolved != nil, "issued cookie did not resolve")?
+    if resolved == nil: return Err("issued cookie missing")
+    dashboard_auth_check(resolved!.username == first!.username, "cookie identity changed")?
+    val cookie_header = auth_login_cookie_header(first!)
+    dashboard_auth_check(cookie_header.contains("HttpOnly") and cookie_header.contains("SameSite=Strict"), "cookie protections absent")?
+
+    step("Reject forged, duplicate, prefixed and folded session headers")
+    dashboard_auth_check(auth_session_lookup("1111111111111111111111111111111111111111111111111111111111111111") == nil, "fabricated random-shaped token authenticated")?
+    dashboard_auth_check(auth_session_from_headers("Cookie: llm_dashboard_session=" + token_a + "; llm_dashboard_session=" + token_a) == nil, "duplicate cookie authenticated")?
+    dashboard_auth_check(auth_session_from_headers("Cookie: other_llm_dashboard_session=" + token_a) == nil, "prefixed cookie authenticated")?
+    dashboard_auth_check(auth_session_from_headers(" Cookie: llm_dashboard_session=" + token_a) == nil, "folded cookie authenticated")?
+
+    step("Issue independent sessions and enforce the configured registry bound")
+    val second = auth_authenticate_form(valid_form).0
+    if second == nil: return Err("second positive login failed")
+    val token_b = second!.session_id
+    dashboard_auth_check(token_b != token_a, "independent logins reused a token")?
+    dashboard_auth_check(auth_authenticate_form(valid_form).0 == nil, "capacity bound exceeded")?
+    dashboard_auth_check(auth_session_lookup(token_a) != nil and auth_session_lookup(token_b) != nil, "capacity refusal revoked live leases")?
+
+    step("Logout revokes one lease and allows a fresh replacement")
+    auth_delete_session(token_a)
+    dashboard_auth_check(auth_session_lookup(token_a) == nil, "logout token remained valid")?
+    dashboard_auth_check(auth_session_lookup(token_b) != nil, "logout revoked an unrelated lease")?
+    val third = auth_authenticate_form(valid_form).0
+    if third == nil: return Err("replacement positive login failed")
+    dashboard_auth_check(third!.session_id != token_a and third!.session_id != token_b, "replacement reused a token")?
+
+    step("Configuration rotation revokes old leases and real monotonic expiry revokes the new lease")
+    if not file_write(path, dashboard_auth_config(1)): return Err("fixture config rotation failed")
+    dashboard_auth_check(auth_session_lookup(token_b) == nil and auth_session_lookup(third!.session_id) == nil, "rotation kept old leases")?
+    val expiring = auth_authenticate_form(valid_form).0
+    if expiring == nil: return Err("rotated positive login failed")
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id) != nil, "new lease not initially live")?
+    sosix_sleep_ms(1100)
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id) == nil, "expired lease remained live")?
+
+    step("Escape reflected login values and reject malformed replacement configuration")
+    val escaped = auth_login_page("<script>", "\" autofocus=\"yes")
+    dashboard_auth_check(not escaped.contains("<script>") and not escaped.contains("value=\"\" autofocus="), "login HTML reflected active markup")?
+    if not file_write(path, "username: \"fixture_operator\"\n"): return Err("malformed fixture config write failed")
+    auth_ensure_bootstrap()
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id) == nil, "invalid configuration accepted a token")?
+    Ok(true)
+
+describe "Dashboard configured authentication":
+    it "verifies credentials and enforces real session creation, revocation and expiry":
+        val parent = env_get("SIMPLE_TEST_PRIVATE_ROOT")
+        expect(parent.len()).to_be_greater_than(0)
+        val directory = secure_temp_dir(parent, "dashboard-auth-")
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val path = directory.unwrap() + "/operator.sdn"
+        val previous = env_get("DASH_AUTH_FILE")
+        val created = file_create_exclusive(path, dashboard_auth_config(3600))
+        val outcome = if created: dashboard_auth_exercise(path) else: Err("exclusive fixture config creation failed")
+        val restored = env_set("DASH_AUTH_FILE", previous)
+        auth_ensure_bootstrap()
+        val removed = if created: file_delete(path) else: true
+        val directory_removed = dir_remove(directory.unwrap(), false)
+        if outcome.is_err(): print("Dashboard auth lifecycle failure: " + outcome.unwrap_err())
+        expect(outcome.is_ok()).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(removed).to_equal(true)
+        expect(directory_removed).to_equal(true)

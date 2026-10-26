@@ -1,5 +1,6 @@
 # CLI compile — target backends (simpleos/c/cuda/opencl/vhdl/native)
 use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_opt_level, cli_print_shared_opt_level_help, cli_print_shared_optimization_inventory}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use app.cli.collection_planner_options.{collection_planner_options, collection_planner_fingerprint}
 use app.cli.bootstrap_backend_installer.{bootstrap_backend_request_error_v1}
 # CLI Compile Functions - Compilation pipeline
@@ -332,13 +333,13 @@ fn cli_native_build_log_value_error(value: text) -> text:
     ""
 
 fn cli_native_build_policy_value_flag(arg: text) -> bool:
-    arg == "--parser-impl" or arg == "--parser-prefer" or
+    arg == "--library-mode" or arg == "--parser-impl" or arg == "--parser-prefer" or
         arg == "--parser-require" or arg == "--host-cpu-max" or
         arg == "--frontend-offload" or
         arg == "--frontend-offload-fallback"
 
 fn cli_native_build_inline_policy_flag(arg: text) -> bool:
-    arg.starts_with("--parser-impl=") or arg.starts_with("--parser-prefer=") or
+    arg.starts_with("--library-mode=") or arg.starts_with("--parser-impl=") or arg.starts_with("--parser-prefer=") or
         arg.starts_with("--parser-require=") or arg.starts_with("--host-cpu-max=") or
         arg.starts_with("--frontend-offload=") or
         arg.starts_with("--frontend-offload-fallback=")
@@ -844,6 +845,10 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
                 source_dirs = source_dirs.push(args[j])
         elif a.starts_with("--source="):
             source_dirs = source_dirs.push(a.substring(9))
+        elif a == "--library-mode":
+            j = j + 1
+        elif a.starts_with("--library-mode="):
+            pass
         elif a == "--collection-policy" or a == "--collection-memory-budget":
             j = j + 1
         elif a.starts_with("--collection-policy=") or a.starts_with("--collection-memory-budget="):
@@ -1143,6 +1148,7 @@ fn cli_native_build_print_help_v1() -> i64:
     print ""
     print "Options:"
     print "  --source <dir>       Source directory to compile (repeatable)"
+    print "  --library-mode <mode>  Semantic gc|nogc-sync|async-mut|immut selection; noalloc-async-mut is also supported"
     print "  -o <path>            Output binary path"
     print "  --entry <file>       Entry file"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
@@ -1227,6 +1233,11 @@ fn _cli_native_build(
     if option_error != "":
         _cli_eprint("Error: {option_error}")
         return 2
+    val library_policy = match library_mode_parse_args_v1(args):
+        case Ok(value): value
+        case Err(reason):
+            _cli_eprint(reason)
+            return 2
     val collection_planner = collection_planner_options(args)
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
@@ -1562,7 +1573,7 @@ fn _cli_native_build(
         elif preclosed_identities.len() > 0:
             preclosed_identities
         else:
-            _native_build_entry_closure(entry_point, source_dirs)
+            _native_build_entry_closure(entry_point, source_dirs, library_policy.mode)
         # A real closure always contains the entry itself, so [] means the SCV
         # freeze failed (already reported). Continuing with zero inputs crashed
         # later with "method `len` not found on type `i64`".
@@ -1595,6 +1606,9 @@ fn _cli_native_build(
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
             var options = driver_core_compile_options_default()
+            options.library_mode = library_policy.mode
+            options.gc_off = library_policy.gc_off
+            options.allowed_families = library_policy.allowed_families
             var native_inputs: [text] = []
             if effective_entry_closure or native_group_requested:
                 for cf in native_action_inputs:
@@ -1649,6 +1663,9 @@ fn _cli_native_build(
             driver_result
         else:
             var options = driver_core_compile_options_default()
+            options.library_mode = library_policy.mode
+            options.gc_off = library_policy.gc_off
+            options.allowed_families = library_policy.allowed_families
             var native_inputs: [text] = []
             if effective_entry_closure or native_group_requested:
                 for cf in native_action_inputs:

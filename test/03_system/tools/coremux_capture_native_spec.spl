@@ -1,0 +1,127 @@
+"""
+CoreMux capture through a real native Windows ConPTY child.
+Evidence: NOT_RUN. Requires an admitted configured pure-Simple runner and native
+Windows provider. No host skip, fake provider, timer-only pass or authored-count
+claim. This exercises the pane owner, not remote endpoint authentication.
+# @manual: primary
+# @capture: text
+"""
+use std.spec.{describe, it, expect, step}
+use std.sosix.host.{sosix_platform_name}
+use std.sosix.time.{sosix_sleep_ms}
+use std.sosix.process.{sosix_process_close_piped}
+use std.common.text_bytes.{bytes_to_text}
+use std.common.contracts.mux.core_v1.*
+use std.common.contracts.mux.observation_v1.*
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.pane_io_service.{pane_spawn_state, pane_spawn_pty_state, pane_poll_state, pane_close_pty_state}
+use os.apps.smux.capture_cursor.{capture_cursor_new, capture_cursor_apply}
+use os.apps.smux.vt_capture.{vt_capture_page}
+
+fn native_state() -> ServiceState:
+    val session = MuxSession.create("capture-session", "capture")
+    val window = MuxWindow.create("capture-window", session.id, "capture")
+    val pane = MuxPane.create("capture-pane", window.id, session.id)
+    ServiceState.empty().add_session(session).add_window(window).add_pane(PaneRecord.create(pane).resize(40, 3))
+
+describe "CoreMux real Windows terminal capture (NOT_RUN)":
+    it "ingests real styled history and reconstructs strictly bounded pages":
+        # @req REQ-CMUX-003 REQ-CMUX-005 NFR-CMUX-005 NFR-CMUX-007 NFR-CMUX-008
+        expect(sosix_platform_name()).to_equal("windows")
+        step("Launch a real child that prints red history and a final marker")
+        val command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"[Console]::Write([char]27+'[31mCOREMUX_LINE_A'+[char]13+[char]10+'COREMUX_LINE_B'+[char]13+[char]10+'COREMUX_LINE_C'+[char]13+[char]10+'COREMUX_END'+[char]27+'[0m'); Start-Sleep -Milliseconds 200\""
+        val spawned = pane_spawn_pty_state(native_state(), false, "capture-session", "capture-window", "capture-pane", command)
+        var state = spawned.state
+        var saw_end = false
+        var attempts = 0
+        while spawned.result.is_ok() and not saw_end and attempts < 100:
+            state = pane_poll_state(state, [], []).state
+            val captured = vt_capture_page(state.get_pane(0).screen, MuxCaptureRangeV1.AllHistory, true, false, 0, 65536)
+            saw_end = bytes_to_text(captured.bytes).contains("COREMUX_END")
+            if not saw_end: sosix_sleep_ms(50)
+            attempts = attempts + 1
+        val record = state.get_pane(0)
+        step("Close the actual child owner, retaining its handle until close succeeds")
+        var closed = record.pty_fd < 0
+        var closes = 0
+        while not closed and closes < 100:
+            val outcome = pane_close_pty_state(state, false, "capture-session", "capture-window", "capture-pane")
+            state = outcome.state
+            closed = outcome.result
+            if not closed: sosix_sleep_ms(10)
+            closes = closes + 1
+        expect(closed).to_equal(true)
+        expect(spawned.result.is_ok()).to_equal(true)
+        expect(spawned.result.unwrap()).to_be_greater_than(0)
+        expect(saw_end).to_equal(true)
+        expect(record.ingestion_sequence).to_be_greater_than(0)
+        expect(record.content_revision).to_be_greater_than(0)
+        step("Page retained styled bytes without performing another native read")
+        val lease = MuxHandleV1(owner_id: "native-test-owner", owner_generation: 1, lease_id: "local-test-client")
+        val target = MuxObjectRefV1(owner_id: lease.owner_id, owner_generation: lease.owner_generation,
+            kind: MuxObjectKindV1.Pane, object_id: "capture-pane")
+        var owner = capture_cursor_new()
+        var continuation: text? = nil
+        var bytes: [u8] = []
+        var complete = false
+        var pages = 0
+        while not complete and pages < 256:
+            val request = MuxCaptureV1(pane: target, range: MuxCaptureRangeV1.AllHistory,
+                join_wrapped: true, styled: true, max_bytes: 7, continuation: continuation)
+            val update = capture_cursor_apply(owner, lease, target, record, request, 17,
+                MuxIngestionV1.NotPolled, 100 + pages)
+            expect(update.result.is_ok()).to_equal(true)
+            val page = update.result.unwrap()
+            expect(page.bytes.len()).to_be_less_than(8)
+            expect(page.observed_revision).to_equal(17)
+            for byte in page.bytes: bytes.push(byte)
+            continuation = page.continuation
+            owner = update.owner
+            complete = not page.truncated
+            pages = pages + 1
+        expect(complete).to_equal(true)
+        val entire = vt_capture_page(record.screen, MuxCaptureRangeV1.AllHistory, true, true, 0, 65536)
+        expect(bytes).to_equal(entire.bytes)
+        expect(bytes_to_text(bytes)).to_contain("COREMUX_LINE_A")
+        expect(bytes_to_text(bytes)).to_contain("COREMUX_END")
+        expect(bytes_to_text(bytes)).to_contain("\x1b[0;31m")
+        expect(owner.cursors.len()).to_equal(0)
+
+    it "preserves real piped child history beyond the visible terminal grid":
+        # @req REQ-CMUX-003 REQ-CMUX-005 NFR-CMUX-005 NFR-CMUX-008
+        expect(sosix_platform_name()).to_equal("windows")
+        step("Launch a real piped child that writes thirty distinguishable lines")
+        val arguments = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "1..30 | ForEach-Object {[Console]::WriteLine('COREMUX_PIPE_'+$_)}"]
+        val spawned = pane_spawn_state(native_state(), false, "capture-session", "capture-window",
+            "capture-pane", "powershell.exe", arguments)
+        var state = spawned.state
+        var attempts = 0
+        var saw_end = false
+        while spawned.result.is_ok() and not saw_end and attempts < 100:
+            state = pane_poll_state(state, [], []).state
+            saw_end = state.get_pane(0).capture(200).content.contains("COREMUX_PIPE_30")
+            if not saw_end: sosix_sleep_ms(50)
+            attempts = attempts + 1
+        val record = state.get_pane(0)
+        step("Release the exact piped child owner before checking capture assertions")
+        var closed = record.child_pid <= 0
+        var closes = 0
+        while not closed and closes < 100:
+            closed = sosix_process_close_piped(record.child_pid)
+            if not closed: sosix_sleep_ms(10)
+            closes = closes + 1
+        expect(closed).to_equal(true)
+        expect(spawned.result.is_ok()).to_equal(true)
+        expect(spawned.result.unwrap()).to_be_greater_than(0)
+        expect(saw_end).to_equal(true)
+        val legacy = record.capture(200)
+        expect(legacy.rows).to_equal(30)
+        expect(legacy.content).to_start_with("COREMUX_PIPE_1\n")
+        expect(legacy.content).to_end_with("COREMUX_PIPE_30")
+        expect(record.capture_history(200).content).to_equal(legacy.content)
+        expect(record.tail_truncated).to_equal(false)
+        val screen = vt_capture_page(record.screen, MuxCaptureRangeV1.Screen, true, false, 0, 65536)
+        expect(bytes_to_text(screen.bytes)).to_contain("COREMUX_PIPE_30")
+        expect(bytes_to_text(screen.bytes).contains("COREMUX_PIPE_1\n")).to_equal(false)

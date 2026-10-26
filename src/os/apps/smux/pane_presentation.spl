@@ -1,0 +1,117 @@
+# Pure presentation projections. Window entries are authoritative metadata,
+# never a second child registry. Allocation rectangles include decorations;
+# content rectangles are the real terminal viewport and public pane geometry.
+use os.apps.smux.contract.{MuxWindow, MuxPanePresentation}
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.mux_rects.{MuxRect}
+use os.apps.smux.vt_screen.{vt_cell_width}
+use std.common.contracts.mux.execution_v1.{MuxBorderV1, MuxBorderStatusV1}
+use std.common.string_core.{text_to_bytes}
+
+pub fn pane_presentation(window: MuxWindow, pane_id: text) -> MuxPanePresentation:
+    for entry in window.presentation:
+        if entry.pane_id == pane_id: return entry
+    return MuxPanePresentation(pane_id: pane_id, title: "", hidden: false,
+        border: MuxBorderV1.Hidden, status: MuxBorderStatusV1.Hidden)
+
+pub fn pane_is_hidden(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> bool:
+    val wi = st.find_window_idx(window_id)
+    val pi = st.find_pane_idx(pane_id)
+    if wi < 0 or pi < 0: return true
+    val pane = st.get_pane(pi).pane
+    if st.get_window(wi).session_id != session_id or pane.session_id != session_id or pane.window_id != window_id:
+        return true
+    return pane_presentation(st.get_window(wi), pane_id).hidden
+
+pub fn pane_title_valid(title: text) -> bool:
+    if text_to_bytes(title).len() > 1024: return false
+    for scalar in title:
+        if scalar < " " or (scalar >= "\u{7f}" and scalar <= "\u{9f}"): return false
+    return true
+
+pub fn pane_border_cells(entry: MuxPanePresentation) -> i64:
+    match entry.border:
+        case MuxBorderV1.Hidden: return 0
+        case MuxBorderV1.Single: return 1
+        case MuxBorderV1.Double: return 1
+
+pub fn pane_status_cells(entry: MuxPanePresentation) -> i64:
+    match entry.status:
+        case MuxBorderStatusV1.Hidden: return 0
+        case MuxBorderStatusV1.Top: return 1
+        case MuxBorderStatusV1.Bottom: return 1
+
+pub fn pane_content_rect(rect: MuxRect, entry: MuxPanePresentation) -> MuxRect:
+    val border = pane_border_cells(entry)
+    val top = if entry.status == MuxBorderStatusV1.Top: 1 else: 0
+    return MuxRect(pane_id: rect.pane_id, col: rect.col + border,
+        row: rect.row + border + top, cols: rect.cols - 2 * border,
+        rows: rect.rows - 2 * border - pane_status_cells(entry))
+
+pub fn pane_presentations_equal(left: [MuxPanePresentation], right: [MuxPanePresentation]) -> bool:
+    if left.len() != right.len(): return false
+    var i = 0
+    while i < left.len():
+        val a = left[i]
+        val b = right[i]
+        if a.pane_id != b.pane_id or a.title != b.title or a.hidden != b.hidden or a.border != b.border or a.status != b.status:
+            return false
+        i = i + 1
+    return true
+
+# Internal owner helper; caller validates membership first. Preserve ordering
+# to make checkpoint comparison exact. Capacity refusal is explicit.
+pub fn window_store_presentation(window: MuxWindow, entry: MuxPanePresentation) -> Result<MuxWindow, text>:
+    var entries: [MuxPanePresentation] = []
+    var found = false
+    for prior in window.presentation:
+        if prior.pane_id == entry.pane_id:
+            entries.push(entry)
+            found = true
+        else: entries.push(prior)
+    if not found:
+        if entries.len() >= 8: return Err("pane presentation capacity reached")
+        entries.push(entry)
+    return Ok(window.with_presentation(entries))
+
+# Unicode title cells are bounded by the status row. Combining scalars attach
+# to the preceding glyph; a leading zero-width scalar is not emitted. Wide
+# glyphs are never emitted into the final cell or split across a border.
+pub fn pane_title_cells(title: text, width: i64) -> [text]:
+    var cells: [text] = []
+    var base: i64 = -1
+    for scalar in title:
+        if scalar < " " or (scalar >= "\u{7f}" and scalar <= "\u{9f}"): continue
+        val extent = vt_cell_width(scalar)
+        if extent == 0:
+            if base >= 0: cells[base] = cells[base] + scalar
+        else:
+            if cells.len() + extent > width: break
+            base = cells.len()
+            cells.push(scalar)
+            if extent == 2: cells.push("")
+    return cells
+
+pub fn pane_decoration_cell(rect: MuxRect, entry: MuxPanePresentation, title: [text], x: i64, y: i64) -> text:
+    val border = pane_border_cells(entry)
+    val left = rect.col
+    val right = rect.col + rect.cols - 1
+    val top = rect.row
+    val bottom = rect.row + rect.rows - 1
+    if x < left or x > right or y < top or y > bottom: return " "
+    val double = entry.border == MuxBorderV1.Double
+    if border > 0:
+        if y == top:
+            if x == left: return if double: "\u{2554}" else: "\u{250c}"
+            if x == right: return if double: "\u{2557}" else: "\u{2510}"
+            return if double: "\u{2550}" else: "\u{2500}"
+        if y == bottom:
+            if x == left: return if double: "\u{255a}" else: "\u{2514}"
+            if x == right: return if double: "\u{255d}" else: "\u{2518}"
+            return if double: "\u{2550}" else: "\u{2500}"
+        if x == left or x == right: return if double: "\u{2551}" else: "\u{2502}"
+    val status_row = if entry.status == MuxBorderStatusV1.Top: top + border else: bottom - border
+    if pane_status_cells(entry) > 0 and y == status_row:
+        val column = x - left - border
+        if column >= 0 and column < title.len(): return title[column]
+    return " "

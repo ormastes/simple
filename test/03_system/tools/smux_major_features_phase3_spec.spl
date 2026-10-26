@@ -1,0 +1,182 @@
+"""
+## Purpose and audience
+Cross-feature regression for SMUX split orientation, retained window geometry,
+client refresh and explicit layout changes. Maintainers use production decoder,
+service and interactive protocol owners; no test service or adapter is supplied.
+## Evidence boundary
+TEST_BLOCKED: authored, compilation/execution/docgen not yet performed.
+These scenarios allocate no shell and observe real in-process service geometry.
+They do not execute the private terminal controller, TCP server or ConPTY.
+Live background execution and independent terminal clients retain their existing
+Windows fixtures and must be qualified separately with the admitted Phase 3 CLI.
+# @manual: primary
+# @capture: text
+Plan: doc/03_plan/sys_test/smux_major_features_phase3.md
+"""
+
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.client_input.{client_input_new, client_input_feed}
+use os.apps.smux.api.{
+    smux_reset_for_test, smux_create_session, smux_list_windows, smux_list_panes,
+    smux_split_pane, smux_select_layout, smux_window_rects,
+    smux_new_window, smux_focus_window, smux_active_window,
+    smux_attach, smux_detach_from, smux_list_clients
+}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+
+# @inline
+fn smux_major_features_setup(name: text) -> [text]:
+    val session = smux_create_session(name)
+    expect(session.id.len()).to_be_greater_than(0)
+    val windows = smux_list_windows(session.id)
+    expect(windows.len()).to_equal(1)
+    val panes = smux_list_panes(session.id, windows[0].id)
+    expect(panes.len()).to_equal(1)
+    expect(smux_select_layout(session.id, windows[0].id, "tiled", 80, 24).is_ok()).to_equal(true)
+    return [session.id, windows[0].id, panes[0].id]
+
+describe "SMUX Phase 3 split and client refresh workflows":
+    it "should retain a horizontal split through current layout and repeated frames":
+        # @req REQ-SMUX-CORE-002
+        # @req REQ-SMUX-INTERACTIVE-001
+        # @req REQ-SMUX-INTERACTIVE-003
+        smux_reset_for_test()
+        step("Decode Ctrl-B quote and split the production window into upper and lower panes")
+        val ids = smux_major_features_setup("horizontal-refresh")
+        val prefix = client_input_feed(client_input_new(), "\x02")
+        expect(prefix.actions.len()).to_equal(0)
+        val decoded = client_input_feed(prefix.state, "\"")
+        expect(decoded.actions.len()).to_equal(1)
+        expect(decoded.actions[0].kind).to_equal("split-horizontal")
+        val direction = if decoded.actions[0].kind == "split-horizontal": "horizontal" else: "vertical"
+        val split = smux_split_pane(ids[0], ids[1], ids[2], direction)
+        expect(split.is_ok()).to_equal(true)
+        val lower = split.unwrap().id
+        expect(smux_list_panes(ids[0], ids[1])[0].rows).to_equal(11)
+        expect(split.unwrap().rows).to_equal(12)
+        step("Request the current layout without issuing a new named layout selection")
+        val address = ids[0] + " " + ids[1]
+        expect(smux_interactive_dispatch("client-layout " + address + " current 80 24")).to_start_with("smux: layout ")
+        step("Capture two frames and require the same upper and lower pane identities")
+        expect(smux_interactive_dispatch("frame " + address + " " + lower)).to_start_with("SMUX-FRAME/1 80 24\n")
+        expect(smux_interactive_dispatch("frame " + address + " " + ids[2])).to_start_with("SMUX-FRAME/1 80 24\n")
+        val rects = smux_window_rects(ids[0], ids[1])
+        expect(rects.len()).to_equal(2)
+        expect(rects[0].pane_id).to_equal(ids[2])
+        expect(rects[1].pane_id).to_equal(lower)
+        expect(rects[0].col).to_equal(0)
+        expect(rects[0].row).to_equal(0)
+        expect(rects[0].cols).to_equal(80)
+        expect(rects[0].rows).to_equal(11)
+        expect(rects[1].col).to_equal(0)
+        expect(rects[1].row).to_equal(12)
+        expect(rects[1].cols).to_equal(80)
+        expect(rects[1].rows).to_equal(12)
+        smux_reset_for_test()
+
+    it "should retain a vertical split until an explicit named layout changes its orientation":
+        # @req REQ-SMUX-CORE-002
+        # @req REQ-SMUX-CORE-005
+        # @req REQ-SMUX-INTERACTIVE-001
+        smux_reset_for_test()
+        step("Decode Ctrl-B percent and split the production window into left and right panes")
+        val ids = smux_major_features_setup("vertical-then-layout")
+        val decoded = client_input_feed(client_input_new(), "\x02%")
+        expect(decoded.actions.len()).to_equal(1)
+        expect(decoded.actions[0].kind).to_equal("split-vertical")
+        val direction = if decoded.actions[0].kind == "split-vertical": "vertical" else: "horizontal"
+        val split = smux_split_pane(ids[0], ids[1], ids[2], direction)
+        expect(split.is_ok()).to_equal(true)
+        val right = split.unwrap().id
+        val address = ids[0] + " " + ids[1]
+        step("A frame arriving before the client arranges must preserve the column split")
+        expect(smux_interactive_dispatch("frame " + address + " " + right)).to_start_with("SMUX-FRAME/1 80 24\n")
+        val columns = smux_window_rects(ids[0], ids[1])
+        expect(columns.len()).to_equal(2)
+        expect(columns[0].pane_id).to_equal(ids[2])
+        expect(columns[1].pane_id).to_equal(right)
+        expect(columns[0].col).to_equal(0)
+        expect(columns[0].row).to_equal(0)
+        expect(columns[0].cols).to_equal(39)
+        expect(columns[0].rows).to_equal(24)
+        expect(columns[1].col).to_equal(40)
+        expect(columns[1].row).to_equal(0)
+        expect(columns[1].cols).to_equal(40)
+        expect(columns[1].rows).to_equal(24)
+        step("Explicit even-vertical selection replaces the split with two full-width bands")
+        expect(smux_interactive_dispatch("client-layout " + address + " even-vertical 80 24")).to_equal("smux: layout even-vertical")
+        expect(smux_interactive_dispatch("frame " + address + " " + right)).to_start_with("SMUX-FRAME/1 80 24\n")
+        val bands = smux_window_rects(ids[0], ids[1])
+        expect(bands.len()).to_equal(2)
+        expect(bands[0].pane_id).to_equal(ids[2])
+        expect(bands[1].pane_id).to_equal(right)
+        expect(bands[0].col).to_equal(0)
+        expect(bands[0].row).to_equal(0)
+        expect(bands[0].cols).to_equal(80)
+        expect(bands[0].rows).to_equal(12)
+        expect(bands[1].col).to_equal(0)
+        expect(bands[1].row).to_equal(12)
+        expect(bands[1].cols).to_equal(80)
+        expect(bands[1].rows).to_equal(12)
+        smux_reset_for_test()
+
+    it "should retain a targeted nested split across sibling frames detach and reattach":
+        # @req REQ-SMUX-CORE-001
+        # @req REQ-SMUX-CORE-004
+        # @req REQ-SMUX-INTERACTIVE-003
+        smux_reset_for_test()
+        step("Create two sessions and two windows with two clients sharing the work session")
+        val ids = smux_major_features_setup("nested-work")
+        val other = smux_major_features_setup("isolated-monitor")
+        val logs = smux_new_window(ids[0], "logs")
+        expect(logs.id.len()).to_be_greater_than(0)
+        expect(smux_select_layout(ids[0], logs.id, "tiled", 40, 10).is_ok()).to_equal(true)
+        expect(smux_focus_window(ids[0], logs.id)).to_equal(true)
+        expect(smux_attach(ids[0], "first", 80, 24).attached).to_equal(true)
+        expect(smux_attach(ids[0], "sibling", 80, 24).attached).to_equal(true)
+        expect(smux_attach(other[0], "foreign", 20, 6).attached).to_equal(true)
+        step("Split the inactive work window vertically then split only its left pane horizontally")
+        val vertical = smux_split_pane(ids[0], ids[1], ids[2], "vertical")
+        expect(vertical.is_ok()).to_equal(true)
+        val horizontal = smux_split_pane(ids[0], ids[1], ids[2], "horizontal")
+        expect(horizontal.is_ok()).to_equal(true)
+        val address = ids[0] + " " + ids[1]
+        step("A sibling frame must preserve the nested topology before any arrange request")
+        expect(smux_interactive_dispatch("frame " + address + " " + vertical.unwrap().id)).to_start_with("SMUX-FRAME/1 80 24\n")
+        step("Reject a foreign pane without replacing the retained nested geometry")
+        expect(smux_split_pane(ids[0], ids[1], other[2], "horizontal").is_err()).to_equal(true)
+        step("Detach both work clients and reattach without recreating panes or changing layout")
+        expect(smux_detach_from(ids[0], "first")).to_equal(true)
+        expect(smux_detach_from(ids[0], "sibling")).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_list_panes(ids[0], ids[1]).len()).to_equal(3)
+        expect(smux_attach(ids[0], "returning", 80, 24).attached).to_equal(true)
+        expect(smux_interactive_dispatch("client-layout " + address + " current 80 24")).to_start_with("smux: layout ")
+        expect(smux_interactive_dispatch("frame " + address + " " + horizontal.unwrap().id)).to_start_with("SMUX-FRAME/1 80 24\n")
+        val rects = smux_window_rects(ids[0], ids[1])
+        expect(rects.len()).to_equal(3)
+        expect(rects[0].pane_id).to_equal(ids[2])
+        expect(rects[0].col).to_equal(0)
+        expect(rects[0].row).to_equal(0)
+        expect(rects[0].cols).to_equal(39)
+        expect(rects[0].rows).to_equal(11)
+        expect(rects[1].pane_id).to_equal(vertical.unwrap().id)
+        expect(rects[1].col).to_equal(40)
+        expect(rects[1].row).to_equal(0)
+        expect(rects[1].cols).to_equal(40)
+        expect(rects[1].rows).to_equal(24)
+        expect(rects[2].pane_id).to_equal(horizontal.unwrap().id)
+        expect(rects[2].col).to_equal(0)
+        expect(rects[2].row).to_equal(12)
+        expect(rects[2].cols).to_equal(39)
+        expect(rects[2].rows).to_equal(12)
+        step("Retain the selected logs window and the untouched monitoring session")
+        expect(smux_active_window(ids[0]).unwrap().id).to_equal(logs.id)
+        expect(smux_list_windows(ids[0]).len()).to_equal(2)
+        expect(smux_window_rects(ids[0], logs.id)[0].cols).to_equal(40)
+        expect(smux_window_rects(ids[0], logs.id)[0].rows).to_equal(10)
+        expect(smux_window_rects(other[0], other[1])[0].cols).to_equal(80)
+        expect(smux_window_rects(other[0], other[1])[0].rows).to_equal(24)
+        expect(smux_list_panes(other[0], other[1])[0].id).to_equal(other[2])
+        smux_reset_for_test()

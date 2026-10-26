@@ -41,6 +41,10 @@ use compiler.driver.driver_source_loading.{
     _driver_unique_physical_sources
 }
 use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1,
+    library_mode_options_error_v1, library_mode_import_key_v1}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1,
+    driver_library_mode_native_owner_v1}
 use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1, native_group_source_paths_v1}
@@ -207,6 +211,12 @@ impl CompilerDriver:
         true
 
     me load_sources_impl(preclosed: NativeEntryClosureRequestV1? = nil) -> (CompileContext, bool):
+        val library_error = library_mode_options_error_v1(self.ctx.options.library_mode,
+            self.ctx.options.gc_off, self.ctx.options.allowed_families)
+        if library_error != "":
+            self.ctx.add_error(library_error)
+            log_phase(library_error)
+            return (self.ctx, false)
         val admitted_task = driver_admitted_epoch_task_active_v1()
         if preclosed != nil and driver_admitted_epoch_active_v1():
             self.ctx.add_error("preclosed parse selection cannot compose with admitted source epoch")
@@ -259,7 +269,8 @@ impl CompilerDriver:
         if preclosed != nil:
             val request = preclosed!
             val selected = native_entry_closure_request_open_v1(
-                request, self.ctx.environment_variant_policy_digest)
+                request, library_mode_closure_digest_v1(self.ctx.environment_variant_policy_digest,
+                    self.ctx.options.library_mode))
             if selected.is_err():
                 self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
                 driver_entry_scan_cache_release()
@@ -1093,11 +1104,17 @@ impl CompilerDriver:
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp_input in closure_imports:
-                    val closure_mp = if closure_mp_input.starts_with(".") and
+                    val authored_mp = if closure_mp_input.starts_with(".") and
                         not closure_mp_input.starts_with(".."):
                         closure_module + closure_mp_input
                     else:
                         closure_mp_input
+                    val closure_mp = library_mode_import_key_v1(authored_mp,
+                        self.ctx.options.library_mode, closure_src.module_name)
+                    if closure_mp == "":
+                        self.ctx.add_error("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: " + closure_src.path)
+                        driver_entry_scan_cache_release()
+                        return (self.ctx, false)
                     # A bare spelling binds importer-relative (`use types` is
                     # the importer's sibling when one exists), so the same
                     # spelling from another directory must be resolved again.
@@ -1105,8 +1122,15 @@ impl CompilerDriver:
                     if closure_seen_mods.contains_key(closure_seen_key):
                         continue
                     closure_seen_mods[closure_seen_key] = true
-                    val selected_source = _driver_resolve_source_root_entry_import_from_v1(
-                        closure_mp_input, closure_source_roots, closure_dir)
+                    val selected_source = match driver_library_mode_selected_v1(
+                            closure_mp_input, closure_source_roots, closure_dir,
+                            self.ctx.options.library_mode, closure_src.module_name):
+                        case Ok(value): value
+                        case Err(reason):
+                            self.ctx.add_error(reason)
+                            log_phase(reason)
+                            driver_entry_scan_cache_release()
+                            return (self.ctx, false)
                     # An alias registered from ANOTHER directory is an
                     # importer-relative binding, not this importer's owner.
                     val alias_dir = closure_alias_dir.get(closure_mp) ?? ""
@@ -1152,7 +1176,8 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
-                    closure_file = driver_closure_native_owner_v1(closure_file, closure_mp, closure_dir)
+                    closure_file = driver_library_mode_native_owner_v1(closure_file, closure_mp_input, closure_dir,
+                        self.ctx.options.library_mode, closure_src.module_name)
                     val closure_edge_exempt = driver_closure_synthetic_spec_v1(closure_mp_input) or
                         driver_closure_parity_exempt_v1(closure_parity_exempt, closure_src.path)
                     # Dedup by physical file, never by spelling: a spelling
@@ -1245,7 +1270,7 @@ impl CompilerDriver:
         # its entry-source semantics.
         if admitted_preclosed != nil:
             match driver_preclosed_source_aliases_v1(all_sources,
-                    closure_source_roots, preclosed_snapshot_root):
+                    closure_source_roots, preclosed_snapshot_root, self.ctx.options.library_mode):
                 case Ok(sources): all_sources = sources
                 case Err(reason):
                     self.ctx.add_error(reason)

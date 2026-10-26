@@ -1,0 +1,131 @@
+"""
+REQ-CMUX-003/004/008: all clients of a session follow shared current focus.
+Source-authored NOT_RUN. Exercises root-owned API publication integration;
+the spec intentionally checks stored owner records, not helper-only projection.
+# @manual: primary
+# @capture: text
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_create_session, smux_new_window, smux_list_windows,
+    smux_list_panes, smux_split_pane, smux_focus_window, smux_focus_pane,
+    smux_attach_leased, smux_client_resize_leased, smux_configuration_revision,
+    smux_owner_snapshot, smux_hide_pane, smux_kill_window, smux_kill_session,
+    smux_attach, smux_list_clients}
+use os.apps.smux.client_context_service.{client_context_lookup}
+
+fn context_shared_checks(session: text, other: text) -> Result<bool, text>:
+    val windows = smux_list_windows(session)
+    val others = smux_list_windows(other)
+    if windows.len() != 1 or others.len() != 1: return Err("initial window missing")
+    val window = windows[0]
+    val panes = smux_list_panes(session, window.id)
+    if panes.len() != 1: return Err("initial pane missing")
+    val added = smux_split_pane(session, window.id, panes[0].id, "vertical")?
+    val token_a = smux_attach_leased(session, "shared-a", 80, 24)?
+    val _token_b = smux_attach_leased(session, "shared-b", 90, 30)?
+    val _token_c = smux_attach_leased(other, "isolated-c", 100, 40)?
+    val original = smux_owner_snapshot()
+    val isolated = original.get_client(original.find_client_idx("isolated-c"))
+    if not smux_focus_pane(session, window.id, added.id): return Err("shared focus failed")
+    val focused = smux_owner_snapshot()
+    for client in ["shared-a", "shared-b"]:
+        val attachment = focused.get_client(focused.find_client_idx(client))
+        if attachment.current_window != window.id or attachment.current_pane != added.id:
+            return Err("stored client context did not follow shared focus")
+    val unchanged = focused.get_client(focused.find_client_idx("isolated-c"))
+    if unchanged.current_window != isolated.current_window or unchanged.current_pane != isolated.current_pane:
+        return Err("focus crossed session boundary")
+    val revision = smux_configuration_revision().value
+    val _renewed = smux_client_resize_leased(session, "shared-a", token_a, 80, 24)?
+    if smux_configuration_revision().value != revision: return Err("heartbeat-only resize changed configuration")
+    val second = smux_new_window(session, "next")
+    if second.id == "" or not smux_focus_window(session, second.id): return Err("shared window focus failed")
+    val moved = smux_owner_snapshot()
+    for client in ["shared-a", "shared-b"]:
+        if moved.get_client(moved.find_client_idx(client)).current_window != second.id:
+            return Err("stored client context did not follow shared window")
+    val _killed = smux_kill_window(session, second.id)?
+    val restored = smux_owner_snapshot()
+    for client in ["shared-a", "shared-b"]:
+        if restored.get_client(restored.find_client_idx(client)).current_window != window.id:
+            return Err("window removal left stale context")
+    val _hidden = smux_hide_pane(session, window.id, added.id)?
+    val hidden = smux_owner_snapshot()
+    for client in ["shared-a", "shared-b"]:
+        if hidden.get_client(hidden.find_client_idx(client)).current_pane != panes[0].id:
+            return Err("hidden active pane remained a client input target")
+    return Ok(true)
+
+fn context_generation_checks(session: text) -> Result<bool, text>:
+    val _token = smux_attach_leased(session, "generation-client", 80, 24)?
+    val before = smux_owner_snapshot()
+    val first = before.get_client(before.find_client_idx("generation-client"))
+    val _replacement = smux_attach_leased(session, "generation-client", 80, 24)?
+    val after = smux_owner_snapshot()
+    val second = after.get_client(after.find_client_idx("generation-client"))
+    if second.attachment_generation <= first.attachment_generation: return Err("reattach reused generation")
+    if client_context_lookup(after, session, "generation-client", first.attachment_generation).is_ok():
+        return Err("stale generation resolved")
+    if second.current_window != first.current_window or second.current_pane != first.current_pane:
+        return Err("reattach changed shared focus")
+    return Ok(true)
+
+fn context_unmanaged_return_checks(session: text) -> Result<bool, text>:
+    val windows = smux_list_windows(session)
+    if windows.len() != 1: return Err("initial window missing")
+    val panes = smux_list_panes(session, windows[0].id)
+    if panes.len() != 1: return Err("initial pane missing")
+    for columns in [80, 90]:
+        val returned = smux_attach(session, "return-client", columns, 24)
+        if not returned.attached: return Err("unmanaged attachment refused")
+        if returned.current_window != windows[0].id or returned.current_pane != panes[0].id:
+            return Err("returned attachment lost canonical context")
+        val snapshot = smux_owner_snapshot()
+        val index = snapshot.find_client_idx("return-client")
+        if index < 0: return Err("stored attachment missing")
+        val stored = snapshot.get_client(index)
+        var listed_count = 0
+        for listed in smux_list_clients():
+            if listed.client_id == "return-client":
+                listed_count = listed_count + 1
+                if listed.session_id != returned.session_id or listed.attached != returned.attached or listed.cols != returned.cols or listed.rows != returned.rows:
+                    return Err("returned attachment differs from listed identity or viewport")
+                if listed.current_window != returned.current_window or listed.current_pane != returned.current_pane or listed.attachment_generation != returned.attachment_generation:
+                    return Err("returned attachment differs from listed context or generation")
+        if listed_count != 1: return Err("listed attachment identity is not unique")
+        if stored.current_window != returned.current_window or stored.current_pane != returned.current_pane or stored.attachment_generation != returned.attachment_generation:
+            return Err("returned attachment differs from stored context or generation")
+        if returned.attachment_generation != 0 or returned.cols != columns:
+            return Err("unmanaged identity or updated viewport differs")
+    return Ok(true)
+
+describe "Shared client focus through the real service API":
+    it "returns the same canonical attachment context as stored and listed state":
+        step("Attach and resize an unmanaged client through the actual API")
+        val session = smux_create_session("context-return")
+        val outcome = if session.id == "": Err("session admission failed") else: context_unmanaged_return_checks(session.id)
+        val cleaned = if session.id == "": true else: smux_kill_session(session.id).is_ok()
+        step("Require returned context and generation to match the actual owner records")
+        expect(cleaned).to_equal(true)
+        expect(outcome.is_ok()).to_equal(true)
+
+    it "moves both attached clients together while isolating other sessions and repairing removed targets":
+        step("Attach two clients to one session and a third to another")
+        val session = smux_create_session("context-shared")
+        val other = smux_create_session("context-isolated")
+        val outcome = if session.id == "" or other.id == "": Err("session admission failed") else: context_shared_checks(session.id, other.id)
+        step("Release both owned sessions before checking shared focus observations")
+        val cleaned = if session.id == "": true else: smux_kill_session(session.id).is_ok()
+        val other_cleaned = if other.id == "": true else: smux_kill_session(other.id).is_ok()
+        expect(cleaned).to_equal(true)
+        expect(other_cleaned).to_equal(true)
+        expect(outcome.is_ok()).to_equal(true)
+
+    it "rejects old attachment identity after same-label managed reattachment":
+        step("Reattach through the actual managed admission path")
+        val session = smux_create_session("context-generation")
+        val outcome = if session.id == "": Err("session admission failed") else: context_generation_checks(session.id)
+        val cleaned = if session.id == "": true else: smux_kill_session(session.id).is_ok()
+        expect(cleaned).to_equal(true)
+        expect(outcome.is_ok()).to_equal(true)

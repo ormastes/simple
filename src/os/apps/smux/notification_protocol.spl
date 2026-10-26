@@ -1,0 +1,39 @@
+# Shared-token-authorized notices, scoped to an actual attached recipient.
+use os.apps.smux.api.{smux_list_clients}
+use os.apps.smux.session_targets.{smux_resolve_session}
+use os.apps.smux.interactive_protocol.{smux_input_hex_decode}
+use os.apps.smux.client_view.{client_input_hex}
+use os.apps.smux.client_notifications.{smux_notifications_enqueue,
+    smux_notifications_peek, smux_notifications_ack}
+
+pub fn smux_notification_dispatch(line: text) -> text:
+    val parts = line.trim().split(" ")
+    if parts.len() == 0: return ""
+    val verb = parts[0]
+    if verb != "notify" and verb != "notifications" and verb != "ack-notification":
+        return ""
+    val required = if verb == "notifications": 3 else: 4
+    if parts.len() != required:
+        return "smux: notification command requires session client and optional payload or id"
+    val session = smux_resolve_session(parts[1])
+    if session == "": return "smux: unknown or ambiguous session " + parts[1]
+    val client_id = parts[2]
+    var attached = false
+    for client in smux_list_clients():
+        if client.attached and client.session_id == session and client.client_id == client_id:
+            attached = true
+    if not attached: return "smux: notification recipient is not attached"
+    if verb == "notify":
+        val decoded = smux_input_hex_decode(parts[3])
+        if decoded.is_err(): return "smux: notification payload invalid: " + decoded.unwrap_err()
+        val queued = smux_notifications_enqueue(session, client_id, decoded.unwrap())
+        if queued.is_err(): return "smux: " + queued.unwrap_err()
+        return "smux: notification queued " + queued.unwrap().to_text()
+    if verb == "ack-notification":
+        val id = parts[3].to_i64() ?? 0
+        if not smux_notifications_ack(session, client_id, id):
+            return "smux: notification acknowledgement refused"
+        return "smux: notification acknowledged " + id.to_text()
+    val message = smux_notifications_peek(session, client_id)
+    if message.id == 0: return "smux: notification none"
+    return "smux: notification " + message.id.to_text() + " " + client_input_hex(message.body)

@@ -1,0 +1,64 @@
+# Explicit-state configured PTY launch composition. The API publishes once.
+# Adapter validates MuxLaunchV1 before lossless mapping; platform-specific launch
+# validity belongs to the selected provider. This helper does not certify it.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.pane_io_service.{PanePidUpdate}
+use std.sosix.pty.{PtyLaunchV1 as SosixPtyLaunchV1,
+    sosix_pty_open, sosix_pty_spawn_configured_v1, sosix_pty_close, sosix_pty_cleanup_pending}
+
+# Pure ownership/capacity admission, also used by the actual effect path.
+pub fn pane_configured_launch_admit(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> Result<int, text>:
+    if closing: return Err("window or session is closing")
+    val si = before.find_session_idx(session_id)
+    val wi = before.find_window_idx(window_id)
+    val pi = before.find_pane_idx(pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("unknown launch owner")
+    val pane = before.get_pane(pi)
+    if before.get_window(wi).session_id != session_id or pane.pane.session_id != session_id or pane.pane.window_id != window_id:
+        return Err("pane does not belong to session/window")
+    if pane.child_pid > 0 or pane.pty_fd >= 0:
+        return Err("pane already owns a child or pending PTY")
+    if not pane.can_attach(): return Err("pane incarnation or content revision exhausted")
+    val cols = pane.pane.cols
+    val rows = pane.pane.rows
+    if cols < 1 or rows < 1 or cols > 32767 or rows > 32767:
+        return Err("invalid configured PTY dimensions")
+    if cols * rows > 262144: return Err("configured PTY dimensions exceed service limit")
+    return Ok(pi)
+
+pub fn pane_spawn_configured_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text, launch: SosixPtyLaunchV1) -> PanePidUpdate:
+    val admitted = pane_configured_launch_admit(before, closing, session_id, window_id, pane_id)
+    if admitted.is_err():
+        # Report pending ownership only for this exact scoped pane. No foreign
+        # lookup grants caller cleanup authority or changes retained state.
+        var pending = false
+        val pi = before.find_pane_idx(pane_id)
+        if pi >= 0:
+            val pane = before.get_pane(pi)
+            pending = pane.pane.session_id == session_id and pane.pane.window_id == window_id and pane.pty_fd >= 0 and pane.child_pid <= 0
+        return PanePidUpdate(state: before, commit: false, cleanup_pending: pending, result: Err(admitted.unwrap_err()))
+    val idx = admitted.unwrap()
+    val pane = before.get_pane(idx)
+    val handle = sosix_pty_open(pane.pane.rows as i32, pane.pane.cols as i32)
+    if handle < 0:
+        # Failed allocation can retain provider-global quarantine without an
+        # addressable pane token. A nonzero count (including unknown -1) keeps
+        # the owner-stop cleanup gate closed; it is not per-request authority.
+        val pending = sosix_pty_cleanup_pending() != 0
+        return PanePidUpdate(state: before, commit: false, cleanup_pending: pending, result: Err("configured PTY open failed"))
+    # Forward Exec/Shell, argv, cwd and Set/Remove unchanged. No shell prefix,
+    # executable search, command reconstruction or pipe fallback is introduced.
+    val started = sosix_pty_spawn_configured_v1(handle, launch)
+    var pid: i64 = -1
+    if started.is_ok(): pid = started.unwrap()
+    if pid <= 0:
+        # Provider errors may describe argv/env/cwd; never surface that text.
+        # A failed close leaves the exact token attached for checked retry.
+        if not sosix_pty_close(handle):
+            val retained = before.replace_pane(idx, pane.with_pty(-1, handle as i64))
+            return PanePidUpdate(state: retained, commit: true, cleanup_pending: true,
+                result: Err("configured PTY launch failed; native cleanup pending"))
+        return PanePidUpdate(state: before, commit: false, cleanup_pending: false,
+            result: Err("configured PTY launch failed"))
+    val attached = before.replace_pane(idx, pane.with_pty(pid, handle as i64))
+    return PanePidUpdate(state: attached, commit: true, cleanup_pending: false, result: Ok(pid))

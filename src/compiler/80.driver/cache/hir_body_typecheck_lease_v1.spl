@@ -2,6 +2,7 @@
 # The archive contains actual lowered HIR. Only diagnostics and scalar counts
 # survive a lease; provider/template body ownership still needs other adapters.
 use compiler.hir.hir_types.{HirModule}
+use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.driver.driver_hir_cache.{
     hir_cache_key, hir_cache_header, hir_cache_enabled, hir_cache_store_in_owned_scope,
@@ -39,6 +40,7 @@ struct HirBodyArchiveInputV1:
     provider_selection_digest: text = ""
     source_content_digest: text = ""
     source_authored_path: text = ""
+    library_mode: text = ""
 
 struct HirBodyArchiveV1:
     input: HirBodyArchiveInputV1
@@ -54,6 +56,7 @@ struct HirBodyTypecheckLeaseReceiptV1:
     body_digest: text
 
 fn hir_body_archive_input_key_v1(input: HirBodyArchiveInputV1) -> text:
+    if library_mode_policy_v1(input.library_mode).is_err(): return ""
     if input.stage != "lowered-unresolved-v1" or input.module_name == "":
         return ""
     if input.closure_digest.len() != 64 or input.runtime_provider_digest.len() != 64:
@@ -75,7 +78,7 @@ fn hir_body_archive_input_key_v1(input: HirBodyArchiveInputV1) -> text:
         val (authored_path, source_content) = source_file_coverage_identity(input.source_path, physical.unwrap())
         if authored_path != input.source_authored_path or sha256_text(source_content) != input.source_content_digest:
             return ""
-    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, input.library_mode)
     if source_key == "":
         return ""
     # Independently hash arbitrary text fields, so line delimiters cannot alias.
@@ -93,7 +96,7 @@ fn hir_body_archive_matches_v1(archive: HirBodyArchiveV1, expected: HirBodyArchi
     current != "" and archive.body_digest.len() == 64 and archive.lowering_warnings_digest.len() == 64 and
         hir_body_archive_content_key_v1(current, archive.body_digest, archive.lowering_warnings_digest) == archive.archive_key and
         hir_body_archive_input_key_v1(archive.input) == current and
-        archive.source_key == hir_cache_key(expected.source_path, expected.closure_digest, expected.is_entry)
+        archive.source_key == hir_cache_key(expected.source_path, expected.closure_digest, expected.is_entry, expected.library_mode)
 
 fn hir_body_archive_warnings_digest_v1(warnings: [text]) -> text:
     var hashes: [text] = []
@@ -118,12 +121,12 @@ fn hir_body_archive_store_in_owned_scope_v1(
     # must not accumulate one whole authority receipt per completed module.
     val input_key = hir_body_archive_input_key_v1(input)
     val identity_valid = input_key != ""
-    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry)
+    val source_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, input.library_mode)
     val blob = if identity_valid: hir_module_encode(module) else: ""
     val body_digest = sha256_text(blob)
     val warnings_digest = hir_body_archive_warnings_digest_v1(warnings)
     val key = hir_body_archive_content_key_v1(input_key, body_digest, warnings_digest)
-    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings)
+    val stored = blob != "" and hir_cache_store_in_owned_scope(key, module, warnings, "", input.library_mode)
     if not identity_valid:
         return Err("body archive identity unavailable")
     if not stored:
@@ -167,7 +170,7 @@ fn hir_body_archive_load_in_owned_scope_v1(
         return Err("body archive warning owner occupied")
     if not hir_body_archive_matches_v1(archive, expected):
         return Err("body archive identity mismatch")
-    if val module = hir_cache_load_in_owned_scope(archive.archive_key):
+    if val module = hir_cache_load_in_owned_scope(archive.archive_key, "", "", archive.input.library_mode):
         if module.name == expected.module_name and module.path == expected.source_path and
                 sha256_text(hir_module_encode(module)) == archive.body_digest and
                 hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == archive.lowering_warnings_digest:

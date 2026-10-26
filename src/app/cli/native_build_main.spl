@@ -14,6 +14,7 @@ use app.cli.native_build_output_plan.{native_build_is_value_consuming_flag,
 use app.cli.native_build_mir_selective_admission.{native_mir_selective_admission_v1,
     native_mir_selective_disk_bytes_v1, native_mir_selective_requested_workers_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
@@ -260,6 +261,7 @@ fn print_help():
     print ""
     print "Options:"
     print "  --source <dir>       Source directory to compile (repeatable)"
+    print "  --library-mode <mode> Semantic library configuration (for example nogc-sync-mut)"
     print "  -o <path>            Output binary path"
     print "  --entry <file>       Entry file"
     print "  --target <triple>    Target triple (for example x86_64-unknown-simpleos)"
@@ -1728,6 +1730,11 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             eprint "SCV-E-ADMISSION: " + reason
             return 1
     val args = request.args
+    val library_policy = match library_mode_parse_args_v1(args):
+        case Ok(value): value
+        case Err(reason):
+            eprint reason
+            return 2
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     env_set("SIMPLE_COMPILE_FAIL_FAST", if fail_fast: "1" else: "0")
     # This is the parent coordinator; native_build_worker.spl and shard
@@ -1913,7 +1920,8 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                 publish_error = "parse-shard closure entry outside source authority"
             elif not native_build_publish_parse_closure_v1(source_root, roots,
                     absolute_entry.substring(source_root.len() + 1),
-                    policy.handoff.policy_digest, simple_bin, closure_request_dir):
+                    policy.handoff.policy_digest, simple_bin, closure_request_dir,
+                    library_policy.mode):
                 publish_error = "parse-shard closure request publication failed"
         if publish_error != "":
             env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")

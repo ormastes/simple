@@ -1,0 +1,36 @@
+# Shared loopback HTTP authority checks for the dashboard and login validator.
+# These pure checks do not authenticate an operator or grant a mux capability.
+pub fn dashboard_header(headers: text, wanted: text) -> text?:
+    if headers.len() > 65536: return nil
+    var found: text? = nil
+    for line in headers.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(" ") or line.starts_with("\t") or line.contains("\r"): return nil
+        val colon = line.find(":")
+        if colon > 0 and line[0:colon].lower() == wanted:
+            if found != nil: return nil
+            found = Some(line[colon + 1:].trim())
+    found
+
+pub fn dashboard_local_origin(headers: text, port: i64, require_origin: bool) -> bool:
+    if port < 1 or port > 65535 or headers.len() > 65536: return false
+    var host = ""
+    var origin = ""
+    var host_seen = false
+    var origin_seen = false
+    for line in headers.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(" ") or line.starts_with("\t") or line.contains("\r"): return false
+        val colon = line.find(":")
+        if colon > 0:
+            val name = line[0:colon].lower()
+            if name == "host":
+                if host_seen: return false
+                host_seen = true
+                host = line[colon + 1:].trim()
+            elif name == "origin":
+                if origin_seen: return false
+                origin_seen = true
+                origin = line[colon + 1:].trim()
+    if not host_seen or (host != "127.0.0.1:" + str(port) and host != "localhost:" + str(port)):
+        return false
+    if origin_seen: return origin == "http://" + host
+    not require_origin

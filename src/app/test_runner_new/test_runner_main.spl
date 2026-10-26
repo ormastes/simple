@@ -17,6 +17,7 @@ use std.io_runtime.{get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.native_compile_contract.{native_test_library_lanes_error, native_test_library_mode_error, native_test_library_resume_error}
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
@@ -275,6 +276,14 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         updated_options.fail_fast = false
     print ""
 
+    # Recheck the effective request after defaults/overrides, not only raw argv.
+    # A legacy checkpoint cannot certify execution under a selected profile.
+    val library_resume_error = native_test_library_resume_error(updated_options.library_mode, updated_options.resume)
+    if library_resume_error != "":
+        return summarize_test_results([TestFileResult(path: updated_options.path,
+            passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0,
+            error: library_resume_error, timed_out: false, cached: false)])
+
     # Progress carried over from a --resume checkpoint (loaded below).
     var ckpt_passed = 0
     var ckpt_failed = 0
@@ -365,7 +374,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # dropped the previous progress. The memory reason no longer holds (the
     # module is live in this same function), so the filter is back, and never
     # silent: a missing checkpoint is reported.
-    if options.resume:
+    if updated_options.resume:
         val ckpt_found = checkpoint_exists()
         val ckpt = if ckpt_found: checkpoint_load() else: make_empty_checkpoint()
         print checkpoint_resume_banner(ckpt_found, ckpt)
@@ -894,6 +903,11 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
         if (monitor_timeout.to_int() ?? 0) < effective_options.timeout:
             env_set("SIMPLE_TIMEOUT_SECONDS", "{effective_options.timeout}")
 
+    val library_route_error = native_test_library_mode_error(effective_options.library_mode,
+        effective_options.native_backend, mode_to_str(effective_options.mode) == "native" and not effective_options.safe_mode)
+    if library_route_error != "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: library_route_error, timed_out: false, cached: false)
     if effective_options.safe_mode and effective_options.native_backend != "":
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: 0, setup_ms: 0, error: "Explicit native backend and --safe cannot be combined",
@@ -1395,6 +1409,11 @@ fn run_test_cli() -> i64:
 
     if options.spl_doctest:
         run_spl_doc = true
+
+    val library_lanes_error = native_test_library_lanes_error(options.library_mode, run_sdoc, run_spl_doc)
+    if library_lanes_error != "":
+        print "Error: {library_lanes_error}"
+        return 2
 
     var spec_result = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
     var spl_doctest_result = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)

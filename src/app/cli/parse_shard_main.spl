@@ -11,6 +11,7 @@
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get, env_set}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use app.cli.environment_variant_policy_handoff_owner_v1.{
     environment_variant_policy_handoff_extract_v1
 }
@@ -42,7 +43,7 @@ fn parse_shard_entry_args() -> [text]:
 # Flags that consume the next token in cli_native_build; the slim parser must
 # skip their values so one is never mistaken for the positional entry.
 fn parse_shard_value_flag(a: text) -> bool:
-    a == "--backend" or a == "--backend-plugin" or a == "--runtime-bundle" or a == "--runtime-path" or
+    a == "--library-mode" or a == "--backend" or a == "--backend-plugin" or a == "--runtime-bundle" or a == "--runtime-path" or
         a == "--linker-script" or a == "-o" or a == "--output" or a == "--mode" or
         a == "--build-mode" or a == "--cache-dir" or a == "--target" or a == "--cpu" or
         a == "--opt-level" or a == "--threads" or a == "--jobs" or a == "-j" or a == "--timeout" or
@@ -51,7 +52,7 @@ fn parse_shard_value_flag(a: text) -> bool:
         a == "--frontend-offload-fallback"
 
 fn parse_shard_inline_policy_flag(a: text) -> bool:
-    a.starts_with("--parser-impl=") or a.starts_with("--parser-prefer=") or
+    a.starts_with("--library-mode=") or a.starts_with("--parser-impl=") or a.starts_with("--parser-prefer=") or
         a.starts_with("--parser-require=") or a.starts_with("--host-cpu-max=") or
         a.starts_with("--frontend-offload=") or
         a.starts_with("--frontend-offload-fallback=")
@@ -72,6 +73,11 @@ pub fn run_parse_shard(args: [text]) -> i64:
             print "error: parse shard rejected its internal policy handoff"
             return 1
     val user_args = opened.user_args
+    val library_policy = match library_mode_parse_args_v1(user_args):
+        case Ok(value): value
+        case Err(reason):
+            eprint reason
+            return 2
     var entry_point = ""
     var source_dirs: [text] = []
     var entry_closure = false
@@ -133,7 +139,7 @@ pub fn run_parse_shard(args: [text]) -> i64:
     if preclosed != nil:
         inputs = [entry_point]
     elif entry_closure:
-        for cf in _native_build_entry_closure(entry_point, source_dirs):
+        for cf in _native_build_entry_closure(entry_point, source_dirs, library_policy.mode):
             inputs = inputs.push(cf)
     else:
         for source_dir in source_dirs:
@@ -147,10 +153,12 @@ pub fn run_parse_shard(args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
     val ok = if parse_fibers:
         driver_run_parse_fibers_with_environment_variant_policy_v1(
-            inputs, low_memory, opened.handoff.collection, preclosed)
+            inputs, low_memory, opened.handoff.collection, preclosed,
+            library_policy.gc_off, library_policy.allowed_families, library_policy.mode)
     else:
         driver_run_parse_shard_with_environment_variant_policy_v1(
-            inputs, low_memory, opened.handoff.collection, preclosed)
+            inputs, low_memory, opened.handoff.collection, preclosed,
+            library_policy.gc_off, library_policy.allowed_families, library_policy.mode)
     if ok:
         return 0
     val split_mode = if parse_fibers: "--parse-fibers" else: "--parse-shard"

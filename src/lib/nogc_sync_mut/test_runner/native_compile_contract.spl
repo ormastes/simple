@@ -2,6 +2,8 @@
 # This owner does not import BDD preprocessing, compiler frontend or verdict parsing.
 
 use std.common.text.{escape_json}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.library_mode_policy_v1.{library_mode_policy_v1}
 use std.io_runtime.{dir_exists}
 
 fn native_test_source_roots_error(roots: [text]) -> text:
@@ -30,7 +32,36 @@ fn native_test_compile_source_roots(args: [text]) -> [text]:
         i = i + 1
     roots
 
-fn native_test_request_error(backend: text, coverage: bool, safe_mode: bool = false, source_roots: [text] = []) -> text:
+fn native_test_library_mode_error(library_mode: text, backend: text, native_route: bool = true) -> text:
+    val policy = library_mode_policy_v1(library_mode)
+    if policy.is_err(): return policy.unwrap_err()
+    if library_mode != "" and (backend == "" or not native_route):
+        return "TEST_LIBRARY_MODE_ROUTE: --library-mode requires explicit native AOT (--native-backend); interpreter, SMF and auto routes do not transport it"
+    ""
+
+fn native_test_library_lanes_error(library_mode: text, sdoctest: bool, spl_doctest: bool) -> text:
+    if library_mode != "" and (sdoctest or spl_doctest):
+        return "TEST_LIBRARY_MODE_ROUTE: configured doctest lanes do not transport --library-mode; select the native SSpec lane only"
+    ""
+
+fn native_test_library_resume_error(library_mode: text, resume: bool) -> text:
+    if library_mode != "" and resume:
+        return "TEST_LIBRARY_MODE_RESUME: --resume checkpoints have no library-profile identity; selected-profile runs must execute without carried totals"
+    ""
+
+fn native_test_source_identity_v1(roots: [text], library_mode: text = "") -> text:
+    val legacy = native_test_source_roots_identity(roots)
+    if library_mode == "": return legacy
+    legacy + "|library-mode-v1|" + library_mode.len().to_text() + ":" + library_mode
+
+fn native_test_artifact_path_v1(temp_dir: text, spec: text, backend: text, producer: text,
+                              start: i64, roots: [text], library_mode: text = "") -> text:
+    val roots_digest = sha256_text(native_test_source_identity_v1(roots, library_mode))[0:16]
+    temp_dir + "/native-" + sha256_text(spec)[0:16] + "-" + backend + "-" + producer[0:16] + "-" + roots_digest + "-{start}.exe"
+
+fn native_test_request_error(backend: text, coverage: bool, safe_mode: bool = false, source_roots: [text] = [], library_mode: text = "") -> text:
+    val mode_error = native_test_library_mode_error(library_mode, backend)
+    if mode_error != "": return mode_error
     val roots_error = native_test_source_roots_error(source_roots)
     if roots_error != "": return roots_error
     if source_roots.len() > 0 and backend == "":
@@ -60,8 +91,11 @@ fn native_test_compile_threads(raw: text) -> (i64, text):
         return (0, "SIMPLE_NATIVE_BUILD_THREADS must be a positive decimal integer")
     (threads, "")
 
-fn native_test_compile_args_with_threads(source_path: text, artifact_path: text, backend: text, threads: i64, source_roots: [text] = []) -> [text]:
+fn native_test_compile_args_with_threads(source_path: text, artifact_path: text, backend: text, threads: i64, source_roots: [text] = [], library_mode: text = "") -> [text]:
     var args = ["native-build", "--backend", backend, "--refresh-source-authority", "--entry-closure"]
+    if library_mode != "":
+        args.push("--library-mode")
+        args.push(library_mode)
     for root in source_roots:
         args.push("--source")
         args.push(root)
@@ -89,3 +123,6 @@ fn native_test_invocation_receipt(backend: text, producer_digest: text, spec_pat
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
 export native_test_source_roots_error, native_test_source_roots_identity, native_test_compile_source_roots
+export native_test_library_mode_error, native_test_library_lanes_error
+export native_test_library_resume_error
+export native_test_source_identity_v1, native_test_artifact_path_v1

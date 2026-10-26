@@ -1,0 +1,112 @@
+# Semantic library selection; no filesystem, environment or runtime-tier policy.
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct LibraryModePolicyV1:
+    mode: text
+    gc_off: bool
+    allowed_families: [text]
+
+pub fn library_mode_policy_v1(mode: text) -> Result<LibraryModePolicyV1, text>:
+    if mode == "":
+        return Ok(LibraryModePolicyV1(mode: "", gc_off: false, allowed_families: []))
+    var family = ""
+    if mode == "noalloc-async-mut":
+        family = "nogc_async_mut_noalloc"
+    else:
+        val parts = mode.split("-")
+        if parts.len() == 3 and (parts[0] == "gc" or parts[0] == "nogc") and
+                (parts[1] == "sync" or parts[1] == "async") and
+                (parts[2] == "mut" or parts[2] == "immut"):
+            family = parts[0] + "_" + parts[1] + "_" + parts[2]
+    if family == "":
+        return Err("LIBRARY_MODE_INVALID: expected gc|nogc-sync|async-mut|immut or noalloc-async-mut; got '" + mode + "'")
+    Ok(LibraryModePolicyV1(mode: mode, gc_off: not mode.starts_with("gc-"),
+        allowed_families: [family, "common"]))
+
+pub fn library_mode_parse_args_v1(args: [text]) -> Result<LibraryModePolicyV1, text>:
+    var selected = ""
+    var present = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--library-mode" or arg.starts_with("--library-mode="):
+            if present: return Err("LIBRARY_MODE_DUPLICATE: --library-mode may be supplied only once")
+            present = true
+            if arg == "--library-mode":
+                if i + 1 >= args.len(): return Err("LIBRARY_MODE_MISSING: --library-mode requires a semantic mode")
+                i = i + 1
+                selected = args[i]
+            else:
+                selected = arg.substring(15)
+            if selected == "": return Err("LIBRARY_MODE_MISSING: --library-mode requires a semantic mode")
+        i = i + 1
+    library_mode_policy_v1(selected)
+
+pub fn library_mode_family_valid_v1(family: text) -> bool:
+    if family == "nogc_async_mut_noalloc": return true
+    val parts = family.split("_")
+    parts.len() == 3 and (parts[0] == "gc" or parts[0] == "nogc") and
+        (parts[1] == "sync" or parts[1] == "async") and
+        (parts[2] == "mut" or parts[2] == "immut")
+
+pub fn library_mode_selected_family_v1(mode: text) -> text:
+    if mode == "": return ""
+    match library_mode_policy_v1(mode):
+        case Ok(policy): policy.allowed_families[0]
+        case Err(_): ""
+
+pub fn library_mode_importer_context_valid_v1(importer_owner: text) -> bool:
+    # A caller supplies the retained logical declaration owner, never a path.
+    if importer_owner == "" or importer_owner.contains("/") or importer_owner.contains("\\") or importer_owner.contains(":") or importer_owner.starts_with("__library_mode_v1."):
+        return false
+    for part in importer_owner.split("."):
+        if part == "": return false
+    true
+
+pub fn library_mode_importer_family_v1(importer_owner: text) -> text:
+    if not library_mode_importer_context_valid_v1(importer_owner): return ""
+    val logical = importer_owner.split(".")
+    if logical.len() >= 2 and (logical[0] == "std" or logical[0] == "lib") and library_mode_family_valid_v1(logical[1]):
+        return logical[1]
+    ""
+
+pub fn library_mode_generic_import_v1(module_path: text) -> bool:
+    if not module_path.starts_with("std.") and not module_path.starts_with("lib."): return false
+    val parts = module_path.split(".")
+    parts.len() > 1 and parts[1] != "common" and not library_mode_family_valid_v1(parts[1])
+
+pub fn library_mode_effective_family_v1(mode: text, importer: text) -> text:
+    val selected = library_mode_selected_family_v1(mode)
+    if selected == "" or not library_mode_importer_context_valid_v1(importer): return ""
+    # This is owner coherence after explicit policy selection, never a way to
+    # infer application policy from its directory or overwrite the chosen mode.
+    # Only a leading std/lib owner namespace can retain an internal family.
+    val internal = library_mode_importer_family_v1(importer)
+    if internal != "": internal else: selected
+
+pub fn library_mode_closure_digest_v1(environment_digest: text, mode: text) -> text:
+    if mode == "": return environment_digest
+    val selected = library_mode_selected_family_v1(mode)
+    if selected == "": return ""
+    sha256_text("library-mode-closure-v1\n" + environment_digest + "\n" + selected + "\ncommon\n")
+
+pub fn library_mode_options_error_v1(mode: text, gc_off: bool, families: [text]) -> text:
+    # A legacy target preset is not an explicit library-mode request.
+    if mode == "": return ""
+    val policy = match library_mode_policy_v1(mode):
+        case Ok(value): value
+        case Err(reason): return reason
+    if gc_off != policy.gc_off or families.len() != 2:
+        return "LIBRARY_MODE_OPTIONS_MISMATCH: " + mode
+    if families[0] != policy.allowed_families[0] or families[1] != "common":
+        return "LIBRARY_MODE_OPTIONS_MISMATCH: " + mode
+    ""
+
+# Private registry coordinates, never authored import names or filesystem roots.
+# Common/explicit physical imports keep their original key.
+pub fn library_mode_import_key_v1(module_path: text, mode: text, importer: text) -> text:
+    if mode == "" or not library_mode_generic_import_v1(module_path): return module_path
+    val family = library_mode_effective_family_v1(mode, importer)
+    if family == "": return ""
+    val canonical_import = "std." + module_path.substring(4)
+    "__library_mode_v1." + mode.replace("-", "_") + "." + family + "." + canonical_import

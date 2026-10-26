@@ -1,0 +1,113 @@
+# Internal typed-codec primitives. Public envelope functions preflight the entire
+# typed value BEFORE constructing SDN or allocating hexadecimal/escaped text.
+use std.common.contracts.mux.wire_types_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.text_bytes.{text_to_bytes}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.binary_inspect.{byte_to_hex, hex_char_value}
+
+pub fn mux_wire_error_v1(code: text) -> MuxWireErrorV1:
+    MuxWireErrorV1(code: code)
+
+pub fn mux_wire_sum_v1(left: i64, right: i64) -> Result<i64, MuxWireErrorV1>:
+    if left < 0 or right < 0 or left > MUX_WIRE_MAX_FRAME_V1 - right: return Err(mux_wire_error_v1("frame_budget"))
+    Ok(left + right)
+
+pub fn mux_wire_array_v1(value: SdnValue, arity: i64) -> Result<[SdnValue], MuxWireErrorV1>:
+    match value:
+        case SdnValue.Array(items):
+            if items.len() > 16384 or (arity >= 0 and items.len() != arity): return Err(mux_wire_error_v1("array_arity"))
+            Ok(items)
+        case _: Err(mux_wire_error_v1("expected_array"))
+
+pub fn mux_wire_tag_v1(items: [SdnValue], tag: text) -> Result<(), MuxWireErrorV1>:
+    if items.len() == 0: return Err(mux_wire_error_v1("missing_tag"))
+    match items[0]:
+        case SdnValue.String(actual):
+            if actual != tag: return Err(mux_wire_error_v1("wrong_tag"))
+            Ok(())
+        case _: Err(mux_wire_error_v1("expected_tag"))
+
+pub fn mux_wire_size_text_v1(value: text) -> Result<i64, MuxWireErrorV1>:
+    if value.len() > 65536: return Err(mux_wire_error_v1("text_limit"))
+    val bytes = text_to_bytes(value)
+    if bytes.len() > 65536 or validated_utf8_bytes_to_text_linear(bytes).is_err(): return Err(mux_wire_error_v1("invalid_utf8_text"))
+    # Canonical escaping adds at most one byte per original UTF8 byte plus quotes.
+    Ok(bytes.len() * 2 + 2)
+
+pub fn mux_wire_encode_text_v1(value: text) -> SdnValue: SdnValue.String(value)
+pub fn mux_wire_decode_text_v1(value: SdnValue) -> Result<text, MuxWireErrorV1>:
+    match value:
+        case SdnValue.String(item):
+            mux_wire_size_text_v1(item)?
+            Ok(item)
+        case _: Err(mux_wire_error_v1("expected_text"))
+
+pub fn mux_wire_size_bool_v1(value: bool) -> Result<i64, MuxWireErrorV1>: Ok(5)
+pub fn mux_wire_encode_bool_v1(value: bool) -> SdnValue: SdnValue.Bool(value)
+pub fn mux_wire_decode_bool_v1(value: SdnValue) -> Result<bool, MuxWireErrorV1>:
+    match value:
+        case SdnValue.Bool(item): Ok(item)
+        case _: Err(mux_wire_error_v1("expected_bool"))
+
+pub fn mux_wire_size_i64_v1(value: i64) -> Result<i64, MuxWireErrorV1>: Ok(20)
+pub fn mux_wire_encode_i64_v1(value: i64) -> SdnValue: SdnValue.Int(value)
+pub fn mux_wire_decode_i64_v1(value: SdnValue) -> Result<i64, MuxWireErrorV1>:
+    match value:
+        case SdnValue.Int(item): Ok(item)
+        case _: Err(mux_wire_error_v1("expected_i64"))
+
+pub fn mux_wire_size_u32_v1(value: u32) -> Result<i64, MuxWireErrorV1>: Ok(10)
+pub fn mux_wire_encode_u32_v1(value: u32) -> SdnValue: SdnValue.Int(value as i64)
+pub fn mux_wire_decode_u32_v1(value: SdnValue) -> Result<u32, MuxWireErrorV1>:
+    val item = mux_wire_decode_i64_v1(value)?
+    if item < 0 or item > 4294967295: return Err(mux_wire_error_v1("u32_range"))
+    Ok(item as u32)
+
+# SDN has signed Int. Decimal TEXT retains the complete u64 domain exactly.
+pub fn mux_wire_size_u64_v1(value: u64) -> Result<i64, MuxWireErrorV1>: Ok(22)
+pub fn mux_wire_encode_u64_v1(value: u64) -> SdnValue: SdnValue.String(value.to_text())
+pub fn mux_wire_decode_u64_v1(value: SdnValue) -> Result<u64, MuxWireErrorV1>:
+    val item = mux_wire_decode_text_v1(value)?
+    if item.len() < 1 or item.len() > 20 or (item.len() > 1 and item.starts_with("0")): return Err(mux_wire_error_v1("u64_spelling"))
+    var result: u64 = 0
+    for index in 0..item.len():
+        val byte = item.byte_at(index)
+        if byte < 48 or byte > 57: return Err(mux_wire_error_v1("u64_spelling"))
+        val digit = (byte - 48) as u64
+        if result > 1844674407370955161u64 or (result == 1844674407370955161u64 and digit > 5u64): return Err(mux_wire_error_v1("u64_range"))
+        result = result * 10u64 + digit
+    Ok(result)
+
+pub fn mux_wire_size_bytes_v1(value: [u8]) -> Result<i64, MuxWireErrorV1>:
+    if value.len() > 1048576: return Err(mux_wire_error_v1("byte_limit"))
+    Ok(value.len() * 2 + 2)
+
+pub fn mux_wire_encode_bytes_v1(value: [u8]) -> SdnValue:
+    # Reuse canonical nibble owner, bounded chunks avoid per-byte whole-string append.
+    var blocks: [text] = []
+    var start = 0
+    while start < value.len():
+        val end = if value.len() - start > 4096: start + 4096 else: value.len()
+        var parts: [text] = []
+        for index in start..end: parts.push(byte_to_hex(value[index] as i64))
+        blocks.push(parts.join(""))
+        start = end
+    SdnValue.String(blocks.join(""))
+
+pub fn mux_wire_decode_bytes_v1(value: SdnValue) -> Result<[u8], MuxWireErrorV1>:
+    val item = match value:
+        case SdnValue.String(raw): raw
+        case _: return Err(mux_wire_error_v1("expected_hex"))
+    if item.len() > 2097152 or item.len() % 2 != 0: return Err(mux_wire_error_v1("hex_length"))
+    var bytes: [u8] = []
+    var index = 0
+    while index < item.len():
+        val first = item.substring(index, index + 1)
+        val second = item.substring(index + 1, index + 2)
+        val hi = hex_char_value(first)
+        val lo = hex_char_value(second)
+        if hi < 0 or lo < 0 or "ABCDEF".contains(first) or "ABCDEF".contains(second): return Err(mux_wire_error_v1("hex_spelling"))
+        bytes.push((hi * 16 + lo) as u8)
+        index = index + 2
+    Ok(bytes)

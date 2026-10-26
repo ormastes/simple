@@ -5,6 +5,7 @@
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
 struct WindowsProcessInputV1:
     path: text
@@ -117,31 +118,7 @@ fn _windows_upper_ascii_v1(value: text) -> text:
 # Microsoft CRT argv decoding: quote each argument, double a run of backslashes
 # before a quote, and double trailing backslashes before the closing quote.
 fn windows_process_quote_arg_v1(argument: text) -> text:
-    var quoted = "\""
-    var slashes = 0
-    var ordinal = 0
-    var offset = 0
-    while offset < argument.len():
-        val width = _windows_scalar_utf8_width_v1(argument.char_code_at(ordinal))
-        val character = argument[offset:offset + width]
-        if character == "\\":
-            slashes = slashes + 1
-        else:
-            var copies = slashes
-            if character == "\"": copies = slashes * 2 + 1
-            var index = 0
-            while index < copies:
-                quoted = quoted + "\\"
-                index = index + 1
-            quoted = quoted + character
-            slashes = 0
-        ordinal = ordinal + 1
-        offset = offset + width
-    var index = 0
-    while index < slashes * 2:
-        quoted = quoted + "\\"
-        index = index + 1
-    quoted + "\""
+    windows_process_quote_arg_linear_v1(argument)
 
 fn windows_process_path_valid_v1(path: text) -> bool:
     if path.len() < 4 or path[1:2] != ":" or (path[2:3] != "/" and path[2:3] != "\\") or path.contains("\0"):
@@ -183,28 +160,7 @@ fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
 
 @unsafe(reason: "bounds checked UTF16 writes into a zeroed owned allocation", capabilities: [ffi, raw_ptr])
 fn _windows_process_wide_v1(heap: i64, value: text) -> i64:
-    # UTF8 byte length bounds UTF16 code units, including supplementary scalars.
-    val buffer = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2) as u64)
-    if buffer == 0: return 0
-    var offset = 0
-    var ordinal = 0
-    var byte_offset = 0
-    while byte_offset < value.len():
-        val scalar = value.char_code_at(ordinal)
-        if scalar < 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
-            val _free = HeapFree(heap, 0u32, buffer)
-            return 0
-        if scalar < 65536:
-            volatile_write_u16(buffer + offset * 2, scalar)
-            offset = offset + 1
-        else:
-            val supplementary = scalar - 65536
-            volatile_write_u16(buffer + offset * 2, 55296 + (supplementary >> 10))
-            volatile_write_u16(buffer + (offset + 1) * 2, 56320 + (supplementary & 1023))
-            offset = offset + 2
-        ordinal = ordinal + 1
-        byte_offset = byte_offset + _windows_scalar_utf8_width_v1(scalar)
-    buffer
+    windows_process_wide_linear_v1(heap, value)
 
 @unsafe(reason: "caller owns file handle and temporary UTF16 storage", capabilities: [ffi, raw_ptr])
 fn _windows_process_file_v1(heap: i64, path: text, access: u32, sharing: u32, security: i64, disposition: u32) -> i64:

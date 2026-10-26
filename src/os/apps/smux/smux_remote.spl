@@ -10,6 +10,8 @@
 
 use os.apps.smux.api.{
     smux_create_session,
+    smux_rename_session, smux_kill_session, smux_kill_window,
+    smux_attach_leased, smux_client_heartbeat, smux_client_check_lease, smux_client_resize_leased, smux_detach_leased,
     smux_list_sessions,
     smux_list_windows,
     smux_list_panes,
@@ -17,18 +19,24 @@ use os.apps.smux.api.{
     smux_send_command,
     smux_capture, smux_capture_history,
     smux_active_window, smux_focused_pane, smux_focus_window, smux_focus_pane,
-    smux_new_window, smux_split_pane, smux_close_pane, smux_resize,
+    smux_new_window, smux_split_pane, smux_rollback_split,
     smux_attach, smux_detach_from,
     smux_select_layout, smux_window_rects,
     smux_capture_cells,
     smux_input_status,
     smux_reset_for_test
 }
-use std.nogc_sync_mut.sosix.pty.{sosix_pty_default_shell as platform_default_shell}
-use std.nogc_sync_mut.sosix.stdio.{sosix_read_stdin_line, sosix_println}
+use std.sosix.pty.{sosix_pty_default_shell as platform_default_shell}
+use std.sosix.stdio.{sosix_read_stdin_line, sosix_println}
 use os.apps.smux.mux_rects.{mux_rect_to_text, MuxRect}
 use os.apps.smux.vt_screen.{vt_cell_width}
 use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+use os.apps.smux.session_targets.{smux_resolve_session}
+use os.apps.smux.notification_protocol.{smux_notification_dispatch}
+use os.apps.smux.notification_client.{notification_reply_ok}
+use os.apps.smux.session_lifecycle.{validate_session_name}
+use os.apps.smux.lifecycle_reply.{smux_missing_session_reply}
+use os.apps.smux.client_leases.{client_lease_token_valid}
 
 # Use the tagged-text ABI.  The legacy optional-pointer rt_stdin_read_line ABI
 # is not safe through an interpreter call: its boxed text result can be
@@ -50,19 +58,18 @@ pub fn smux_remote_launch_once(version: int) -> bool:
     sosix_println("smux " + marker + " ready")
     return true
 
-# Session id of the session NAMED `name`, or "".
+# Stable ID or unambiguous session name, or "".
 fn _session_id(name: text) -> text:
-    for s in smux_list_sessions():
-        if s.name == name:
-            return s.id
-    return ""
+    return smux_resolve_session(name)
 
 # Creates session `name` with a shell on a PTY in its first pane.
 fn _open_shell_session(name: text) -> text:
-    if name == "":
-        return "smux: empty session name"
-    if _session_id(name) != "":
-        return "smux: session already exists: " + name
+    val valid = validate_session_name(name)
+    if valid.is_err():
+        return "smux: invalid session name: " + valid.unwrap_err()
+    for existing in smux_list_sessions():
+        if existing.name == name or existing.id == name:
+            return "smux: session already exists: " + name
     val s = smux_create_session(name)
     if s.id == "":
         return "smux: session capacity reached"
@@ -94,6 +101,9 @@ pub fn smux_remote_main():
 # Handles one protocol line and returns the reply line. Exposed so a spec can
 # drive the protocol without a stdin.
 pub fn smux_remote_dispatch(line: text) -> text:
+    val notification = smux_notification_dispatch(line)
+    if notification != "":
+        return notification
     val interactive = smux_interactive_dispatch(line)
     if interactive != "":
         return interactive
@@ -103,6 +113,13 @@ pub fn smux_remote_dispatch(line: text) -> text:
     val verb = parts[0]
     if verb == "list":
         return "smux: sessions=" + smux_list_sessions().len().to_text()
+    if verb == "list-sessions":
+        if parts.len() != 1:
+            return "smux: list-sessions accepts no arguments"
+        var listing = "smux: sessions:\n"
+        for session in smux_list_sessions():
+            listing = listing + session.id + " " + session.name + "\n"
+        return listing
     if parts.len() < 2:
         return "smux: usage: VERB session_id [extra]"
     val name = parts[1]
@@ -110,7 +127,97 @@ pub fn smux_remote_dispatch(line: text) -> text:
         return _open_shell_session(name)
     val sid = _session_id(name)
     if sid == "":
-        return "smux: unknown session " + name
+        return smux_missing_session_reply(name)
+    if verb == "client-request":
+        if parts.len() < 6:
+            return "smux: client request requires session client lease and scoped command"
+        val action = parts[4]
+        var permitted = false
+        for allowed in ["windows", "client-panes", "client-layout", "input", "new-window",
+                "client-split", "client-zoom", "client-history", "client-size-leased", "client-heartbeat",
+                "notifications-leased", "frame", "ack-notification-leased", "client-detach", "kill-window"]:
+            if action == allowed: permitted = true
+        if not permitted:
+            return "smux: client request command is not supported"
+        if smux_resolve_session(parts[5]) != sid:
+            return "smux: client request session mismatch"
+        if action == "client-size-leased" or action == "client-heartbeat" or action == "notifications-leased" or action == "ack-notification-leased" or action == "client-detach":
+            if parts.len() < 8 or parts[6] != parts[2] or parts[7] != parts[3]:
+                return "smux: client request lease target mismatch"
+        val checked = smux_client_check_lease(sid, parts[2], parts[3])
+        if checked.is_err(): return "smux: client request failed: " + checked.unwrap_err()
+        # The whitelist excludes client-request, so this dispatcher cannot be
+        # used to construct recursive envelopes or escape the leased session.
+        return smux_remote_dispatch(parts[4:].join(" "))
+    if verb == "notifications-leased" or verb == "ack-notification-leased":
+        val required = if verb == "notifications-leased": 4 else: 5
+        if parts.len() != required:
+            return "smux: notification lease command requires session client lease and optional id"
+        if verb == "ack-notification-leased":
+            val id = parts[4].to_i64() ?? 0
+            if id <= 0 or id.to_text() != parts[4]:
+                return "smux: notification acknowledgement id invalid"
+        val checked = smux_client_check_lease(sid, parts[2], parts[3])
+        if checked.is_err(): return "smux: notification lease failed: " + checked.unwrap_err()
+        val command = if verb == "notifications-leased": "notifications" else: "ack-notification"
+        val suffix = if verb == "notifications-leased": "" else: " " + parts[4]
+        return smux_notification_dispatch(command + " " + sid + " " + parts[2] + suffix)
+    if verb == "client-attach":
+        if parts.len() != 5:
+            return "smux: client-attach requires session client cols rows"
+        val admitted = smux_attach_leased(sid, parts[2], parts[3].to_int() ?? 0, parts[4].to_int() ?? 0)
+        if admitted.is_err(): return "smux: attach failed: " + admitted.unwrap_err()
+        return "smux: leased " + admitted.unwrap() + " " + sid
+    if verb == "client-heartbeat":
+        if parts.len() != 4:
+            return "smux: client-heartbeat requires session client lease"
+        val renewed = smux_client_heartbeat(sid, parts[2], parts[3])
+        if renewed.is_err(): return "smux: heartbeat failed: " + renewed.unwrap_err()
+        return "smux: heartbeat accepted " + parts[2]
+    if verb == "client-size-leased":
+        if parts.len() != 6:
+            return "smux: client-size-leased requires session client lease cols rows"
+        val resized = smux_client_resize_leased(sid, parts[2], parts[3], parts[4].to_int() ?? 0, parts[5].to_int() ?? 0)
+        if resized.is_err(): return "smux: resize failed: " + resized.unwrap_err()
+        return "smux: sized " + parts[2]
+    if verb == "client-detach":
+        if parts.len() != 4:
+            return "smux: client-detach requires session client lease"
+        val detached = smux_detach_leased(sid, parts[2], parts[3])
+        if detached.is_err(): return "smux: detach failed: " + detached.unwrap_err()
+        return "smux: detached " + parts[2] + " from " + name
+    if verb == "has-session":
+        if parts.len() != 2:
+            return "smux: has-session requires one target"
+        return "smux: session exists " + sid
+    if verb == "rename-session":
+        if parts.len() != 3:
+            return "smux: rename-session requires target and new name"
+        val renamed = smux_rename_session(sid, parts[2])
+        if renamed.is_err():
+            return "smux: rename failed: " + renamed.unwrap_err()
+        return "smux: renamed session " + sid + " to " + renamed.unwrap().name
+    if verb == "kill-window":
+        if parts.len() != 3:
+            return "smux: kill-window requires session and window id"
+        val killed = smux_kill_window(sid, parts[2])
+        if killed.is_err():
+            return "smux: kill-window failed: " + killed.unwrap_err()
+        return "smux: killed window " + parts[2] + " from " + sid
+    if verb == "kill-session":
+        if parts.len() != 2:
+            return "smux: kill-session requires one target"
+        val killed = smux_kill_session(sid)
+        if killed.is_err():
+            return "smux: kill failed: " + killed.unwrap_err()
+        return "smux: killed session " + sid
+    if verb == "send-pane":
+        if parts.len() < 5:
+            return "smux: send-pane requires session window pane command"
+        val sent = smux_send_command(sid, parts[2], parts[3], parts[4:].join(" "))
+        if sent.is_err():
+            return "smux: send failed: " + sent.unwrap_err()
+        return "smux: sent to " + name + " " + parts[2] + " " + parts[3]
     if verb == "windows":
         var reply = "smux: windows[" + name + "]:\n"
         for window in smux_list_windows(sid):
@@ -213,14 +320,9 @@ pub fn smux_remote_dispatch(line: text) -> text:
         val added = split.unwrap()
         val spawned = smux_pane_spawn_pty(sid, w.id, added.id, platform_default_shell())
         if spawned.is_err():
-            var rollback_failed = not smux_close_pane(sid, w.id, added.id)
-            if smux_resize(sid, w.id, p.id, p.cols, p.rows).is_err():
-                rollback_failed = true
-            if w.layout != "manual":
-                if smux_select_layout(sid, w.id, w.layout, w.canvas_cols, w.canvas_rows).is_err():
-                    rollback_failed = true
-            if rollback_failed:
-                return "smux: split failed: " + spawned.unwrap_err() + "; rollback incomplete"
+            val restored = smux_rollback_split(sid, w.id, added.id)
+            if restored.is_err():
+                return "smux: split failed: " + spawned.unwrap_err() + "; rollback incomplete: " + restored.unwrap_err()
             return "smux: split failed: " + spawned.unwrap_err()
         val _focused = smux_focus_pane(sid, w.id, added.id)
         return "smux: split pane " + added.id
@@ -301,12 +403,32 @@ pub fn smux_composite_cells(rects: [MuxRect], screens: [[[text]]]) -> text:
         lines.push(row.join(""))
     return lines.join("\n")
 
+fn _lease_reply_ok(reply: text) -> bool:
+    val fields = reply.split(" ")
+    if fields.len() < 3 or fields[0] != "smux:": return false
+    if fields[1] == "leased":
+        return fields.len() == 4 and client_lease_token_valid(fields[2]) and fields[3] != ""
+    if fields[1] == "heartbeat":
+        return fields.len() == 4 and fields[2] == "accepted" and fields[3] != ""
+    return fields.len() == 3 and fields[1] == "sized" and fields[2] != ""
+
+fn _zoom_reply_ok(reply: text) -> bool:
+    if reply == "smux: zoom restored": return true
+    val fields = reply.split(" ")
+    if fields.len() != 3 or fields[0] != "smux:" or fields[1] != "zoom": return false
+    val id = fields[2]
+    if not id.starts_with("id") or id.len() <= 2: return false
+    val serial = id[2:].to_i64() ?? -1
+    return serial > 0 and serial.to_text() == id[2:]
+
 # Keep command status consistent for all request clients. A transport success
 # is not a command success (unknown ids, capacity and shell failures are errors).
 pub fn smux_remote_reply_ok(reply: text) -> bool:
     if reply.starts_with("smux: created session ") or reply.starts_with("smux: created window "):
         return not reply.contains("(no shell:")
-    return (reply.starts_with("smux: sessions=") or
+    return (reply.starts_with("smux: sessions=") or reply.starts_with("smux: sessions:\n") or
+        reply.starts_with("smux: session exists ") or reply.starts_with("smux: renamed session ") or reply.starts_with("smux: killed session ") or reply.starts_with("smux: killed window ") or
+        _lease_reply_ok(reply) or _zoom_reply_ok(reply) or
         reply.starts_with("smux: windows[") or reply.starts_with("smux: panes[") or
         reply.starts_with("smux: rects[") or reply.starts_with("smux: screen[") or
         (reply.starts_with("smux: layout ") and not reply.starts_with("smux: layout failed:") and not reply.starts_with("smux: layout requires ")) or
@@ -315,6 +437,7 @@ pub fn smux_remote_reply_ok(reply: text) -> bool:
         reply.starts_with("smux: split pane ") or reply.starts_with("smux: sent to ") or
         reply.starts_with("smux: capture[") or reply.starts_with("smux: history[") or
         reply.starts_with("smux: input[") or reply == "smux: input accepted" or
+        notification_reply_ok(reply) or
         reply.starts_with("SMUX-FRAME/1 ") or reply == "smux: stopping server")
 
 export smux_remote_dispatch, smux_remote_reply_ok, smux_composite_cells
