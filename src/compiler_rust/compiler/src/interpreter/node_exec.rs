@@ -874,7 +874,8 @@ fn forward_field_setter(
             ctx,
         ));
     }
-    let tmp = "__setter_arg__".to_string();
+    // NUL-prefixed: no Simple program can spell (and so clobber) this binding.
+    let tmp = "\u{0}setter_arg".to_string();
     env.insert(tmp.clone(), value.clone());
     let call = Expr::MethodCall {
         receiver: Box::new(Expr::Identifier(obj_name.to_string())),

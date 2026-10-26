@@ -1619,7 +1619,10 @@ fn expand_trait_alias_forwards(items: &mut [Node], forwards: &[(String, String, 
             Node::Class(c) if &c.name == class_name => Some(c),
             _ => None,
         }) else {
-            continue;
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name}: trait-alias forwarding is only supported in a top-level class (class {class_name} is nested)"),
+                Span::new(0, 0, 0, 0),
+            ));
         };
         if trait_methods.is_empty() {
             return Err(syntax_error(
@@ -1641,6 +1644,7 @@ fn expand_trait_alias_forwards(items: &mut [Node], forwards: &[(String, String, 
             let args = tm
                 .params
                 .iter()
+                .filter(|p| p.name != "self")
                 .map(|p| Argument::new(None, Expr::Identifier(p.name.clone())))
                 .collect();
             let call = Expr::MethodCall {

@@ -269,7 +269,17 @@ impl<'a> Parser<'a> {
 
         let _where_clause = self.parse_where_clause()?;
         let (fields, methods, _invariant, _macro_invocations, inner_mixins, doc_comment) = self.parse_class_body()?;
-        self.class_trait_aliases.clear();
+        if let Some((trait_name, field_name)) = self.class_trait_aliases.drain(..).next() {
+            return Err(ParseError::SyntaxError {
+                message: format!(
+                    "alias {trait_name} = {field_name}: trait-alias forwarding is not supported in a mixin body"
+                ),
+                line: start_span.line,
+                column: start_span.column,
+                span: Some(start_span),
+                context: None,
+            });
+        }
 
         // Merge `use` declarations from mixin body into required_mixins
         let mut all_required_mixins = required_mixins;

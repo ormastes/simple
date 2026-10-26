@@ -387,7 +387,7 @@ impl Lowerer {
                 // `obj.get_name()` then `obj.is_name()` — the same order as the
                 // interpreter (interpreter/expr/calls.rs). The bare no-paren
                 // `obj.name()` case is the has_known_method path below.
-                for prefix in ["get_", "is_"] {
+                for prefix in ["get_", "is_"].into_iter().filter(|_| !field.starts_with('_')) {
                     let getter = format!("{prefix}{field}");
                     if candidate_struct_names
                         .iter()
