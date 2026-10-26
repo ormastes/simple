@@ -40,7 +40,7 @@ fn run_command_text(binary: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run_bounded(
         binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
-    if code != 0 and stderr.contains("TIMEOUT"):
+    if _lsp_child_timed_out(code, stderr):
         return LSP_TIMEOUT_PREFIX + str(LSP_COMMAND_TIMEOUT_MS) + " ms"
     if code == 0:
         return clean
@@ -510,3 +510,14 @@ export handle_resource_read
 export handle_prompts_list
 export handle_roots_list
 export handle_logging_set_level
+
+# Mirrors std process_ops.process_bounded_timed_out (anchored trailing marker,
+# exit -1). Inlined to keep this server off the heavy std io import graph.
+fn _lsp_child_timed_out(exit_code: i64, stderr: text) -> bool:
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")

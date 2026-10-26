@@ -14,5 +14,12 @@
 
 - Root cause: `clean_command_output` in src/app/simple_lsp_mcp/json_helpers.spl (old lines 348-349) stripped trailing newlines with `while joined.ends_with("\n"): joined = _slice_text(joined, 0, joined.len() - 1)`. `text.len()` counts bytes, `_slice_text` counts characters. The definition child prints `[search truncated: ... — part of the tree was NOT searched]` (em dash, multibyte), so the slice never shrank the string: an infinite loop in the server process itself (the child exited normally in about 9 s). No subprocess timeout can preempt it.
 - Fix (a): `_trim_trailing_newlines` pops trailing `"\n"` by character.
-- Fix (b): `run_command_text` (tools.spl) maps a `process_run_bounded` timeout (10000 ms) to `lsp request timed out after N ms`, and `position_result` turns that into a JSON-RPC error (-32001), so the loop keeps serving.
+- Fix (b): `run_command_text` (tools.spl) maps a `process_run_bounded` timeout (30000 ms, raised from 10000 because definition takes about 9 s) to `lsp request timed out after N ms`, and `position_result` turns that into a JSON-RPC error (-32001), so the loop keeps serving.
 - Spec: test/01_unit/app/simple_lsp_mcp/lsp_definition_bounded_spec.spl (REQ-LSP-BOUNDED-001). Before: child-timeout at 120 s budget (red). After: 3/3.
+
+## Follow-ups from the review of PR #4984 (not fixed here)
+- tools.spl:120-135 and :255 pass character indices to the byte-indexed `substring`, so slices come out wrong on non-ASCII paths or arguments.
+- json_helpers.spl:103-233 scanners bound character indices by the byte length `len()`. They terminate, but they over-iterate.
+- lsp_visibility, symbols, diagnostics and saml_analyze still wrap a timeout inside a success result.
+- origin/main has the same infinite loop (json_helpers.spl:332) and needs this fix forward-ported.
+- lsp_command_bounded_spec has 2 failures that already exist at base 1.0.0 (stale source-text oracles: json_helpers still contains `process_run(binary, args)`, and the SIMPLE_LIB repo_bin lookup is gone). They are not caused by this PR.
