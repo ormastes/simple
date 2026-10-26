@@ -1,0 +1,178 @@
+# Root regression: imported same-leaf records must share one exact layout
+# across construction, parameter provenance, field index and projected type.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.dependency.visibility.Visibility
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn qualified_record_owner_fixture(exact: bool = true) -> MirLowering:
+    var symbols = SymbolTable.new()
+    val owner = symbols.define("Facts", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("provider.facts"))
+    var lowering = MirLowering.new(symbols)
+    lowering.struct_field_order["Facts"] = ["effects"]
+    lowering.struct_field_order_conflict_warned["Facts"] = true
+    if exact:
+        lowering.struct_field_order["src/provider/facts.spl::Facts"] = ["admitted", "count"]
+    lowering.struct_identity_layout_key["provider.facts::Facts"] = "src/provider/facts.spl::Facts"
+    lowering.struct_field_hir_type["src/provider/facts.spl::Facts"] = [
+        HirType(kind: HirTypeKind.Bool, span: Span.empty()),
+        HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+    ]
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 900), "probe", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
+
+fn qualified_record_owner_expr(lowering: MirLowering) -> HirExpr:
+    val owner = lowering.symbols.lookup("Facts") ?? SymbolId(id: -1)
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: 800)), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty()), span: Span.empty())
+
+
+fn qualified_record_parameter_owner(wrapper: i64) -> text:
+    val source = "struct Facts:\n    admitted: bool\n    count: i64\n\nfn inspect(input: Facts) -> i64:\n    input.count\n"
+    val parsed = parse_full_frontend(source, "provider/facts.spl", "provider/facts.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("provider/facts.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.lower_module(hir)
+    lowering.nogc_strict = true
+    lowering.struct_field_order["Facts"] = ["effects"]
+    lowering.struct_field_order_conflict_warned["Facts"] = true
+    for declaration in hir.functions.values():
+        if declaration.name != "inspect": continue
+        var target = declaration
+        var parameter = target.params[0]
+        val named_type = parameter.type_
+        if wrapper == 1:
+            parameter.type_ = HirType(kind: HirTypeKind.Ref(named_type, false), span: Span.empty())
+        elif wrapper == 2:
+            parameter.type_ = HirType(kind: HirTypeKind.Isolated(named_type), span: Span.empty())
+        target.params = [parameter]
+        val function = lowering.lower_function(target)
+        expect(lowering.errors.len()).to_equal(0)
+        for local in function.locals:
+            match local.kind:
+                case LocalKind.Arg(0):
+                    return lowering.struct_value_syms[local.id.id]
+                case _: ()
+    "missing"
+
+describe "qualified record field owner":
+    it "uses one declaration for both index and projected field owner despite a bare decoy":
+        var lowering = qualified_record_owner_fixture()
+        val base = qualified_record_owner_expr(lowering)
+        var builder = lowering.builder
+        val local = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.struct_value_syms[local.id] = "Facts"
+        expect(lowering.resolve_field_index(base, local, "count", nil)).to_equal(1)
+        expect(lowering.resolve_base_struct_name(base, local)).to_equal(Some("src/provider/facts.spl::Facts"))
+        val field_owner = lowering.resolve_base_struct_name(base, local) ?? ""
+        val declared = lowering.struct_field_hir_type[field_owner][1]
+        val projected = lowering.declared_field_type_in_current_table(field_owner, 1, declared)
+        var scalar = false
+        match projected.kind:
+            case HirTypeKind.Int(64, true): scalar = true
+            case _: ()
+        expect(scalar).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "rejects a missing exact field instead of reading decoy field zero":
+        var lowering = qualified_record_owner_fixture()
+        val base = qualified_record_owner_expr(lowering)
+        var builder = lowering.builder
+        val local = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.struct_value_syms[local.id] = "Facts"
+        lowering.resolve_field_index(base, local, "effects", nil)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("absent from exact")
+
+    it "rejects a conflicted owner whose exact declaration layout is unavailable":
+        var lowering = qualified_record_owner_fixture(false)
+        val base = qualified_record_owner_expr(lowering)
+        var builder = lowering.builder
+        val local = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.struct_value_syms[local.id] = "Facts"
+        expect(lowering.resolve_base_struct_name(base, local)).to_equal(nil)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+
+    it "constructs a direct imported record using the declaration layout":
+        var lowering = qualified_record_owner_fixture()
+        val owner = lowering.symbols.lookup("Facts") ?? SymbolId(id: -1)
+        if val declaration = lowering.symbols.get_symbol_raw(owner.id):
+            expect(declaration.kind).to_equal(SymbolKind.Struct)
+            expect(lowering.struct_value_layout_key(declaration)).to_equal("src/provider/facts.spl::Facts")
+        val callee = HirExpr(kind: HirExprKind.NamedVar(owner, "Facts"), has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+        val admitted = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Bool, span: Span.empty()), span: Span.empty())
+        val count = HirExpr(kind: HirExprKind.IntLit(73, nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()), span: Span.empty())
+        val args = [
+            HirCallArg(has_name: true, name: "admitted", value: admitted, span: Span.empty()),
+            HirCallArg(has_name: true, name: "count", value: count, span: Span.empty())
+        ]
+        val result = lowering.lower_call(callee, args)
+        expect(lowering.struct_value_syms[result.id]).to_equal("src/provider/facts.spl::Facts")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "constructs a record literal with the same owner as a direct call":
+        var lowering = qualified_record_owner_fixture()
+        val owner = lowering.symbols.lookup("Facts") ?? SymbolId(id: -1)
+        val admitted = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Bool, span: Span.empty()), span: Span.empty())
+        val count = HirExpr(kind: HirExprKind.IntLit(73, nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()), span: Span.empty())
+        val type_ = HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty())
+        val literal = HirExpr(kind: HirExprKind.StructLit(type_, [("admitted", admitted), ("count", count)]),
+            has_type_: true, type_: type_, span: Span.empty())
+        val result = lowering.lower_expr(literal)
+        expect(lowering.struct_value_syms[result.id]).to_equal("src/provider/facts.spl::Facts")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "retains the declaration owner on plain struct parameters":
+        expect(qualified_record_parameter_owner(0)).to_contain("::Facts")
+
+    it "retains the declaration owner on borrowed struct parameters":
+        expect(qualified_record_parameter_owner(1)).to_contain("::Facts")
+
+    it "retains the declaration owner on isolated struct parameters":
+        expect(qualified_record_parameter_owner(2)).to_contain("::Facts")
+
+    it "rejects a collided qualified layout instead of trusting its registered fields":
+        var lowering = qualified_record_owner_fixture()
+        lowering.struct_field_order_conflict_warned["src/provider/facts.spl::Facts"] = true
+        val owner = lowering.symbols.lookup("Facts") ?? SymbolId(id: -1)
+        if val symbol = lowering.symbols.get_symbol_raw(owner.id):
+            expect(lowering.struct_value_layout_key(symbol)).to_equal("")
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+
+    it "rejects a missing field on exact value provenance without a HIR type":
+        var lowering = qualified_record_owner_fixture()
+        val base = HirExpr(kind: HirExprKind.Var(SymbolId(id: 800)), has_type_: false,
+            type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty())
+        var builder = lowering.builder
+        val local = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        lowering.struct_value_syms[local.id] = "src/provider/facts.spl::Facts"
+        lowering.resolve_field_index(base, local, "missing", nil)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("absent from exact value layout")
