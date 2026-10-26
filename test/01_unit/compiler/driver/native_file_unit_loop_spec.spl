@@ -1,0 +1,92 @@
+# Per-file unit worker loop (native_file_unit_loop_v1.spl) driven by a fake
+# NativeFileUnitInvokerV1: every way a unit can end without compiling its
+# picks must fail the worker, never read as a drained ledger.
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_exists, file_read, file_write}
+use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_pick_v1, worker_unit_drained_path_v1,
+    worker_unit_pick_seal_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{NativeFileUnitInvokerV1,
+    native_file_worker_mono_pending_path_v1}
+use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
+
+struct FakeUnitInvoker:
+    hir_queue: text
+    mir_queue: text
+    mode: text
+
+impl NativeFileUnitInvokerV1 for FakeUnitInvoker:
+    fn run_unit(hir_owner: text, mir_owner: text) -> i64:
+        if self.mode == "silent":
+            return 0
+        if self.mode == "orphan":
+            val _p = file_write("{self.hir_queue}/{sha256_text("o.spl")}.pick", hir_owner)
+            return 0
+        val already = file_exists("{self.hir_queue}/{sha256_text("a.spl")}.claim")
+        if self.mode == "one" and already:
+            val _d = file_write(worker_unit_drained_path_v1(self.hir_queue, hir_owner), hir_owner)
+            return 0
+        val _c = hir_shard_recovery_claim(self.hir_queue, hir_owner, "a.spl", "k")
+        if self.mode == "crash":
+            return -1
+        val _t = hir_shard_recovery_terminal(self.hir_queue, hir_owner, "a.spl", "PASS", true)
+        if self.mode == "pending":
+            val _m = file_write(native_file_worker_mono_pending_path_v1(self.mir_queue, "a.spl"), "x")
+        0
+
+fn ledgers() -> (text, text):
+    val root = "build/test_tmp/unit_loop_{getpid()}_{time_now_unix_micros()}"
+    expect(dir_create_all("{root}/hir")).to_equal(true)
+    expect(dir_create_all("{root}/mir")).to_equal(true)
+    ("{root}/hir", "{root}/mir")
+
+fn run(mode: text) -> (i64, text, text):
+    val (hir, mir) = ledgers()
+    val code = native_file_unit_worker_loop_v1(FakeUnitInvoker(hir_queue: hir, mir_queue: mir, mode: mode), "0/2", mir, hir)
+    (code, hir, mir)
+
+describe "per-file unit worker loop":
+    it "fails and seals CRASH when the unit crashes":
+        val (code, hir, _mir) = run("crash")
+        expect(code).to_equal(1)
+        expect(file_read("{hir}/{sha256_text("a.spl")}.terminal").starts_with("CRASH\n")).to_equal(true)
+
+    it "ends after a compiled unit when the next unit proves the ledger drained":
+        val (code, _hir, _mir) = run("one")
+        expect(code).to_equal(0)
+
+    it "fails when a unit exits 0 with no claim and no drained proof":
+        val (code, _hir, _mir) = run("silent")
+        expect(code).to_equal(1)
+
+    it "fails on a MONO-PENDING target":
+        val (code, _hir, _mir) = run("pending")
+        expect(code).to_equal(1)
+
+    it "fails and frees a pick the unit never claimed":
+        val (code, hir, _mir) = run("orphan")
+        expect(code).to_equal(1)
+        expect(file_exists("{hir}/{sha256_text("o.spl")}.pick")).to_equal(false)
+
+describe "unit pick ledger":
+    it "proves a drained ledger only after a full scan":
+        val (hir, _mir) = ledgers()
+        val first = worker_unit_pick_v1(hir, "u0", ["a.spl"], [0], 1)
+        expect(first.unwrap()).to_equal(["a.spl"])
+        expect(worker_unit_pick_v1(hir, "u1", ["a.spl"], [0], 1).unwrap().len()).to_equal(0)
+        expect(file_exists(worker_unit_drained_path_v1(hir, "u1"))).to_equal(true)
+        expect(file_exists(worker_unit_drained_path_v1(hir, "u0"))).to_equal(false)
+
+    it "is an error, not an empty pick, without a ledger":
+        expect(worker_unit_pick_v1("", "u0", ["a.spl"], [0], 1).is_err()).to_equal(true)
+        expect(worker_unit_pick_v1("build/test_tmp/no_such_ledger_dir", "u0", ["a.spl"], [0], 1).is_err()).to_equal(true)
+
+    it "drops only the owner's unclaimed picks":
+        val (hir, _mir) = ledgers()
+        expect(worker_unit_pick_v1(hir, "u0", ["a.spl", "b.spl"], [0, 1], 2).unwrap().len()).to_equal(2)
+        expect(hir_shard_recovery_claim(hir, "u0", "a.spl", "k")).to_equal(1)
+        expect(worker_unit_pick_seal_v1(hir, "u1")).to_equal(0)
+        expect(worker_unit_pick_seal_v1(hir, "u0")).to_equal(1)
+        expect(worker_unit_pick_v1(hir, "u2", ["a.spl", "b.spl"], [0, 1], 2).unwrap()).to_equal(["b.spl"])

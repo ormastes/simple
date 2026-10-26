@@ -32,7 +32,7 @@
 # closed (MONO-PENDING). MIR shards that run GLOBAL mono are unchanged: they
 # still build every surface and load every HIR module.
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, dir_list_optional, getpid}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
@@ -318,7 +318,8 @@ pub fn worker_surface_text_v1(source_path: text, source: text, tldr_root: text) 
 # deps-first order over the frozen sources (iterative DFS post-order on the
 # same import resolution as worker_surface_closure_v1). Every unit child of
 # one invocation computes the same order from the same frozen inventory, so a
-# module is picked only after the modules it imports were picked.
+# module is picked only after the modules it imports were picked (an import
+# cycle has no such order: one member of the cycle is picked first).
 pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], contents: [text]) -> [i64]:
     var by_canonical: Dict<text, i64> = {}
     var i = 0
@@ -366,25 +367,61 @@ pub fn worker_unit_pick_order_v1(paths: [text], canonical_paths: [text], content
     order
 
 # Takes up to `batch` sources in `order` that no unit child picked or claimed
-# yet, under the HIR ledger lock. The pick record "<sha256(path)>.pick" is
-# ignored by the ledger's readers (they read .claim/.terminal only).
-pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64) -> [text]:
+# yet, under the HIR ledger lock. The pick record "<sha256(path)>.pick" holds
+# the owner; the ledger's own readers only read .claim/.terminal. Err when the
+# lock or a pick record cannot be taken -- never confused with a drained
+# ledger. An empty Ok publishes the owner's drained proof: the whole order was
+# scanned under the lock and every source was already picked or claimed.
+pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64) -> Result<[text], text>:
     var picked: [text] = []
-    if queue == "" or owner == "" or batch <= 0:
-        return picked
+    if queue == "" or owner == "" or owner.contains("\n") or batch <= 0:
+        return Err("unit pick needs a HIR ledger, an owner and a batch")
     val fd = file_lock("{queue}/.lock", 30)
     if fd < 0:
-        return picked
+        return Err("HIR ledger lock unavailable for unit pick")
+    var failed = false
     for at in order:
         if picked.len() >= batch:
             break
         val path = paths[at]
         val base = "{queue}/{sha256_text(path)}"
         if not picked.contains(path) and not file_exists("{base}.pick") and not file_exists("{base}.claim"):
-            if file_write("{base}.pick", owner):
-                picked.push(path)
+            if not file_write("{base}.pick", owner):
+                failed = true
+                break
+            picked.push(path)
+    if not failed and picked.len() == 0:
+        failed = not file_write(worker_unit_drained_path_v1(queue, owner), owner)
     val _unlocked = file_unlock(fd)
-    picked
+    if failed:
+        return Err("unit pick record publication failed")
+    Ok(picked)
+
+pub fn worker_unit_drained_path_v1(queue: text, owner: text) -> text:
+    "{queue}/{sha256_text(owner)}.drained"
+
+# After `owner`'s unit exited: delete its picks that never became a claim so
+# a later unit can pick them again. Returns how many, or -1 when the ledger
+# cannot be listed/locked or a record cannot be removed.
+pub fn worker_unit_pick_seal_v1(queue: text, owner: text) -> i64:
+    val listing = dir_list_optional(queue)
+    if listing == nil:
+        return -1
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0:
+        return -1
+    var dropped: i64 = 0
+    for name in listing.unwrap():
+        if name.ends_with(".pick"):
+            val pick = "{queue}/{name}"
+            val claim = "{queue}/{name.substring(0, name.len() - 5)}.claim"
+            if file_read(pick) == owner and not file_exists(claim):
+                if not file_delete(pick):
+                    dropped = -1
+                    break
+                dropped = dropped + 1
+    val _unlocked = file_unlock(fd)
+    dropped
 
 pub fn worker_surface_counters_v1() -> text:
     "surfaces_built={_ws_surfaces_built} surfaces_loaded={_ws_surfaces_loaded} skeleton_parses={_ws_skeleton_parses}"
@@ -396,4 +433,4 @@ export worker_surface_text_v1, worker_surface_counters_v1
 export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
 export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
 export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1
-export worker_unit_pick_order_v1, worker_unit_pick_v1
+export worker_unit_pick_order_v1, worker_unit_pick_v1, worker_unit_drained_path_v1, worker_unit_pick_seal_v1
