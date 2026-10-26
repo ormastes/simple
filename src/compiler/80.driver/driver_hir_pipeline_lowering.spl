@@ -532,7 +532,7 @@ impl CompilerDriver:
     me native_parser_cache_record_v1(key: text, source: SourceFile, source_index: i64) -> text:
         if not self.ctx.native_parsed_classifications.has(source.module_name): return ""
         val binding = hir_cache_parser_binding_v1(key, source.module_name, source.path,
-            self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
+            self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode, self.ctx.native_target)
         if binding == "": return ""
         val kind = if self.ctx.native_parsed_classifications[source.module_name]: "objectless:" else: "bodyful:"
         kind + binding
@@ -757,12 +757,12 @@ impl CompilerDriver:
             val selected = driver_hir_archive_input_from_managed_runtime_selection_v1(
                 selection, source, self.streaming_module_surfaces_owner, source_index, is_entry,
                 get_effective_backend_name(self.ctx.options.backend, self.ctx.options.release),
-                self.ctx.native_target, env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "", self.ctx.options.library_mode)
+                self.ctx.native_target, env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "", self.ctx.options.library_mode, self.ctx.native_target)
             if selected.is_err():
                 self.ctx.add_error(selected.unwrap_err())
                 return driver_hir_failed_shard_receipt_v1(-1)
             val input = selected.unwrap()
-            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, self.ctx.options.library_mode)
+            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, self.ctx.options.library_mode, self.ctx.native_target)
             if transaction_cache_key == "":
                 self.ctx.add_error("HIR archive driver source key unavailable")
                 return driver_hir_failed_shard_receipt_v1(-1)
@@ -772,12 +772,12 @@ impl CompilerDriver:
                 self.ctx.add_error("HIR archive driver frozen surface owner unavailable")
                 return driver_hir_failed_shard_receipt_v1(-1)
             val selected = driver_hir_archive_input_from_runtime_std_selection_v1(
-                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry, self.ctx.options.library_mode)
+                selection, source, self.streaming_module_surfaces_owner, source_index, is_entry, self.ctx.options.library_mode, self.ctx.native_target)
             if selected.is_err():
                 self.ctx.add_error(selected.unwrap_err())
                 return driver_hir_failed_shard_receipt_v1(-1)
             val input = selected.unwrap()
-            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, self.ctx.options.library_mode)
+            transaction_cache_key = hir_cache_key(input.source_path, input.closure_digest, input.is_entry, self.ctx.options.library_mode, self.ctx.native_target)
             if transaction_cache_key == "":
                 self.ctx.add_error("HIR archive driver source key unavailable")
                 return driver_hir_failed_shard_receipt_v1(-1)
@@ -832,7 +832,7 @@ impl CompilerDriver:
         var declaration_registration: MonoArchiveRegistrationReceiptV1? = nil
         var source_body_custody: DriverHirSourceBodyCustodyV1? = nil
         val parser_binding = hir_cache_parser_binding_v1(transaction_cache_key,
-            source.module_name, source.path, sha256_text(source.content), self.ctx.options.library_mode)
+            source.module_name, source.path, sha256_text(source.content), self.ctx.options.library_mode, self.ctx.native_target)
         var parsed_classification_known = false
         var parsed_code_less = false
         val cache_result = if archive_input == nil and parser_binding != "": hir_cache_load_in_owned_scope(transaction_cache_key, parser_binding, "", self.ctx.options.library_mode) else: nil
@@ -905,7 +905,7 @@ impl CompilerDriver:
                     infrastructure_error = "HIR shard parser binding unavailable for {source.path}"
                 else:
                     stored = hir_cache_store_in_owned_scope(
-                        transaction_cache_key, module, warnings, parser_record, self.ctx.options.library_mode)
+                        transaction_cache_key, module, warnings, parser_record, self.ctx.options.library_mode, self.ctx.native_target)
                     if not stored:
                         if hir_cache_last_refusal_is_io_v1():
                             infrastructure_error = "HIR shard cache publication failed for {source.path}"
@@ -1245,7 +1245,7 @@ impl CompilerDriver:
                 return false
 
             val hir_stream_key: text = if hir_closure_digest != "":
-                hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry, self.ctx.options.library_mode)
+                hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry, self.ctx.options.library_mode, self.ctx.native_target)
             else:
                 ""
             if hir_shard_mode:
@@ -1307,7 +1307,7 @@ impl CompilerDriver:
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
-                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode), source.path, self.ctx.options.library_mode)
+                hir_cache_load_parsed_v1(hir_stream_key, hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode), source.path, self.ctx.options.library_mode, self.ctx.native_target)
             else:
                 nil
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
@@ -1880,7 +1880,7 @@ impl CompilerDriver:
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
             if hir_shard_mode:
-                val hir_shard_key = hir_cache_key(src.path, hir_closure_digest, source_idx == entry_source_index, self.ctx.options.library_mode)
+                val hir_shard_key = hir_cache_key(src.path, hir_closure_digest, source_idx == entry_source_index, self.ctx.options.library_mode, self.ctx.native_target)
                 val claim = hir_shard_begin(src.path, hir_shard_key)
                 if claim < 0 or hir_shard_key == "":
                     hir_shard_guard_block("HIR claim or cache identity unavailable")
@@ -1935,11 +1935,11 @@ impl CompilerDriver:
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_cache_key_value: text = if hir_closure_digest != "":
-                hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry, self.ctx.options.library_mode)
+                hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry, self.ctx.options.library_mode, self.ctx.native_target)
             else:
                 ""
             val hir_cached: HirModule? = if hir_cache_key_value != "":
-                hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx], self.ctx.options.library_mode), src.path, self.ctx.options.library_mode)
+                hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx], self.ctx.options.library_mode), src.path, self.ctx.options.library_mode, self.ctx.native_target)
             else:
                 nil
             val hir_cache_hit: bool = hir_cached != nil
