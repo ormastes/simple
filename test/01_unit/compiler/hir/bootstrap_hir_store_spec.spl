@@ -2,16 +2,23 @@ use std.spec
 
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{HirSymbol, SymbolId, SymbolKind, ScopeId, Visibility}
-use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirEnum, HirStruct, HirClass, HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirType, HirTypeKind}
 use compiler.common.attributes.{FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.hir.hir_lowering._Items.bootstrap_hir_store.{BootstrapHirStore, HirPublishPort, bootstrap_hir_store_with_port, hir_publish_port_runtime}
+use compiler.driver.driver_hir_pipeline_support.{driver_publish_flat_hir_row_v1}
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_modules_reset,
     bootstrap_hir_modules_add,
-    bootstrap_hir_modules_promote_last,
+    bootstrap_hir_modules_promote_last_legacy,
+    bootstrap_hir_modules_publish_pending,
+    bootstrap_hir_modules_has_pending,
+    bootstrap_hir_modules_discard_pending,
+    bootstrap_hir_store_install,
+    bootstrap_hir_store,
+    bootstrap_hir_module_function_at,
     bootstrap_hir_modules_rollback_last,
     bootstrap_hir_module_count,
     bootstrap_hir_entry_index,
-    bootstrap_hir_module_owner_at,
     bootstrap_hir_module_name_at,
     bootstrap_hir_module_symbol_count,
     bootstrap_hir_module_symbol_at,
@@ -60,22 +67,19 @@ describe "bootstrap HIR store publishes complete module rows":
         expect(rt_transient_array_scope_begin()).to_equal(true)
         bootstrap_hir_modules_add("support", false, [support_symbol], [], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
         expect(rt_transient_array_scope_begin()).to_equal(true)
         bootstrap_hir_modules_add("entry", true, [entry_symbol], [], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
 
         expect(bootstrap_hir_module_count()).to_equal(2)
         expect(bootstrap_hir_entry_index()).to_equal(1)
         expect(bootstrap_hir_module_name_at(0)).to_equal("support")
         expect(bootstrap_hir_module_name_at(1)).to_equal("entry")
-        val entry_owner = bootstrap_hir_module_owner_at(1)
-        expect(entry_owner.name).to_equal("entry")
-        expect(entry_owner.is_entry).to_equal(true)
-        expect(entry_owner.symbols.len()).to_equal(1)
+        expect(bootstrap_hir_module_symbol_count(1)).to_equal(1)
         expect(bootstrap_hir_module_symbol_count(0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(bootstrap_hir_module_symbol_count(1)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(bootstrap_hir_module_symbol_at(0, 0).id.id).to_equal(11)  # oracle: 11 — named expected value from the requirement
@@ -90,7 +94,7 @@ describe "bootstrap HIR store publishes complete module rows":
         expect(rt_transient_array_scope_begin()).to_equal(true)
         bootstrap_hir_modules_add("old", true, [bootstrap_store_symbol(7, "old_value")], [], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
         bootstrap_hir_modules_reset()
 
@@ -102,7 +106,7 @@ describe "bootstrap HIR store publishes complete module rows":
 
     it "fails closed without a committed row to promote":
         bootstrap_hir_modules_reset()
-        expect(bootstrap_hir_modules_promote_last()).to_equal(false)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(false)
 
     it "keeps the committed row readable after its transient scope ends":
         bootstrap_hir_modules_reset()
@@ -111,26 +115,26 @@ describe "bootstrap HIR store publishes complete module rows":
             "scoped", true, [bootstrap_store_symbol(31, "scoped_value")],
             [], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
         expect(bootstrap_hir_module_name_at(0)).to_equal("scoped")
         expect(bootstrap_hir_module_symbol_at(0, 0).name).to_equal("scoped_value")
         bootstrap_hir_modules_reset()
 
-    it "rolls back exactly the newly appended row":
+    it "keeps a published function body readable after scope end":
         bootstrap_hir_modules_reset()
         expect(rt_transient_array_scope_begin()).to_equal(true)
         bootstrap_hir_modules_add("body-owner", true, [],
             [bootstrap_store_function("owned_body")], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
-        val owner = bootstrap_hir_module_owner_at(0)
-        expect(owner.functions.len()).to_equal(1)
-        expect(owner.functions[0].name).to_equal("owned_body")
-        expect(owner.functions[0].body.has).to_equal(true)
-        expect(owner.functions[0].body.stmts.len()).to_equal(1)
-        expect(rt_enum_discriminant(owner.functions[0].body.value.kind)).to_equal(
+        expect(bootstrap_hir_module_function_count(0)).to_equal(1)
+        val owned: HirFunction = bootstrap_hir_module_function_at(0, 0)
+        expect(owned.name).to_equal("owned_body")
+        expect(owned.body.has).to_equal(true)
+        expect(owned.body.stmts.len()).to_equal(1)
+        expect(rt_enum_discriminant(owned.body.value.kind)).to_equal(
             rt_enum_discriminant(HirExprKind.IntLit(0, nil)))
         bootstrap_hir_modules_reset()
 
@@ -141,7 +145,7 @@ describe "bootstrap HIR store publishes complete module rows":
             "kept", true, [bootstrap_store_symbol(41, "kept_value")],
             [], [], [], [], [])
         expect(rt_transient_array_scope_pause()).to_equal(true)
-        expect(bootstrap_hir_modules_promote_last()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
         expect(rt_transient_array_scope_end()).to_equal(true)
         expect(rt_transient_array_scope_begin()).to_equal(true)
         bootstrap_hir_modules_add(
@@ -155,3 +159,107 @@ describe "bootstrap HIR store publishes complete module rows":
         expect(bootstrap_hir_module_name_at(0)).to_equal("kept")
         expect(bootstrap_hir_modules_rollback_last(1)).to_equal(false)
         bootstrap_hir_modules_reset()
+
+# Fake session port: the deployed seed predates the rt_session_* externs, so
+# the publish ORDER (I1 adopt -> I3 append under session alloc -> commit) is
+# observed through an injected port, as global_dataset.spl does for rt_rc_*.
+var _fake_session_log: [text] = []
+var _fake_scope_running: bool = true
+var _fake_adopt_ok: bool = true
+
+fn fake_adopt_row(name: text, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]) -> bool:
+    _fake_session_log = _fake_session_log.push("adopt@{bootstrap_hir_module_count()}")
+    _fake_adopt_ok
+
+fn fake_alloc_begin() -> bool:
+    _fake_session_log = _fake_session_log.push("alloc_begin@{bootstrap_hir_module_count()}")
+    true
+
+fn fake_alloc_end() -> bool:
+    _fake_session_log = _fake_session_log.push("alloc_end@{bootstrap_hir_module_count()}")
+    true
+
+fn fake_scope_running() -> bool:
+    _fake_scope_running
+
+fn install_fake_session_store():
+    _fake_session_log = []
+    _fake_scope_running = true
+    _fake_adopt_ok = true
+    var store = bootstrap_hir_store_with_port(HirPublishPort(adopt_row: fake_adopt_row,
+        alloc_begin: fake_alloc_begin, alloc_end: fake_alloc_end,
+        scope_running: fake_scope_running))
+    store.session_on = true
+    bootstrap_hir_store_install(store)
+
+fn restore_runtime_store():
+    bootstrap_hir_store_install(bootstrap_hir_store_with_port(hir_publish_port_runtime()))
+
+describe "bootstrap HIR store session publish protocol (BSM P2)":
+    it "stages a row in a running scope and commits it only after adopt + session append":
+        install_fake_session_store()
+        bootstrap_hir_modules_add("staged", true, [bootstrap_store_symbol(5, "staged_value")], [], [], [], [], [])
+        expect(bootstrap_hir_modules_has_pending()).to_equal(true)
+        expect(bootstrap_hir_module_count()).to_equal(0)
+        expect(bootstrap_hir_store().aligned(0)).to_equal(true)
+        expect(bootstrap_hir_modules_publish_pending()).to_equal(true)
+        expect(bootstrap_hir_modules_has_pending()).to_equal(false)
+        expect(bootstrap_hir_module_count()).to_equal(1)
+        expect(bootstrap_hir_entry_index()).to_equal(0)
+        expect(bootstrap_hir_module_symbol_at(0, 0).name).to_equal("staged_value")
+        # One typed row adopt (name + 6 payload arrays) before the append, inside
+        # the session allocator, committed_count advanced last; no promote.
+        expect(_fake_session_log.len()).to_equal(3)
+        expect(_fake_session_log[0]).to_equal("adopt@0")
+
+        expect(_fake_session_log[1]).to_equal("alloc_begin@0")
+        expect(_fake_session_log[2].starts_with("alloc_end")).to_equal(true)
+        expect(_fake_session_log.contains("promote")).to_equal(false)
+        restore_runtime_store()
+
+    it "does not publish when adopt is refused, and rollback drops the staged row":
+        install_fake_session_store()
+        _fake_adopt_ok = false
+        bootstrap_hir_modules_add("refused", false, [], [], [], [], [], [])
+        expect(bootstrap_hir_modules_publish_pending()).to_equal(false)
+        expect(bootstrap_hir_module_count()).to_equal(0)
+        expect(_fake_session_log.contains("alloc_begin@0")).to_equal(false)
+        bootstrap_hir_modules_discard_pending()
+        expect(bootstrap_hir_modules_has_pending()).to_equal(false)
+        expect(bootstrap_hir_store().aligned(0)).to_equal(true)
+        restore_runtime_store()
+
+    it "appends immediately outside a running scope (cache replay) even with a session":
+        install_fake_session_store()
+        _fake_scope_running = false
+        bootstrap_hir_modules_add("replayed", false, [], [], [], [], [], [])
+        expect(bootstrap_hir_modules_has_pending()).to_equal(false)
+        expect(bootstrap_hir_module_count()).to_equal(1)
+        expect(_fake_session_log.len()).to_equal(0)
+        restore_runtime_store()
+
+    it "without a session keeps the legacy append + promote_last_legacy path":
+        install_fake_session_store()
+        var legacy_store = bootstrap_hir_store()
+        legacy_store.session_on = false
+        bootstrap_hir_store_install(legacy_store)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        bootstrap_hir_modules_add("legacy", false, [], [], [], [], [], [])
+        expect(bootstrap_hir_modules_has_pending()).to_equal(false)
+        expect(bootstrap_hir_module_count()).to_equal(1)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(bootstrap_hir_modules_promote_last_legacy()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(_fake_session_log.len()).to_equal(0)
+        restore_runtime_store()
+
+    it "publishes an immediately appended row with a session and no running scope":
+        install_fake_session_store()
+        _fake_scope_running = false
+        val before = bootstrap_hir_module_count()
+        bootstrap_hir_modules_add("unscoped", false, [], [], [], [], [], [])
+        expect(bootstrap_hir_modules_has_pending()).to_equal(false)
+        expect(driver_publish_flat_hir_row_v1(true, before)).to_equal(true)
+        expect(bootstrap_hir_module_count()).to_equal(before + 1)
+        expect(_fake_session_log.len()).to_equal(0)
+        restore_runtime_store()

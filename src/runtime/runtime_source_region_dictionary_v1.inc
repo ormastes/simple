@@ -136,9 +136,30 @@ static int64_t sd_metrics_locked(int operation,const uint64_t* descriptor,
             uint64_t next_scope=rt_core_transient_heap_scope_object_cap ?
                 rt_core_transient_heap_scope_object_cap*2 : 64;
             if (next_scope>RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ||
-                !sd_mul(next_scope,sizeof(void*),&n) || !sd_add(&bytes,n) ||
-                !sd_add(&fields,next_scope) ||
-                !sd_add(&work,rt_core_transient_heap_scope_object_cap)) return SD_CAPACITY;
+                !sd_mul(next_scope,sizeof(RtCoreScopedAllocationKey),&n) || !sd_add(&bytes,n) ||
+                !sd_mul(next_scope,3,&n) || !sd_add(&fields,n) ||
+                !sd_mul(rt_core_transient_heap_scope_object_cap,3,&n) ||
+                !sd_add(&work,n)) return SD_CAPACITY;
+        }
+        /* The MODULE ledger now stores ptr/birth/owner. Its scoped-only
+         * registry index uses the existing lock, but still allocates, clears,
+         * probes and rehashes real entries. Charge both success and exact-key
+         * rollback (two lookups), rather than treating that index as free. */
+        uint64_t old_scoped=rt_core_scoped_cap;
+        uint64_t next_scoped=core_scoped_next_capacity_locked();
+        if ((next_scoped && next_scoped<old_scoped) || next_scoped>INT64_MAX)
+            return SD_CAPACITY;
+        uint64_t scoped_capacity=next_scoped ? next_scoped : old_scoped;
+        if (!sd_add(&fields,16) ||
+            !sd_mul(scoped_capacity,3,&n) || !sd_add(&n,old_scoped) ||
+            !sd_mul(n,8,&n) || !sd_add(&work,n)) return SD_CAPACITY;
+        if (next_scoped) {
+            if (!sd_mul(next_scoped,sizeof(RtCoreScopedAllocationKey),&n) ||
+                !sd_add(&bytes,n) || !sd_mul(next_scoped,3,&n) ||
+                !sd_add(&fields,n) || !sd_mul(old_scoped,3,&n) ||
+                !sd_add(&fields,n) || !sd_mul(old_scoped,next_scoped,&n) ||
+                !sd_mul(n,8,&n) || !sd_add(&work,n) ||
+                !sd_add(&work,old_scoped)) return SD_CAPACITY;
         }
     } else {
         int64_t observation=sd_observation_locked();
@@ -302,13 +323,14 @@ int64_t rt_source_region_dict_new_v1(int64_t control,int64_t generation,int64_t 
     int ok=d && (uintptr_t)d<=INT64_MAX && !((uintptr_t)d&7) && b && registration &&
         !((uintptr_t)registration&7) && next>=0 &&
         (!next || rt_core_immortal_registry_resize((size_t)next));
-    if (ok) ok=rt_core_track_transient_immortal(d);
+    RtCoreScopedAllocationKey module_key = {0};
+    if (ok) ok=rt_core_track_module_immortal_locked(d, &module_key);
     if (ok) {
         d->kind=RT_VALUE_HEAP_DICT; d->flags=RT_CORE_DICT_SOURCE_REGION_V1;
-        d->transient_scope_id=rt_core_transient_array_scope_id;
+        d->transient_scope_id=module_key.owner;
         d->cap=8; d->entries=b->entries;
         ok=rt_core_immortal_registry_insert_raw((uintptr_t)registration|RT_CORE_SOURCE_DICT_REGISTRATION_TAG_V1);
-        if (!ok) --rt_core_transient_heap_scope_object_len;
+        if (!ok) rt_core_rollback_module_immortal_locked(module_key);
     }
     if (ok) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count,1,memory_order_relaxed);

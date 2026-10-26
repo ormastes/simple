@@ -483,6 +483,73 @@ pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, Comp
     Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
 }
 
+fn require_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(CompileError::runtime(format!("{} requires 0 arguments", name)))
+    }
+}
+
+/// Build session heap (BSM T1, runtime value/collections.rs).
+pub fn rt_session_heap_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_begin", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_begin() as i64))
+}
+
+pub fn rt_session_heap_end(args: &[Value]) -> Result<Value, CompileError> {
+    let session = match args {
+        [Value::Int(id)] => u32::try_from(*id).ok(),
+        [Value::UInt { value, .. }] => u32::try_from(*value).ok(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_session_heap_end requires 1 argument (session id)",
+            ))
+        }
+    };
+    Ok(Value::Bool(session.is_some_and(|id| simple_runtime::value::rt_session_heap_end(id))))
+}
+
+pub fn rt_session_alloc_begin(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_begin", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_begin()))
+}
+
+pub fn rt_session_alloc_end(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_alloc_end", args)?;
+    Ok(Value::Bool(simple_runtime::value::rt_session_alloc_end()))
+}
+
+pub fn rt_session_heap_id(args: &[Value]) -> Result<Value, CompileError> {
+    require_no_args("rt_session_heap_id", args)?;
+    Ok(Value::Int(simple_runtime::value::rt_session_heap_id() as i64))
+}
+
+/// Same carrier rules as `rt_transient_heap_promote`: raw handles adopt in the
+/// runtime; nil uses the same runtime prerequisites; interpreter composites own no runtime
+/// transient state, so they succeed exactly when adoption is possible at all.
+pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_adopt requires 1 argument (value)",
+        ));
+    }
+    let adopted = match &args[0] {
+        Value::Int(raw) => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        Value::UInt { value, .. } => {
+            simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*value))
+        }
+        Value::Nil => simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::NIL),
+        _ => {
+            simple_runtime::value::rt_session_heap_id() != 0
+                && simple_runtime::value::transient_heap_scope_paused()
+        }
+    };
+    Ok(Value::Bool(adopted))
+}
+
 /// Observe this thread's transient parser-array scope without mutating it:
 /// 0 = no scope, 1 = active, 2 = paused (the Rust runtime's own state).
 pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, CompileError> {
@@ -2776,5 +2843,24 @@ mod tests {
         );
         rt_volatile_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
         assert_eq!(value, 0x7654_3210);
+    }
+
+    #[test]
+    fn session_nil_adoption_matches_runtime_prerequisites() {
+        fn nil_adopts() -> bool {
+            matches!(rt_transient_heap_adopt(&[Value::Nil]).unwrap(), Value::Bool(true))
+        }
+        assert!(!nil_adopts(), "no live session");
+        let session = simple_runtime::value::rt_session_heap_begin();
+        assert_ne!(session, 0);
+        assert!(!nil_adopts(), "no paused module scope");
+        assert!(simple_runtime::value::rt_transient_array_scope_begin());
+        assert!(!nil_adopts(), "running module scope");
+        assert!(simple_runtime::value::rt_transient_array_scope_pause());
+        assert!(nil_adopts(), "live session and paused module");
+        assert!(simple_runtime::value::rt_transient_array_scope_end());
+        assert!(!nil_adopts(), "ended module scope");
+        assert!(simple_runtime::value::rt_session_heap_end(session));
+        assert!(!nil_adopts(), "ended session");
     }
 }

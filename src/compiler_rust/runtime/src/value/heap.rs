@@ -212,7 +212,13 @@ const MIN_VALID_HEAP_ADDR: usize = 4096;
 /// semantics and table layout.
 pub(crate) type HeapPtrSet<K> = HashSet<K, std::hash::BuildHasherDefault<ahash::AHasher>>;
 
-static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapPtrSet<usize>>> = OnceLock::new();
+#[path = "heap_claim.rs"]
+mod claim;
+pub(crate) use claim::{claim_free, claim_scoped_free, claim_typed_free, claim_closure_release_locked, finish_claim, new_scope_owner,
+    scoped_key_is_live, track_scoped_allocation, transfer_scoped_allocation,
+    ClaimResult, ClaimedAllocation, ScopedAllocationKey};
+use claim::HeapRegistry;
+static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HeapRegistry>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Byte-level accounting (header bytes only).
@@ -275,8 +281,8 @@ pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
         .collect()
 }
 
-fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
-    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
+fn heap_allocation_registry() -> &'static Mutex<HeapRegistry> {
+    HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapRegistry::default()))
 }
 
 /// Bumped (under the registry lock) by every erase. A pointer that a locked
@@ -334,61 +340,16 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     }
 }
 
+/// Retire canonical membership and scoped identity together. New disposal paths
+/// consume the claim directly; this compatibility entry point never frees storage.
 #[inline]
 pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
-    if !ptr.is_null() {
-        let removed = heap_allocation_registry()
-            .lock()
-            .map(|mut registry| {
-            let removed = registry.remove(&(ptr as usize));
-            if removed {
-                heap_free_epoch_bump();
-            }
-            removed
-        })
-            .unwrap_or(false);
-        if removed {
-            // Presence in the registry means not yet freed (the erasing call
-            // is the one allowed to free), so this read is not use-after-free.
-            let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
-            super::dict_scope_read::unregistered(ptr as usize, kind);
-            note_heap_free(kind, bytes);
-            note_attr_free(ptr as usize, bytes);
-            super::collections::transient_promote_share_forget(ptr as usize);
-        }
-    }
+    let _ = claim_free(ptr);
 }
 
-/// Unregister a heap pointer, reporting whether THIS call is the one that
-/// erased it. Mirrors the C runtime's `rt_core_unregister_immortal_ptr`
-/// (src/runtime/runtime_native.c), whose non-zero return is the single
-/// serialization point that makes a free safe: the registry mutex guarantees
-/// exactly one caller observes `true` for a given pointer, so a double free
-/// (or a free of a never-registered pointer) is refused instead of executing.
-/// `RuntimeValue` is `Copy`, so aliases are the norm — this is the gate.
 #[inline]
 pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
-    let removed = heap_allocation_registry()
-        .lock()
-        .map(|mut registry| {
-            let removed = registry.remove(&(ptr as usize));
-            if removed {
-                heap_free_epoch_bump();
-            }
-            removed
-        })
-        .unwrap_or(false);
-    if removed {
-        let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
-        super::dict_scope_read::unregistered(ptr as usize, kind);
-        note_heap_free(kind, bytes);
-        note_attr_free(ptr as usize, bytes);
-        super::collections::transient_promote_share_forget(ptr as usize);
-    }
-    removed
+    matches!(claim_free(ptr), ClaimResult::Claimed(_))
 }
 
 #[inline]
@@ -424,6 +385,7 @@ pub fn clear_heap_allocation_registry() {
     if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
         let _ = registry.lock().map(|mut registry| {
             registry.clear();
+            registry.scoped.clear();
             super::dict_scope_read::cleared();
             heap_free_epoch_bump();
         });

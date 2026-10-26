@@ -3,7 +3,7 @@
 use super::collections::{rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
 use super::heap::{
-    get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, unregister_heap_ptr_checked, HeapHeader, HeapObjectType,
+    get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, HeapHeader, HeapObjectType,
 };
 
 /// Get typed pointer from heap object with validation, returning early if invalid
@@ -59,7 +59,7 @@ unsafe fn dict_alloc_slots(capacity: u64) -> *mut RuntimeValue {
     data
 }
 
-unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
+pub(crate) unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
     if data.is_null() {
         return;
     }
@@ -134,14 +134,9 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
 #[no_mangle]
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
-    let ptr = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, ());
-    // Close admission before freeing the backing allocation. Only the caller
-    // that removed membership may release storage, including aliased handles.
-    if !unregister_heap_ptr_checked(ptr as *mut HeapHeader) { return; }
-    unsafe {
-        dict_free_slots((*ptr).data, (*ptr).capacity);
-        let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
-        std::alloc::dealloc(ptr as *mut u8, layout);
+    if let super::heap::ClaimResult::Claimed(allocation) =
+        super::heap::claim_typed_free(dict, HeapObjectType::Dict) {
+        super::collections::dispose_claimed(allocation);
     }
 }
 
