@@ -1606,6 +1606,8 @@ static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
 static _Thread_local uint64_t rt_core_source_raw_revision_v1 = 1;
+/* Exclusion only, never copy authority: the SOURCE control owns the frame. */
+static _Thread_local uint32_t rt_core_source_copy_scope_pin_v1 = 0;
 static void rt_core_source_raw_changed_v1(void) {
     if (rt_core_source_raw_revision_v1 < INT64_MAX)
         ++rt_core_source_raw_revision_v1;
@@ -1950,6 +1952,7 @@ int8_t rt_transient_array_scope_begin(void) {
 }
 
 int8_t rt_transient_array_scope_pause(void) {
+    if (rt_core_source_copy_scope_pin_v1) return 0;
     if (!rt_core_transient_array_scope_active ||
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
@@ -1962,6 +1965,7 @@ int8_t rt_transient_array_scope_pause(void) {
 }
 
 int8_t rt_transient_array_scope_end(void) {
+    if (rt_core_source_copy_scope_pin_v1) return 0;
     if (!rt_core_transient_array_scope_active ||
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
@@ -2085,7 +2089,13 @@ static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
 
 #define RT_CORE_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
 #define RT_CORE_TRANSIENT_RAW_OWNED_BIT ((size_t)1 << (sizeof(size_t) * CHAR_BIT - 1))
-#define RT_CORE_TRANSIENT_RAW_SIZE_MASK (~RT_CORE_TRANSIENT_RAW_OWNED_BIT)
+#if UINTPTR_MAX == UINT64_MAX
+#define RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT (RT_CORE_TRANSIENT_RAW_OWNED_BIT >> 1)
+#else
+/* The copy-frame provider is native64-only; preserve ordinary 32-bit sizes. */
+#define RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT ((size_t)0)
+#endif
+#define RT_CORE_TRANSIENT_RAW_SIZE_MASK (~(RT_CORE_TRANSIENT_RAW_OWNED_BIT | RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT))
 
 static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
     size_t mask = rt_core_transient_raw_alloc_cap - 1;
@@ -2113,6 +2123,7 @@ static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
 }
 
 static int rt_core_transient_raw_grow(void) {
+    if (rt_core_source_copy_scope_pin_v1) return 0;
     size_t next_cap = rt_core_transient_raw_alloc_cap == 0
         ? 256
         : rt_core_transient_raw_alloc_cap * 2;
@@ -2143,7 +2154,12 @@ static int rt_core_transient_raw_grow(void) {
     return 1;
 }
 
+static RtCoreTransientRawAlloc* rt_core_transient_raw_lookup(uintptr_t ptr);
 static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int owned) {
+    if (rt_core_source_copy_scope_pin_v1) {
+        RtCoreTransientRawAlloc* existing = rt_core_transient_raw_lookup((uintptr_t)ptr);
+        if (existing && (existing->bytes & RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT)) return 0;
+    }
     if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
     if (bytes > RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
@@ -2173,7 +2189,7 @@ static RtCoreTransientRawAlloc* rt_core_transient_raw_lookup(uintptr_t ptr) {
 
 static void rt_core_transient_raw_erase(void* ptr) {
     RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
-    if (!entry) return;
+    if (!entry || (entry->bytes & RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT)) return;
     core_transient_share_forget((uintptr_t)ptr);
     entry->ptr = RT_CORE_TRANSIENT_RAW_TOMBSTONE;
     entry->bytes = 0;
@@ -2241,6 +2257,62 @@ int64_t rt_transient_raw_source_revision_v1(void) {
     return rt_transient_raw_owner_thread_allows() &&
         rt_core_source_raw_revision_v1 < INT64_MAX
         ? (int64_t)rt_core_source_raw_revision_v1 : -1;
+}
+
+/* Native SOURCE copy-frame owner bridge. No new registry or dynamic buffer.
+ * Called only by runtime_memory's existing SOURCE control owner. */
+int8_t rt_transient_raw_copy_scope_pinned_v1(void) {
+    return rt_core_source_copy_scope_pin_v1 != 0;
+}
+static int core_source_copy_share_clear_v1(void);
+int64_t rt_transient_raw_copy_scope_v1(void) {
+    if (sizeof(uintptr_t) != 8) return -1;
+    return rt_transient_raw_owner_thread_allows() && core_source_copy_share_clear_v1() && rt_core_transient_array_scope_active &&
+        !rt_core_transient_array_scope_paused ? (int64_t)rt_core_transient_array_scope_id : -1;
+}
+int64_t rt_transient_raw_copy_capacity_v1(void) {
+    return rt_transient_raw_owner_thread_allows() && rt_core_transient_raw_alloc_cap <= INT64_MAX
+        ? (int64_t)rt_core_transient_raw_alloc_cap : -1;
+}
+int64_t rt_transient_raw_copy_scope_pin_v1(int64_t module) {
+    if (module <= 0 || rt_transient_raw_copy_scope_v1() != module ||
+        rt_core_source_copy_scope_pin_v1 || rt_core_source_raw_revision_v1 >= INT64_MAX) return -1;
+    rt_core_source_copy_scope_pin_v1 = (uint32_t)module;
+    rt_core_source_raw_changed_v1();
+    return (int64_t)rt_core_source_raw_revision_v1;
+}
+int64_t rt_transient_raw_copy_scope_unpin_v1(int64_t module) {
+    if (module <= 0 || rt_transient_raw_copy_scope_v1() != module ||
+        rt_core_source_copy_scope_pin_v1 != (uint32_t)module) return -1;
+    rt_core_source_copy_scope_pin_v1 = 0;
+    rt_core_source_raw_changed_v1();
+    return 0;
+}
+int8_t rt_transient_raw_copy_is_pinned_v1(void* ptr) {
+    if (!rt_core_source_copy_scope_pin_v1) return 0;
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    return entry && (entry->bytes & RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT) != 0;
+}
+int64_t rt_transient_raw_copy_pin_v1(void* ptr, uint64_t bytes, int64_t module) {
+    if (rt_transient_raw_copy_scope_v1() != module || module <= 0 ||
+        rt_core_source_copy_scope_pin_v1 != (uint32_t)module) return -1;
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!entry || entry->bytes != (bytes | RT_CORE_TRANSIENT_RAW_OWNED_BIT)) return -1;
+    entry->bytes |= RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT;
+    rt_core_source_raw_changed_v1();
+    return 0;
+}
+/* Exact pinned birth claim. Capacity stays frozen, erase never compacts. */
+int64_t rt_transient_raw_copy_claim_v1(void* ptr, uint64_t bytes, int64_t module, int64_t cap) {
+    if (rt_transient_raw_copy_scope_v1() != module || module <= 0 ||
+        rt_core_source_copy_scope_pin_v1 != (uint32_t)module ||
+        rt_transient_raw_copy_capacity_v1() != cap) return -1;
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!entry || entry->bytes != (bytes | RT_CORE_TRANSIENT_RAW_OWNED_BIT |
+        RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT)) return -1;
+    entry->bytes &= ~RT_CORE_TRANSIENT_RAW_COPY_PIN_BIT;
+    rt_core_transient_raw_erase(ptr);
+    return 0;
 }
 
 /* Entries (16 bytes each) an empty table may keep between scopes. */
@@ -3163,7 +3235,12 @@ static void core_transient_share_record(const RtCoreTransientPlan* plan) {
 
 /* 1 = window opened; 0 = no paused scope owned by this thread (promotion then
  * behaves exactly as without a window). */
+static int core_source_copy_share_clear_v1(void) {
+    return !core_transient_share_active;
+}
+
 int8_t rt_transient_heap_promote_share_begin(void) {
+    if (rt_core_source_copy_scope_pin_v1) return 0;
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused ||
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;

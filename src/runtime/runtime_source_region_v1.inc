@@ -9,6 +9,11 @@
 #define SR_CONFLICT (-6)
 #define SR_CONSUMED (-7)
 
+enum { SR_COPY_EMPTY, SR_COPY_PREPARED, SR_COPY_READY, SR_COPY_ATTEMPTED, SR_COPY_LIVE, SR_COPY_CLEANED };
+typedef struct RtSourceCopyFrameV1 {
+    uint64_t state, words, birth, lease, raw_revision, raw_capacity, module;
+    uintptr_t raw;
+} RtSourceCopyFrameV1;
 typedef struct RtSourceRegionV1 {
     uint64_t generation, epoch, serial, lease, ticket, members;
     uintptr_t destination;
@@ -17,6 +22,7 @@ typedef struct RtSourceRegionV1 {
     _Atomic uint8_t closed;
     uintptr_t execution_owner;
     RtSourceControlMetadataV1* control_metadata;
+    RtSourceCopyFrameV1 copy;
 } RtSourceRegionV1;
 
 /* A single monotonic identity counter under the existing owner lock. It is
@@ -102,6 +108,19 @@ static int sr_descriptor(const uint64_t* d, int64_t capacity) {
     return d[3] * 8 == d[2];
 }
 
+static int64_t sr_copy_end_locked_v1(RtSourceRegionV1* r, int64_t lease) {
+    if (r->copy.state == SR_COPY_EMPTY) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (r->copy.state != SR_COPY_CLEANED || r->copy.raw ||
+        r->copy.lease != (uint64_t)lease || rt_transient_raw_copy_scope_unpin_v1((int64_t)r->copy.module))
+        return SR_CONFLICT;
+    r->copy = (RtSourceCopyFrameV1){0};
+    return 0;
+#else
+    (void)lease; return SR_INCOMPLETE;
+#endif
+}
+
 /* Guarded/hardened allocator variants need their own bound qualification. */
 static int sr_allocator_ready(void) {
     if (sizeof(uintptr_t) != 8) return 0;
@@ -148,7 +167,7 @@ static int64_t sr_bound_locked(int64_t operation, int64_t descriptor,
         }
         if (operation == 1) {
             bytes += sizeof(RtSourceRegionV1)+sizeof(RtSourceControlMetadataV1);
-            fields += 18;
+            fields += 18 + sizeof(RtSourceCopyFrameV1)/sizeof(uint64_t);
             work += cap;
         }
     }
@@ -212,6 +231,10 @@ static int sr_allow(int64_t operation, int64_t descriptor, int64_t capacity,
     rt_struct_alloc_lock_release();
     return 0;
 }
+
+static int64_t sr_live_identity_unsafe_v1(int64_t control,int64_t generation,
+    RtSourceRegionV1** out);
+#include "runtime_source_copy_frame_v1.inc"
 
 int64_t rt_source_region_allocation_prepare_v1(int64_t descriptor,
     int64_t capacity, int64_t fuel) {
@@ -344,9 +367,13 @@ int64_t rt_source_region_read_begin_v1(int64_t c, int64_t g, int64_t e, int64_t 
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = sr_validate(r, g);
     if (!error && r->epoch != (uint64_t)e) error = SR_STALE;
-    if (!error && (r->lease || r->ticket)) error = SR_CONFLICT;
+    if (!error && (r->lease || r->ticket || (r->copy.state != SR_COPY_EMPTY && r->copy.state != SR_COPY_PREPARED))) error = SR_CONFLICT;
     if (!error && r->serial >= INT64_MAX) error = sr_fail(r, SR_CAPACITY);
     int64_t result = error ? error : (int64_t)(r->lease = ++r->serial);
+    if (!error && r->copy.state == SR_COPY_PREPARED) {
+        r->copy.lease = r->lease;
+        r->copy.state = SR_COPY_READY;
+    }
     rt_struct_alloc_lock_release(); return result;
 }
 
@@ -355,6 +382,7 @@ int64_t rt_source_region_read_end_v1(int64_t c, int64_t g, int64_t lease, int64_
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = !r ? SR_INCOMPLETE : r->generation != (uint64_t)g ? SR_FOREIGN :
         lease <= 0 || r->lease != (uint64_t)lease ? SR_CONSUMED : 0;
+    if (!error) error = sr_copy_end_locked_v1(r, lease);
     if (!error) r->lease = 0;
     rt_struct_alloc_lock_release(); return error;
 }
@@ -458,6 +486,7 @@ int64_t rt_source_region_close_v1(int64_t c, int64_t g, int64_t f) {
     if (!sr_allow(10, 0, 0, f)) return sr_allow_failure_v1;
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = !r ? SR_INCOMPLETE : r->generation != (uint64_t)g ? SR_FOREIGN : 0;
+    if (!error && r->copy.state != SR_COPY_EMPTY) error = SR_CONFLICT;
     if (!error) { atomic_store_explicit(&r->closed,1,memory_order_release); r->ticket = 0; r->destination = 0; }
     rt_struct_alloc_lock_release(); return error;
 }
@@ -466,7 +495,7 @@ int64_t rt_source_region_release_v1(int64_t c, int64_t g, int64_t f) {
     if (!sr_allow(11, 0, 0, f)) return sr_allow_failure_v1;
     RtSourceRegionV1* r = sr_control(c);
     int64_t error = !r ? SR_INCOMPLETE : r->generation != (uint64_t)g ? SR_FOREIGN :
-        !atomic_load_explicit(&r->closed,memory_order_acquire) || r->lease || r->ticket || r->members ? SR_CONFLICT : 0;
+        !atomic_load_explicit(&r->closed,memory_order_acquire) || r->lease || r->ticket || r->members || r->copy.state != SR_COPY_EMPTY ? SR_CONFLICT : 0;
     if (!error) {
         RtStructAllocation* entry = sr_find((uintptr_t)c);
         RtSourceAllocationMetadataV1* metadata=rt_struct_source_metadata_v1(entry);
@@ -518,6 +547,7 @@ int64_t rt_source_region_revoke_live_v1(int64_t control,int64_t generation,
     RtSourceRegionV1* r;
     int64_t error=sr_live_identity_unsafe_v1(control,generation,&r);
     if (error) return error;
+    if (r->copy.state != SR_COPY_EMPTY) return SR_CONFLICT;
     /* Only the atomic flag changes: foreign retirement may run under the
      * existing registry lock, and plain ticket/member fields are untouched. */
     atomic_store_explicit(&r->closed,1,memory_order_release);
@@ -534,6 +564,8 @@ int64_t rt_source_region_read_end_live_v1(int64_t control,int64_t generation,
      * atomic closed and lock-protected membership, never this lease field.
      * Compiler confinement forbids callbacks/another mutable lease owner. */
     if (lease<=0 || r->lease!=(uint64_t)lease) return SR_CONSUMED;
+    error=sr_copy_end_locked_v1(r,lease);
+    if (error) return error;
     r->lease=0;
     return 0;
 }
@@ -555,7 +587,7 @@ int64_t rt_source_region_release_live_v1(int64_t control,int64_t generation,
         metadata->allocation.generation!=(uint64_t)generation ||
         metadata->allocation.bytes!=sizeof(*r))) error=SR_INCOMPLETE;
     if (!error && (!atomic_load_explicit(&r->closed,memory_order_acquire) ||
-        r->members || r->lease)) error=SR_CONFLICT;
+        r->members || r->lease || r->copy.state != SR_COPY_EMPTY)) error=SR_CONFLICT;
     if (!error) {
         /* Atomic revocation already invalidated the writer. Discard its plain
          * retained fields only while holding the existing owner lock. */

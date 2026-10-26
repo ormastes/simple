@@ -54,6 +54,29 @@ int64_t rt_source_region_read_end_live_v1(int64_t pinned_control,
 int64_t rt_source_region_release_live_v1(int64_t pinned_control,
     int64_t generation, int64_t prepaid_work);
 
+/* NATIVE PREREQUISITE ONLY; no compiler/facade authority is enabled. One
+ * plain-word parameter copy, embedded in the existing control. Metric queries
+ * and prepare must be prepaid by the actual SourceRegionContext account before
+ * ReadBegin. Native numeric fees are not an account certificate. words>0.
+ * prepare is registry-checked; alloc/cleanup require the SAME genuine retained
+ * live control as the unsafe pinned lifecycle ABI above. They must not receive
+ * fabricated, stale, published, cross-thread or arbitrary raw tokens.
+ * Ordinary ReadBegin binds the prepared frame to its actual lease. Allocation
+ * returns a canonical UNTAGGED raw pointer or a negative error, and generated
+ * stores require its checked success edge. One allocator attempt per prepared
+ * frame, including allocation failure; retry refuses. No allocation/alias elision.
+ * Cleanup on every consumer exit precedes ReadEnd. lease0 cancels only a
+ * prepared frame before a successful read; otherwise use its actual lease.
+ * Failure retains frame+lease. ReadEnd/revoke/release refuse unfinished frames.
+ * Only native64/composed plain allocator is qualified; other profiles refuse. */
+int64_t rt_source_region_copy_bound_v1(int64_t words, int64_t metric);
+int64_t rt_source_region_copy_prepare_v1(int64_t control, int64_t generation,
+    int64_t words, int64_t work, int64_t fields, int64_t bytes);
+int64_t rt_source_region_copy_alloc_live_v1(int64_t pinned_control,
+    int64_t generation, int64_t lease);
+int64_t rt_source_region_copy_cleanup_live_v1(int64_t pinned_control,
+    int64_t generation, int64_t lease);
+
 /* Native typed dictionary milestone: raw i64 keys, non-null exact Struct
  * values. These signatures do not admit safe SOURCE without compiler capture,
  * shared-account reservation, caller/pin and final-link qualification. */
