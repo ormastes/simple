@@ -1736,6 +1736,17 @@ pub fn native_build_missing_output_is_failure_v1(code: i64, output_path: text,
 pub fn native_build_workarounds_refresh_needed_v1(worker: text, shard_child: bool) -> bool:
     worker != "1" and not shard_child
 
+# True only for a shard child that inherited a published closure request and
+# the SCV snapshot it was signed against. A top-level coordinator always
+# publishes its own request.
+fn native_build_shard_child_inherits_closure_v1() -> bool:
+    val shard_child = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    shard_child and (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") != "" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "") != "" and
+        (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") != ""
+
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val request = match native_build_authority_request_v1(raw_args,
             (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
@@ -1896,7 +1907,15 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "") or
+    # A shard child (capsule route re-executes this argv plus --*-shard=i/n)
+    # inherits the coordinator's frozen closure request. Keep it: every
+    # consumer re-admits it against the inherited SCV authority
+    # (native_build_closure_request_admit), so clearing and republishing only
+    # repeated the whole-closure walk once per shard before any parse work.
+    val inherited_shard_request = native_build_shard_child_inherits_closure_v1()
+    if inherited_shard_request:
+        print "[parse-closure] shard child reuses inherited request; walks=0"
+    elif not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "") or
             not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", ""):
         eprint "error: stale parse closure request could not be cleared"
         return 1
@@ -1909,7 +1928,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     var closure_request_dir = frontend_cache_dir
     if closure_request_dir == "":
         closure_request_dir = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
-    if args.contains("--entry-closure") and closure_request_dir != "":
+    if args.contains("--entry-closure") and closure_request_dir != "" and not inherited_shard_request:
         # With parse shards a failed publication stays fatal (unchanged
         # contract). Without shards it only costs the workers their own walk,
         # exactly the pre-publication behaviour, so it degrades to that.
