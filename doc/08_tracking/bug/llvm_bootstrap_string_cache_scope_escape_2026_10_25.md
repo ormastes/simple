@@ -1,5 +1,7 @@
 # LLVM direct translation scratch and bootstrap-cache lifetime
 
+**Status:** open
+
 The admitted LLVM file-emission path bypassed `compile_module_with_backend_scoped_v1`, so `SIMPLE_CODEGEN_MODULE_SCOPE=1` did not reclaim its translator scratch. The direct route is `compile_owned_aot_into_path_v2` → `BuiltinBackendCompileAdapter.compile_aot_into_path` → `compile_llvm_module_to_object_path` → `llvm_compile_module_direct_to_path`.
 
 The candidate scopes only `llvm_translate_module_direct_ir_for`, promotes the returned IR text, closes the scope, then invokes the existing object-file emitter. MIR storage lowering/optimization, persistent backend authority mutation, tool initialization, object publication and diagnostics remain outside the new scope. The option remains off by default. This reclaims translator scratch only; retained IR text and optimizer allocations remain outside the claimed savings.

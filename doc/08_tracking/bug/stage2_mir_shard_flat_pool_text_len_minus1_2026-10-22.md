@@ -1,5 +1,7 @@
 # Stage2 MIR shard: flat-pool encode of MIR artifact sees invalid text handle (rt_string_len == -1), worker stack-overflows
 
+**Status:** open
+
 Date: 2026-10-22
 Lane: bootstrap-from-scratch, stage2 gate (attempt 36)
 Tree: release/1.0 @ a868480a973 (includes PR #4162 HIR crash fixes)

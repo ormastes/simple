@@ -1,5 +1,7 @@
 # MIR "unresolved method call" on receivers with inferred/unknown type (2026-10-24)
 
+**Status:** open
+
 Symptom (Phase-3 run-11, stage=mir): `MIR lowering error: unresolved method call: <m>`.
 The method is lowered to a const-0 placeholder (silent-null risk, Task #145), then the module fails.
 
