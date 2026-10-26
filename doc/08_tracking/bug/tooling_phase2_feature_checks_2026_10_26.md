@@ -224,3 +224,23 @@ sources newly visible as app leaves, not a PASS to suppress. Facade migration
 and normal gate verification remain necessary before feature landing. Preserve
 materializer-created junctions/hardlinks; do not stage their apparent link
 deletions or unrelated command/document aliases in a source commit.
+
+## Materialized leaf facade migration
+
+Seven physical example files now import std.io_runtime env/process facades
+instead of declaring/calling raw environment/CWD/process primitives. The working
+guard passes against the materialized app aliases. Independent static review
+found no new P0/P1; imports resolve at top level and process tuples retain
+stdout/stderr/i64 status. Semantics are explicitly the facade contracts:
+env_get_opt treats unset AND empty as absent (nonempty debug/log defaults now
+apply to empty values); cwd_process falls back to "." on raw CWD failure, so
+old empty-CWD/PWD recovery branches are no longer taken in that case. This is
+not claimed to be a purely mechanical behavior-identical rename.
+
+Actual Phase2 object attempts for startup_log and CLI session both FAILED in
+the shared TextIoError.Codec / file_text_session I64-array MIR failure family.
+Neither emitted a qualifying object. Evidence: t32-startup-facades/ and
+t32-session-facades/. Source migration is reviewed but runtime UNVERIFIED;
+do not merge it merely because the guard is green. The same underlying compiler
+boundary blocks MCP/LSP and these leaf consumers. Retain their independent
+failure rows rather than repeating the unchanged shared failure.
