@@ -17,6 +17,8 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
 
 struct MirHirExpressionArtifactV1:
     final_repository_authority: text
@@ -36,11 +38,15 @@ struct MirHirExpressionArtifactV1:
 fn mir_hir_expression_header_v1() -> text:
     "mir-hir-declaration-expression-v1 " + hir_codec_header()
 
-fn mir_hir_expression_encode_v1(expression: HirExpr) -> Result<text, text>:
+fn mir_hir_expression_encode_v1(expression: HirExpr,
+        account: MirLoopResourceAccountV1? = nil) -> Result<text, text>:
     # Keep the existing generated HIR byte grammar. Selecting a bounded
     # writer does not admit the separately gated canonical portable codec.
-    var writer = HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024,
-        128 * 1024 * 1024, 1000000)
+    var writer = match account:
+        case Some(actual):
+            mir_loop_codec_charge_v1(actual, 256, 256)?
+            HirCodecWriter.create_accounted_v1(8 * 1024 * 1024, 128 * 1024 * 1024, 1000000, actual)?
+        case _: HirCodecWriter.create_canonical_bounded(8 * 1024 * 1024, 128 * 1024 * 1024, 1000000)
     writer.canonical = false
     hc_enc_hir_expr(writer, expression)
     if not writer.ok: return Err("MIR expression artifact codec refused")
@@ -48,7 +54,8 @@ fn mir_hir_expression_encode_v1(expression: HirExpr) -> Result<text, text>:
     if not writer.ok: return Err("MIR expression artifact byte bound exceeded")
     Ok(blob)
 
-fn mir_hir_expression_key_v1(record: MirHirExpressionArtifactV1) -> text:
+fn mir_hir_expression_key_v1(record: MirHirExpressionArtifactV1,
+        account: MirLoopResourceAccountV1? = nil) -> text:
     if record.stage != "mir-hir-declaration-expression-v1" or
             not sha256_lower_hex_valid(record.final_repository_authority) or
             not sha256_lower_hex_valid(record.final_archive_key) or
@@ -61,7 +68,13 @@ fn mir_hir_expression_key_v1(record: MirHirExpressionArtifactV1) -> text:
             record.category != "global-initializer" and record.category != "enum-discriminant":
         return ""
     if record.member_index < 0 or record.member_name == "": return ""
-    var writer = HirCodecWriter.create()
+    var writer = match account:
+        case Some(actual):
+            match HirCodecWriter.create_accounted_v1(8 * 1024 * 1024, 128 * 1024 * 1024, 1000000, actual):
+                case Ok(value): value
+                case Err(_): return ""
+        case _: HirCodecWriter.create()
+    writer.canonical = false
     writer.put_text(record.stage)
     writer.put_text(record.final_repository_authority)
     writer.put_text(record.final_archive_key)
@@ -74,7 +87,11 @@ fn mir_hir_expression_key_v1(record: MirHirExpressionArtifactV1) -> text:
     writer.put_text(record.member_name)
     writer.put_text(record.expression_digest)
     if not writer.ok: return ""
-    sha256_text("mir-hir-expression-artifact-key-v1\n" + writer.finish())
+    val encoded = writer.finish()
+    if val actual = account:
+        if not writer.ok: return ""
+        if mir_hir_expression_hash_bound_v1(encoded, actual).is_err(): return ""
+    sha256_text("mir-hir-expression-artifact-key-v1\n" + encoded)
 
 fn mir_hir_expression_store_in_owned_scope_v1(context: HirOwnedArtifactContextV1, authority: text, final_key: text,
         body_digest: text, module_name: text, source_path: text, category: text,
@@ -110,19 +127,74 @@ fn mir_hir_expression_load_in_owned_scope_v1(context: HirOwnedArtifactContextV1,
     val loaded = hir_owned_artifact_load_blob_v1(context, record.archive_key)
     if loaded.is_err(): return Err(loaded.unwrap_err())
     val blob = loaded.unwrap()
-    if text_byte_len(blob) > 8 * 1024 * 1024 or sha256_text(blob) != record.expression_digest:
+    mir_hir_expression_decode_blob_v1(blob, record.expression_digest)
+
+# The ordinary and SOURCE routes share the grammar/stability implementation.
+# Only the SOURCE route supplies the actual live account; local codec maxima
+# remain structural guards and are not charged as a maximum-size envelope.
+fn mir_hir_expression_decode_blob_v1(blob: text, expected_digest: text,
+        account: MirLoopResourceAccountV1? = nil) -> Result<HirExpr, text>:
+    if val actual = account:
+        mir_hir_expression_hash_bound_v1(blob, actual)?
+    if text_byte_len(blob) > 8 * 1024 * 1024 or sha256_text(blob) != expected_digest:
         return Err("MIR expression artifact bytes mismatch")
-    var reader = FlatPoolReader.new_bounded(blob, 8 * 1024 * 1024,
-        128 * 1024 * 1024, 65536, 128, 1000000)
+    var reader = match account:
+        case Some(actual):
+            mir_loop_codec_charge_v1(actual, 256, 256)?
+            FlatPoolReader.new_accounted_v1(blob, 8 * 1024 * 1024,
+                128 * 1024 * 1024, 65536, actual.limits().max_depth, 1000000, actual)?
+        case _: FlatPoolReader.new_bounded(blob, 8 * 1024 * 1024,
+            128 * 1024 * 1024, 65536, 128, 1000000)
     if reader.next() != mir_hir_expression_header_v1():
         return Err("MIR expression artifact codec header mismatch")
     val expression: HirExpr = hc_dec_hir_expr(reader)
     if not reader.ok or reader.pos != reader.lines.len() - 1 or reader.lines[reader.pos] != "":
         return Err("MIR expression artifact is incomplete")
-    val encoded = mir_hir_expression_encode_v1(expression)
+    val encoded = mir_hir_expression_encode_v1(expression, account)
     if encoded.is_err(): return Err(encoded.unwrap_err())
+    if val actual = account:
+        mir_loop_codec_charge_v1(actual, 1)?
+        val bytes = text_byte_len(blob)
+        mir_loop_codec_charge_v1(actual, bytes)?
     if encoded.unwrap() != blob: return Err("MIR expression artifact is not stable")
     Ok(expression)
+
+fn mir_hir_expression_hash_bound_v1(value: text,
+        account: MirLoopResourceAccountV1) -> Result<(), text>:
+    mir_loop_codec_charge_v1(account, 1)?
+    val bytes = text_byte_len(value)
+    if bytes < 0 or bytes > 36028797018963965:
+        return Err("MIR expression hash reservation overflow")
+    # Covers SHA-256 rounds, UTF-8 conversion/padding, optional key prefix,
+    # retained digest and comparison. The bound uses actual input bytes.
+    mir_loop_codec_charge_v1(account, bytes * 256 + 512, bytes * 4 + 512)
+
+# Retained bytes are data, not admission. The actual private archive owner
+# must still bind the supplied record to its current admitted repository.
+# Deliberately no filesystem context, loader fallback or cache-presence proof.
+fn mir_hir_expression_from_retained_blob_v1(record: MirHirExpressionArtifactV1,
+        authority: text, final_key: text, body_digest: text, blob: text,
+        account: MirLoopResourceAccountV1) -> Result<HirExpr, text>:
+    mir_loop_codec_charge_v1(account, 128, 256)?
+    val identity_texts = [record.final_repository_authority, record.final_archive_key,
+        record.final_body_digest, record.module_name, record.source_path, record.category,
+        record.member_name, record.expression_digest, record.archive_key, record.stage,
+        authority, final_key, body_digest]
+    for value in identity_texts:
+        mir_loop_codec_charge_v1(account, 1)?
+        val bytes = text_byte_len(value)
+        if bytes < 0 or bytes > 288230376151711741:
+            return Err("MIR expression identity reservation overflow")
+        mir_loop_codec_charge_v1(account, bytes * 32 + 64)?
+    if transient_array_scope_state_v1() != 1:
+        return Err("MIR expression replay requires an active unpaused scope")
+    if record.final_repository_authority != authority or record.final_archive_key != final_key or
+            record.final_body_digest != body_digest or record.archive_key == "" or
+            mir_hir_expression_key_v1(record, Some(account)) != record.archive_key:
+        return Err("MIR expression retained artifact identity mismatch")
+    mir_hir_expression_decode_blob_v1(blob, record.expression_digest, Some(account))
+
+export mir_hir_expression_from_retained_blob_v1
 
 # Budget-reporting sibling for private bootstrap reconstruction. The caller
 # reserves allocation_limit first and keeps the returned charge until its

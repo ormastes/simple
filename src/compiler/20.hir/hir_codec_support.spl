@@ -14,6 +14,8 @@
 #     terminating the process. Public decode then treats the entry as a miss.
 
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
 use compiler.frontend.parser_types_expr.{Expr}
 use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -161,6 +163,36 @@ class HirCodecWriter:
     charged_allocation_bytes: i64
     charged_work_units: i64
     audit_events: i64
+    resource_account_v1: MirLoopResourceAccountV1? = nil
+    accounted_visits_v1: i64 = 0
+    accounted_depth_v1: i64 = 0
+
+    # Generated traversal calls these before heap access and each child loop.
+    # Legacy nil-account traversal keeps its prior behavior, including errors.
+    me accounted_enter_v1() -> bool:
+        if self.resource_account_v1 == nil: return true
+        if not self.ok: return false
+        val account = self.resource_account_v1.unwrap()
+        if self.accounted_depth_v1 >= account.limits().max_depth:
+            self.reject_bounds("actual_account_depth")
+            return false
+        if not self.charge_work(128): return false
+        self.accounted_visits_v1 = self.accounted_visits_v1 + 1
+        self.accounted_depth_v1 = self.accounted_depth_v1 + 1
+        true
+
+    me accounted_leave_v1():
+        if self.resource_account_v1 != nil:
+            self.accounted_depth_v1 = self.accounted_depth_v1 - 1
+
+    me accounted_step_v1() -> bool:
+        if self.resource_account_v1 == nil: return true
+        if not self.ok or not self.charge_work(16): return false
+        self.accounted_visits_v1 = self.accounted_visits_v1 + 1
+        true
+
+    fn accounted_continue_v1() -> bool:
+        self.resource_account_v1 == nil or self.ok
 
     static fn create() -> HirCodecWriter:
         HirCodecWriter(parts: [], chunks: [], ok: true, unsupported: "",
@@ -179,13 +211,27 @@ class HirCodecWriter:
     static fn create_canonical_bounded(max_output_bytes: i64,
                                        max_allocation_bytes: i64,
                                        max_work_units: i64) -> HirCodecWriter:
+        HirCodecWriter.create_bounded_with_account_v1(max_output_bytes,
+            max_allocation_bytes, max_work_units, nil)
+
+    static fn create_accounted_v1(max_output_bytes: i64, max_allocation_bytes: i64,
+            max_work_units: i64, account: MirLoopResourceAccountV1) -> Result<HirCodecWriter, text>:
+        mir_loop_codec_charge_v1(account, 64, 512)?
+        val writer = HirCodecWriter.create_bounded_with_account_v1(max_output_bytes,
+            max_allocation_bytes, max_work_units, Some(account))
+        if not writer.ok: return Err("CODEC-ACCOUNT: writer construction refused")
+        Ok(writer)
+
+    static fn create_bounded_with_account_v1(max_output_bytes: i64,
+            max_allocation_bytes: i64, max_work_units: i64,
+            account: MirLoopResourceAccountV1?) -> HirCodecWriter:
         var writer = HirCodecWriter(parts: [], chunks: [], ok: true,
             unsupported: "", canonical: true, bounded: true,
             failure_kind: "", max_output_bytes: max_output_bytes,
             max_allocation_bytes: max_allocation_bytes,
             max_work_units: max_work_units, output_bytes: 0,
             current_part_bytes: 0, charged_allocation_bytes: 0,
-            charged_work_units: 0, audit_events: 0)
+            charged_work_units: 0, audit_events: 0, resource_account_v1: account)
         if (max_output_bytes < 0 or max_allocation_bytes < 0 or
                 max_work_units < 0):
             writer.reject_bounds("invalid_writer_limits")
@@ -202,10 +248,16 @@ class HirCodecWriter:
             return false
         if not self.bounded:
             return true
-        self.audit_events = self.audit_events + 1
+        if self.resource_account_v1 == nil:
+            self.audit_events = self.audit_events + 1
         if amount < 0 or self.charged_work_units > self.max_work_units - amount:
             self.reject_bounds("writer_work_units")
             return false
+        if val account = self.resource_account_v1:
+            if mir_loop_codec_charge_v1(account, amount).is_err():
+                self.reject_bounds("actual_account_work")
+                return false
+            self.audit_events = self.audit_events + 1
         self.charged_work_units = self.charged_work_units + amount
         true
 
@@ -214,11 +266,17 @@ class HirCodecWriter:
             return false
         if not self.bounded:
             return true
-        self.audit_events = self.audit_events + 1
+        if self.resource_account_v1 == nil:
+            self.audit_events = self.audit_events + 1
         if (amount < 0 or self.charged_allocation_bytes >
                 self.max_allocation_bytes - amount):
             self.reject_bounds("writer_allocation_bytes")
             return false
+        if val account = self.resource_account_v1:
+            if mir_loop_codec_charge_v1(account, 0, amount).is_err():
+                self.reject_bounds("actual_account_allocation")
+                return false
+            self.audit_events = self.audit_events + 1
         self.charged_allocation_bytes = self.charged_allocation_bytes + amount
         true
 

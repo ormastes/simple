@@ -643,6 +643,27 @@ fn _codec_binders(fields: [FieldDecl]) -> text:
         names.push("b_" + f.binder)
     "(" + _join(names, ", ") + ")"
 
+fn _codec_accounted_encoder_guards_v1(source: text) -> text:
+    # Source-owned generation rule, mirrored mechanically in the checked-in
+    # artifact when executable code generation is unavailable. Ordinary codecs
+    # have nil accounts; these methods preserve their previous traversal.
+    var guarded: [text] = []
+    for line in source.split("\n"):
+        if line == "": continue
+        val body = line.trim_start()
+        val indent = line.substring(0, line.len() - body.len())
+        if body.starts_with("for "):
+            guarded.push(indent + "if not w.accounted_step_v1(): return")
+        guarded.push(line)
+        if body.starts_with("fn hc_enc_"):
+            guarded.push("    if not w.accounted_enter_v1(): return")
+            guarded.push("    defer w.accounted_leave_v1()")
+        elif body.starts_with("for "):
+            guarded.push(indent + "    if not w.accounted_step_v1(): return")
+        elif body.starts_with("w.") or body.starts_with("hc_enc_") or body.starts_with("hc_put_char("):
+            guarded.push(indent + "if not w.accounted_continue_v1(): return")
+    guarded.join("\n") + "\n"
+
 fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
     # Fail closed on a nil node: live compiler state can present a nil/corrupt
@@ -684,7 +705,7 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                 field_index = field_index + 1
             idx = idx + 1
         parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
-        return parts.join("")
+        return _codec_accounted_encoder_guards_v1(parts.join(""))
     var body: [text] = []
     for f in decl.fields:
         # A function dictionary entry cannot represent an absent declaration.
@@ -693,7 +714,7 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
-    parts.join("") + body.join("")
+    _codec_accounted_encoder_guards_v1(parts.join("") + body.join(""))
 
 # @workaround bug=a174_enum_scalar_codec_wire_boundary_2026_10_16 recover=5c3e501759ae833a828b14b4e23c9238c73b76a6 reason=generate-typed-enum-prototypes-and-schema-owned-wire-nil-slots
 fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:

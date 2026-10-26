@@ -35,6 +35,8 @@
 # UTF-8 in literals and comments, so an offset-based frame would corrupt them.
 
 use std.common.encoding.utf8.{text_byte_len}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
 
 # The item7 development branch also used v4 for named type arguments; those
 # unadmitted snapshots are incompatible with release's v4 described below.
@@ -119,6 +121,7 @@ pub class FlatPoolReader:
     var maximum_depth: i64
     var charged_work_units: i64
     var audit_events: i64
+    var resource_account_v1: MirLoopResourceAccountV1? = nil
 
     pub static fn new(blob: text) -> FlatPoolReader:
         FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
@@ -161,12 +164,29 @@ pub class FlatPoolReader:
                               max_allocation_bytes: i64, max_nodes: i64,
                               max_depth: i64,
                               max_work_units: i64) -> FlatPoolReader:
+        FlatPoolReader.new_bounded_with_account_v1(blob, max_input_bytes,
+            max_allocation_bytes, max_nodes, max_depth, max_work_units, nil)
+
+    pub static fn new_accounted_v1(blob: text, max_input_bytes: i64,
+            max_allocation_bytes: i64, max_nodes: i64, max_depth: i64,
+            max_work_units: i64, account: MirLoopResourceAccountV1) -> Result<FlatPoolReader, text>:
+        # Pay cursor and empty-array retention before constructing either.
+        mir_loop_codec_charge_v1(account, 64, 512)?
+        val reader = FlatPoolReader.new_bounded_with_account_v1(blob, max_input_bytes,
+            max_allocation_bytes, max_nodes, max_depth, max_work_units, Some(account))
+        if not reader.ok: return Err("CODEC-ACCOUNT: reader construction refused")
+        Ok(reader)
+
+    static fn new_bounded_with_account_v1(blob: text, max_input_bytes: i64,
+            max_allocation_bytes: i64, max_nodes: i64, max_depth: i64,
+            max_work_units: i64, account: MirLoopResourceAccountV1?) -> FlatPoolReader:
         var reader = FlatPoolReader(lines: [], pos: 0, ok: true,
             bounded: true, canonical: true, failure_kind: "", failure_detail: "",
             max_allocation_bytes: max_allocation_bytes, max_nodes: max_nodes,
             max_depth: max_depth, max_work_units: max_work_units,
             live_reserved_bytes: 0, entered_nodes: 0, current_depth: 0,
-            maximum_depth: 0, charged_work_units: 0, audit_events: 0)
+            maximum_depth: 0, charged_work_units: 0, audit_events: 0,
+            resource_account_v1: account)
         # Simple requires parentheses around a boolean continued across lines.
         if (max_input_bytes < 0 or max_allocation_bytes < 0 or max_nodes < 0 or
                 max_depth < 0 or max_work_units < 0):
@@ -216,10 +236,16 @@ pub class FlatPoolReader:
             return false
         if not self.bounded:
             return true
-        self.audit_events = self.audit_events + 1
+        if self.resource_account_v1 == nil:
+            self.audit_events = self.audit_events + 1
         if amount < 0 or self.charged_work_units > self.max_work_units - amount:
             self.reject_bounds("work_units")
             return false
+        if val account = self.resource_account_v1:
+            if mir_loop_codec_charge_v1(account, amount).is_err():
+                self.reject_bounds("actual_account_work")
+                return false
+            self.audit_events = self.audit_events + 1
         self.charged_work_units = self.charged_work_units + amount
         true
 
@@ -228,10 +254,16 @@ pub class FlatPoolReader:
             return false
         if not self.bounded:
             return true
-        self.audit_events = self.audit_events + 1
+        if self.resource_account_v1 == nil:
+            self.audit_events = self.audit_events + 1
         if amount < 0 or self.live_reserved_bytes > self.max_allocation_bytes - amount:
             self.reject_bounds("allocation_bytes")
             return false
+        if val account = self.resource_account_v1:
+            if mir_loop_codec_charge_v1(account, 0, amount).is_err():
+                self.reject_bounds("actual_account_allocation")
+                return false
+            self.audit_events = self.audit_events + 1
         self.live_reserved_bytes = self.live_reserved_bytes + amount
         true
 
