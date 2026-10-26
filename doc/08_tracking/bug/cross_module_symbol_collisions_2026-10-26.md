@@ -8,7 +8,7 @@ name). The compiler already warns
 same-name definitions are co-compiled and resolved by arg type, so identically
 typed or class-typed duplicates resolve to whichever is last.
 
-## ThreadHandle (FIXED here)
+## ThreadHandle (FIXED #4926)
 - `src/lib/nogc_sync_mut/concurrent/thread.spl` (canonical; fields handle, joined; join() -> i64?)
 - `src/lib/nogc_async_mut/thread_sffi.spl` (different layout; join() -> bool) was a second `class ThreadHandle`
   re-exported from `nogc_async_mut/__init__.spl` while `nogc_async_mut/concurrent/thread.spl` re-exports the canonical one.
@@ -20,13 +20,12 @@ Spec: test/01_unit/lib/nogc_async_mut/thread_handle_unique_spec.spl.
 `src/lib/nogc_async_mut/async/cancellation.spl:37` (`cancellation_token_new()->CancellationToken`).
 Fix: cancellation token function already renamed to `cancellation_token_new`, resolving the collision.
 
-## timestamp_* (FIXED #4930)
+## timestamp_* (timestamp_now FIXED #4930; remaining dupes FIXED #4941)
 Duplicates across `common/time_utils.spl`, `io/time_ops.spl`, database test modules, 
 resource_utils, semihost_capture, and sffi/system stubs.
 Fix: 
-- Deleted 6 wrapper functions from `time_ops.spl` (timestamp_year/month/day/hour/minute/second); 
-  added `pub use` re-export from time_utils (used by bug_add, test_runner, log_writer, etc.)
-- Deleted `timestamp_now` stub from `test_extended/stubs.spl`; replaced with import from time_utils
+- Kept `time_ops.spl` timestamp_year/month/day/hour/minute/second: public aliases with distinct names (9 importers), not duplicates
+- Deleted `timestamp_now` stub from `test_extended/stubs.spl`; replaced with `pub use` from time_utils (re-exported to 5 database modules)
 - Renamed `semihost_capture.spl`'s `timestamp_now` → `semihost_timestamp_now` (different: uses semihost shell)
 - Renamed database test stubs: `timestamp_to_iso` → `test_timestamp_to_iso` (in sync_mut/database/test.spl and async_mut/database/test.spl)
 - Renamed mcp stub: `resource_utils.spl`'s `timestamp_to_iso` → `resource_timestamp_to_iso` 
