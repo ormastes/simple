@@ -21,7 +21,8 @@
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
-use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, HASH_ALGO_SHA256_V1,
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{DigestV1, HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1,
     DIGEST_SET_MATCH_V1, digest_v1_new, digest_v1_text, digest_v1_parse, digest_v1_identity_ok,
     digest_set_match_v1}
 use compiler.common.cache_contract.guard_id_v1.{ActiveGuardRootV1, active_guard_root_empty_v1,
@@ -97,11 +98,22 @@ pub struct WeavePlanDeltaV1:
     reweave: [text]
     reuse: [text]
 
-fn _h(domain: text, parts: [text]) -> text:
+fn _framed(domain: text, parts: [text]) -> text:
     var framed = "{domain}\u0000"
     for p in parts:
         framed = framed + "{p.len()}:{p}\u0000"
-    _sha256_digest(sha256_u8_hex(text_to_bytes(framed)))
+    framed
+
+# PERSISTED identity: sha256 (written into shards, receipts, apply keys).
+fn _h(domain: text, parts: [text]) -> text:
+    _sha256_digest(sha256_u8_hex(text_to_bytes(_framed(domain, parts))))
+
+# LOCAL lookup key (in-process shard Dict + single-flight only; never written
+# or sent). xxh3-128 with its algorithm tag so it cannot be confused with sha256.
+fn _local_key(domain: text, parts: [text]) -> text:
+    match digest_v1_new(HASH_ALGO_XXH3_128_V1, xxh3_128_text(_framed(domain, parts))):
+        case Some(d): digest_v1_text(d)
+        case nil: ""
 
 fn _sorted_texts(values: [text]) -> [text]:
     var out: [text] = []
@@ -339,7 +351,7 @@ fn _selector_matches(sel: PointcutSelectorV1, p: JoinPointFactV1) -> bool:
     _node_matches(sel.nodes, sel.root, p)
 
 pub fn pointcut_match_key_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
-    _h("aop-match/v1", [sel.selector_digest, f.facts_key])
+    _local_key("aop-match/v1", [sel.selector_digest, f.facts_key])
 
 pub fn pointcut_match_shard_compute_v1(sel: PointcutSelectorV1,
         f: DirectoryJoinPointFactsV1) -> PointcutMatchShardV1:
