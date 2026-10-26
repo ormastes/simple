@@ -51,3 +51,42 @@ remains a failure; no placeholder passes, guard bypasses or invented test counts
 Landing requires the selected feature's real native behavior and applicable
 SSpec/core gates, reviewed exact PR contents, and merge. No feature is yet
 admitted for landing from this Phase 2 cohort.
+
+
+## First collection terminal and typed retry
+
+The SSpec runner terminated with exit139 at MIR entry after its286-module HIR
+closure and monomorphization. Peak RSS1827404 KiB; no executable or examples
+passed. CMM server also failed HIR on unresolved print_raw. Initial rows are
+terminal before source edits; retained logs remain immutable.
+
+Changed-source compatibility attempt two pins token tuple fields to text,
+codec Result expressions and forwarded CodecError locals to declared types,
+and byte-buffer Results to their concrete sum type. Array append results are
+retained. This preserves error fields and byte-loop semantics; it is an
+unqualified old-producer workaround until actual values/error regressions pass.
+LSP MCP retry: build/tooling-phase2/lsp-mcp-typed, exec session73187, same private
+cache owner and enforced limits. No overall PASS or landing admission yet.
+
+## Changed-source results
+
+LSP MCP typed attempt two FAILED with the same Codec payload and byte-array
+MIR errors. Removed the ineffective shared text-I/O edits; preserved the failed
+log at `lsp-mcp-typed/`. No claim that explicit bindings repaired that owner.
+
+The envelope's separately typed tuple fields compiled in an actual-production-
+parser native probe. Executing `mcp_envelope_probe.exe` exited0 and reported
+16 input cases /96 actual assertions. This qualifies the focused parser input
+set only, not the full MCP consumer or a general SSpec run. Source fixture and
+receipts remain in `build/tooling-phase2/envelope-probe/` and its sibling file.
+
+Copied the existing uncommitted Markdown repair into this isolated cohort,
+preserving its original checkout. Phase2 compiled/linked the repaired17-module
+closure, and initialize/shutdown/exit ran successfully. A real didOpen followed
+by documentSymbol returned First/Second headings and correct source lines.
+However folding request ID3 and string request IDstring-id both returned ID0.
+This is a functional protocol failure, not PASS. Captures:
+`build/tooling-phase2/markdown-functional.stdout` and `.stderr`.
+Markdown remains unqualified for landing despite compile/link and handshake
+success. The same cohort's parser/fence and document-mutation requirements
+remain to be verified. No unsupported full-feature readiness inference.
