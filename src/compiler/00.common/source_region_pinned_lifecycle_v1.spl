@@ -3,6 +3,7 @@
 # authorize calls; ordinary SourceRegionRequest methods stay registry-guarded.
 use compiler.common.source_region_context_v1.*
 use compiler.common.source_region_request_v1.{SourceRegionRequestV1}
+use compiler.common.source_region_copy_frame_v1.{source_region_copy_cleanup_context_pinned_v1}
 
 @unsafe(reason: "compiler-verified live control pin required", capabilities: [ffi, raw_ptr])
 extern fn rt_source_region_revoke_live_v1(control: i64, generation: i64, work: i64) -> i64
@@ -21,8 +22,20 @@ impl SourceRegionRequestV1:
         if self.cleanup_error == nil: self.cleanup_error = Some(error)
         Ok(0)
 
+    @unsafe(reason: "requires actual compiler request copy-frame pin receipt", capabilities: [ffi, raw_ptr])
+    me copy_cleanup_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        val cleanup = unsafe(capabilities: [ffi, raw_ptr]):
+            source_region_copy_cleanup_context_pinned_v1(self.context)
+        match cleanup:
+            case Ok(value): Ok(value)
+            case Err(error):
+                self.retain_cleanup_error_v1(error)
+                Err(error)
+
     @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
     me read_end_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if self.context.copy_frame_state_ != 0 and self.context.copy_frame_state_ != 3:
+            return Err(SourceRegionErrorV1.Conflict)
         if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
         if self.context.pending_lease_ == 0: return Ok(0)
         val work = self.context.pending_read_end_work_
@@ -34,6 +47,8 @@ impl SourceRegionRequestV1:
         match source_region_value_v1(raw):
             case Ok(value):
                 self.context.pending_lease_ = 0
+                self.context.copy_frame_state_ = 0
+                self.context.copy_cleanup_attempted_ = false
                 Ok(value)
             case Err(error):
                 self.retain_cleanup_error_v1(error)
@@ -41,6 +56,7 @@ impl SourceRegionRequestV1:
 
     @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
     me revoke_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if self.context.copy_frame_state_ != 0: return Err(SourceRegionErrorV1.Conflict)
         if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
         if self.context.revoked_: return Ok(0)
         val work = self.context.cleanup_revoke_work_
@@ -61,6 +77,7 @@ impl SourceRegionRequestV1:
 
     @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
     me release_pinned_v1() -> Result<i64, SourceRegionErrorV1>:
+        if self.context.copy_frame_state_ != 0: return Err(SourceRegionErrorV1.Conflict)
         if self.released: return Err(SourceRegionErrorV1.Consumed)
         if not self.context.live_: return Err(SourceRegionErrorV1.Closed)
         if not self.context.revoked_: return Err(SourceRegionErrorV1.Conflict)
@@ -88,6 +105,11 @@ pub fn source_region_retain_first_error_v1(slot: SourceRegionRequestV1,
 pub fn source_region_retain_cleanup_error_v1(slot: SourceRegionRequestV1,
         error: SourceRegionErrorV1) -> Result<i64, SourceRegionErrorV1>:
     slot.retain_cleanup_error_v1(error)
+
+@unsafe(reason: "requires actual compiler request copy-frame pin receipt", capabilities: [ffi, raw_ptr])
+pub fn source_region_copy_cleanup_pinned_v1(slot: SourceRegionRequestV1) -> Result<i64, SourceRegionErrorV1>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        slot.copy_cleanup_pinned_v1()
 
 @unsafe(reason: "requires actual compiler request pin receipt", capabilities: [ffi, raw_ptr])
 pub fn source_region_read_end_pinned_v1(slot: SourceRegionRequestV1) -> Result<i64, SourceRegionErrorV1>:
