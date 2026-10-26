@@ -1032,5 +1032,36 @@ impl HmInferContext:
             case Return(value):
                 self.infer_return_expr(value, span)
 
+            # Target-neutral @cfg/@when select: every arm is inferred
+            # independently (no condition evaluation, no narrowing). The
+            # result is the arms' common type; unit when they differ or when
+            # there is no else arm (the select may select nothing).
+            case CfgSelect(_, cs_arms, cs_else):
+                val unit_ty = HirType(kind: HirTypeKind.Unit, span: span)
+                var arm_types: [HirType] = []
+                for cs_arm in cs_arms:
+                    match self.infer_block(cs_arm):
+                        case Ok(arm_ty): arm_types = arm_types.push(arm_ty)
+                        case Err(e): return Err(e)
+                var has_else = false
+                if val else_blk = cs_else:
+                    has_else = true
+                    match self.infer_block(else_blk):
+                        case Ok(else_ty): arm_types = arm_types.push(else_ty)
+                        case Err(e): return Err(e)
+                if not has_else or arm_types.len() == 0:
+                    return Ok(unit_ty)
+                var common = arm_types[0]
+                var idx = 1
+                while idx < arm_types.len():
+                    # A mismatch is not an error: arms are target-neutral and only
+                    # one runs per target, so the select is used as a statement
+                    # and its value is unit.
+                    match self.unify(common, arm_types[idx]):
+                        case Ok(_): pass
+                        case Err(_): return Ok(unit_ty)
+                    idx = idx + 1
+                Ok(self.resolve(common))
+
             case _:
                 Err(TypeInferError.Other(message: "unsupported expression kind: {expr.kind}", span: span))

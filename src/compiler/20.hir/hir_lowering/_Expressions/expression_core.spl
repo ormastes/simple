@@ -18,12 +18,28 @@ use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
 
 # A concrete parameter retains the symbol owner after optional extraction.
 fn _hir_callable_named_var_payload(symbol: SymbolId, name: text) -> HirExprKind:
     HirExprKind.NamedVar(symbol, name)
 
 impl HirLowering:
+    # Preprocessor cfg-select marker chain -> target-neutral CfgSelect: every
+    # arm is kept with its condition text; MIR picks the arm for its target.
+    me lower_cfg_when_chain(arms: [IfArm], else_block: Block?, span: Span) -> HirExpr:
+        var conds: [text] = []
+        var hir_arms: [HirBlock] = []
+        for arm in arms:
+            val arm_t: IfArm = arm
+            val marker = cfg_when_marker_cond(arm_t.cond)
+            conds = conds.push(marker ?? "")
+            hir_arms = hir_arms.push(self.lower_hir_block(arm_t.then_))
+        var hir_else: HirBlock? = nil
+        if val else_src = else_block:
+            hir_else = Some(self.lower_hir_block(else_src))
+        HirExpr(kind: HirExprKind.CfgSelect(conds, hir_arms, hir_else), has_type_: false, type_: nil, span: span)
+
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
         # A local type may reuse an adaptive leaf name. Only the stdlib type's
         # defining module grants this compiler-owned attribute admission.
@@ -612,6 +628,9 @@ impl HirLowering:
         if kind_disc_v == hir_expr_kind_disc(ExprKind.IfChain([], None)):
             match expr_kind_value:
                 case ExprKind.IfChain(arms, else_):
+                    if cfg_when_chain_is_marker(arms):
+                        val marker_else: Block? = else_
+                        return self.lower_cfg_when_chain(arms, marker_else, e.span)
                     var hir_arms: [HirIfArm] = []
                     var arm_idx = 0
                     while arm_idx < arms.len():
@@ -638,6 +657,11 @@ impl HirLowering:
         if kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), None)):
             match expr_kind_value:
                 case ExprKind.If(cond, then_, else_):
+                    val marker_cond_expr: Expr = cond
+                    val single_arm = IfArm(cond: marker_cond_expr, then_: then_, span: e.span)
+                    if cfg_when_chain_is_marker([single_arm]):
+                        val single_else: Block? = else_
+                        return self.lower_cfg_when_chain([single_arm], single_else, e.span)
                     val hir_cond = self.lower_hir_expr(cond)
                     val hir_then = self.lower_hir_block(then_)
                     val else_opt: Block? = else_

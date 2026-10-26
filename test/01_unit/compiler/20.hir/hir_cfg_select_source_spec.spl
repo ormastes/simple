@@ -1,0 +1,181 @@
+# @req: REQ-COMP-HIR-CFG-SELECT-002 - statement-level @when/@elif/@else/@end lowers to HirExprKind.CfgSelect behind SIMPLE_HIR_CFG_SELECT=1.
+"""
+## Purpose and audience
+Purpose: Prove the source path for the target-neutral cfg-select node. With
+SIMPLE_HIR_CFG_SELECT=1 an indented @when chain is kept (not stripped) and lowers
+to ONE CfgSelect (2 conds + else) that is identical under any SIMPLE_TARGET_OS;
+MIR picks the arm per target; a malformed condition is fatal. With the flag off
+the old stripping is unchanged. Audience: COMP maintainers.
+"""
+# @tag: unit, compiler, hir, mir, parser
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set_process}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.common.mir_target_context.{MirTargetContext}
+
+val SRC = "fn pick() -> i64:\n    var r = 0\n    @when(os == \"linux\")\n    r = 4101\n    @elif(os == \"windows\")\n    r = 4202\n    @else\n    r = 4303\n    @end\n    r\n"
+val BAD_SRC = "fn pick() -> i64:\n    var r = 0\n    @when(bogus_atom)\n    r = 4101\n    @else\n    r = 4303\n    @end\n    r\n"
+
+struct Sel:
+    count: i64
+    nested: i64
+    conds: [text]
+    has_else: bool
+
+fn lower(src: text, flag: text, target_os: text) -> HirModule:
+    reset_env()
+    env_set_process("SIMPLE_HIR_CFG_SELECT", flag)
+    env_set_process("SIMPLE_TARGET_OS", target_os)
+    val parsed = parse_full_frontend(src, "testdata/cfg_select_src.spl", "cfg_select_src", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/cfg_select_src.spl")
+    val hir = hl.lower_module(parsed)
+    reset_env()
+    hir
+
+fn find_fn(hir: HirModule, name: text) -> HirFunction?:
+    for f in hir.functions.values():
+        if f.name == name or f.name.ends_with("." + name):
+            return Some(f)
+    nil
+
+fn block_selects(b: HirBlock) -> i64:
+    var n = 0
+    for s in b.stmts:
+        match s.kind:
+            case HirStmtKind.Expr(e):
+                match e.kind:
+                    case HirExprKind.CfgSelect(_, _, _): n = n + 1
+                    case _: pass
+            case _: pass
+    if b.value.?:
+        match b.value.unwrap().kind:
+            case HirExprKind.CfgSelect(_, _, _): n = n + 1
+            case _: pass
+    n
+
+fn reset_env():
+    env_set_process("SIMPLE_HIR_CFG_SELECT", "")
+    env_set_process("SIMPLE_TARGET_OS", "")
+
+fn scan_expr(e: HirExpr, acc: Sel) -> Sel:
+    var out = acc
+    match e.kind:
+        case HirExprKind.CfgSelect(conds, arms, else_):
+            var found_else = false
+            if val _else_blk = else_: found_else = true
+            var inner = 0
+            for arm in arms:
+                inner = inner + block_selects(arm)
+            out = Sel(count: acc.count + 1, nested: inner, conds: conds, has_else: found_else)
+        case _: pass
+    out
+
+fn selects(f: HirFunction) -> Sel:
+    var acc = Sel(count: 0, nested: 0, conds: [], has_else: false)
+    for s in f.body.stmts:
+        match s.kind:
+            case HirStmtKind.Expr(e): acc = scan_expr(e, acc)
+            case _: pass
+    if f.body.value.?:
+        acc = scan_expr(f.body.value.unwrap(), acc)
+    acc
+
+fn tgt(os: text) -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: os, abi: "gnu", backend: "llvm", version: 1)
+
+struct Lowered:
+    consts: [text]
+    errors: [MirError]
+
+fn lower_pick(hir: HirModule, os: text) -> Lowered:
+    var lowering = MirLowering.new_for_target(hir.symbols, tgt(os))
+    val mir = lowering.lower_module(hir)
+    var consts: [text] = []
+    for function in mir.functions.values():
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Const(_, v, _): consts = consts.push("{v}")
+                        case _: pass
+    Lowered(consts: consts, errors: lowering.errors)
+
+fn has_const(l: Lowered, needle: text) -> bool:
+    for c in l.consts:
+        if c.contains(needle): return true
+    false
+
+describe "SIMPLE_HIR_CFG_SELECT source path":
+    it "flag on: one CfgSelect with 2 conds and an else, identical under linux and windows":
+        reset_env()
+        val a = selects(find_fn(lower(SRC, "1", "linux"), "pick")!)
+        val b = selects(find_fn(lower(SRC, "1", "windows"), "pick")!)
+        expect(a.count).to_equal(1)
+        expect(a.conds.len()).to_equal(2)
+        expect(a.has_else).to_equal(true)
+        expect(b.count).to_equal(1)
+        expect(b.conds.len()).to_equal(2)
+        expect(b.conds[0]).to_equal(a.conds[0])
+        expect(b.conds[1]).to_equal(a.conds[1])
+
+    it "flag off: old stripping is unchanged":
+        reset_env()
+        val hir = lower(SRC, "", "linux")
+        expect(selects(find_fn(hir, "pick")!).count).to_equal(0)
+        val l = lower_pick(hir, "linux")
+        expect(has_const(l, "4101")).to_equal(true)
+        expect(has_const(l, "4202")).to_equal(false)
+        expect(has_const(l, "4303")).to_equal(false)
+
+    it "flag on: MIR picks a different arm for linux vs windows":
+        reset_env()
+        val hir = lower(SRC, "1", "linux")
+        val lin = lower_pick(hir, "linux")
+        val win = lower_pick(hir, "windows")
+        val mac = lower_pick(hir, "macos")
+        expect(has_const(lin, "4101")).to_equal(true)
+        expect(has_const(lin, "4202")).to_equal(false)
+        expect(has_const(win, "4202")).to_equal(true)
+        expect(has_const(win, "4101")).to_equal(false)
+        expect(has_const(mac, "4303")).to_equal(true)
+
+    it "flag on: a malformed condition is a fatal error":
+        reset_env()
+        val l = lower_pick(lower(BAD_SRC, "1", "linux"), "linux")
+        var fatal = false
+        for e in l.errors:
+            if e.fatal and e.message.contains("malformed @cfg"): fatal = true
+        expect(fatal).to_equal(true)
+
+    # Statement-only arms; binding-declaring chains keep flat-strip semantics
+    # until a non-scoping CfgSelect design lands (retained_file.spl relies on it).
+    it "flag on: a retained_file-style binding chain falls back (no CfgSelect)":
+        reset_env()
+        val src = "fn pick() -> i64:\n    @when(os=\"windows\"):\n    val supported = true\n    @else:\n    @when(os=\"linux\"):\n    val supported = true\n    @else:\n    val supported = false\n    @end\n    @end\n    if not supported: return 1\n    2\n"
+        val f = find_fn(lower(src, "1", "linux"), "pick")
+        expect(f.?).to_equal(true)
+        val s = selects(f!)
+        expect(s.count).to_equal(0)
+        expect(s.nested).to_equal(0)
+
+    it "flag on: a nested statement-only chain produces nested CfgSelect":
+        reset_env()
+        val src = "fn pick() -> i64:\n    var r = 0\n    @when(os == \"linux\")\n    r = 1\n    @when(arch == \"x86_64\")\n    r = 2\n    @else\n    r = 3\n    @end\n    @else\n    r = 4\n    @end\n    r\n"
+        val s = selects(find_fn(lower(src, "1", "linux"), "pick")!)
+        expect(s.count).to_equal(1)
+        expect(s.conds.len()).to_equal(1)
+        expect(s.nested).to_equal(1)
+
+    it "flag off: a user fn named __cfg_when__ is called normally":
+        reset_env()
+        val src = "fn __cfg_when__(s: text) -> bool:\n    true\n\nfn pick() -> i64:\n    var r = 0\n    if __cfg_when__(\"x\"):\n        r = 7123\n    r\n"
+        val hir = lower(src, "", "linux")
+        expect(selects(find_fn(hir, "pick")!).count).to_equal(0)
+        expect(has_const(lower_pick(hir, "linux"), "7123")).to_equal(true)
