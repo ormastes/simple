@@ -1,0 +1,64 @@
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_nil_slot, enum_wire_restore_nil}
+
+enum OtherRestoreVerdict:
+    Ok(i64)
+    Err(text)
+
+enum RestoreWireNode:
+    Flag(bool)
+
+class RestoreProbe:
+    error: text
+    me reject(detail: text):
+        self.error = detail
+
+fn consume_restore_result<T>(probe: RestoreProbe, result: Result<T, text>) -> T:
+    match result:
+        case Ok(restored):
+            print "generic restore: Ok"
+            restored
+        case Err(detail):
+            print "generic restore: Err {detail}"
+            probe.reject(detail)
+            nil
+
+fn consume_concrete_restore(result: Result<RestoreWireNode, text>) -> RestoreWireNode:
+    match result:
+        case Ok(restored):
+            print "concrete restore: Ok"
+            restored
+        case Err(detail):
+            print "concrete restore: Err {detail}"
+            nil
+
+fn restore_wire<T>(probe: RestoreProbe, node: T, arity: i64, slots: [i64]) -> T:
+    unsafe(capabilities: [ffi]):
+        consume_restore_result<T>(probe, enum_wire_restore_nil<T>(node, arity, slots))
+
+fn describe_slot(result: Result<bool, text>) -> text:
+    match result:
+        case Ok(is_nil):
+            if is_nil: "nil"
+            else: "value"
+        case Err(detail): detail
+
+fn main() -> i64:
+    var failures = 0
+    val probe: RestoreProbe = RestoreProbe(error: "")
+    val node: RestoreWireNode = RestoreWireNode.Flag(false)
+    val restored: RestoreWireNode = restore_wire<RestoreWireNode>(probe, node, 1, [0])
+    if probe.error != "": failures = failures + 1
+    unsafe(capabilities: [ffi]):
+        val generic_slot: text = describe_slot(enum_wire_nil_slot<RestoreWireNode>(restored, 1, 0))
+        print "generic slot: {generic_slot}"
+        if generic_slot != "nil": failures = failures + 1
+        val concrete: RestoreWireNode = consume_concrete_restore(enum_wire_restore_nil<RestoreWireNode>(node, 1, [0]))
+        val concrete_slot: text = describe_slot(enum_wire_nil_slot<RestoreWireNode>(concrete, 1, 0))
+        print "concrete slot: {concrete_slot}"
+        if concrete_slot != "nil": failures = failures + 1
+    val rejected: RestoreWireNode = restore_wire<RestoreWireNode>(probe, node, 1, [1])
+    print "rejected nil={rejected == nil} error={probe.error}"
+    if rejected != nil: failures = failures + 1
+    if probe.error != "enum wire slot out of range": failures = failures + 1
+    if failures == 0: print "wire-restore-result-parameter: PASS"
+    failures

@@ -200,3 +200,15 @@ full authority native linkage and deployment remain unqualified. The separate
 class-static compiler repair is an UNRUN draft; it has not been validated by
 these caller probes. Keep this bug OPEN and do not close the authoritative
 bug DB or report full native/compiler PASS from these results.
+
+## Phase 3 AsyncFile owner attribution (2026-10-26, Astra lane)
+
+The normal Stage 2 producer acfedbebd1db457efc0f8d1b0b3020dfa20711157bc090334c1b523a6a228779 compiled the 389-module hir_codec entry closure from a0aa04ea5df71665466a5c148cd148b6711da23e plus an unrelated explicit HirTypeKind import. Its go-to-end manifest identifies lib.nogc_async_mut.io.file as a MIR failure with E-MIR-TYPE-TypeParam: unsubstituted generic type parameter T. This is actual module attribution. Its FileThreadPool.exec has one Future.from_value(task()) call, matching the existing generic static factory mechanism.
+
+A candidate replaces that call with one evaluation of task(), a typed Poll<i64>.Ready value, and the real Future<i64> constructor. Public signature and synchronous task execution stay unchanged. The intended code recovery reference is a0aa04ea5df71665466a5c148cd148b6711da23e. Native runtime qualification is PENDING; no workaround fix or retirement is claimed. Workaround source commit: [9ed671541235acb1050ca51ccb0b3f0f5e19fd46](https://github.com/ormastes/simple/commit/9ed671541235acb1050ca51ccb0b3f0f5e19fd46) (same source patch as local `c2bb5f8e273`). Qualified bug DB reconciliation remains pending.
+
+Regression fixture: test/fixtures/compiler/async_file_future_receiver/main.spl. It must exit zero and print exactly one async-file-task-called line followed by async-file-future-ready-pass, proving the actual production method invokes the supplied task once and returns Ready(37). Pending or a wrong payload fails. The other unchanged failed owner in the diagnostic closure is io.buffer; its prior six-cycle failure is not cleared by this candidate.
+
+Evidence: C:/dev/wt-s3self/build/native_probe/phase3-hir-codec-import/cycle2-serial-parse/worker-output.exe.go-to-end.sdn and retained full-worker-stderr-1.log/full-worker-stderr-2.log. The command exited 1, with 387 successful MIR modules and two failed owners; aggregate dependency failures blocked all object emission in entry-object mode.
+
+Source review confirms that the supplied task is evaluated exactly once and that the concrete constructor preserves the original Future.from_value fields (empty state and Ready payload). No known runtime regression was found by source review; this does not claim a completed runtime test. The first file-workaround attempt passed HIR/mono for 390 modules but was refused before MIR because ordinary dynload selects Both output. The existing cycle2-native-mode job uses the supported one-binary output mode and remains the pending native qualification; no new retry is implied by this record.
