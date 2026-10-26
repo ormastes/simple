@@ -3,7 +3,10 @@
 use app.io.env_ops.{env_get, env_set}
 use app.io.file_ops.{path_absolute}
 use app.io.mod.{file_read_regular_no_follow_bounded}
-use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_traced_cost_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_traced_cost_v1,
+    compiler_inventory_admit_extra_roots_v1, compiler_inventory_cursor_present_v1}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use app.compiler_entrypoint.inventory_trace.{inventory_trace_cost_create_v1, inventory_trace_cost_emit_v1}
 use std.scv.compile_cost_v1.{scv_cost_now_v1, scv_cost_elapsed_v1}
 use app.compiler_entrypoint.inventory_families.{compiler_inventory_family_v1}
@@ -149,11 +152,31 @@ fn compiler_source_authority_acquire_v1(
     val resolved = compiler_source_authority_selectors_v1(root, source_roots)
     if resolved.is_err(): return compiler_source_authority_invalid_v1(resolved.unwrap_err())
     val selectors = resolved.unwrap()
-    val selected_families = compiler_source_authority_inventory_roots_v1(root, selectors)
-    if selected_families.len() == 0:
+    # Selectors outside the closed event families (e.g. an entry under
+    # build/hw) are auto-added and committed into the inventory below, so the
+    # snapshot can freeze them. They never become event scopes.
+    var extra_roots: [text] = []
+    var selected_families: [text] = []
+    for selector in selectors:
+        val relative = compiler_source_selector_relative_v1(root, selector)
+        val family = compiler_inventory_family_v1(relative)
+        if family == "":
+            if not compiler_source_authority_extra_root_valid_v1(root, relative):
+                return compiler_source_authority_invalid_v1("source-inventory-scope-unsupported")
+            if not extra_roots.contains(relative): extra_roots = extra_roots.push(relative)
+        elif not selected_families.contains(family):
+            selected_families = selected_families.push(family)
+    if selected_families.len() == 0 and extra_roots.len() == 0:
         return compiler_source_authority_invalid_v1("source-inventory-scope-unsupported")
+    if selected_families.len() == 0: selected_families = ["src"]
     var inventory_roots = selected_families
-    if cold_init:
+    # First build in a checkout: no event cursor exists yet, so nothing was
+    # ever admitted. Auto cold-init (list + commit the src/test generation)
+    # instead of failing; every other refresh failure stays fail-closed.
+    var cold = cold_init
+    if not cold and not compiler_inventory_cursor_present_v1(cache_root):
+        cold = true
+    if cold:
         if not inventory_roots.contains("src"): inventory_roots = inventory_roots.push("src")
         if not inventory_roots.contains("test"): inventory_roots = inventory_roots.push("test")
         if not inventory_roots.contains("examples/10_tooling"):
@@ -161,8 +184,10 @@ fn compiler_source_authority_acquire_v1(
     val trace_token = env_get("SIMPLE_INVENTORY_TRACE_ATTEMPT") ?? ""
     val cost = inventory_trace_cost_create_v1(trace_token)
     val inventory_started = scv_cost_now_v1(cost)
-    val refresh = compiler_inventory_refresh_traced_cost_v1(
-        root, cache_root, inventory_roots, cold_init, trace_token, cost)
+    var refresh = compiler_inventory_refresh_traced_cost_v1(
+        root, cache_root, inventory_roots, cold, trace_token, cost)
+    if refresh.valid and extra_roots.len() > 0:
+        refresh = compiler_inventory_admit_extra_roots_v1(root, cache_root, extra_roots)
     if cost != nil: cost!.inventory_ns = scv_cost_elapsed_v1(cost, inventory_started)
     if not refresh.valid:
         inventory_trace_cost_emit_v1(trace_token, cost)
@@ -188,6 +213,15 @@ fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]
         if family == "": return []
         if not families.contains(family): families = families.push(family)
     families
+
+fn compiler_source_authority_extra_root_valid_v1(root: text, relative: text) -> bool:
+    # An auto-admitted selector must name an existing real file or directory
+    # inside the checkout, never SCV/VCS state.
+    if relative == "" or relative.contains("|") or relative.contains("\n"): return false
+    for owned in ["build/scv", ".simple", ".git", ".scv", ".jj"]:
+        if relative == owned or relative.starts_with(owned + "/"): return false
+    val path = root + "/" + relative
+    file_is_regular_no_follow(path) or dir_is_real_no_follow(path)
 
 fn compiler_source_authority_inherit_v1(snapshot: ScvCompileSnapshotV1) -> CompilerSourceAuthorityV1:
     val root = compile_source_inventory_plain_checkout_v1(path_absolute("."))

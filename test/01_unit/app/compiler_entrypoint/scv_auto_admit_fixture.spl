@@ -1,0 +1,68 @@
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write, file_read}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+
+val SCV_AUTO_SELECTORS = ["src/app", "build/hw", "build/hw/hello.spl"]
+
+fn scv_auto_git(root: text, args: [text]) -> bool:
+    sosix_run("git", ["-C", root] + args).exit_code == 0
+
+fn scv_auto_setup(label: text) -> text:
+    val root = compile_source_inventory_plain_checkout_v1(path_absolute(
+        "build/tests/scv-auto-admit-{label}-{time_now_unix_micros()}"))
+    if not dir_create_all(root + "/src/app") or not dir_create_all(root + "/test") or
+            not dir_create_all(root + "/build/hw"):
+        return ""
+    if not file_write(root + "/src/app/probe.spl", "fn probe() -> i64: 1\n"): return ""
+    if not file_write(root + "/test/probe.spl", "fn probe() -> i64: 1\n"): return ""
+    if not file_write(root + "/build/hw/hello.spl", "fn main():\n    print(\"hello\")\n"): return ""
+    if not scv_auto_git(root, ["init", "-q"]): return ""
+    if not scv_auto_git(root, ["add", "src", "test"]): return ""
+    if not scv_auto_git(root, ["-c", "user.name=scv fixture", "-c",
+            "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]):
+        return ""
+    root
+
+# Fresh checkout, no cold-init flag, entry outside the event families: SCV
+# must auto-add + commit the entry and freeze it. Edits are re-committed.
+fn scv_auto_admit_roundtrip_io() -> text:
+    val root = scv_auto_setup("roundtrip")
+    if root == "": return "setup"
+    val cache = root + "/build/scv"
+    val first = compiler_source_authority_acquire_v1(root, cache, SCV_AUTO_SELECTORS, false)
+    if not first.valid: return "first:" + first.reason
+    if file_read(first.snapshot.snapshot_root + "/build/hw/hello.spl") != "fn main():\n    print(\"hello\")\n":
+        return "entry-not-frozen"
+    val warm = compiler_source_authority_acquire_v1(root, cache, SCV_AUTO_SELECTORS, false)
+    if not warm.valid: return "warm:" + warm.reason
+    if warm.inventory_generation != first.inventory_generation: return "warm-republished"
+    val changed = "fn main():\n    print(\"changed\")\n"
+    if not file_write(root + "/build/hw/hello.spl", changed): return "edit"
+    val edited = compiler_source_authority_acquire_v1(root, cache, SCV_AUTO_SELECTORS, false)
+    if not edited.valid: return "edited:" + edited.reason
+    if file_read(edited.snapshot.snapshot_root + "/build/hw/hello.spl") != changed: return "edit-not-committed"
+    val missing = compiler_source_authority_acquire_v1(root, cache, ["src/app", "build/absent"], false)
+    if missing.valid or missing.reason != "source-inventory-scope-unsupported": return "absent-admitted"
+    val owned = compiler_source_authority_acquire_v1(root, cache, ["src/app", "build/scv"], false)
+    if owned.valid: return "scv-state-admitted"
+    ""
+
+# A source that changes after admission but before the freeze copies it must
+# fail closed (snapshot-index-drift), never be frozen silently.
+fn scv_auto_admit_mutation_io() -> text:
+    val root = scv_auto_setup("mutation")
+    if root == "": return "setup"
+    val cache = root + "/build/scv"
+    val first = compiler_source_authority_acquire_v1(root, cache, SCV_AUTO_SELECTORS, false)
+    if not first.valid: return "first:" + first.reason
+    if not file_write(root + "/build/hw/hello.spl", "fn main():\n    print(\"mutated\")\n"): return "mutate"
+    val frozen = scv_compile_snapshot_acquire_v1(root, cache, SCV_AUTO_SELECTORS)
+    if frozen.valid: return "mutated-source-frozen"
+    if not frozen.reason.starts_with("snapshot-index-drift"): return "wrong-reason:" + frozen.reason
+    ""
+
+export scv_auto_admit_roundtrip_io, scv_auto_admit_mutation_io
