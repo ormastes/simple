@@ -38,11 +38,32 @@ fn rename_metadata_checks(session: text) -> Result<bool, text>:
     if smux_configuration_revision().value != before + 1: return Err("rename publication missing")
     val _same = smux_rename_window(session, first.id, "한 😀 window")?
     if smux_configuration_revision().value != before + 1: return Err("no-op advanced revision")
-    if smux_rename_window(session, first.id, sibling.id).is_ok(): return Err("ID collision accepted")
-    if smux_rename_window(session, first.id, "sibling").is_ok(): return Err("name collision accepted")
+    val id_label = smux_rename_window(session, first.id, sibling.id)?
+    if id_label.id != first.id or id_label.name != sibling.id: return Err("ID-like label changed target identity")
+    if smux_configuration_revision().value != before + 2: return Err("ID-like label publication missing")
+    val sibling_renamed = smux_rename_window(session, sibling.id, "shared label")?
+    if sibling_renamed.id != sibling.id: return Err("ID-like label redirected sibling target")
+    if smux_configuration_revision().value != before + 3: return Err("sibling label publication missing")
+    val targeted = smux_owner_snapshot()
+    val targeted_first = targeted.find_window_idx(first.id)
+    val targeted_sibling = targeted.find_window_idx(sibling.id)
+    if targeted_first < 0 or targeted_sibling < 0: return Err("ID-targeted rename lost a window")
+    if targeted.get_window(targeted_first).name != sibling.id or targeted.get_window(targeted_sibling).name != "shared label":
+        return Err("ID-like label redirected sibling metadata")
+    val duplicate = smux_rename_window(session, first.id, "shared label")?
+    if duplicate.id != first.id: return Err("duplicate label changed identity")
+    if smux_configuration_revision().value != before + 4: return Err("duplicate label publication missing")
+    val _duplicate_same = smux_rename_window(session, first.id, "shared label")?
+    if smux_configuration_revision().value != before + 4: return Err("duplicate-label no-op advanced revision")
+    val snapshot = smux_owner_snapshot()
+    val first_index = snapshot.find_window_idx(first.id)
+    val sibling_index = snapshot.find_window_idx(sibling.id)
+    if first_index < 0 or sibling_index < 0 or first_index == sibling_index: return Err("stable window IDs lost")
+    if snapshot.get_window(first_index).name != "shared label" or snapshot.get_window(sibling_index).name != "shared label":
+        return Err("duplicate labels not retained independently")
     if smux_rename_window(session, first.id, "a\nb").is_ok(): return Err("control name accepted")
     if smux_rename_window("missing", first.id, "new").is_ok(): return Err("foreign session accepted")
-    if smux_configuration_revision().value != before + 1: return Err("refusal changed revision")
+    if smux_configuration_revision().value != before + 4: return Err("refusal changed revision")
     return Ok(true)
 
 fn rename_child_checks(session: text, window: text, pane: text, pid: i64) -> Result<bool, text>:
@@ -87,7 +108,7 @@ fn rename_native_scenario(session: text) -> Result<bool, text>:
     return rename_child_checks(session, window.id, pane.id, spawned.unwrap())
 
 describe "RenameWindow persistent owner integration":
-    it "publishes the rename once and refuses invalid changes without altering revision":
+    it "publishes duplicate labels by stable ID and preserves no-op and refusal revisions":
         step("Create real service windows and rename one by its stable identity")
         val session = smux_create_session("rename-metadata")
         val outcome = if session.id == "": Err("session admission failed") else: rename_metadata_checks(session.id)

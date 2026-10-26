@@ -23,6 +23,7 @@ use os.apps.smux.contract.{
     SmuxMetrics, MuxBackendKind
 }
 use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.client_context_service.{client_context_reconcile}
 use os.apps.smux.window_metadata_service.{rename_window_state}
 use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_new,
     service_revision_publish, service_revision_writable, service_revision_reset, service_attachment_identities, service_revision_rollback_allowed}
@@ -84,9 +85,10 @@ var _closing_panes: [PaneClosePending] = []
 # Every publication compares the immediate prior authoritative snapshot. Output
 # and input progress do not advance configuration; legacy mutations do.
 fn _publish(next: ServiceState) -> ServiceState:
-    _revisions = service_revision_publish(_revisions, _svc, next, _closing_sessions, _closing_windows, _closing_panes,
+    val canonical = client_context_reconcile(next)
+    _revisions = service_revision_publish(_revisions, _svc, canonical, _closing_sessions, _closing_windows, _closing_panes,
         _client_leases.owner_nonce, service_attachment_identities(_client_leases))
-    return next
+    return canonical
 
 pub fn smux_configuration_writable() -> bool:
     return service_revision_writable(_revisions)
@@ -333,7 +335,7 @@ pub fn smux_attach(session_id: text, client_id: text, cols: int, rows: int) -> M
     val update = changed.unwrap()
     _clear_attachment_notices(update)
     _svc = _publish(update.state)
-    return MuxClientAttachment.create(client_id, session_id, cols, rows)
+    return _svc.get_client(_svc.find_client_idx(client_id))
 
 pub fn smux_detach(client_id: text) -> bool:
     val idx = _svc.find_client_idx(client_id)
@@ -599,7 +601,7 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
 pub fn smux_pane_spawn_pty(session_id: text, window_id: text, pane_id: text, command_line: text) -> Result<i64, text>:
     if not smux_configuration_writable(): return Err("service revision authority exhausted")
     val updated = pane_spawn_pty_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, command_line)
-    if updated.cleanup_pending:
+    if updated.cleanup_pending and updated.commit:
         _closing_panes.push(PaneClosePending(session_id: session_id, window_id: window_id, pane_id: pane_id))
     if updated.commit: _svc = _publish(updated.state)
     return updated.result

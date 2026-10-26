@@ -1,0 +1,118 @@
+# REQ-CMUX-004/005/008: Windows configured-provider composition, NOT_RUN.
+# No platform fallback/skip. Fixture is NOT_BUILT; external Job/resource guard
+# must own this test and children. Run serially with an exclusive PTY owner.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{env_get}
+use std.sosix.host.{sosix_file_exists}
+use std.sosix.pty.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1, sosix_pty_cleanup_pending}
+use std.sosix.process.{sosix_process_exists}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.pane_configured_launch_service.{pane_spawn_configured_pty_state}
+use os.apps.smux.pane_io_service.{pane_capture_state}
+use os.apps.smux.child_lifecycle.{close_owned_children}
+
+struct ConfiguredChildObservation:
+    state: ServiceState
+    launched: bool
+    observed: bool
+    existed: bool
+    overwrite_refused: bool
+    cleaned: bool
+    remains: bool
+    incarnation: u64
+
+fn configured_native_state() -> ServiceState:
+    var st = ServiceState.empty().add_session(MuxSession.create("s", "configured"))
+    st = st.add_window(MuxWindow.create("w", "s", "configured"))
+    return st.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")))
+
+fn configured_child_observe(launch: PtyLaunchV1, marker: text) -> ConfiguredChildObservation:
+    val started = pane_spawn_configured_pty_state(configured_native_state(), false, "s", "w", "p", launch)
+    var st = started.state
+    val pid = if started.result.is_ok(): started.result.unwrap() else: -1
+    var observed = false
+    val begin = sosix_time_now_monotonic_ms()
+    var attempts = 0
+    var now = begin
+    while pid > 0 and not observed and attempts < 200 and begin >= 0 and now >= begin and now - begin < 5000:
+        val captured = pane_capture_state(st, false, "s", "w", "p", 60)
+        st = captured.state
+        if captured.result.is_ok(): observed = captured.result.unwrap().content.contains(marker)
+        if not observed: sosix_sleep_ms(25)
+        attempts = attempts + 1
+        now = sosix_time_now_monotonic_ms()
+    val existed = pid > 0 and sosix_process_exists(pid)
+    var refused = false
+    var extra = ServiceState.empty()
+    var extra_pid: i64 = -1
+    if pid > 0:
+        val second = pane_spawn_configured_pty_state(st, false, "s", "w", "p", launch)
+        refused = second.result.is_err() and not second.commit and second.state.get_pane(0).child_pid == pid and second.state.get_pane(0).pty_fd == st.get_pane(0).pty_fd
+        if second.state.get_pane(0).pty_fd != st.get_pane(0).pty_fd or second.state.get_pane(0).child_pid != pid:
+            extra = second.state
+            extra_pid = extra.get_pane(0).child_pid
+    val incarnation = st.get_pane(0).child_incarnation
+    # Always clean even if launch failed with retained deferred ownership, the
+    # marker never appeared, the clock failed, or overwrite refusal regressed.
+    # Production must not return an unowned PID; external Job is the backstop.
+    attempts = 0
+    var cleaned = false
+    while not cleaned and attempts < 200:
+        st = close_owned_children(st, "s", "w", "p")
+        cleaned = st.get_pane(0).pty_fd < 0 and st.get_pane(0).child_pid <= 0
+        if extra.pane_count > 0:
+            extra = close_owned_children(extra, "s", "w", "p")
+            cleaned = cleaned and extra.get_pane(0).pty_fd < 0 and extra.get_pane(0).child_pid <= 0
+        if not cleaned: sosix_sleep_ms(25)
+        attempts = attempts + 1
+    cleaned = cleaned and sosix_pty_cleanup_pending() == 0
+    val remains = (pid > 0 and sosix_process_exists(pid)) or (extra_pid > 0 and sosix_process_exists(extra_pid))
+    return ConfiguredChildObservation(state: st, launched: started.result.is_ok() and started.commit and not started.cleanup_pending,
+        observed: observed, existed: existed, overwrite_refused: refused, cleaned: cleaned,
+        remains: remains, incarnation: incarnation)
+
+describe "configured PTY launch composition with real children":
+    it "preserves literal Exec argv cwd environment changes and child identity":
+        step("Require the admitted compiled fixture and private Unicode-space working directory")
+        val image = env_get("SIMPLE_TEST_CONFIGURED_CHILD")
+        val directory = env_get("SIMPLE_TEST_CONFIGURED_CWD")
+        expect(image != "" and sosix_file_exists(image)).to_equal(true)
+        expect(directory.contains(" ") and directory.contains("한글")).to_equal(true)
+        expect(env_get("SMUX_CONFIGURED_REMOVE")).to_equal("erase-me")
+        expect(env_get("SMUX_CONFIGURED_KEEP")).to_equal("parent-kept")
+        val launch = PtyLaunchV1(mode: PtyLaunchModeV1.Exec(image,
+            [directory, "", "two words", "quote\"inside", "trail\\", "한글😀", "&echo NOT_SHELL"]),
+            cwd: Some(directory), environment: [PtyEnvironmentChangeV1.Set("SMUX_CONFIGURED_SET", "value 한글😀"),
+                PtyEnvironmentChangeV1.Remove("SMUX_CONFIGURED_REMOVE")])
+        step("Observe child-computed success and reject overwrite of its real retained handles")
+        val result = configured_child_observe(launch, "CONFIGURED_CHILD_OBSERVED_ALL_FIELDS")
+        step("Assert only after checked cleanup and independent process-presence query")
+        expect(result.cleaned).to_equal(true)
+        expect(result.remains).to_equal(false)
+        expect(result.launched).to_equal(true)
+        expect(result.observed).to_equal(true)
+        expect(result.existed).to_equal(true)
+        expect(result.overwrite_refused).to_equal(true)
+        expect(result.incarnation).to_equal(1u64)
+        expect(result.state.get_pane(0).child_incarnation).to_equal(1u64)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)
+        expect(env_get("SMUX_CONFIGURED_REMOVE")).to_equal("erase-me")
+        expect(env_get("SMUX_CONFIGURED_KEEP")).to_equal("parent-kept")
+
+    it "executes configured Shell through the selected provider without a pipe fallback":
+        step("Use explicit Windows suite shell syntax and a bounded child lifetime")
+        # Shell interpretation is intentional only in this Shell variant.
+        val launch = PtyLaunchV1(mode: PtyLaunchModeV1.Shell("echo CONFIGURED_SHELL_OBSERVED&&ping -n 16 127.0.0.1 >nul"),
+            cwd: nil, environment: [])
+        val result = configured_child_observe(launch, "CONFIGURED_SHELL_OBSERVED")
+        step("Assert observed output and real ownership only after checked cleanup")
+        expect(result.cleaned).to_equal(true)
+        expect(result.remains).to_equal(false)
+        expect(result.launched).to_equal(true)
+        expect(result.observed).to_equal(true)
+        expect(result.existed).to_equal(true)
+        expect(result.overwrite_refused).to_equal(true)
+        expect(result.incarnation).to_equal(1u64)
+        expect(sosix_pty_cleanup_pending()).to_equal(0)

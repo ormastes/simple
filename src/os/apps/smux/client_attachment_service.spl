@@ -1,6 +1,7 @@
 # Explicit-state attachment transforms. API publishes; no registry lives here.
 use os.apps.smux.service.{ServiceState}
 use os.apps.smux.contract.{MuxClientAttachment}
+use os.apps.smux.client_context_service.{client_context_put}
 use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new, smux_lease_admit,
     smux_lease_heartbeat, smux_lease_expiry_candidates, smux_lease_expire}
 use std.sosix.entropy.{sosix_random_hex}
@@ -20,22 +21,6 @@ pub fn client_attachment_index(st: ServiceState, session: text, client: text) ->
 fn canvas_valid(cols: int, rows: int) -> bool:
     return cols > 0 and cols <= 512 and rows > 0 and rows <= 256 and cols * rows <= 60000
 
-# Preserve attachment ordering: lease renewal is not a configuration mutation.
-# At most four slots are rebuilt locally; only the final state is published.
-fn put_attachment(st: ServiceState, idx: int, attachment: MuxClientAttachment) -> ServiceState:
-    if idx < 0: return st.add_client(attachment)
-    var changed = st
-    while changed.client_count > 0:
-        changed = changed.remove_client(changed.client_count - 1)
-    var i = 0
-    while i < st.client_count:
-        if i == idx:
-            changed = changed.add_client(attachment)
-        else:
-            changed = changed.add_client(st.get_client(i))
-        i = i + 1
-    return changed
-
 pub fn client_attach_leased(st: ServiceState, leases: ClientLeaseState, closing: bool,
     session: text, client: text, cols: int, rows: int, now_ms: i64) -> Result<ClientAttachmentUpdate, text>:
     if closing or st.find_session_idx(session) < 0: return Err("client lease session unavailable")
@@ -54,7 +39,10 @@ pub fn client_attach_leased(st: ServiceState, leases: ClientLeaseState, closing:
     var cleared: [MuxClientAttachment] = []
     if idx >= 0:
         cleared.push(st.get_client(idx))
-    return Ok(ClientAttachmentUpdate(state: put_attachment(st, idx, MuxClientAttachment.create(client, session, cols, rows)),
+    val attachment = MuxClientAttachment(client_id: client, session_id: session,
+        attached: true, cols: cols, rows: rows,
+        attachment_generation: admitted.unwrap().lease.generation)
+    return Ok(ClientAttachmentUpdate(state: client_context_put(st, idx, attachment),
         leases: admitted.unwrap().state, token: admitted.unwrap().lease.token, removed: 0, cleared: cleared))
 
 pub fn client_resize_leased(st: ServiceState, leases: ClientLeaseState, closing: bool,
@@ -64,7 +52,10 @@ pub fn client_resize_leased(st: ServiceState, leases: ClientLeaseState, closing:
     if idx < 0: return Err("client lease attachment unavailable")
     val renewed = smux_lease_heartbeat(leases, session, client, token, now_ms)
     if renewed.is_err(): return Err(renewed.unwrap_err())
-    return Ok(ClientAttachmentUpdate(state: put_attachment(st, idx, MuxClientAttachment.create(client, session, cols, rows)),
+    val attachment = MuxClientAttachment(client_id: client, session_id: session,
+        attached: true, cols: cols, rows: rows,
+        attachment_generation: st.get_client(idx).attachment_generation)
+    return Ok(ClientAttachmentUpdate(state: client_context_put(st, idx, attachment),
         leases: renewed.unwrap(), token: token, removed: 0, cleared: []))
 
 pub fn client_reap_expired(st: ServiceState, leases: ClientLeaseState, now_ms: i64) -> Result<ClientAttachmentUpdate, text>:
@@ -94,5 +85,5 @@ pub fn client_attach_unmanaged(st: ServiceState, leases: ClientLeaseState, closi
     var cleared: [MuxClientAttachment] = []
     if idx >= 0:
         if st.get_client(idx).session_id != session: cleared.push(st.get_client(idx))
-    return Ok(ClientAttachmentUpdate(state: put_attachment(st, idx, MuxClientAttachment.create(client, session, cols, rows)),
+    return Ok(ClientAttachmentUpdate(state: client_context_put(st, idx, MuxClientAttachment.create(client, session, cols, rows)),
         leases: leases, token: "", removed: 0, cleared: cleared))

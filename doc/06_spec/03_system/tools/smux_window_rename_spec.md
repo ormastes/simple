@@ -7,9 +7,12 @@ the executable bodies; docgen, native execution and evidence capture are pending
 
 1. Create service windows through the actual API. Rename one using a spaced
    Unicode display name and observe its unchanged IDs and one revision tick.
-   Repeat the same name and require no tick. Refuse peer name/ID collisions,
-   control text and wrong session without publishing a change. Release the owned
-   session before asserting the collected result.
+   Repeat the same name and require no tick. Accept a label equal to the sibling
+   ID (second tick), then rename the sibling by that exact ID (third tick) and
+   verify the first label remains unchanged. Give both windows the same label
+   (fourth tick) and require distinct IDs and unchanged revision on repetition.
+   Refuse control text and wrong session without a fifth tick. Release the
+   owned session before asserting the collected result.
 2. Start a real `cmd.exe /Q` child through Windows ConPTY. Split its window,
    set a Unicode pane title, zoom the original pane, then attach and detach a
    viewer. Rename its window and require retained zoom, title, viewport, PID,

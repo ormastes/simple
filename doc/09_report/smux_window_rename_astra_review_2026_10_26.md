@@ -126,3 +126,63 @@ the tracked adapter-plan copy. The private matrix remains unchanged at
 37b4a0dcf64c89e15da61338055272f458c5c55f3a1578bf261101624d849cab.
 Source acceptance and NOT_RUN status are unchanged. No production rereview,
 test/check rerun, staging or commit was performed.
+
+## Cycle 2: tmux-compatible nonunique labels
+
+Source correction cycle 2. STATUS: WARN / source accepted; all execution NOT_RUN.
+No remaining scoped P0/P1/P2 finding was identified in this six-path delta.
+Five unit cases and two system scenarios remain authored, zero executed.
+
+The v2 manifest build/review/smux-window-rename-source-v2.sdn matched SHA256
+ef6b7ab2d301e7a9664752566b8fa92047665bda0391fb9db8c02d4b4765dcf2.
+All six file hashes matched:
+
+| V2 path | SHA256 |
+| --- | --- |
+| src/os/apps/smux/window_metadata_service.spl | dc9c2781f8857ddbbfc9b79cf011d860dd4c870e6d635f84f5cab56cc7510569 |
+| test/01_unit/tools/smux_window_metadata_spec.spl | a4b67c4f576386d241c181aea72d0f57b4b95c2d730e76a0bd8b3550eeb8de37 |
+| test/03_system/tools/smux_window_rename_spec.spl | e63bb4e8a82e6b75bc0f117f0c93b8fca93630e174fe57fc89d0e1e56418e564 |
+| doc/06_spec/01_unit/tools/smux_window_metadata_spec.md | bf0bc266ca90687b1539009ea6a48423e85d3f298b1d932acecba8ebf2fc2c86 |
+| doc/06_spec/03_system/tools/smux_window_rename_spec.md | fee7eb237fe0efd8854a3585555ac4c95bed3e18cd66d9857b1eabbabb71060b |
+| doc/09_report/smux_window_rename_source_2026_10_26.md | eea9dfeb8208e4e3f8728aa845c6dd93a1f2c2b672aebcabfa0294646fee31fb |
+
+### Policy correction and primary evidence
+
+The v1 collision-refusal policy and its earlier acceptance above are superseded.
+The official tmux Getting Started wiki states that window names do not have to
+be unique. This was independently retrieved through the context fetch/index tools
+at the immutable [cf5a82fad1144475335e078548b6ed18fc37422c revision](https://github.com/tmux/tmux/wiki/Getting-Started/cf5a82fad1144475335e078548b6ed18fc37422c).
+That supports treating names as display labels rather than uniqueness authority.
+
+The production delta removes only the peer-name/peer-ID collision loop and adds
+a clarifying comment. Canonical clean UTF8 validation, existence/membership,
+unchanged-name handling and the full metadata-preserving constructor remain.
+Duplicate names, peer-ID-like labels and own-ID-like labels are accepted without
+changing IDs. Inspected ServiceState.find_window_idx matches window.id exactly;
+an ID-like label does not acquire stable-ID target authority.
+
+The future name-based ResolveTarget path is not implemented by this correction.
+Its ambiguity refusal remains an integration requirement. This review does not
+claim full tmux target grammar, index semantics or resolver parity.
+
+### Updated oracle review
+
+The changed unit scenario checks two equal names, independent exact IDs and
+lookup slots; then a label equal to a sibling ID, followed by an actual rename
+of that sibling. It verifies that the first window remains untouched.
+
+The system metadata path checks four real API configuration changes against the
+captured baseline: Unicode rename (+1), peer-ID-like label (+2), sibling rename
+through its actual ID (+3), then duplicate label (+4). The intermediate snapshot
+checks both labels, avoiding a false pass from only checking a returned record.
+Repeated same-name requests and invalid/control/foreign-session refusals leave
+the expected revision unchanged. Distinct IDs remain addressable after the
+duplicate-label operation. These are authored production-path assertions, not
+executed results.
+
+The live-child scenario and outer cleanup-before-assert structure are unchanged.
+Updated manuals/report accurately supersede the earlier uniqueness policy and
+retain NOT_RUN status. No concurrent L1 record/context fields, API publication,
+common contracts, service revision or L2 launch changes were accepted under this
+review. Original v1 pins and publication-normalization evidence remain preserved.
+No source edit, build, executable/test launch, staging or commit was performed.

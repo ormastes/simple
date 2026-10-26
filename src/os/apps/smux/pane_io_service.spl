@@ -11,7 +11,8 @@ use os.apps.smux.input_queue.{pane_input_enqueue, pane_input_remaining,
 use std.sosix.pty.{sosix_pty_open as pty_open,
     sosix_pty_spawn as pty_spawn, sosix_pty_write_some as pty_write_some,
     sosix_pty_input_pending as pty_input_pending, sosix_pty_read as pty_read,
-    sosix_pty_close as pty_close, sosix_pty_is_running as pty_is_running}
+    sosix_pty_close as pty_close, sosix_pty_is_running as pty_is_running,
+    sosix_pty_cleanup_pending as pty_cleanup_pending}
 use std.sosix.process.{sosix_process_spawn_piped as process_spawn_piped,
     sosix_process_write_stdin_some as process_write_stdin_some,
     sosix_process_read_stdout as process_read_stdout,
@@ -243,7 +244,9 @@ pub fn pane_spawn_pty_state(before: ServiceState, closing: bool, session_id: tex
         return PanePidUpdate(cleanup_pending: false, state: state, commit: false, result: Err("pane incarnation or content revision exhausted"))
     val handle = pty_open(pr.pane.rows as i32, pr.pane.cols as i32)
     if handle < 0:
-        return PanePidUpdate(cleanup_pending: false, state: state, commit: commit, result: Err("pty open failed"))
+        # Failed open can retain provider-owned quarantine without issuing a
+        # pane token. Unknown/sticky provider cleanup is not a clean receipt.
+        return PanePidUpdate(cleanup_pending: pty_cleanup_pending() != 0, state: state, commit: commit, result: Err("pty open failed"))
     val pid = pty_spawn(handle, command_line)
     if pid <= 0:
         if not pty_close(handle):
