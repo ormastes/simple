@@ -3803,6 +3803,11 @@ echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
   tool_authority_after="${stage3_provenance_dir}/tool-authority-after.txt"
   mkdir -p "${stage3_provenance_dir}"
   chmod u+w "${stage3_provenance_dir}" || exit 1
+  # Bounded retention: keep SIMPLE_BOOTSTRAP_KEEP_ATTEMPTS (default 2) attempts
+  # including the one about to be created.
+  bootstrap_keep_attempts=${SIMPLE_BOOTSTRAP_KEEP_ATTEMPTS:-2}
+  case "$bootstrap_keep_attempts" in ""|*[!0-9]*|0) echo "bootstrap: SIMPLE_BOOTSTRAP_KEEP_ATTEMPTS must be a positive integer" >&2; exit 1 ;; esac
+  bootstrap_cache_prune_attempts "${stage3_provenance_dir}" $((bootstrap_keep_attempts - 1)) || exit 1
   attempt_archive="${stage3_provenance_dir}/attempts/attempt-$(date -u '+%Y%m%dT%H%M%S')-$$"
   mkdir -p "${attempt_archive}"
   for prior in "${stage3_provenance_dir}"/*.env "${stage3_provenance_dir}"/*.txt \
