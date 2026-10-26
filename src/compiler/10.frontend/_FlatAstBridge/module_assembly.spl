@@ -24,7 +24,7 @@ use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor
 use compiler.core.parser_decls.{parser_extend_ctor_type_counts, parser_extend_ctor_type_ids}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.core.ast.*
-use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields, decl_get_field_visibility}
 use compiler.core.ast.{decl_enum_payload_unnamed_marker, decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_is_packed_at, decl_is_packed_len, decl_get_is_value_type}
@@ -229,12 +229,18 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
 # following iteration lower them through conditional aggregate joins. Early
 # returns keep every aggregate branch local to this helper; the caller retains
 # only scalar ids and immediately pushes the completed ParserField.
+fn field_vis_text_at(codes: [text], fi: i64) -> text:
+    if fi >= 0 and fi < codes.len():
+        return codes[fi]
+    "private"
+
 fn flat_parser_field_from_nodes(
     name: text,
     has_type_node: bool,
     type_node: i64,
     default_node: i64,
-    raw_bits: i64
+    raw_bits: i64,
+    vis_text: text
 ) -> ParserField:
     val has_default = default_node >= 0
     val has_bits = raw_bits > 0
@@ -249,7 +255,7 @@ fn flat_parser_field_from_nodes(
             return ParserField(
                 name: name, type_: declared_type,
                 has_default: true, default: default_expr,
-                visibility: Visibility.Private, is_public: false,
+                visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
                 is_volatile: false, has_bits: has_bits, bits: bits,
                 has_fixed_address: false, fixed_address: 0,
                 span: make_span())
@@ -258,7 +264,7 @@ fn flat_parser_field_from_nodes(
             name: name, type_: declared_type,
             has_default: false,
             default: Expr(kind: ExprKind.NilLit, span: make_span()),
-            visibility: Visibility.Private, is_public: false,
+            visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
             is_volatile: false, has_bits: has_bits, bits: bits,
             has_fixed_address: false, fixed_address: 0,
             span: make_span())
@@ -269,7 +275,7 @@ fn flat_parser_field_from_nodes(
             name: name,
             type_: Type(kind: TypeKind.Infer, span: make_span()),
             has_default: true, default: default_expr,
-            visibility: Visibility.Private, is_public: false,
+            visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
             is_volatile: false, has_bits: has_bits, bits: bits,
             has_fixed_address: false, fixed_address: 0,
             span: make_span())
@@ -279,7 +285,7 @@ fn flat_parser_field_from_nodes(
         type_: Type(kind: TypeKind.Infer, span: make_span()),
         has_default: false,
         default: Expr(kind: ExprKind.NilLit, span: make_span()),
-        visibility: Visibility.Private, is_public: false,
+        visibility: convert_visibility_text(vis_text), is_public: vis_text == "public",
         is_volatile: false, has_bits: has_bits, bits: bits,
         has_fixed_address: false, fixed_address: 0,
         span: make_span())
@@ -419,6 +425,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val f_types = decl_get_field_types(idx)
             val f_bits = decl_get_field_bits(idx)
             val f_defaults = decl_get_field_defaults(idx)
+            val f_vis = decl_get_field_visibility(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
             if idx < decl_is_packed_len():
@@ -501,7 +508,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         field_type_node = f_types[fi]
                     fields.push(flat_parser_field_from_nodes(
                         f_names[fi], fi < f_types.len(), field_type_node,
-                        fd_id, fb))
+                        fd_id, fb, field_vis_text_at(f_vis, fi)))
                     fi = fi + 1
                 # decl_get_type_params returns the struct/class's own `<T, U,
                 # ...>` names (threaded through by parse_struct_decl via
