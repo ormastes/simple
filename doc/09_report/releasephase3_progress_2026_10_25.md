@@ -2,7 +2,7 @@
 
 This is an evidence update, not a fresh compiler build or acceptance run. Historical [82-scope inventory](releasephase3_coding_inventory_2026_10_25.md) and [selector reconciliation](robust_acceptance_selector_reconciliation_2026_10_25.md) are unchanged. Local `/tmp` evidence links name retained host artifacts; they are not portable repository artifacts.
 
-Latest status: [the 13:17 UTC terminal/evidence update below](#superseding-terminal-and-evidence-update--2026-10-25-1317-utc). Earlier build observations and the 11:42 source ledger are preserved as dated history.
+Latest status: [the 2026-10-26 landed-source and live-attempt snapshot below](#superseding-landed-source-and-live-attempt-snapshot--2026-10-26-0122-utc). Earlier observations remain dated history.
 
 ## Current update — 2026-10-25, after PR #4657
 
@@ -266,3 +266,59 @@ whole-graph proof or PASS for any of the82 selected acceptance scopes.
 Older source-candidate and implementation classifications above retain their
 own pins and dates; this update neither recertifies every row nor narrows the
 selected robust goal. There is still no full Phase3 PASS or qualified CLI/runner.
+
+## Superseding landed-source and live-attempt snapshot — 2026-10-26 01:22 UTC
+
+This bounded documentation update separates implementation from its actual
+acceptance evidence. Existing reports and terminal receipts above remain dated
+history. It is not a new feature census, test execution or bootstrap launch.
+The old attempt6 producer/source and newly landed memory source below are
+separate immutable lineages; passing controls on one cannot qualify the other.
+
+| Feature/dependency | Implementation landed | Actual evidence and remaining acceptance |
+|---|---|---|
+| Memory/source ownership integration | [#4853](https://github.com/ormastes/simple/pull/4853), `e0b15b1f1d49acc71d7ba069d8f10124292196a5`: adapted P0/P1/P2/P3, session-owned HIR/MIR stores, C/Rust birth/owner claims, bounded SOURCE dictionary tracking. P6 disabled. | Equivalent reviewed Rust ownership batch **18 PASS**, plus retained P0 **5 PASS** and P1 **7 PASS**; these are distinct focused batches, not a new combined acceptance census. C session **54 PASS** plus focused SOURCE ownership/session override, allocation-claim and budget ASan/UBSan controls PASS with reviewed source-equivalence records. Compiler `bsm_p0`/`bsm_p1` and Nil interpreter regression remain UNRUN, as do required genuine CLI/core/MCP/LSP checks. No rebuilt producer/runtime capsule, Stage3 PASS or measured compiler RSS improvement is established for this landed source. |
+| Bounded ordinary dictionary values snapshot | [#4857](https://github.com/ormastes/simple/pull/4857), `f33529fd4ce66118db0a6fab4fdc9f36e1d61e18`: authenticated C-private birth/epoch/backing/extent observation/fill and prepaid fresh output ownership. | One focused ASan/UBSan fixture PASS, exit0, binary SHA256 `c0fcb18005dde847f833612a25d240fd9f5050c94cd650cfad6db28f1256345f`; sampled peak247336KiB, hard_memory_limit0. Actual typed Array<MirFunction> compiler bridge and invocation confinement remain OPEN/UNRUN. No Simple-record C ABI or integer-to-MirFunction reinterpretation is admitted. Generic tombstone churn is evidenced; same-capacity compaction is not proven. |
+| Typed SOURCE local rebasing | [#4858](https://github.com/ormastes/simple/pull/4858), `e8a00fd6217f4cd5234fcfc66e5cea0c551f77d3`: four pure helper/type leaves and the existing rebasing spec preserved from exact donor blobs. | Preservation5/5 and static guards PASS; **six authored SSpec scenarios UNRUN**. This adds no ordinary lowering hooks, mutable owner, wrapper/default/archive activation or full invocation/native acceptance. |
+
+The [#4853 source/evidence scope packet](/tmp/phase3-memory-lineage-20261026/pr-scope-and-validation.md)
+and adjacent C/Rust equivalence records retain the source boundaries. Focused
+native/Rust PASS counts are not SSpec/compiler acceptance counts. Newly authored
+SSpecs remain UNRUN; older focused green evidence was not rerun for this report.
+Logical/prepaid allocation accounting and sampled RSS are not hard-memory,
+wall-clock or whole-compiler performance guarantees.
+
+### Separate frozen attempt6: provisional progress, not Stage3 success
+
+The coordinator reports live owner PID3358804 at **HIR909/1453, failed0** in its
+latest retained observation. This is a dated coordinator snapshot, not a fresh
+poll or object inventory. The build uses frozen source
+`83be266ace41f453c69edf3c7f92521b5d573483` plus its explicitly retained tool overlay
+and actual admitted compiler SHA256
+`8cd080ef9b7d59794d161beaee33c04260ca643511c58d9c19d125d6092cce1e`.
+The v3 producer compiled **1499 modules,0 cached**, and its actual Hello modes0/1
+passed. Those are Stage2 producer/sanity facts, not qualification of the newer
+`e0b15b1f1d49` memory implementation or a Phase3 result.
+
+Attempt6 is **provisional RUNNING**. There is no completed Stage3 compiler
+artifact/own Hello PASS, no object-completion claim and no qualified full CLI or
+general SSpec runner. The earlier unspent/never-launched wording is historical;
+it does not describe this new live snapshot. No live sources, caches, receipts,
+watchers, resource settings or external process owners changed in this update.
+
+### Full selected acceptance remains open
+
+Landed foundations do not complete the general-default route, capture-failure
+refusal, rich reachable graph, actual compiler driver/invocation confinement,
+complete C4 caller/lifecycle and source admission, or positive integrated
+acceptance. The newly authored SSpecs remain UNRUN; focused native/Rust provider
+counts cannot substitute for them. All previously selected acceptance scopes
+remain UNRUN, with no new count or claim that all implementation is coded.
+
+The required end conditions remain: genuine source/runtime-bound producer and
+sanity/admission; completed Phase3 compiler with its own compile-and-run Hello;
+the required next compiler generation; qualified full CLI and the existing
+runner; and actual execution of all selected acceptance, including remaining
+C4 invocation/full-graph/default/capture-failure/driver behavior. No narrowed
+component-only goal, full compiler success, SOURCE activation or release
+readiness is declared.

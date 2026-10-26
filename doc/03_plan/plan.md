@@ -2,6 +2,12 @@
 
 ## Current landing and qualification status — 2026-10-25
 
+### Superseding snapshot — 2026-10-26 01:22 UTC
+
+The [current feature → implementation → acceptance ledger](../09_report/releasephase3_progress_2026_10_25.md#superseding-landed-source-and-live-attempt-snapshot--2026-10-26-0122-utc) records landed memory/source integration [#4853](https://github.com/ormastes/simple/pull/4853), native bounded snapshot [#4857](https://github.com/ormastes/simple/pull/4857), and pure rebasing foundation [#4858](https://github.com/ormastes/simple/pull/4858). Focused native/Rust controls have specific PASS evidence; newly authored SSpecs and complete SOURCE/general-default/capture-failure/rich-graph/actual-driver acceptance remain UNRUN or OPEN. No feature census or whole-goal PASS is added.
+
+The coordinator's latest attempt6 observation is **HIR909/1453, failed0, provisional RUNNING**, using the separate frozen `83be`/actual admitted `8cd` producer lineage. Its v3 Stage2 compiled1499 modules with0 cached and passed Hello modes0/1; that does not qualify the later landed memory changes. There is no Stage3 compiler success/own Hello, object-completion claim or qualified full CLI/general runner. All selected acceptance scopes remain UNRUN; complete end conditions and old terminal receipts remain in the report.
+
 ### Superseding terminal snapshot — 13:17 UTC
 
 The [terminal/evidence update](../09_report/releasephase3_progress_2026_10_25.md#superseding-terminal-and-evidence-update--2026-10-25-1317-utc) supersedes the RUNNING wording below. Attempt4 completed all 1,453 HIR modules and typechecking, then stopped during monomorphization at the inner sampled RSS cap (exit88, quiescent); all 1,453 HIR/frontend entries remain preserved. Attempt5 refused before compilation because admitted source/git/tool identities changed. A real fresh canonical Stage2 producer/checkpoint is required; fresh preflight alone cannot replace those bindings. The v3 remint never launched, and its finite peer wait ended124 without extension. Final Stage3 attempt6 remains unspent.
