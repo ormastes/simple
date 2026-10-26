@@ -1,0 +1,74 @@
+use std.io_runtime.{dir_create_all, file_write, getpid}
+use compiler.common.cache_contract.guard_id_v1.{active_guard_root_empty_v1}
+use compiler.driver.cache.generic_specialization_list_v1.{GENERIC_SPEC_HOST_PROFILE_DIGEST_V1}
+use compiler.driver.cache.generic_spec_rr_producer_v1.{generic_spec_list_of_module_v1,
+    generic_spec_sealed_manifest_v1}
+use compiler.driver.cache.module_artifacts_v1.{GenericSpecInputsV1, MonoGenericUsesV1,
+    module_tldr_companion_path_v1, module_tldr_companion_render_sections_v1,
+    module_tldr_companion_sections_v1, module_tldr_generic_spec_ctx_of_sections_v1,
+    module_tldr_generic_spec_ctx_section_v1, module_tldr_update_generic_spec_from_mono_v1}
+
+fn main() -> i64:
+    val root = "build/native_probe/generic_spec_absence_{getpid()}"
+    val source_path = root + "/src/main.spl"
+    val tldr_root = "."
+    val source = "pub fn main() -> i64:\n    0\n"
+    val module_id = "src.main"
+    if not dir_create_all(root + "/src"): panic("could not create fixture source directory")
+    if not file_write(source_path, source): panic("could not write fixture source")
+
+    val tldr_path = module_tldr_companion_path_v1(tldr_root, source_path)
+    val sectionless = module_tldr_companion_render_sections_v1(module_id, source, ["summary|fixture"])
+    if not file_write(tldr_path, sectionless): panic("could not write sectionless companion")
+    val absent = generic_spec_list_of_module_v1(source_path, tldr_root)
+    match absent:
+        case nil: ()
+        case Some(_): panic("fresh sectionless companion was accepted as complete-empty")
+    if generic_spec_sealed_manifest_v1(source_path, absent).sealed:
+        panic("fresh sectionless companion sealed the generic read manifest")
+
+    val guard_root = active_guard_root_empty_v1(GENERIC_SPEC_HOST_PROFILE_DIGEST_V1)
+    val context = module_tldr_generic_spec_ctx_section_v1(GenericSpecInputsV1(
+        guard_root: guard_root, import_names: [], imports_unknown: false, import_paths: []))
+    if context == "": panic("could not encode generic specialization context")
+    val sections = module_tldr_companion_sections_v1(sectionless, source)
+    var with_context = sections
+    with_context.push(context)
+    if not file_write(tldr_path, module_tldr_companion_render_sections_v1(module_id, source, with_context)):
+        panic("could not persist generic specialization context")
+    match module_tldr_generic_spec_ctx_of_sections_v1(with_context):
+        case Some(inputs):
+            if inputs.guard_root.profile_digest != guard_root.profile_digest or
+                    inputs.guard_root.complete != guard_root.complete or
+                    inputs.guard_root.root_digest != guard_root.root_digest or
+                    inputs.import_names.len() != 0 or
+                    inputs.imports_unknown or inputs.import_paths.len() != 0:
+                panic("persisted generic specialization context changed during decode")
+        case nil: panic("persisted generic specialization context did not decode")
+
+    val mono = MonoGenericUsesV1(owners: [], names: [], args: [], complete: true)
+    if module_tldr_update_generic_spec_from_mono_v1(source_path, tldr_root, mono) != "":
+        panic("post-mono updater rejected the persisted context")
+    val published = generic_spec_list_of_module_v1(source_path, tldr_root)
+    match published:
+        case Some(list):
+            if not list.complete or list.specs.len() != 0:
+                panic("post-mono complete-empty list was not preserved")
+            if not generic_spec_sealed_manifest_v1(source_path, published).sealed:
+                panic("post-mono complete-empty list did not seal")
+        case nil: panic("post-mono complete-empty section was not readable")
+
+    if not file_write(source_path, source + "# changed source\n"):
+        panic("could not mutate source for stale companion check")
+    match generic_spec_list_of_module_v1(source_path, tldr_root):
+        case nil: ()
+        case Some(_): panic("mutated source reused a stale generic specialization list")
+
+    if not file_write(source_path, source): panic("could not restore fixture source")
+    val malformed = module_tldr_companion_render_sections_v1(module_id, source,
+        ["summary|fixture", "generic-spec|not-a-valid-list"])
+    if not file_write(tldr_path, malformed): panic("could not write malformed generic section")
+    match generic_spec_list_of_module_v1(source_path, tldr_root):
+        case nil: ()
+        case Some(_): panic("malformed generic specialization section was accepted")
+    0

@@ -23,7 +23,7 @@ same success/error arms, error text, mutation order, and early returns.
 No cast, raw payload extraction, result suppression, or stub is introduced.
 
 Intended-code recovery reference: `9642b8ec4c3a14e8cb7893dce75887b2f4ecdf4b`.
-Initial workaround commit: [`548831268ca`](https://github.com/ormastes/simple/commit/548831268ca).
+Initial workaround commit: `548831268ca` (retained local experiment, not a published landing).
 That initial four-file proposal is superseded: its four generic codec edits
 were disproven and restored to their intended code. Only the six method sites
 in `backend_helpers`, `backend_api`, and `obj_taker` are retained.
@@ -82,7 +82,7 @@ The working/staged direct-env guards passed; executable specs under
 ## Renewed codec repair batch, 2026-10-26
 
 Codec workaround commit:
-[`14a38034b41`](https://github.com/ormastes/simple/commit/14a38034b41).
+[`0a9837a6082`](https://github.com/ormastes/simple/commit/0a9837a60828721abed7cab7a0fb6b2e64878e3f) (same patch as tested local `14a38034b41`).
 Its parent `626fea7f91a` preserves the separately checked six method sites.
 
 After the first three-cycle escalation, the user renewed the binary-first
