@@ -18,6 +18,9 @@ new_repo() {
     git -C "$repo" config core.symlinks false
     git -C "$repo" config user.email test@example.invalid
     git -C "$repo" config user.name materializer-test
+    cp "$root/.gitattributes" "$repo/.gitattributes"
+    git -C "$repo" add .gitattributes
+    git -C "$repo" commit -qm attributes
 }
 add_link() {
     link=$1 target=$2
@@ -69,6 +72,30 @@ bash "$root/scripts/setup/materialize-symlinks-windows.shs" --undo "$repo" >"$tm
 test ! -L "$repo/alias"
 test "$(cat "$repo/alias")" = target.txt
 test "$(cat "$repo/target.txt")" = 'small target payload'
+
+# A genuine directory symlink has FILE_ATTRIBUTE_DIRECTORY underneath its
+# reparse point and must be unlinked/recreated as a file placeholder before
+# the directory junction can be installed.
+new_repo directory-symlink
+mkdir "$repo/target-dir"
+printf 'directory symlink payload' >"$repo/target-dir/nested.txt"
+add_link alias target-dir
+git -C "$repo" add target-dir
+git -C "$repo" commit -qm fixture
+git -C "$repo" update-index --cacheinfo "120000,$(git -C "$repo" rev-parse HEAD:alias),alias"
+git -C "$repo" config core.symlinks false
+rm -f -- "$repo/alias"
+make_real_link target-dir
+receipt="$tmp/directory-symlink.env"
+run_materializer
+test "$materializer_status" -eq 0 || { cat "$tmp/materializer.log" >&2; exit 1; }
+test -L "$repo/alias"
+test -d "$repo/alias"
+grep -Fqx 'created=1' "$receipt"
+bash "$root/scripts/setup/materialize-symlinks-windows.shs" --undo "$repo" >"$tmp/directory-symlink-undo.log" 2>&1
+test ! -L "$repo/alias"
+test "$(cat "$repo/alias")" = target-dir
+test "$(cat "$repo/target-dir/nested.txt")" = 'directory symlink payload'
 
 # NTFS junctions also test -L in MSYS. Existing junctions must remain on the
 # junction validator path, and undo must safely restore the tracked placeholder.
