@@ -45,3 +45,40 @@ been installed or retired.
   retain independent failures and compatible cache products.
 
 See [reconciliation evidence](../../03_plan/evidence/cache_perfile_phase3_reconciliation_2026-10-26.md).
+
+
+## Candidate repair and corrected link diagnosis
+
+The canonical native linker succeeds with an absolute bootstrap-owned CC path;
+the reduced unwrapped executable prints `7 8 0`. The earlier manual links omitted
+required canonical C/runtime-entry inputs; their archive errors are not proof
+of a runtime-provider defect. The original logs remain historical diagnostics.
+
+A candidate now unwraps both optional payloads before exhaustive owner-qualified
+matches. Unit regression scenarios add direct/Some tuple/struct payloads,
+second-pass stability and absence. A separate native fixture imports the real
+substitution functions. Actual-owner native qualification and the general
+SSpec/manual gate remain pending; this bug is still OPEN.
+
+
+## Workaround-first record
+
+- Stable bug record ID: `native_optional_payload_owner_dispatch_2026_10_26`.
+- Underlying compiler defect remains OPEN; canonical DB reconciliation pending.
+- Workaround blocks: `hs_enum_payload` and `hs_pattern_payload` presence binding.
+- Intended-code recovery: `b9f082ef085d6656ad78b9812a3f7335dc29cb5b`, original mixed
+  optional/payload patterns in the same source file. Restore only after the
+  compiler owner is fixed and original-form behavior is qualified.
+- Root-fix owner: root, MIR optional-pattern owner resolution, after the
+  workaround and Phase 3 route are qualified.
+- The actual-owner expression fixture built a 124-module closure with the
+  existing admitted Stage 2, exited 0, and ran with output
+  `optional payload substitution: 5 cases, 2 passes each` (run rc=0).
+  This checks direct/Some tuple/struct payloads, absence and second-pass stability.
+- Producer SHA-256 remains
+  `acfedbebd1db457efc0f8d1b0b3020dfa20711157bc090334c1b523a6a228779`;
+  no Phase 2 rebuild was needed. The successful source snapshot precedes only
+  the workaround marker comments; the presence-binding logic is unchanged.
+- A separate pattern fixture is prepared for an 80-job build; its runtime
+  outcome is not yet claimed. The existing SSpec additions are unrun because
+  a qualified general full-CLI runner is unavailable.

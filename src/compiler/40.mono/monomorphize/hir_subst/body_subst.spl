@@ -352,42 +352,35 @@ fn hs_params(params: [HirParam], ctx: HirSubstCtx) -> [HirParam]:
 
 
 fn hs_enum_payload(payload: HirEnumPayload?, ctx: HirSubstCtx, span: Span) -> HirEnumPayload?:
-    if payload == nil:
-        return nil
-    # An `X?` value may arrive BARE (fresh construction) or wrapped in
-    # `Some(...)` (after a round trip through an `-> X?` signature); both are
-    # matched so a second pass over already-substituted HIR still works.
-    val out: HirEnumPayload? = match payload:
-        case Tuple(values):
-            HirEnumPayload.Tuple(hs_exprs(values, ctx))
-        case Struct(fields):
-            HirEnumPayload.Struct(hs_named_exprs(fields, ctx))
-        Some(p):
-            hs_enum_payload(p, ctx, span)
-        nil:
-            nil
-    if out == nil:
-        hir_subst_unhandled(ctx, "HirEnumPayload", span)
-        return payload
-    out
+    # Optional and payload enums have distinct owners. Unwrap first so native
+    # lowering never resolves Tuple/Struct against Option or another payload.
+    # @workaround bug=native_optional_payload_owner_dispatch_2026_10_26 recover=b9f082ef085d6656ad78b9812a3f7335dc29cb5b reason=unwrap optional before native payload-owner dispatch
+    if val concrete = payload:
+        val out: HirEnumPayload? = match concrete:
+            case HirEnumPayload.Tuple(values):
+                HirEnumPayload.Tuple(hs_exprs(values, ctx))
+            case HirEnumPayload.Struct(fields):
+                HirEnumPayload.Struct(hs_named_exprs(fields, ctx))
+        if out == nil:
+            hir_subst_unhandled(ctx, "HirEnumPayload", span)
+            return payload
+        return out
+    nil
 
 
 fn hs_pattern_payload(payload: HirPatternPayload?, ctx: HirSubstCtx, span: Span) -> HirPatternPayload?:
-    if payload == nil:
-        return nil
-    val out: HirPatternPayload? = match payload:
-        case Tuple(patterns):
-            HirPatternPayload.Tuple(hs_patterns(patterns, ctx))
-        case Struct(fields):
-            HirPatternPayload.Struct(hs_named_patterns(fields, ctx))
-        Some(p):
-            hs_pattern_payload(p, ctx, span)
-        nil:
-            nil
-    if out == nil:
-        hir_subst_unhandled(ctx, "HirPatternPayload", span)
-        return payload
-    out
+    # @workaround bug=native_optional_payload_owner_dispatch_2026_10_26 recover=b9f082ef085d6656ad78b9812a3f7335dc29cb5b reason=unwrap optional before native payload-owner dispatch
+    if val concrete = payload:
+        val out: HirPatternPayload? = match concrete:
+            case HirPatternPayload.Tuple(patterns):
+                HirPatternPayload.Tuple(hs_patterns(patterns, ctx))
+            case HirPatternPayload.Struct(fields):
+                HirPatternPayload.Struct(hs_named_patterns(fields, ctx))
+        if out == nil:
+            hir_subst_unhandled(ctx, "HirPatternPayload", span)
+            return payload
+        return out
+    nil
 
 
 fn hs_asm(asm_node: HirAsm, ctx: HirSubstCtx) -> HirAsm:
