@@ -1788,6 +1788,20 @@ pub fn native_build_missing_output_is_failure_v1(code: i64, output_path: text,
 pub fn native_build_workarounds_refresh_needed_v1(worker: text, shard_child: bool) -> bool:
     worker != "1" and not shard_child
 
+# Build-start memory admission shared by every native-build entry (full CLI
+# coordinator and the bootstrap CLI); "" admits.
+pub fn native_build_memory_admission_refusal_v1(args: [text]) -> text:
+    val shard_child = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    # The MIR export-summary child re-execs bare `native-build`; its parent
+    # was already admitted.
+    if (env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? "") != "":
+        return ""
+    if not native_build_memory_gate_applies_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child,
+            env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "", args):
+        return ""
+    build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
+
 pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, group_result: text,
         mir_shard_link: text, args: [text]) -> bool:
     if worker == "1" or shard_child or group_result != "" or mir_shard_link != "":
@@ -1829,12 +1843,10 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                 stderr_write("workarounds: refresh failed: " + reason + "\n")
     # Memory admission at build start, coordinator only: workers, shard
     # children, grouped and file workers are admitted by their parent's pool.
-    if native_build_memory_gate_applies_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child,
-            env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "", args):
-        val memory_refusal = build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
-        if memory_refusal != "":
-            eprint memory_refusal
-            return 3
+    val memory_refusal = native_build_memory_admission_refusal_v1(args)
+    if memory_refusal != "":
+        eprint memory_refusal
+        return 3
     val compiled_bootstrap_route =
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     val simple_bin = if compiled_bootstrap_route:
