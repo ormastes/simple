@@ -1,6 +1,7 @@
 # Private bounded ordinary dictionary values snapshot
 
-Source checkpoint only; all new executable controls UNRUN. This is not a safe
+Focused native ASan/UBSan fixture passed; Simple integration remains UNRUN.
+This is not a safe
 general Dict API or complete compiler request admission. Actual MirLowering
 invocation confinement and canonical Array<MirFunction> lowering remain required.
 
@@ -56,9 +57,22 @@ array_element_struct_syms, then normal indexed decode_runtime_value. There is no
 raw-word→MirFunction cast, reboxing or guessed backend Struct tag. Pure/hosted
 implementations unsupported; no CapLevel parity or complete SOURCE claim.
 
-Authored native controls: forged tagged address, observation/array/fill one-unit
+Focused native controls: forged tagged address, observation/array/fill one-unit
 short, zero length and copied witness after publication, sparse/tombstone map,
 raw unchanged values, actual mutation, deterministic owner/epoch/backing/cap/
 tombstone changes, SOURCE flag refusal, exactly-once disposal, actual registration-growth transition with stale observed
 fees, and delete-heavy output churn with state/byte one-unit-short refusal. No
-jobs run.
+passing checks rerun.
+
+
+## Focused evidence
+
+Exact production/test source `3c6e1cb4b42` received independent scoped SOURCE_GO
+and one focused ASan/UBSan PASS (exit 0, no findings). Binary SHA256:
+`c0fcb18005dde847f833612a25d240fd9f5050c94cd650cfad6db28f1256345f`.
+Evidence directory: `/tmp/dict-snapshot-evidence-20261026`.
+Peak sampled RSS 247336KiB; guard 2GiB, receipt hard_memory_limit0 (sampled,
+not a hard kernel memory limit). Churn controls do not prove that a same-capacity
+compaction branch executed; only generic tombstone churn is evidenced.
+Compiler typed bridge, actual invocation confinement, pure/hosted parity and
+full Phase3/SOURCE admission remain OPEN/UNRUN. No passing native test rerun.
