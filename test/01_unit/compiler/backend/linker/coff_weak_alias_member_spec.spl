@@ -160,6 +160,47 @@ fn _cl_weak_alias_object(alias: text, target: text, machine: i64) -> [u8]:
     bytes = bytes.push(0)
     _cl_u32(bytes, 4)
 
+fn _cl_weak_def_object(alias: text, target: text) -> [u8]:
+    # clang `weak` definition: one RET section, weak external `alias`
+    # (SEARCH_ALIAS) whose default is the external `target` defined there.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _cl_name(bytes, alias)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(105)
+    bytes = bytes.push(1)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, target)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
 describe "COFF weak alias archive members":
     it "selects a SEARCH_ALIAS member and resolves the reference through it":
         val linked = coff_link_amd64(CoffLinkRequest(
@@ -177,5 +218,14 @@ describe "COFF weak alias archive members":
             objects: [_cl_ref_object("_start", "mkdir")],
             archives: [_cl_archive(_cl_weak_alias_object("mkdir", "_mkdir", 0)),
                 _cl_archive(_cl_object("_mkdir", 1))], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+
+    it "resolves another object's reference through an input object's weak alias":
+        # Hosted runtime: simple_entry.obj references spl_init_args, which
+        # runtime_native.obj provides only as a clang weak definition.
+        val linked = coff_link_amd64(CoffLinkRequest(
+            objects: [_cl_ref_object("_start", "wfn"), _cl_weak_def_object("wfn", "wfn_def")],
+            archives: [], entry: "_start"))
         if linked.is_err(): print("link error: {linked.unwrap_err()}")
         expect(linked.is_ok()).to_equal(true)
