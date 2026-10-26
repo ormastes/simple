@@ -38,10 +38,12 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
+use app.cli.native_build_output_plan.{native_build_apply_failure_policy_v1}
 use app.cli.bootstrap_backend_installer.{bootstrap_install_worker_backends_v1,
     bootstrap_backend_request_error_v1, bootstrap_backend_choices_v1,
     bootstrap_backend_capability_label_v1}
-use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_size, remove_file_if_exists, dir_create}
 
 fn native_build_help() -> i64:
     0
@@ -227,12 +229,13 @@ fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     # without STAGE3/STAGE4 those children land here, not in the capsule branch.
     if bootstrap_file_worker_requested(args):
         return run_native_file_worker_v1(args)
-    bootstrap_capsule_shard_child_env(args)
     val worker_args = bootstrap_native_build_worker_args(args)
     val option_error = cli_native_build_option_error(worker_args, true)
     if option_error != "":
         print "Error: " + option_error
         return 1
+    native_build_apply_failure_policy_v1(worker_args)
+    bootstrap_capsule_shard_child_env(args)
     # P-H2: plain `native-build` (no STAGE3/STAGE4) also runs the file-worker
     # pool when selected; the in-process build then links the per-module
     # objects from the sealed ledger (SIMPLE_MIR_SHARD_LINK). A FAILED or
@@ -410,8 +413,14 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             # that drives HIR and MIR children; it never runs the capsule itself.
             if bootstrap_file_worker_requested(args):
                 return run_native_file_worker_v1(args)
-            bootstrap_capsule_shard_child_env(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":
+            val worker_args = bootstrap_native_build_worker_args(args)
+            val option_error = cli_native_build_option_error(worker_args, true)
+            if option_error != "":
+                print "Error: {option_error}"
+                return 1
+            native_build_apply_failure_policy_v1(worker_args)
+            bootstrap_capsule_shard_child_env(args)
             # P-H: with SIMPLE_FILE_WORKERS=1 (or the per-file default) Stage3
             # runs the file-worker pool and the in-process capsule links the
             # pool's per-module objects from the sealed ledger
@@ -437,6 +446,13 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         if mode != "one-binary":
             print "Error: Stage4 compiler capsule requires --mode one-binary"
             return 1
+        val worker_args = bootstrap_native_build_worker_args(args)
+        val option_error = cli_native_build_option_error(worker_args, true)
+        if option_error != "":
+            print "Error: {option_error}"
+            return 1
+        native_build_apply_failure_policy_v1(worker_args)
+        bootstrap_capsule_shard_child_env(args)
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
