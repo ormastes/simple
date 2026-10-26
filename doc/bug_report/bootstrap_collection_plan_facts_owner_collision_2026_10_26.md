@@ -84,3 +84,14 @@ Unknown-owner legacy fallback remains unchanged. Genuine coverage is seven
 passing cases in01, two in04, and one in05, never a single ten-case green run.
 All five attempt receipts are retained;02/03 remain excluded wrong-source
 diagnostics. Native P3 validation of this exact root-fix is still pending.
+
+
+## Reviewed Phase3 corrective follow-up
+
+PR4886 (`0db0889e119cf6dfe0c171879e91dc065af1f591`) supplies qualified default
+registration: match the selected declaration's field order before retaining its
+flags/default expressions, both in bootstrap composite registration and normal
+struct lowering. Existing release parameter signatures and both field-index
+ambiguity guards are preserved, already equivalent to the donor. Two authored
+metadata controls are added; all current SSpecs/native checks remain UNRUN.
+This backport does not claim emitted default-value/native replay acceptance.
