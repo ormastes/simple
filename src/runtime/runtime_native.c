@@ -10051,6 +10051,122 @@ int64_t rt_sha384_digest(int64_t data_value) {
     return spl_sha2_512_family_digest(data_value, iv, 48u);
 }
 
+/* Native twin of value/pbkdf2_native.rs. Reuse the SHA-512 compression owner,
+ * and keep the iteration loop allocation-free rather than retaining one
+ * registered runtime array per intermediate HMAC. */
+static const uint64_t spl_pbkdf512_iv[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull,
+    0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+    0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+};
+
+static void spl_pbkdf512_clear(void* memory, size_t length) {
+    volatile uint8_t* bytes = (volatile uint8_t*)memory;
+    while (length--) *bytes++ = 0;
+}
+
+/* state already includes prefix whole blocks (128 bytes for HMAC). */
+static void spl_pbkdf512_finish(uint64_t state[8], const uint8_t* data,
+                                size_t length, uint64_t prefix, uint8_t out[64]) {
+    uint8_t block[256];
+    size_t offset = 0;
+    while (length - offset >= 128u) {
+        spl_sha512_compress(state, data + offset);
+        offset += 128u;
+    }
+    size_t remaining = length - offset;
+    memset(block, 0, sizeof(block));
+    if (remaining) memcpy(block, data + offset, remaining);
+    block[remaining] = 0x80u;
+    size_t final_bytes = remaining < 112u ? 128u : 256u;
+    uint64_t total = prefix + (uint64_t)length;
+    uint64_t bits = total << 3;
+    for (unsigned i = 0; i < 8; ++i)
+        block[final_bytes - 1u - i] = (uint8_t)(bits >> (8u * i));
+    block[final_bytes - 9u] = (uint8_t)(total >> 61);
+    spl_sha512_compress(state, block);
+    if (final_bytes == 256u) spl_sha512_compress(state, block + 128u);
+    for (unsigned i = 0; i < 64; ++i)
+        out[i] = (uint8_t)(state[i / 8u] >> (56u - 8u * (i % 8u)));
+    spl_pbkdf512_clear(block, sizeof(block));
+}
+
+static void spl_pbkdf512_hmac(const uint64_t inner[8], const uint64_t outer[8],
+                             const uint8_t* data, size_t length, uint8_t out[64]) {
+    uint64_t state[8];
+    uint8_t digest[64];
+    memcpy(state, inner, sizeof(state));
+    spl_pbkdf512_finish(state, data, length, 128u, digest);
+    memcpy(state, outer, sizeof(state));
+    spl_pbkdf512_finish(state, digest, sizeof(digest), 128u, out);
+    spl_pbkdf512_clear(state, sizeof(state));
+    spl_pbkdf512_clear(digest, sizeof(digest));
+}
+
+int64_t rt_pbkdf2_hmac_sha512(int64_t password_value, int64_t salt_value,
+                             int64_t iterations, int64_t dk_len) {
+    int64_t password_len = rt_array_bytes_validate(password_value);
+    int64_t salt_len = rt_array_bytes_validate(salt_value);
+    if (password_len < 0 || salt_len < 0) return rt_core_nil();
+    /* Preserve the Rust twin's nonpositive length/round semantics. Enforce
+     * PBKDF2's four-byte block-index limit before allocating. */
+    if (dk_len <= 0) return (int64_t)(uintptr_t)rt_byte_array_new_len(0);
+    if ((uint64_t)dk_len > (uint64_t)UINT32_MAX * 64u ||
+        (uint64_t)dk_len > SIZE_MAX || (uint64_t)password_len > SIZE_MAX ||
+        (uint64_t)salt_len > SIZE_MAX - 4u) return rt_core_nil();
+    uint32_t rounds = iterations <= 0 ? 1u :
+        ((uint64_t)iterations > UINT32_MAX ? UINT32_MAX : (uint32_t)iterations);
+    uint8_t* password = (uint8_t*)malloc(password_len ? (size_t)password_len : 1u);
+    uint8_t* salt = (uint8_t*)malloc((size_t)salt_len + 4u);
+    uint8_t key_block[128] = {0}, u[64], accumulated[64];
+    uint64_t inner[8], outer[8], state[8];
+    int64_t result = rt_core_nil();
+    if (!password || !salt) goto cleanup;
+    if (rt_array_bytes_copy_checked(password_value, password, password_len) != password_len ||
+        rt_array_bytes_copy_checked(salt_value, salt, salt_len) != salt_len) goto cleanup;
+    if (password_len > 128) {
+        memcpy(state, spl_pbkdf512_iv, sizeof(state));
+        spl_pbkdf512_finish(state, password, (size_t)password_len, 0, key_block);
+    } else if (password_len) {
+        memcpy(key_block, password, (size_t)password_len);
+    }
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u;
+    memcpy(inner, spl_pbkdf512_iv, sizeof(inner));
+    spl_sha512_compress(inner, key_block);
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u ^ 0x5cu;
+    memcpy(outer, spl_pbkdf512_iv, sizeof(outer));
+    spl_sha512_compress(outer, key_block);
+    SplArray* array = rt_byte_array_new_len((uint64_t)dk_len);
+    RtCoreArray* output = rt_core_array_ptr(array);
+    if (!output || !output->data) goto cleanup;
+    for (uint64_t offset = 0, block_index = 1; offset < (uint64_t)dk_len;
+         offset += 64u, ++block_index) {
+        for (unsigned i = 0; i < 4; ++i)
+            salt[(size_t)salt_len + i] = (uint8_t)(block_index >> (24u - 8u * i));
+        spl_pbkdf512_hmac(inner, outer, salt, (size_t)salt_len + 4u, u);
+        memcpy(accumulated, u, sizeof(u));
+        for (uint32_t round = 1; round < rounds; ++round) {
+            spl_pbkdf512_hmac(inner, outer, u, sizeof(u), u);
+            for (unsigned i = 0; i < 64; ++i) accumulated[i] ^= u[i];
+        }
+        size_t count = (uint64_t)dk_len - offset < 64u ?
+            (size_t)((uint64_t)dk_len - offset) : 64u;
+        memcpy((uint8_t*)output->data + (size_t)offset, accumulated, count);
+    }
+    result = (int64_t)(uintptr_t)array;
+cleanup:
+    if (password) { spl_pbkdf512_clear(password, (size_t)password_len); free(password); }
+    if (salt) { spl_pbkdf512_clear(salt, (size_t)salt_len + 4u); free(salt); }
+    spl_pbkdf512_clear(key_block, sizeof(key_block));
+    spl_pbkdf512_clear(u, sizeof(u));
+    spl_pbkdf512_clear(accumulated, sizeof(accumulated));
+    spl_pbkdf512_clear(inner, sizeof(inner));
+    spl_pbkdf512_clear(outer, sizeof(outer));
+    spl_pbkdf512_clear(state, sizeof(state));
+    return result;
+}
+
 /* `[u8]` -> text, bytes copied verbatim (the interpreter's
  * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
  * A `[u8]` arrives in one of two layouts: byte-packed
