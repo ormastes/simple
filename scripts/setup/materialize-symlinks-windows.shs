@@ -1451,6 +1451,40 @@ while IFS= read -r -d '' path && IFS= read -r -d '' oid; do
         continue
     }
     native_action target "$(to_win_path "$target_abs")" "" || materializer_fail "target path predicate: $path"
+
+    # MSYS reports NTFS junctions as -L too. Accept an already-materialized
+    # junction through the existing native receipt validator before treating
+    # any other -L path as a Git symlink.
+    if [ -L "$abs_link" ] && [ -d "$abs_link" ] && [ ! -f "$abs_link" ] && validate_materialized_directory; then
+        already_ok=$((already_ok + 1))
+        printf 'directory\t%s\n' "$path" >>"$manifest_tmp" || materializer_fail "cannot record undo manifest entry: $path"
+        record_link "$path" "$target_rel" directory already ||
+            materializer_fail "cannot record directory link: $path"
+        continue
+    fi
+
+    # A Windows checkout may have privilege to materialize Git's mode-120000
+    # entry as a real filesystem symlink. Normalize only an exact HEAD/index
+    # symlink back to Git's placeholder bytes before either the pending-target
+    # or hardlink/junction path. This avoids following a small target file and
+    # mistaking its contents for a placeholder. Exact NUL-terminated
+    # readlink/HEAD comparison and the unchanged index check keep this from
+    # rewriting an ordinary file or a user-retargeted symlink.
+    if [ -L "$abs_link" ]; then
+        readlink -z -- "$abs_link" >"$work_dir/link-target.actual" ||
+            materializer_fail "cannot read existing symlink: $path"
+        printf '%s\0' "$target_rel" >"$work_dir/link-target.expected" ||
+            materializer_fail "cannot record expected symlink target: $path"
+        cmp -s -- "$work_dir/link-target.actual" "$work_dir/link-target.expected" ||
+            materializer_fail "existing symlink target differs from HEAD: $path"
+        git -C "$repo_root" diff --cached --quiet "$head_sha" -- "$path" ||
+            materializer_fail "index symlink differs from HEAD: $path"
+        git -C "$repo_root" -c core.symlinks=false checkout-index --force -- "$path" ||
+            materializer_fail "cannot restore verified symlink placeholder: $path"
+        [ ! -L "$abs_link" ] && cmp -s -- "$abs_link" "$blob_file" ||
+            materializer_fail "verified symlink placeholder restore mismatch: $path"
+    fi
+
     if [ ! -e "$target_abs" ]; then
         cmp -s -- "$abs_link" "$blob_file" || materializer_fail "pending placeholder bytes: $path"
         if target_is_tracked "$target_abs"; then

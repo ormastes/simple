@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/setup/host-env.shs"
+host_env_apply_path
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'BLOCKED: Windows/MSYS required' >&2; exit 77 ;; esac
+for tool in powershell cygpath git; do
+    command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool" >&2; exit 77; }
+done
+test -n "${LOCALAPPDATA:-}" || { echo 'BLOCKED: LOCALAPPDATA required' >&2; exit 77; }
+tmp=$(mktemp -d "$(cygpath -u "$LOCALAPPDATA")/Temp/materializer-real-symlink.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+
+new_repo() {
+    repo="$tmp/repo-$1"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config core.symlinks false
+    git -C "$repo" config user.email test@example.invalid
+    git -C "$repo" config user.name materializer-test
+}
+add_link() {
+    link=$1 target=$2
+    printf '%s' "$target" >"$repo/$link"
+    blob=$(printf '%s' "$target" | git -C "$repo" hash-object -w --stdin)
+    git -C "$repo" update-index --add --cacheinfo "120000,$blob,$link"
+}
+make_real_link() {
+    (cd "$repo" && MSYS=winsymlinks:nativestrict ln -s "$1" alias)
+    test -L "$repo/alias" || { echo 'BLOCKED: Windows symlink creation unavailable' >&2; exit 77; }
+}
+run_materializer() {
+    if bash "$root/scripts/setup/materialize-symlinks-windows.shs" \
+        --strict-missing --receipt "$receipt" "$repo" >"$tmp/materializer.log" 2>&1; then
+        materializer_status=0
+    else
+        materializer_status=$?
+    fi
+}
+make_junction() {
+    rm -f -- "$repo/alias"
+    FIXTURE_LINK="$(cygpath -w "$repo/alias")" FIXTURE_TARGET="$(cygpath -w "$repo/target-dir")" \
+        powershell -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference="Stop"
+        New-Item -ItemType Junction -Path $env:FIXTURE_LINK -Target $env:FIXTURE_TARGET | Out-Null
+        '
+}
+
+# Positive: a genuine checkout symlink with the exact HEAD target is restored
+# to the verified index placeholder, then admitted through hardlink receipt.
+new_repo exact
+printf 'small target payload' >"$repo/target.txt"
+add_link alias target.txt
+git -C "$repo" add target.txt
+git -C "$repo" commit -qm fixture
+git -C "$repo" update-index --cacheinfo "120000,$(git -C "$repo" rev-parse HEAD:alias),alias"
+git -C "$repo" config core.symlinks false
+rm -f -- "$repo/alias"
+make_real_link target.txt
+test "$(readlink "$repo/alias")" = target.txt
+receipt="$tmp/exact.env"
+run_materializer
+test "$materializer_status" -eq 0 || { cat "$tmp/materializer.log" >&2; exit 1; }
+test ! -L "$repo/alias"
+cmp "$repo/alias" "$repo/target.txt"
+grep -Fqx 'result=complete' "$receipt"
+grep -Fqx 'created=1' "$receipt"
+bash "$root/scripts/setup/materialize-symlinks-windows.shs" --undo "$repo" >"$tmp/undo.log" 2>&1
+test ! -L "$repo/alias"
+test "$(cat "$repo/alias")" = target.txt
+test "$(cat "$repo/target.txt")" = 'small target payload'
+
+# NTFS junctions also test -L in MSYS. Existing junctions must remain on the
+# junction validator path, and undo must safely restore the tracked placeholder.
+new_repo junction
+mkdir "$repo/target-dir"
+printf 'junction target payload' >"$repo/target-dir/nested.txt"
+add_link alias target-dir
+git -C "$repo" add target-dir
+git -C "$repo" commit -qm fixture
+make_junction
+receipt="$tmp/junction.env"
+run_materializer
+test "$materializer_status" -eq 0 || { cat "$tmp/materializer.log" >&2; exit 1; }
+grep -Fqx 'already_ok=1' "$receipt"
+grep -Fqx 'created=0' "$receipt"
+bash "$root/scripts/setup/materialize-symlinks-windows.shs" --undo "$repo" >"$tmp/junction-undo.log" 2>&1
+test ! -L "$repo/alias"
+test "$(cat "$repo/alias")" = target-dir
+test "$(cat "$repo/target-dir/nested.txt")" = 'junction target payload'
+
+# Negative: a real symlink retargeted to another local file is rejected and
+# remains untouched; exact path ownership is checked before checkout-index.
+new_repo wrong
+printf 'expected payload' >"$repo/target.txt"
+printf 'other payload' >"$repo/other.txt"
+add_link alias target.txt
+git -C "$repo" add target.txt other.txt
+git -C "$repo" commit -qm fixture
+rm -f -- "$repo/alias"
+make_real_link other.txt
+receipt="$tmp/wrong.env"
+run_materializer
+test "$materializer_status" -ne 0
+test -L "$repo/alias"
+test "$(readlink "$repo/alias")" = other.txt
+test ! -e "$receipt"
+grep -Fq 'existing symlink target differs from HEAD: alias' "$tmp/materializer.log"
+
+# A worktree link matching HEAD is not authority to overwrite an index entry
+# staged for a different target.
+new_repo changed-index
+printf 'expected payload' >"$repo/target.txt"
+printf 'staged target payload' >"$repo/other.txt"
+add_link alias target.txt
+git -C "$repo" add target.txt other.txt
+git -C "$repo" commit -qm fixture
+staged_blob=$(printf '%s' other.txt | git -C "$repo" hash-object -w --stdin)
+git -C "$repo" update-index --cacheinfo "120000,$staged_blob,alias"
+rm -f -- "$repo/alias"
+make_real_link target.txt
+receipt="$tmp/changed-index.env"
+run_materializer
+test "$materializer_status" -ne 0
+test -L "$repo/alias"
+test "$(readlink "$repo/alias")" = target.txt
+test ! -e "$receipt"
+grep -Fq 'index symlink differs from HEAD: alias' "$tmp/materializer.log"
+
+# A genuine symlink to a policy-allowed missing target must be normalized
+# before the pending-target byte check, and remain a pending placeholder.
+new_repo pending
+add_link alias missing.txt
+git -C "$repo" commit -qm fixture
+rm -f -- "$repo/alias"
+make_real_link missing.txt
+if bash "$root/scripts/setup/materialize-symlinks-windows.shs" "$repo" >"$tmp/pending.log" 2>&1; then
+    pending_status=0
+else
+    pending_status=$?
+fi
+test "$pending_status" -eq 0 || { cat "$tmp/pending.log" >&2; exit 1; }
+test ! -L "$repo/alias"
+test "$(cat "$repo/alias")" = missing.txt
+grep -Fq 'pending-untracked symlink: alias -> missing.txt' "$tmp/pending.log"
+
+printf 'PASS: real checkout symlinks normalize safely; tamper, index drift, pending targets, junctions, and undo are covered\n'
