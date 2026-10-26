@@ -1,0 +1,54 @@
+# Actual SymbolTable and memo owner, not a model of the high-water loop.
+# Runtime/paired performance execution remains UNRUN.
+use std.spec.*
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, SymbolKind, ScopeId}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.driver.mir_logical_name_warm_v1.*
+
+fn preserved(id: i64, owner: text) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: "symbol{id}", kind: SymbolKind.Variable,
+        type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+        visibility: Visibility.Private, is_public: false, is_mutable: false,
+        defining_module: owner, builtin_method_tag: 0)
+
+describe "MIR warm names visit present IDs in original ascending order":
+    it "handles a real preserved billion-ID symbol without a billion probes":
+        var table = SymbolTable.new()
+        table.register_preserved_symbol(preserved(1000000000, "src/warm_sparse/foreign.spl"))
+        table.register_preserved_symbol(preserved(3, "src/warm_sparse/local.spl"))
+        expect(table.next_symbol_id).to_equal(1000000001)
+        expect(driver_mir_warm_symbol_ids_v1(table)).to_equal([3, 1000000000])
+        expect(driver_warm_mir_symbol_logical_names_v1(table)).to_equal(2)
+        expect(module_logical_name_from_path("src/warm_sparse/foreign.spl")).to_equal("warm_sparse.foreign")
+        expect(module_logical_name_from_path("src/warm_sparse/local.spl")).to_equal("warm_sparse.local")
+        expect(table.symbols.len()).to_equal(2)
+        expect(table.next_symbol_id).to_equal(1000000001)
+
+    it "matches dense traversal while filtering negative and out-of-range entries":
+        var table = SymbolTable.new()
+        table.symbols[4] = preserved(4, "src/warm_dense/a.spl")
+        table.symbols[0] = preserved(0, "")
+        table.symbols[3] = preserved(3, "src/warm_dense/a.spl")
+        table.symbols[1] = preserved(1, "src/warm_dense/b.spl")
+        table.symbols[-1] = preserved(-1, "src/warm_dense/excluded.spl")
+        table.symbols[5] = preserved(5, "src/warm_dense/excluded.spl")
+        table.next_symbol_id = 5
+        var dense: [i64] = []
+        var id = 0
+        while id < table.next_symbol_id:
+            if table.symbols.has(id): dense.push(id)
+            id = id + 1
+        expect(driver_mir_warm_symbol_ids_v1(table)).to_equal(dense)
+        expect(dense).to_equal([0, 1, 3, 4])
+        expect(driver_warm_mir_symbol_logical_names_v1(table)).to_equal(4)
+        expect(table.symbols.len()).to_equal(6)
+
+    it "does no work for empty or nonpositive high-water ranges":
+        var table = SymbolTable.new()
+        expect(driver_warm_mir_symbol_logical_names_v1(table)).to_equal(0)
+        table.symbols[0] = preserved(0, "src/warm_empty/a.spl")
+        table.next_symbol_id = -1
+        expect(driver_mir_warm_symbol_ids_v1(table)).to_equal([])
