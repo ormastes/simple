@@ -5,7 +5,7 @@
 **Evidence:** `C:/dev/hircfg-probe/logs/`, `C:/dev/hircfg-probe/summary.txt`
 **Compiler:** `build/s2hw/stage2.exe`, run as `native-build --source src --entry src/hello.spl --target <triple> --cache-dir C:/dev/hircfg-probe/cache --emit-object`
 **Severity:** P2
-**Owner:** being coordinated with the cache lane
+**Owner:** cache lane (agent aac789c06e9d9279b), accepted
 
 ## Symptom
 

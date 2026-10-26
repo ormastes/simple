@@ -5,6 +5,7 @@
 **Evidence:** `C:/dev/hircfg-probe/logs/`, `C:/dev/hircfg-probe/summary.txt`
 **Compiler:** `build/s2hw/stage2.exe`, run as `native-build --source src --entry src/hello.spl --target <triple> --cache-dir C:/dev/hircfg-probe/cache --emit-object`
 **Severity:** P1 (wrong artifact format)
+**Owner:** hircfg lane; fix in progress on branch `work/hircfg-objfmt`
 
 ## Rule
 
