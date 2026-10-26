@@ -181,3 +181,20 @@ smaller production generator), all retained. Stop the unchanged shared crash
 loop and investigate the compiler owner before any further build retry. Existing
 native wire/probe checks remain focused evidence, not canonical SSpec PASS.
 No feature is landed while its mandatory verification is unavailable.
+
+## T32 Windows alias preparation
+
+Inspection found src/app/t32_cli, mcp_t32 and cmm_lsp were regular path-text
+files (tracked mode120000), not usable directory aliases. This invalidates a
+source-only interpretation of the earlier CLI missing-export diagnostic.
+The canonical scripts/setup/materialize-symlinks-windows.shs ran in this
+isolated owner: created55, already_ok0, failed0, strict_missing1, exit0.
+Receipt is outside the checkout as required:
+`D:/dev/simple-tooling-phase2-evidence-20261026/materialization.sdn`.
+The receipt's producer hash identifies the materializer, not the compiler.
+Two earlier setup refusals (Windows-form receipt path; receipt inside source
+owner) performed no successful conversion and remain in separate retained logs.
+
+T32 CLI changed-input verification is live, exec session85862, evidence
+build/tooling-phase2/t32-cli-materialized, pinned Phase2 producer and unchanged
+feature source. No CLI execution or PASS inferred from successful link setup.
