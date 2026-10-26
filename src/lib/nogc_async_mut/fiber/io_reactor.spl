@@ -12,7 +12,8 @@
 #
 # Op ids are the driver's operation ids (> 0), so they are valid park tokens.
 
-use std.nogc_async_mut.io.native_driver.{native_driver_create, native_driver_destroy, native_driver_submit_open, native_driver_submit_read, native_driver_submit_close, native_driver_flush, native_driver_poll, native_driver_poll_id, native_driver_poll_result, native_driver_poll_data, native_driver_backend_name}
+use std.nogc_async_mut.io.native_driver.{native_driver_create, native_driver_destroy, native_driver_submit_open, native_driver_submit_read, native_driver_submit_write, native_driver_submit_close, native_driver_flush, native_driver_poll, native_driver_poll_id, native_driver_poll_result, native_driver_poll_data, native_driver_backend_name}
+use std.nogc_sync_mut.io_runtime.{platform_name}
 use std.common.task_runner.fiber_scheduler.{FiberSchedV1, fiber_sched_wake}
 
 struct FiberIoReactorV1:
@@ -55,6 +56,23 @@ fn fiber_io_submit_read(r: FiberIoReactorV1, fd: i64, length: i64, offset: i64) 
 
 fn fiber_io_submit_close(r: FiberIoReactorV1, fd: i64) -> FiberIoSubmitV1:
     _fio_submitted(r, native_driver_submit_close(r.handle, fd))
+
+fn fiber_io_open_write_flags() -> i64:
+    """Driver open flags for write-only | create | truncate. The driver forwards
+    flags to the host open(), whose O_CREAT/O_TRUNC values differ per OS (the
+    Windows driver decodes BSD-style 0x200/0x800)."""
+    val p = platform_name()
+    if p == "windows": return 0x0A01
+    if p == "macos" or p == "freebsd": return 0x0601
+    0x0241
+
+fn fiber_io_submit_open_write(r: FiberIoReactorV1, path: text) -> FiberIoSubmitV1:
+    """Open `path` for writing (create + truncate); the completion result is the fd (< 0 = -errno)."""
+    _fio_submitted(r, native_driver_submit_open(r.handle, path, fiber_io_open_write_flags(), 0x1A4))
+
+fn fiber_io_submit_write(r: FiberIoReactorV1, fd: i64, data: text, offset: i64) -> FiberIoSubmitV1:
+    """Positioned write; the completion result is the byte count written (< 0 = -errno)."""
+    _fio_submitted(r, native_driver_submit_write(r.handle, fd, data, offset))
 
 fn _fio_index(r: FiberIoReactorV1, op: i64) -> i64:
     for i in 0..r.done_ops.len():
@@ -118,4 +136,5 @@ fn fiber_io_pump(r: FiberIoReactorV1, s: FiberSchedV1, timeout_ms: i64) -> Fiber
 export FiberIoReactorV1, FiberIoSubmitV1, FiberIoPumpV1
 export fiber_io_new, fiber_io_backend, fiber_io_close
 export fiber_io_submit_open, fiber_io_submit_read, fiber_io_submit_close
+export fiber_io_submit_open_write, fiber_io_submit_write, fiber_io_open_write_flags
 export fiber_io_ready, fiber_io_result, fiber_io_data, fiber_io_forget, fiber_io_pump

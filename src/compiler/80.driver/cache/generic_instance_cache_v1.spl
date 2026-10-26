@@ -118,7 +118,7 @@ class GenericInstanceCacheV1:
         role == SINGLE_FLIGHT_LEADER_V1
 
     me abandon_produce(instance_key: text, request_id: text) -> bool:
-        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, nil)
+        self._end_flight(instance_key, request_id, nil)
 
     me redrive(now_ms: i64, timeout_ms: i64) -> [text]:
         self.flights.redrive(now_ms, timeout_ms)
@@ -150,8 +150,15 @@ class GenericInstanceCacheV1:
     me put_mir(instance_key: text, semantic: MonoSemanticKey, request_id: text, mir: [u8]) -> bool:
         val ok = self._publish_mir(instance_key, semantic, mir)
         val result: [u8]? = if ok: Some(mir) else: nil
-        self.flights.complete(_instance_flight_key_v1(instance_key), request_id, result)
+        self._end_flight(instance_key, request_id, result)
         ok
+
+    # Waiters re-produce through begin_produce and never read future():
+    # release the flight's retained entries once it is completed.
+    me _end_flight(instance_key: text, request_id: text, result: [u8]?) -> bool:
+        val flight = self.flights.complete_flight(_instance_flight_key_v1(instance_key), request_id, result)
+        self.flights.forget(flight)
+        flight >= 0
 
     me _publish_mir(instance_key: text, semantic: MonoSemanticKey, mir: [u8]) -> bool:
         val found = self._entry_for(instance_key, semantic)

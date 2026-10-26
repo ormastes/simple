@@ -37,7 +37,11 @@ use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_parse, 
 use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
-use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid, env_get_opt}
+use std.nogc_async_mut.async.future.{Future}
+use std.common.text_bytes.{text_to_bytes}
+use std.nogc_async_mut.fiber.io_reactor.{FiberIoReactorV1, fiber_io_new, fiber_io_close, fiber_io_submit_open_write, fiber_io_submit_write, fiber_io_submit_close, fiber_io_ready, fiber_io_result, fiber_io_pump}
+use std.common.task_runner.fiber_scheduler.{fiber_sched_new, FiberSchedV1}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.common.config.{Logger}
 use compiler.frontend.cache_artifact.macro_source_from_parse_v1.{macro_module_source_from_parse_guarded_v1}
@@ -495,6 +499,112 @@ pub fn module_artifact_publish_atomic_v1(path: text, content: text) -> bool:
         val _r = file_delete(temp)
         return false
     true
+
+var _PUBLISH_ASYNC_FALLBACKS_V1: i64 = 0
+
+# Number of async publishes that fell back to the sync publish because the
+# reactor reported ENOSYS/unsupported (process-wide, for tests and diagnostics).
+pub fn module_artifact_publish_async_fallbacks_v1() -> i64:
+    _PUBLISH_ASYNC_FALLBACKS_V1
+
+struct PubReactorWaitV1:
+    reactor: FiberIoReactorV1
+    ready: bool
+    result: i64
+
+# Submit-and-wait one op. A timeout is reported as ready=false after one last
+# non-blocking drain; the caller decides how to clean up.
+fn _pub_wait_v1(r: FiberIoReactorV1, s: FiberSchedV1, op: i64) -> PubReactorWaitV1:
+    var t = r
+    if op <= 0:
+        return PubReactorWaitV1(reactor: t, ready: false, result: op)
+    var pump = fiber_io_pump(t, s, 5000)
+    t = pump.reactor
+    if not fiber_io_ready(t, op):
+        pump = fiber_io_pump(t, s, 0)
+        t = pump.reactor
+    if not fiber_io_ready(t, op):
+        return PubReactorWaitV1(reactor: t, ready: false, result: -9999)
+    PubReactorWaitV1(reactor: t, ready: true, result: fiber_io_result(t, op))
+
+# Reactor write of `content` to `temp` (create + truncate, mode 0644; the sync
+# file_write path uses 0666 & ~umask, so the final mode can differ by umask).
+# Status: 0 = whole payload written and fd closed; -38 = the driver does not
+# support Open/Write/Close; any other value = failure. The caller owns temp cleanup.
+# WA(async-write-rust-win): Rust-runtime Windows driver lacks Open/Write/Close; native IOCP used in compiled binaries
+# Timeouts: an open that times out has no known fd, so the driver is destroyed
+# (fiber_io_close) which cancels what it still owns; a write/close that times
+# out is followed by a best-effort close of the known fd before destroy.
+pub fn module_artifact_reactor_write_status_v1(temp: text, content: text) -> i64:
+    var r = fiber_io_new(8)
+    if r.error != "":
+        return -38
+    val s = fiber_sched_new([0], 100)
+    val osub = fiber_io_submit_open_write(r, temp)
+    r = osub.reactor
+    val o = _pub_wait_v1(r, s, osub.op)
+    r = o.reactor
+    if not o.ready:
+        fiber_io_close(r)
+        return -1
+    if o.result == -38:
+        fiber_io_close(r)
+        return -38
+    if o.result < 0:
+        fiber_io_close(r)
+        return o.result
+    val fd = o.result
+    val nbytes = text_to_bytes(content).len()
+    var status = 0
+    var done = 0
+    while done < nbytes:
+        # text cannot be sliced by byte: a short write of non-ASCII content fails closed
+        if done > 0 and nbytes != content.len():
+            status = -1
+            break
+        val sub = fiber_io_submit_write(r, fd, if done == 0: content else: content.substring(done, nbytes), done)
+        r = sub.reactor
+        val w = _pub_wait_v1(r, s, sub.op)
+        r = w.reactor
+        if not w.ready or w.result <= 0:
+            status = if w.ready and w.result < 0: w.result else: -1
+            break
+        done = done + w.result
+    val cs = fiber_io_submit_close(r, fd)
+    r = cs.reactor
+    val c = _pub_wait_v1(r, s, cs.op)
+    r = c.reactor
+    fiber_io_close(r)
+    if status == 0 and not (c.ready and c.result == 0):
+        return -1
+    status
+
+# Async variant. Unset SIMPLE_ASYNC_WRITES: exactly the sync publish. With
+# SIMPLE_ASYNC_WRITES=1: same admission and temp name, temp written through the
+# fiber IO reactor, rename stays synchronous; a failed write removes the temp
+# and never touches the destination.
+pub fn module_artifact_publish_atomic_async_v1(path: text, content: text) -> Future<bool>:
+    if (env_get_opt("SIMPLE_ASYNC_WRITES") ?? "") != "1":
+        return Future.from_value(module_artifact_publish_atomic_v1(path, content))
+    val slash = path.rfind("/")
+    if slash > 0 and not dir_create_all(path.substring(0, slash)):
+        return Future.from_value(false)
+    if not disk_publish_admitted(if slash > 0: path.substring(0, slash) else: ".", content.len()):
+        return Future.from_value(false)
+    val temp = "{path}.{getpid()}.{xxh3_128_text(content)}.tmp"
+    val ws = module_artifact_reactor_write_status_v1(temp, content)
+    if ws == -38:
+        # Driver lacks Open/Write/Close (Rust-runtime Windows): one counted fallback to the sync publish.
+        val _u = file_delete(temp)
+        _PUBLISH_ASYNC_FALLBACKS_V1 = _PUBLISH_ASYNC_FALLBACKS_V1 + 1
+        return Future.from_value(module_artifact_publish_atomic_v1(path, content))
+    if ws != 0:
+        val _w = file_delete(temp)
+        return Future.from_value(false)
+    if not file_rename(temp, path):
+        val _r = file_delete(temp)
+        return Future.from_value(false)
+    Future.from_value(true)
 
 # The shared entry. Returns "" on success (fresh or regenerated), else an
 # error text. A fresh companion skips the parse entirely.
