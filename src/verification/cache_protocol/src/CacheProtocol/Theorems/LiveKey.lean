@@ -60,4 +60,15 @@ theorem invalidation_complete {Out : Type} (build : Inputs → Out)
   · left
     exact hk
 
+/-- The optional library-mode component uses the empty model value for the
+    legacy encoding with no component. Every explicit mode is distinct from
+    that default, independently of an otherwise equivalent family allowlist.
+    Source framing/digest assumptions remain those of Generated.LiveKey. -/
+theorem library_mode_default_vs_explicit_visible (legacy explicit : LiveKey)
+    (hlegacy : legacy .opts_library_mode = [])
+    (hexplicit : explicit .opts_library_mode ≠ []) : enc legacy ≠ enc explicit := by
+  apply opts_library_mode_live_change_visible
+  intro heq
+  exact hexplicit (heq.symm.trans hlegacy)
+
 end CacheProtocol.Live
