@@ -348,9 +348,18 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         symbol_table_count: symbol_count))
 
 fn coff_symbol_at_table_index(object: CoffObject, table_index: i64) -> Result<CoffSymbol, text>:
-    """Resolve a relocation's raw symbol-table index without confusing aux rows."""
-    for symbol in object.symbols:
-        if symbol.table_index == table_index: return Ok(symbol)
+    """Resolve a relocation's raw symbol-table index without confusing aux rows.
+
+    `symbols` is in table order, so this is a binary search: a linear scan per
+    relocation was quadratic on large runtime objects."""
+    var low: i64 = 0
+    var high: i64 = object.symbols.len() - 1
+    while low <= high:
+        val mid = (low + high) / 2
+        val index = object.symbols[mid].table_index
+        if index == table_index: return Ok(object.symbols[mid])
+        if index < table_index: low = mid + 1
+        else: high = mid - 1
     Err("COFF symbol-table index {table_index} names an auxiliary or missing record")
 
 fn coff_symbol_resolution_name(object: CoffObject, symbol: CoffSymbol) -> Result<text, text>:
@@ -376,11 +385,14 @@ fn coff_is_weak_alias(symbol: CoffSymbol) -> bool:
     symbol.name != "" and symbol.is_weak_external() and
         symbol.weak_characteristics == COFF_WEAK_SEARCH_ALIAS
 
-fn coff_weak_primary_for_fallback(object: CoffObject, table_index: i64) -> Option<text>:
+fn coff_weak_primary_map(object: CoffObject) -> {i64: text}:
+    """Fallback symbol-table index -> weak external naming it, built in one
+    pass so per-symbol lookups do not rescan the whole table."""
+    var result: {i64: text} = {}
     for candidate in object.symbols:
-        if candidate.is_weak_external() and candidate.weak_default_index == table_index:
-            return Some(candidate.name)
-    nil
+        if candidate.is_weak_external() and not result.has(candidate.weak_default_index):
+            result[candidate.weak_default_index] = candidate.name
+    result
 
 fn coff_weak_primary_searches_library_for_fallback(
         object: CoffObject, table_index: i64) -> bool:
@@ -603,7 +615,7 @@ export COFF_REL_ARM64_SECTION, COFF_REL_ARM64_ADDR64
 export COFF_REL_ARM64_BRANCH19, COFF_REL_ARM64_BRANCH14, COFF_REL_ARM64_REL32
 export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name
 export coff_is_bigobj
-export coff_weak_primary_for_fallback, coff_is_weak_alias
+export coff_is_weak_alias, coff_weak_primary_map
 export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
 export coff_apply_amd64_relocation
 export coff_apply_arm64_relocation
