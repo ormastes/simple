@@ -1,11 +1,11 @@
 use std.spec.*
 use compiler.mir_opt.collection_plan_selection.{
-    CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_select,
+    CollectionPlanAlgorithm, CollectionSelectionFacts, collection_plan_select,
     collection_plan_unproven_facts
 }
 use compiler.mir_opt.collection_plan_explain.collection_plan_explain
 
-fn collection_explain_memory_facts() -> CollectionPlanFacts:
+fn collection_explain_memory_facts() -> CollectionSelectionFacts:
     var facts = collection_plan_unproven_facts()
     facts.collection_kind = "set"
     facts.equality_pure = true
@@ -108,3 +108,24 @@ describe "collection plan explanation uses the guarded selector result":
         val report = collection_plan_explain("memory/invalid", "generic", facts, decision)
         expect(report).to_contain("\nreason=invalid-memory-facts\n")
         expect(report).to_contain("\ncandidate.hash.extra_memory_bytes=invalid\n")
+
+    it "renders admitted scalar profile counters without projecting effect facts":
+        var facts = collection_plan_unproven_facts()
+        facts.profile_admitted = true
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 7
+        val decision = collection_plan_select(facts)
+        val report = collection_plan_explain("profile/scalars", "generic", facts, decision)
+        expect(report).to_contain("\nprofile.hash_probes_p95=100\n")
+        expect(report).to_contain("\nprofile.hash_collisions_p95=7\n")
+        facts.profile_hash_probes_p95 = -1
+        facts.profile_hash_collisions_p95 = -1
+        val unknown = collection_plan_explain("profile/unknown", "generic", facts, decision)
+        expect(unknown).to_contain("\nprofile.hash_probes_p95=unknown\n")
+        expect(unknown).to_contain("\nprofile.hash_collisions_p95=unknown\n")
+        facts.profile_admitted = false
+        facts.profile_hash_probes_p95 = 100
+        facts.profile_hash_collisions_p95 = 7
+        val unadmitted = collection_plan_explain("profile/unadmitted", "generic", facts, decision)
+        expect(unadmitted).to_contain("\nprofile.hash_probes_p95=unknown\n")
+        expect(unadmitted).to_contain("\nprofile.hash_collisions_p95=unknown\n")
