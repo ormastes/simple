@@ -1,0 +1,202 @@
+# Authored UNRUN. Account/codec mechanics only: artifact records here are local
+# fixture data, never an admitted repository, invocation or native proof.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr}
+use compiler.mir.hir_expression_artifact_v1.{MirHirExpressionArtifactV1,
+    mir_hir_expression_encode_v1, mir_hir_expression_key_v1,
+    mir_hir_expression_from_retained_blob_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+fn expression_codec_account_v1(work: i64 = 1048576) -> MirLoopResourceAccountV1:
+    var limits = MirLoopResourceLimitsV1()
+    limits.max_work = work
+    match MirLoopResourceAccountV1.create(limits):
+        case Ok(account): account
+        case Err(_): fail("actual account factory refused")
+
+fn expression_codec_fixture_v1() -> (MirHirExpressionArtifactV1, text):
+    val source = "class CodecDefaultV1:\n    value: i64 = 7\n"
+    val parsed = parse_full_frontend(source, "codec_default.spl", "codec_default", Logger(level: 0))
+    var owner = HirLowering.with_filename("codec_default.spl")
+    val module = owner.lower_module(parsed)
+    expect(owner.errors.len()).to_equal(0)
+    val declaration = module.classes.values()[0]
+    val field = declaration.fields[0]
+    expect(field.has_default).to_equal(true)
+    val blob = match mir_hir_expression_encode_v1(field.default):
+        case Ok(actual): actual
+        case Err(error): fail(error)
+    var record = MirHirExpressionArtifactV1(final_repository_authority: sha256_text("codec-fixture-authority"),
+        final_archive_key: sha256_text("codec-fixture-key"), final_body_digest: sha256_text("codec-fixture-body"),
+        module_name: module.name, source_path: module.path, category: "field-default",
+        declaration_symbol: declaration.symbol.id, member_index: 0, member_name: field.name,
+        expression_digest: sha256_text(blob), archive_key: "", stage: "mir-hir-declaration-expression-v1")
+    record.archive_key = mir_hir_expression_key_v1(record)
+    expect(record.archive_key.len()).to_equal(64)
+    (record, blob)
+
+fn expression_codec_decode_v1(record: MirHirExpressionArtifactV1, blob: text,
+        account: MirLoopResourceAccountV1) -> Result<HirExpr, text>:
+    mir_hir_expression_from_retained_blob_v1(record, record.final_repository_authority,
+        record.final_archive_key, record.final_body_digest, blob, account)
+
+fn expression_codec_nested_v1() -> HirExpr:
+    val parsed = parse_full_frontend("class NestedCodecDefaultV1:\n    value: [[i64]] = [[1], [2]]\n",
+        "nested_codec.spl", "nested_codec", Logger(level: 0))
+    var owner = HirLowering.with_filename("nested_codec.spl")
+    val module = owner.lower_module(parsed)
+    expect(owner.errors.len()).to_equal(0)
+    val declaration = module.classes.values()[0]
+    expect(declaration.fields[0].has_default).to_equal(true)
+    declaration.fields[0].default
+
+describe("actual account before expression codec work"):
+    it("debits the same actual account before reader split and accepts its exact constructor boundary"):
+        # Factory20 + cursor(64+2*512) + scan4 + split(2*(2+2*64)).
+        val account = expression_codec_account_v1(1372)
+        val reader = match FlatPoolReader.new_accounted_v1("2\n", 16, 1024, 16, 8, 1000, account):
+            case Ok(actual): actual
+            case Err(error): fail(error)
+        expect(reader.lines).to_equal(["2", ""])
+        expect(reader.charged_work_units).to_equal(4)
+        expect(reader.live_reserved_bytes).to_equal(130)
+        expect(account.snapshot().work_used).to_equal(1372)
+
+    it("refuses the reader scan when one unit short before any split allocation"):
+        val account = expression_codec_account_v1(1111)
+        match FlatPoolReader.new_accounted_v1("2\n", 16, 1024, 16, 8, 1000, account):
+            case Err(error): expect(error).to_equal("CODEC-ACCOUNT: reader construction refused")
+            case Ok(_): fail("unpaid reader scan accepted")
+        expect(account.snapshot().work_used).to_equal(1108)
+        expect(account.snapshot().output_bytes).to_equal(512)
+
+    it("poisons an actual writer before an unpaid allocation and preserves its counters"):
+        val account = expression_codec_account_v1(1117)
+        val writer = match HirCodecWriter.create_accounted_v1(1024, 1024, 1000, account):
+            case Ok(actual): actual
+            case Err(error): fail(error)
+        val before = account.snapshot()
+        expect(writer.reserve(5)).to_equal(false)
+        expect(writer.ok).to_equal(false)
+        expect(writer.failure_kind).to_equal("bounds")
+        expect(writer.charged_allocation_bytes).to_equal(0)
+        expect(writer.audit_events).to_equal(0)
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+        expect(account.snapshot().output_bytes).to_equal(before.output_bytes)
+
+    it("preserves ordinary writer bytes while the accounted writer debits its actual owner"):
+        var ordinary = HirCodecWriter.create_canonical_bounded(4096, 65536, 65536)
+        val account = expression_codec_account_v1()
+        var accounted = match HirCodecWriter.create_accounted_v1(4096, 65536, 65536, account):
+            case Ok(actual): actual
+            case Err(error): fail(error)
+        val before = account.snapshot()
+        ordinary.put_text("a\\b\nc")
+        ordinary.put_i64(37)
+        accounted.put_text("a\\b\nc")
+        accounted.put_i64(37)
+        expect(accounted.finish()).to_equal(ordinary.finish())
+        expect(accounted.ok).to_equal(true)
+        expect(ordinary.ok).to_equal(true)
+        expect(account.snapshot().work_used).to_be_greater_than(before.work_used)
+
+    it("rejects product and sum overflow without debiting the actual account"):
+        val account = expression_codec_account_v1()
+        val before = account.snapshot()
+        expect(mir_loop_codec_charge_v1(account, 0, 4611686018427387904).is_err()).to_equal(true)
+        expect(mir_loop_codec_charge_v1(account, 9223372036854775807, 1).is_err()).to_equal(true)
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it("stops before visiting an underfunded nested expression and never resumes a poisoned traversal"):
+        val expression = expression_codec_nested_v1()
+        val account = expression_codec_account_v1(1235)
+        var writer = HirCodecWriter.create_accounted_v1(4096, 65536, 65536, account).unwrap()
+        val before = account.snapshot()
+        # Cursor leaves127, one short of the first prepaid generated visit128.
+        hc_enc_hir_expr(writer, expression)
+        expect(writer.ok).to_equal(false)
+        expect(writer.accounted_visits_v1).to_equal(0)
+        expect(writer.accounted_depth_v1).to_equal(0)
+        expect(writer.parts.len()).to_equal(0)
+        hc_enc_hir_expr(writer, expression)
+        expect(writer.accounted_visits_v1).to_equal(0)
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it("stops at the first failed put before visiting nested children"):
+        val expression = expression_codec_nested_v1()
+        val account = expression_codec_account_v1(1363)
+        var writer = HirCodecWriter.create_accounted_v1(4096, 65536, 65536, account).unwrap()
+        # Factory20+cursor1088+root128=1236; put_i64 reserve64*2 is one short.
+        hc_enc_hir_expr(writer, expression)
+        expect(writer.ok).to_equal(false)
+        expect(writer.accounted_visits_v1).to_equal(1)
+        expect(writer.accounted_depth_v1).to_equal(0)
+        expect(writer.parts.len()).to_equal(0)
+        expect(account.snapshot().work_used).to_equal(1236)
+
+    it("visits funded nested children and preserves the ordinary expression bytes"):
+        val expression = expression_codec_nested_v1()
+        var ordinary = HirCodecWriter.create_canonical_bounded(65536, 262144, 262144)
+        var accounted = HirCodecWriter.create_accounted_v1(65536, 262144, 262144,
+            expression_codec_account_v1()).unwrap()
+        hc_enc_hir_expr(ordinary, expression)
+        hc_enc_hir_expr(accounted, expression)
+        expect(accounted.finish()).to_equal(ordinary.finish())
+        expect(accounted.ok).to_equal(true)
+        expect(ordinary.ok).to_equal(true)
+        expect(accounted.accounted_visits_v1).to_be_greater_than(1)
+        expect(accounted.accounted_depth_v1).to_equal(0)
+
+    it("unwinds accounted depth when a nested encoder exceeds the actual depth limit"):
+        val expression = expression_codec_nested_v1()
+        var limits = MirLoopResourceLimitsV1()
+        limits.max_depth = 1
+        val account = MirLoopResourceAccountV1.create(limits).unwrap()
+        var writer = HirCodecWriter.create_accounted_v1(65536, 262144, 262144, account).unwrap()
+        hc_enc_hir_expr(writer, expression)
+        expect(writer.ok).to_equal(false)
+        expect(writer.unsupported).to_equal("actual_account_depth")
+        expect(writer.accounted_visits_v1).to_equal(1)
+        expect(writer.accounted_depth_v1).to_equal(0)
+
+    it("freshly decodes a real frontend field default without a filesystem context"):
+        val (record, blob) = expression_codec_fixture_v1()
+        val account = expression_codec_account_v1()
+        val before = account.snapshot()
+        expect(transient_scope_begin()).to_equal(true)
+        defer transient_scope_end()
+        val expression = match expression_codec_decode_v1(record, blob, account):
+            case Ok(actual): actual
+            case Err(error): fail(error)
+        expect(mir_hir_expression_encode_v1(expression).unwrap()).to_equal(blob)
+        match expression.kind:
+            case HirExprKind.IntLit(value, _): expect(value).to_equal(7)
+            case _: fail("actual default was not retained by the codec")
+        expect(account.snapshot().work_used).to_be_greater_than(before.work_used)
+
+    it("refuses changed retained bytes before decoding"):
+        val (record, blob) = expression_codec_fixture_v1()
+        expect(transient_scope_begin()).to_equal(true)
+        defer transient_scope_end()
+        match expression_codec_decode_v1(record, blob + "\n", expression_codec_account_v1()):
+            case Err(error): expect(error).to_equal("MIR expression artifact bytes mismatch")
+            case Ok(_): fail("changed retained bytes accepted")
+
+    it("refuses a different current provider identity without treating the blob as admission"):
+        val (record, blob) = expression_codec_fixture_v1()
+        expect(transient_scope_begin()).to_equal(true)
+        defer transient_scope_end()
+        match mir_hir_expression_from_retained_blob_v1(record, sha256_text("different-provider"),
+                record.final_archive_key, record.final_body_digest, blob, expression_codec_account_v1()):
+            case Err(error): expect(error).to_equal("MIR expression retained artifact identity mismatch")
+            case Ok(_): fail("foreign provider identity accepted")
