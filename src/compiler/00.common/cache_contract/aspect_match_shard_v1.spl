@@ -113,7 +113,7 @@ fn _h(domain: text, parts: [text]) -> text:
 fn _local_key(domain: text, parts: [text]) -> text:
     match digest_v1_new(HASH_ALGO_XXH3_128_V1, xxh3_128_text(_framed(domain, parts))):
         case Some(d): digest_v1_text(d)
-        case nil: ""
+        case None: ""
 
 fn _sorted_texts(values: [text]) -> [text]:
     var out: [text] = []
@@ -353,6 +353,11 @@ fn _selector_matches(sel: PointcutSelectorV1, p: JoinPointFactV1) -> bool:
 pub fn pointcut_match_key_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
     _local_key("aop-match/v1", [sel.selector_digest, f.facts_key])
 
+# PERSISTED identity of the same (selector, facts) pair: sha256, for the .rr v2
+# read manifest (implied sha256). Never use the local key there.
+pub fn pointcut_match_identity_v1(sel: PointcutSelectorV1, f: DirectoryJoinPointFactsV1) -> text:
+    _h("aop-match/v1", [sel.selector_digest, f.facts_key])
+
 pub fn pointcut_match_shard_compute_v1(sel: PointcutSelectorV1,
         f: DirectoryJoinPointFactsV1) -> PointcutMatchShardV1:
     var ids: [text] = []
@@ -377,9 +382,14 @@ pub fn pointcut_match_cache_acquire_v1(cache: PointcutMatchCacheV1, sel: Pointcu
     val key = pointcut_match_key_v1(sel, f)
     val cacheable = sel.supported and f.complete and aop_digest_known_v1(sel.selector_digest) and
         aop_digest_known_v1(f.facts_key)
+    if key == "":
+        return PointcutMatchAcquireV1(cache: cache, key: key, shard: pointcut_match_shard_compute_v1(sel, f),
+            hit: false, cacheable: false)
     if cacheable and cache.shards.contains_key(key):
-        return PointcutMatchAcquireV1(cache: cache, key: key, shard: cache.shards[key],
-            hit: true, cacheable: true)
+        val cached = cache.shards[key]
+        if cached.selector_digest == sel.selector_digest and cached.dir_facts_key == f.facts_key:
+            return PointcutMatchAcquireV1(cache: cache, key: key, shard: cached,
+                hit: true, cacheable: true)
     val shard = pointcut_match_shard_compute_v1(sel, f)
     if not cacheable:
         return PointcutMatchAcquireV1(cache: cache, key: key, shard: shard, hit: false,
@@ -428,7 +438,7 @@ export JoinPointFactV1, DirectoryJoinPointFactsV1, PointcutSelectorV1, PointcutM
 export AdviceFacetsV1, PointcutMatchCacheV1, PointcutMatchAcquireV1, WeavePlanDeltaV1
 export directory_join_point_facts_guarded_v1
 export directory_join_point_facts_v1, directory_facts_key_v1, pointcut_selector_parse_v1
-export pointcut_match_key_v1, pointcut_match_shard_compute_v1
+export pointcut_match_key_v1, pointcut_match_identity_v1, pointcut_match_shard_compute_v1
 export pointcut_match_cache_new_v1, pointcut_match_cache_acquire_v1
 export aspect_advice_mode_cacheable_v1, advice_apply_key_v1, aspect_weave_plan_delta_v1
 
@@ -442,7 +452,8 @@ pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPo
     # The v1 read manifest carries bare SHA-256 hex (its implied algorithm).
     # Any other algorithm emits no reads, so the consumer sees no coverage
     # (conservative), never a mislabelled digest.
-    val all = [f.facts_key, f.negative_root, shard.match_digest, sel.selector_digest]
+    val identity = pointcut_match_identity_v1(sel, f)
+    val all = [f.facts_key, f.negative_root, shard.match_digest, sel.selector_digest, identity]
     for d in all:
         if not _is_sha256(d): return []
     var coverage = SemanticCoverageV1.Conservative
@@ -450,7 +461,7 @@ pub fn aspect_match_forward_reads_v1(sel: PointcutSelectorV1, f: DirectoryJoinPo
     val facts_q = SemanticQueryKeyV1(kind: "aop.directory_facts", stable_entity_id: f.scope_id,
         semantic_profile_digest: profile_digest, parameter_digest: _hex(f.facts_key))
     val match_q = SemanticQueryKeyV1(kind: "aop.match", stable_entity_id: f.scope_id,
-        semantic_profile_digest: profile_digest, parameter_digest: _hex(pointcut_match_key_v1(sel, f)))
+        semantic_profile_digest: profile_digest, parameter_digest: _hex(identity))
     val weave_q = SemanticQueryKeyV1(kind: "aop.weave", stable_entity_id: f.scope_id,
         semantic_profile_digest: profile_digest, parameter_digest: _hex(shard.match_digest))
     [SemanticQueryReadV1(producer: facts_q, consumer: match_q, facet: "membership:join-points",
