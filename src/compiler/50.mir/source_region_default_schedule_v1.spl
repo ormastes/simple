@@ -1,0 +1,267 @@
+# Opt-in ordinary-emission discovery and immutable default-use observations.
+# The actual private archive owner must authenticate/retain the target and clear
+# this scratch before promotion/end on every exit. No replay getter is exposed.
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1}
+use compiler.common.loop_codec_account_v1.{mir_loop_codec_charge_v1}
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.source_region_default_schedule_types_v1.*
+use compiler.mir.hir_expression_artifact_v1.{MirHirExpressionArtifactV1, mir_hir_expression_encode_v1}
+use compiler.mir.canonical_enum_serialization_budget_v1.{canonical_enum_dict_count_v1,
+    canonical_enum_sum_v1, canonical_enum_product_v1, canonical_enum_text_bound_v1}
+use compiler.mir._MirLowering.asm_and_targets.*
+
+fn default_schedule_append_v1(scope: MirSourceRegionDefaultScheduleV1, count: i64,
+        width: i64) -> Result<(), text>:
+    val growth = canonical_enum_product_v1(canonical_enum_sum_v1(count, 1)?, width)?
+    mir_loop_codec_charge_v1(scope.account, growth, growth)
+
+fn default_schedule_enqueue_v1(scope: MirSourceRegionDefaultScheduleV1,
+        symbol: SymbolId, required: bool) -> Result<(), text>:
+    mir_loop_codec_charge_v1(scope.account, 64)?
+    if symbol.id < 0: return Err("SOURCE-DEFAULT-SCHEDULE: invalid resolver identity")
+    mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(scope.queue.len(), 16)?)?
+    for queued in scope.queue:
+        if queued.id == symbol.id: return Ok(())
+    val count = canonical_enum_sum_v1(canonical_enum_dict_count_v1(scope.source.functions, scope.account)?, 1)?
+    mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(count, 2)?)?
+    if not scope.source.functions.has(symbol):
+        if required: return Err("SOURCE-DEFAULT-SCHEDULE: selected original body absent")
+        # An external reference is not an internal body permission. The later
+        # actual SOURCE closed-call verifier independently decides legality.
+        return Ok(())
+    val function: HirFunction = scope.source.functions[symbol]
+    if function == nil or function.symbol.id != symbol.id:
+        return Err("SOURCE-DEFAULT-SCHEDULE: original table key differs")
+    default_schedule_append_v1(scope, scope.queue.len(), 32)?
+    scope.queue = scope.queue.push(symbol)
+    Ok(())
+
+impl MirLowering:
+    me source_region_prepare_default_schedule_v1(source: HirModule, target_key: text,
+            producer: SymbolId, consumer: SymbolId, account: MirLoopResourceAccountV1) -> Result<(), text>:
+        # Includes one fixed error record and replacement error-vector storage.
+        mir_loop_codec_charge_v1(account, 128, 2048)?
+        if self.source_region_default_schedule_v1 != nil or self.builder.current_function != nil or self.errors.len() != 0:
+            return Err("SOURCE-DEFAULT-SCHEDULE: actual lowering owner is not idle")
+        val key_bound = canonical_enum_text_bound_v1(target_key, account)?
+        mir_loop_codec_charge_v1(account, key_bound)?
+        if target_key == "" or source == nil:
+            return Err("SOURCE-DEFAULT-SCHEDULE: target selector absent")
+        val scope = MirSourceRegionDefaultScheduleV1(source: source, target_key: target_key,
+            account: account, queue: [], completed: [], occurrences: [], cursor: 0,
+            active: nil, active_occurrence: 0, active_errors: 0, initial_errors: 0,
+            failure: "", failure_published: false, bound: false)
+        default_schedule_enqueue_v1(scope, producer, true)?
+        default_schedule_enqueue_v1(scope, consumer, true)?
+        self.source_region_default_schedule_v1 = Some(scope)
+        Ok(())
+
+    me source_region_default_latch_v1(message: text):
+        if val scope = self.source_region_default_schedule_v1:
+            if scope.failure == "": scope.failure = message
+
+    me source_region_default_publish_failure_v1():
+        if val scope = self.source_region_default_schedule_v1:
+            if scope.failure == "" or scope.failure_published: return
+            scope.failure_published = true
+            # One pre-reserved fixed diagnostic. If ordinary lowering already
+            # failed, preserve that real error without adding a second record.
+            if self.errors.len() == scope.initial_errors:
+                self.error_fatal("SOURCE-DEFAULT-SCHEDULE: selected ordinary capture failed", nil)
+
+    fn source_region_default_failed_v1() -> bool:
+        if val scope = self.source_region_default_schedule_v1:
+            return scope.failure != ""
+        false
+
+    me source_region_default_bind_target_v1(source: HirModule) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        if scope.bound or scope.active != nil or self.builder.current_function != nil:
+            return Err("SOURCE-DEFAULT-SCHEDULE: ordinary target binding reused")
+        val names = canonical_enum_sum_v1(canonical_enum_text_bound_v1(source.name, scope.account)?,
+            canonical_enum_text_bound_v1(scope.source.name, scope.account)?)?
+        val paths = canonical_enum_sum_v1(canonical_enum_text_bound_v1(source.path, scope.account)?,
+            canonical_enum_text_bound_v1(scope.source.path, scope.account)?)?
+        mir_loop_codec_charge_v1(scope.account, canonical_enum_sum_v1(names, paths)?)?
+        if source.name != scope.source.name or source.path != scope.source.path:
+            return Err("SOURCE-DEFAULT-SCHEDULE: ordinary target frame differs")
+        # Exact loaded-target/admitted ownership is the enclosing private
+        # archive calltree prerequisite, never inferred from this comparison.
+        # Emit from THIS actual ordinary module, never a prepared copy of its
+        # function table. Selectors cannot substitute an earlier body graph.
+        scope.source = source
+        scope.bound = true
+        Ok(())
+
+    me source_region_default_next_v1() -> Result<HirFunction?, text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        if scope.failure != "" or not scope.bound or scope.active != nil:
+            return Err("SOURCE-DEFAULT-SCHEDULE: selected owner cannot advance")
+        if scope.cursor < 0: return Err("SOURCE-DEFAULT-SCHEDULE: negative queue cursor")
+        if scope.cursor >= scope.queue.len(): return Ok(nil)
+        val symbol = scope.queue[scope.cursor]
+        val count = canonical_enum_sum_v1(canonical_enum_dict_count_v1(scope.source.functions, scope.account)?, 1)?
+        mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(count, 2)?)?
+        if not scope.source.functions.has(symbol): return Err("SOURCE-DEFAULT-SCHEDULE: queued body disappeared")
+        val function: HirFunction = scope.source.functions[symbol]
+        if function == nil or function.symbol.id != symbol.id:
+            return Err("SOURCE-DEFAULT-SCHEDULE: queued body identity differs")
+        Ok(Some(function))
+
+    me source_region_default_begin_function_v1(function: HirFunction) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        if (scope.failure != "" or scope.active != nil or scope.cursor < 0 or scope.cursor >= scope.queue.len() or
+                scope.queue[scope.cursor].id != function.symbol.id or self.builder.current_function != nil):
+            return Err("SOURCE-DEFAULT-SCHEDULE: selected function is not current")
+        val count = canonical_enum_sum_v1(canonical_enum_dict_count_v1(self.builder.module.functions, scope.account)?, 1)?
+        mir_loop_codec_charge_v1(scope.account, count)?
+        if self.builder.module.functions.has(function.symbol):
+            return Err("SOURCE-DEFAULT-SCHEDULE: selected function already emitted")
+        scope.active = Some(function.symbol)
+        scope.active_occurrence = 0
+        scope.active_errors = self.errors.len()
+        Ok(())
+
+    me source_region_default_complete_function_v1(function: HirFunction) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        val active = scope.active ?? SymbolId(id: -1)
+        if (scope.failure != "" or active.id != function.symbol.id or self.builder.current_function != nil or
+                self.errors.len() != scope.active_errors):
+            return Err("SOURCE-DEFAULT-SCHEDULE: ordinary selected body failed")
+        val count = canonical_enum_sum_v1(canonical_enum_dict_count_v1(self.builder.module.functions, scope.account)?, 1)?
+        mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(count, 2)?)?
+        if not self.builder.module.functions.has(function.symbol):
+            return Err("SOURCE-DEFAULT-SCHEDULE: selected emitter produced no body")
+        val output: MirFunction = self.builder.module.functions[function.symbol]
+        if output == nil or output.symbol.id != function.symbol.id:
+            return Err("SOURCE-DEFAULT-SCHEDULE: emitted body key differs")
+        default_schedule_append_v1(scope, scope.completed.len(), 32)?
+        scope.completed = scope.completed.push(function.symbol)
+        scope.cursor = scope.cursor + 1
+        scope.active = nil
+        Ok(())
+
+    me source_region_default_validate_filter_v1(function: HirFunction,
+            selected: [i64]?) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        if function.is_generic_template or function.is_extern:
+            return Err("SOURCE-DEFAULT-SCHEDULE: selected original is not an ordinary body")
+        if val permitted = selected:
+            mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(permitted.len(), 16)?)?
+            var found = false
+            for symbol in permitted:
+                if symbol == function.symbol.id: found = true
+            if not found: return Err("SOURCE-DEFAULT-SCHEDULE: ordinary archive filter excludes selected body")
+        Ok(())
+
+    me source_region_default_skip_completed_v1(symbol: SymbolId) -> Result<bool, text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        if scope.failure != "": return Err("SOURCE-DEFAULT-SCHEDULE: capture failed")
+        mir_loop_codec_charge_v1(scope.account, canonical_enum_product_v1(scope.completed.len(), 16)?)?
+        for completed in scope.completed:
+            if completed.id == symbol.id: return Ok(true)
+        Ok(false)
+
+    me source_region_observe_default_callee_v1(resolved: SymbolId?):
+        if val scope = self.source_region_default_schedule_v1:
+            if scope.failure != "" or scope.active == nil: return
+            match mir_loop_codec_charge_v1(scope.account, 32):
+                case Ok(_): ()
+                case Err(error):
+                    self.source_region_default_latch_v1(error)
+                    return
+            val owner = scope.active ?? SymbolId(id: -1)
+            val actual = self.builder.current_function
+            if actual == nil or actual.unwrap().symbol.id != owner.id:
+                self.source_region_default_latch_v1("SOURCE-DEFAULT-SCHEDULE: resolver belongs to another active function")
+                return
+            if val symbol = resolved:
+                match default_schedule_enqueue_v1(scope, symbol, false):
+                    case Ok(_): ()
+                    case Err(error): self.source_region_default_latch_v1(error)
+
+    me source_region_record_relocated_default_v1(record: MirHirExpressionArtifactV1, expression: HirExpr):
+        if val scope = self.source_region_default_schedule_v1:
+            if scope.failure != "" or scope.active == nil: return
+            match self.source_region_record_relocated_default_inner_v1(record, expression):
+                case Ok(_): ()
+                case Err(error): self.source_region_default_latch_v1(error)
+
+    me source_region_record_relocated_default_inner_v1(record: MirHirExpressionArtifactV1,
+            expression: HirExpr) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        val owner = scope.active ?? SymbolId(id: -1)
+        val actual = self.builder.current_function
+        if actual == nil or actual.unwrap().symbol.id != owner.id:
+            return Err("SOURCE-DEFAULT-SCHEDULE: default belongs to another active function")
+        val category = canonical_enum_text_bound_v1(record.category, scope.account)?
+        mir_loop_codec_charge_v1(scope.account, canonical_enum_sum_v1(category, 128)?)?
+        if record.category != "field-default": return Ok(())
+        self.source_region_record_default_bytes_v1(Some(record), record.module_name, record.member_index, expression)
+
+    me source_region_record_local_default_v1(owner: text, index: i64, expression: HirExpr):
+        if val scope = self.source_region_default_schedule_v1:
+            if scope.failure != "" or scope.active == nil: return
+            match self.source_region_record_default_bytes_v1(nil, owner, index, expression):
+                case Ok(_): ()
+                case Err(error): self.source_region_default_latch_v1(error)
+
+    me source_region_record_default_bytes_v1(artifact: MirHirExpressionArtifactV1?,
+            field_owner: text, field_index: i64, expression: HirExpr) -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        val original = scope.active ?? SymbolId(id: -1)
+        val actual = self.builder.current_function
+        if original.id < 0 or actual == nil or actual.unwrap().symbol.id != original.id:
+            return Err("SOURCE-DEFAULT-SCHEDULE: default occurrence has no actual function")
+        val owner_bound = canonical_enum_text_bound_v1(field_owner, scope.account)?
+        mir_loop_codec_charge_v1(scope.account, owner_bound)?
+        if field_owner == "" or field_index < 0 or scope.active_occurrence < 0:
+            return Err("SOURCE-DEFAULT-SCHEDULE: default field locator absent")
+        val blob = mir_hir_expression_encode_v1(expression, Some(scope.account))?
+        default_schedule_append_v1(scope, scope.occurrences.len(), 512)?
+        if scope.active_occurrence == 9223372036854775807:
+            return Err("SOURCE-DEFAULT-SCHEDULE: occurrence ordinal overflow")
+        scope.occurrences = scope.occurrences.push(MirSourceRegionDefaultOccurrenceV1(original: original,
+            ordinal: scope.active_occurrence, artifact: artifact, field_owner: field_owner,
+            field_index: field_index, target_blob: blob))
+        scope.active_occurrence = scope.active_occurrence + 1
+        Ok(())
+
+    me source_region_finish_default_schedule_v1() -> Result<(), text>:
+        val scope = match self.source_region_default_schedule_v1:
+            case Some(actual): actual
+            case _: return Err("SOURCE-DEFAULT-SCHEDULE: owner scratch absent")
+        mir_loop_codec_charge_v1(scope.account, 64)?
+        if (scope.failure != "" or not scope.bound or scope.active != nil or scope.cursor != scope.queue.len() or
+                scope.completed.len() != scope.queue.len()):
+            return Err("SOURCE-DEFAULT-SCHEDULE: ordinary closure capture is incomplete")
+        Ok(())
+
+    me source_region_clear_default_scope_v1():
+        self.source_region_default_schedule_v1 = nil
