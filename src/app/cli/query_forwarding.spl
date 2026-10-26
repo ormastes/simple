@@ -48,18 +48,27 @@ fn _fw_strip_modifiers(t: text) -> text:
         r = r.substring(7)
     r
 
-# Type named by `val|var recv = Type(..)` or `recv: Type` anywhere in the file.
-fn _fw_receiver_type(lines: [text], recv: text) -> text:
-    for raw in lines:
-        val t = raw.trim()
+# Type of `recv` from the NEAREST declaration at or before line index `from`:
+# `val|var recv = Type(..)`, `val|var recv: Type`, or a `recv: Type` parameter
+# of the enclosing fn signature. The search stops at the enclosing top-level fn.
+fn _fw_receiver_type(lines: [text], recv: text, from: i64) -> text:
+    var i = from
+    while i >= 0:
+        val t = _fw_strip_modifiers(lines[i].trim())
         for kw in ["val ", "var "]:
             if t.starts_with(kw + recv + " = "):
-                val rhs = t.substring(kw.len() + recv.len() + 3).trim()
-                val w = _fw_word_from(rhs, 0)
+                val w = _fw_word_from(t.substring(kw.len() + recv.len() + 3).trim(), 0)
                 if w != "" and w.substring(0, 1) >= "A" and w.substring(0, 1) <= "Z":
                     return w
             if t.starts_with(kw + recv + ": "):
                 return _fw_word_from(t.substring(kw.len() + recv.len() + 2), 0)
+        if t.starts_with("fn ") or t.starts_with("me "):
+            val p = t.index_of(recv + ": ")
+            if p > 0 and not _fw_word_char(_fw_ch(t, p - 1)):
+                return _fw_word_from(t, p + recv.len() + 2)
+            if _fw_indent(lines[i]) == 0:
+                return ""
+        i = i - 1
     ""
 
 # (first line index, end line index exclusive) of `class|struct|trait <ty>`; (-1, -1) if absent.
@@ -134,6 +143,13 @@ fn _fw_resolve_member(lines: [text], ty: text, member: text, assign: bool, depth
                 val field = t.substring(eq + 1).trim()
                 val fl = _fw_find_member(lines, block, field, true)
                 if fl >= 0:
+                    # Forward only methods the named trait declares. If the trait
+                    # is not declared in this file we cannot read its method set,
+                    # so we keep forwarding every inner method (unverified).
+                    val tb = _fw_type_block(lines, trait_name)
+                    if tb.0 >= 0 and _fw_find_member(lines, tb, member, false) < 0:
+                        i = i + 1
+                        continue
                     val fty = _fw_word_from(lines[fl].trim().substring(field.len() + 1).trim(), 0)
                     val inner = _fw_resolve_member(lines, fty, member, assign, depth + 1)
                     if inner.name != "":
@@ -141,41 +157,78 @@ fn _fw_resolve_member(lines: [text], ty: text, member: text, assign: bool, depth
         i = i + 1
     none
 
-# Member reference at a 1-based position, resolved with forwarding semantics.
-# Returns a hit with name == "" when the position is not a resolvable `recv.x`.
+fn _fw_chars(value: text) -> [text]:
+    var chars: [text] = []
+    for part in value.split(""):
+        if part != "":
+            chars = chars.push(part)
+    chars
+
+fn _fw_join(chars: [text], a: i64, b: i64) -> text:
+    var out: [text] = []
+    var i = a
+    while i < b and i < chars.len():
+        out = out.push(chars[i])
+        i = i + 1
+    out.join("")
+
+# True when char index `k` of the line sits inside a string literal or after a
+# `#` comment start.
+fn _fw_in_string_or_comment(cc: [text], k: i64) -> bool:
+    var in_str = false
+    var i = 0
+    while i < k and i < cc.len():
+        if cc[i] == "\\" and in_str:
+            i = i + 1
+        elif cc[i] == "\"":
+            in_str = not in_str
+        elif cc[i] == "#" and not in_str:
+            return true
+        i = i + 1
+    in_str
+
+# Member reference at a 1-based position (`col` counts characters, like
+# extract_symbol_at). Returns a hit ONLY when forwarding applies (via != ""):
+# accessor forwarding or alias forwarding. Plain fields/methods return a
+# no-hit so the caller keeps the existing engine path. Tab-indented files are
+# skipped, and `_`-prefixed members never forward (same as the seed).
 fn forwarding_resolve_at(file: text, line_num: i64, col: i64) -> ForwardHit:
     val none = ForwardHit(line: 0, kind: "", owner: "", name: "", decl: "", via: "")
     val content = file_read_text(file) ?? ""
-    if content == "":
+    if content == "" or content.contains("\t"):
         return none
     val lines = content.split("\n")
     if line_num < 1 or line_num > lines.len():
         return none
-    val cur = lines[line_num - 1]
+    val cc = _fw_chars(lines[line_num - 1])
     var s = col - 1
-    if s < 0 or s >= cur.len() or not _fw_word_char(_fw_ch(cur, s)):
+    if s < 0 or s >= cc.len() or not _fw_word_char(cc[s]):
         return none
-    while s > 0 and _fw_word_char(_fw_ch(cur, s - 1)):
+    while s > 0 and _fw_word_char(cc[s - 1]):
         s = s - 1
-    val member = _fw_word_from(cur, s)
-    if _fw_ch(cur, s - 1) != "." or s < 2:
+    var e = s
+    while e < cc.len() and _fw_word_char(cc[e]):
+        e = e + 1
+    val member = _fw_join(cc, s, e)
+    if member.starts_with("_") or s < 2 or cc[s - 1] != ".":
         return none
     var rs = s - 1
-    while rs > 0 and _fw_word_char(_fw_ch(cur, rs - 1)):
+    while rs > 0 and _fw_word_char(cc[rs - 1]):
         rs = rs - 1
-    val recv = cur.substring(rs, s - 1)
+    val recv = _fw_join(cc, rs, s - 1)
     if recv == "":
         return none
-    var k = s + member.len()
-    while _fw_ch(cur, k) == " ":
+    var k = e
+    while k < cc.len() and cc[k] == " ":
         k = k + 1
-    val assign = _fw_ch(cur, k) == "=" and _fw_ch(cur, k + 1) != "="
-    val ty = _fw_receiver_type(lines, recv)
+    val next_ch = if k + 1 < cc.len(): cc[k + 1] else: ""
+    val assign = k < cc.len() and cc[k] == "=" and next_ch != "=" and not _fw_in_string_or_comment(cc, k)
+    val ty = _fw_receiver_type(lines, recv, line_num - 1)
     if ty == "":
         return none
     val hit = _fw_resolve_member(lines, ty, member, assign, 0)
-    if hit.name == "":
+    if hit.name == "" or hit.via == "":
         return none
-    ForwardHit(line: hit.line, kind: hit.kind, owner: hit.owner, name: hit.name, decl: hit.decl, via: if hit.via != "": hit.via + " (" + recv + "." + member + ")" else: "")
+    ForwardHit(line: hit.line, kind: hit.kind, owner: hit.owner, name: hit.name, decl: hit.decl, via: hit.via + " (" + recv + "." + member + ")")
 
 export ForwardHit, forwarding_resolve_at
