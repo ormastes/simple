@@ -9,7 +9,7 @@ Writes under a scratch dir in the working directory and deletes it.
 Design: cache plan step 1 (S1-4).
 """
 use app.io.env_ops.{env_get, env_set}
-use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_create_all, getpid}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_create_all, dir_list, getpid}
 use std.nogc_async_mut.async.poll.{Poll}
 use std.nogc_async_mut.async.future.{Future}
 use compiler.driver.cache.module_artifacts_v1.{module_artifact_publish_atomic_v1, module_artifact_publish_atomic_async_v1}
@@ -23,8 +23,11 @@ fn _pa_ready(f: Future<bool>) -> bool:
         case Poll.Pending: false
 
 fn _pa_tmp_leftovers(dir: text, dest: text) -> bool:
-    # temp name is "{dest}.{pid}.{hash}.tmp"; the probe covers the pid-prefixed form
-    file_exists("{dest}.{getpid()}.tmp")
+    # true if the directory holds any file ending in .tmp (temp name embeds pid + xxh3)
+    var found = false
+    for e in dir_list(dir):
+        if e.ends_with(".tmp"): found = true
+    found
 
 describe "publish_atomic async":
     before_each:
@@ -56,6 +59,7 @@ describe "publish_atomic async":
         expect(_pa_ready(module_artifact_publish_atomic_async_v1(d, "new-content"))).to_be(true)
         env_set("SIMPLE_ASYNC_WRITES", prev)
         expect(file_read(d)).to_equal("new-content")
+        expect(_pa_tmp_leftovers(dir, d)).to_be(false)
         file_delete(d)
 
     it "failed write leaves destination unchanged and no temp":
@@ -70,4 +74,22 @@ describe "publish_atomic async":
         env_set("SIMPLE_ASYNC_WRITES", prev)
         expect(file_read(d)).to_equal("keep")
         expect(file_exists(bad)).to_be(false)
+        expect(_pa_tmp_leftovers(dir, d)).to_be(false)
         file_delete(d)
+
+    it "non-ASCII content round-trips byte-identical with flag off and on":
+        val dir = _pa_dir()
+        val body = "é→日本 end"
+        val a = "{dir}/u_off.bin"
+        val b = "{dir}/u_on.bin"
+        val prev = env_get("SIMPLE_ASYNC_WRITES")
+        env_set("SIMPLE_ASYNC_WRITES", "")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(a, body))).to_be(true)
+        env_set("SIMPLE_ASYNC_WRITES", "1")
+        expect(_pa_ready(module_artifact_publish_atomic_async_v1(b, body))).to_be(true)
+        env_set("SIMPLE_ASYNC_WRITES", prev)
+        expect(file_read(a)).to_equal(body)
+        expect(file_read(b)).to_equal(body)
+        expect(_pa_tmp_leftovers(dir, b)).to_be(false)
+        file_delete(a)
+        file_delete(b)
