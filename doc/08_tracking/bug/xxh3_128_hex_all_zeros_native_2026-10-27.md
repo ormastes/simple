@@ -1,6 +1,6 @@
 # Native `_hex64` makes `xxh3_128_hex` return all zeros (2026-10-27)
 
-**Status:** OPEN
+**Status:** FIXED (workaround in _hex64; codegen bug open)
 **Severity:** P1. A native build that falls back to pure-Simple XXH3 gives every input the same cache key.
 **Found by:** XXH3 lane native benchmark, using stage2 `C:/dev/p3new/stage2.exe` (sha `e4746b05…`) on Windows x64.
 
@@ -35,3 +35,27 @@ yields nibble 0 or "0" every time.
 1. Reduce the repro to a minimal native program: print `_hex64(0x28241db6188879c2u64)`.
 2. Fix the codegen bug, or as a stopgap rewrite `_hex64` without the text-array index.
 3. Add a native-lane check that `xxh3_128_hex([0x61,0x62,0x63])` == `06b05ab6733a618578af5f94892f3950`.
+
+## Resolution (2026-10-27)
+Bisected natively with stage2 (`C:/dev/p3new/stage2.exe`). Miscompiled construct:
+`.to_i64()` called on a parenthesised u64 binary-op result evaluates to 0.
+Variable u64 shifts, `[text]` literal indexing, text concatenation, and `v.to_i64()`
+on a plain variable are all correct.
+
+Minimal repro (native prints `t1=2 t2=0 t3=<v> t4=<v>`; expected `t2=2`):
+```
+fn t1(v: u64) -> i64:
+    (v & 0xFu64) as i64        # 2 (ok)
+fn t2(v: u64) -> i64:
+    (v & 15u64).to_i64()       # 0 (WRONG)
+# main: val v = 0x28241db6188879c2u64; print "{t1(v)} {t2(v)}"
+```
+Also seen: `v.to_i64()` directly on a `val v = 0x...u64` local in `main` inside string
+interpolation segfaulted the binary (not isolated further).
+
+Fix: `_hex64` in `src/lib/common/crypto/xxh3.spl` uses `as i64`. The `_hex64` in
+`xxh3_dual.spl` already used `as i64` and was verified correct natively, so it is unchanged.
+`xxh3_128_text` now returns "" (the existing failure sentinel; `digest_v1_new` rejects it)
+when the fallback yields the all-zero digest. Native check: abc ->
+06b05ab6733a618578af5f94892f3950, empty -> 99aa06d3014798d86001c324468d497f.
+Open: fix the `.to_i64()`-on-binary-op codegen bug itself.
