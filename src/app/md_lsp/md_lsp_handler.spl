@@ -4,6 +4,7 @@
 # (same pattern as json_helpers.spl / lsp_transport.spl).
 
 use std.common.markdown
+use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks_with_ranges, compute_folding_ranges}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
 
 # ---------------------------------------------------------------------------
@@ -150,12 +151,12 @@ fn lsp_uri_to_path(uri: text) -> text:
 # Response builders
 # ---------------------------------------------------------------------------
 
-fn _md_lsp_ok_response(req_id: i64, result_json: text) -> text:
-    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", str(req_id)) + "," + _jp("result", result_json) + "}"
+fn _md_lsp_ok_response(req_id: text, result_json: text) -> text:
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", req_id) + "," + _jp("result", result_json) + "}"
 
-fn _md_lsp_error_response(req_id: i64, code: i64, message: text) -> text:
+fn _md_lsp_error_response(req_id: text, code: i64, message: text) -> text:
     val err = "{" + _jp("code", str(code)) + "," + _jp("message", _js(message)) + "}"
-    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", str(req_id)) + "," + _jp("error", err) + "}"
+    "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", req_id) + "," + _jp("error", err) + "}"
 
 # ---------------------------------------------------------------------------
 # Params extraction helpers
@@ -223,13 +224,13 @@ fn _md_lsp_get_line(content: text, line_num: i64) -> text:
     val lines = split_lines(content)
     if line_num < 0 or line_num >= lines.length():
         return ""
-    lines.get(line_num)
+    lines[line_num]
 
 # ---------------------------------------------------------------------------
 # Capability response
 # ---------------------------------------------------------------------------
 
-fn md_lsp_initialize(req_id: i64) -> text:
+fn md_lsp_initialize_raw(req_id: text) -> text:
     val trigger_chars = "[" + _js("[") + "," + _js("#") + "," + _js("(") + "]"
     val completion_provider = "{" + _jp("triggerCharacters", trigger_chars) + "}"
     var caps = "{"
@@ -248,7 +249,7 @@ fn md_lsp_initialize(req_id: i64) -> text:
 # Completion
 # ---------------------------------------------------------------------------
 
-fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_completion_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
@@ -266,7 +267,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = headings.length()
         while i < count:
-            val heading = headings.get(i)
+            val heading = headings[i]
             val heading_text = heading.1
             val slug = markdown_slugify(heading_text)
             val label = "#" + slug
@@ -282,7 +283,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = all_uris.length()
         while i < count:
-            val doc_uri = all_uris.get(i)
+            val doc_uri = all_uris[i]
             val label = lsp_uri_to_path(doc_uri)
             val item = "{" + _jp("label", _js(label)) + "," + _jp("kind", "17") + "}"
             if not first:
@@ -296,7 +297,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         var i = 0
         val count = headings.length()
         while i < count:
-            val heading = headings.get(i)
+            val heading = headings[i]
             val heading_text = heading.1
             val anchor = "#" + markdown_slugify(heading_text)
             val item = "{" + _jp("label", _js(anchor)) + "," + _jp("kind", "15") + "," + _jp("detail", _js(heading_text)) + "}"
@@ -314,7 +315,7 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
 # Hover
 # ---------------------------------------------------------------------------
 
-fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_hover_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
@@ -352,7 +353,7 @@ fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
 # Definition
 # ---------------------------------------------------------------------------
 
-fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_definition_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
@@ -379,7 +380,7 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
     var j = 0
     val line_count = doc_lines.length()
     while j < line_count:
-        val l = doc_lines.get(j)
+        val l = doc_lines[j]
         if l.starts_with("#"):
             var k = 0
             while k < l.len() and l.char_at(k) == "#":
@@ -405,7 +406,7 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
 # Document Symbol
 # ---------------------------------------------------------------------------
 
-fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_document_symbol_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val doc = workspace.get_document(uri)
     val doc_lines = split_lines(doc.content)
@@ -415,7 +416,7 @@ fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace
     var j = 0
     val line_count = doc_lines.length()
     while j < line_count:
-        val l = doc_lines.get(j)
+        val l = doc_lines[j]
         if l.starts_with("#"):
             var k = 0
             while k < l.len() and l.char_at(k) == "#":
@@ -442,7 +443,7 @@ fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace
 # Folding Range
 # ---------------------------------------------------------------------------
 
-fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_folding_range_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val doc = workspace.get_document(uri)
     val lines = split_lines(doc.content)
@@ -454,7 +455,7 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
     var i = 0
     val count = fold_ranges.length()
     while i < count:
-        val fr = fold_ranges.get(i)
+        val fr = fold_ranges[i]
         var item = "{" + _jp("startLine", str(fr.from_line)) + "," + _jp("endLine", str(fr.to_line))
         if fr.kind != "":
             item = item + "," + _jp("kind", _js(fr.kind))
@@ -471,7 +472,7 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
 # Code Actions
 # ---------------------------------------------------------------------------
 
-fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_code_action_raw(params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position_from_range(params_json)
     val line_num = pos.0
@@ -551,21 +552,46 @@ fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWork
 # Main request dispatcher
 # ---------------------------------------------------------------------------
 
-fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+fn md_lsp_handle_request_raw(method: text, params_json: text, req_id: text, workspace: MdWorkspace) -> text:
     if method == "initialize":
-        return md_lsp_initialize(req_id)
+        return md_lsp_initialize_raw(req_id)
     if method == "textDocument/completion":
-        return md_lsp_completion(params_json, req_id, workspace)
+        return md_lsp_completion_raw(params_json, req_id, workspace)
     if method == "textDocument/hover":
-        return md_lsp_hover(params_json, req_id, workspace)
+        return md_lsp_hover_raw(params_json, req_id, workspace)
     if method == "textDocument/definition":
-        return md_lsp_definition(params_json, req_id, workspace)
+        return md_lsp_definition_raw(params_json, req_id, workspace)
     if method == "textDocument/documentSymbol":
-        return md_lsp_document_symbol(params_json, req_id, workspace)
+        return md_lsp_document_symbol_raw(params_json, req_id, workspace)
     if method == "textDocument/foldingRange":
-        return md_lsp_folding_range(params_json, req_id, workspace)
+        return md_lsp_folding_range_raw(params_json, req_id, workspace)
     if method == "textDocument/codeAction":
-        return md_lsp_code_action(params_json, req_id, workspace)
+        return md_lsp_code_action_raw(params_json, req_id, workspace)
     if method == "shutdown":
         return _md_lsp_ok_response(req_id, "null")
     _md_lsp_error_response(req_id, -32601, "Method not found: " + method)
+
+# Integer adapters preserve existing in-process callers; wire IDs stay lexical.
+fn md_lsp_initialize(req_id: i64) -> text:
+    md_lsp_initialize_raw(str(req_id))
+
+fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_completion_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_hover_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_definition_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_document_symbol_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_folding_range_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_code_action_raw(params_json, str(req_id), workspace)
+
+fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    md_lsp_handle_request_raw(method, params_json, str(req_id), workspace)

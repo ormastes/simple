@@ -90,3 +90,20 @@ This is a functional protocol failure, not PASS. Captures:
 Markdown remains unqualified for landing despite compile/link and handshake
 success. The same cohort's parser/fence and document-mutation requirements
 remain to be verified. No unsupported full-feature readiness inference.
+
+## Markdown request correlation repair
+
+Phase2 Markdown attempt three compiled/linked the19-module closure successfully
+(`markdown-ids/`). Wire dispatch now validates the root envelope and carries its
+lexical ID to raw response handlers. Existing integer-call interfaces remain
+adapters. This removes both string-to-integer coercion and failed optional
+numeric conversion defaulting to zero, without accepting nested IDs as root IDs.
+
+Actual native folding requests passed with IDs3, string-id, an escaped quote/
+backslash string, integer9007199254740993, and genuine Korean/emoji. The live
+document produced two fold ranges for each. Seven responses exactly matched
+initialize, five requests, shutdown; notifications produced no replies, frame
+lengths parsed exactly, and exit0. Captures: `markdown-ids.stdout`/`.stderr`.
+Added3 meaningful SSpec examples for raw success/error IDs and the retained
+integer facade; these are authored, not executed by the crashed general runner.
+Document changes, parser edge cases, and remaining qualification are incomplete.

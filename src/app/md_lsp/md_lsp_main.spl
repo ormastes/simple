@@ -8,20 +8,22 @@
 #   \r\n
 #   <N bytes of JSON body>
 
-extern fn rt_stdin_read_line() -> text
-extern fn rt_stdin_read_bytes(n: i64) -> text
-extern fn rt_stdout_write(s: text)
-extern fn rt_stderr_write(s: text)
+extern fn rt_stdin_read_line_text() -> text
+extern fn rt_stdin_read_chars_text(n: i64) -> text
+extern fn rt_stdout_write_text(s: text) -> i64
+extern fn rt_stdout_flush()
+extern fn rt_eprintln(s: text)
 
 use app.md_lsp.md_lsp_workspace
 use app.md_lsp.md_lsp_handler
+use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 fn _md_lsp_log(message: text):
-    rt_stderr_write("[md-lsp] " + message + "\n")
+    rt_eprintln("[md-lsp] " + message)
 
 fn _md_lsp_parse_content_length(header_line: text) -> i64:
     val prefix = "Content-Length:"
@@ -76,7 +78,7 @@ fn _md_lsp_extract_field(json: text, key: text) -> text:
                 depth = depth + 1
             elif ch == "}" or ch == "]":
                 depth = depth - 1
-            parts.push(ch)
+            parts = parts.push(ch)
             j = j + 1
             if depth == 0:
                 return parts.join("")
@@ -90,7 +92,7 @@ fn _md_lsp_extract_field(json: text, key: text) -> text:
             val ch = after.char_at(j)
             if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
                 return parts.join("")
-            parts.push(ch)
+            parts = parts.push(ch)
             j = j + 1
         parts.join("")
 
@@ -118,7 +120,7 @@ fn md_lsp_server_main():
         for _hiter in range(0, 100):
             if found_header:
                 break
-            val header_line = rt_stdin_read_line()
+            val header_line = rt_stdin_read_line_text()
             if header_line == "":
                 running = false
                 return
@@ -130,28 +132,33 @@ fn md_lsp_server_main():
             continue
 
         # Step 2: Read empty separator line (\r\n)
-        val _sep = rt_stdin_read_line()
+        val _sep = rt_stdin_read_line_text()
 
         # Step 3: Read exactly content_length bytes of JSON body
-        val json = rt_stdin_read_bytes(content_length)
+        val json = rt_stdin_read_chars_text(content_length)
         if json == "":
             continue
 
-        # Step 4: Parse fields
-        val method = _md_lsp_extract_field(json, "method")
-        val req_id = _md_lsp_extract_field(json, "id")
-        val params_json = _md_lsp_extract_field(json, "params")
-
-        _md_lsp_log("recv method=" + method + " id=" + req_id)
+        # The root envelope owns correlation; do not coerce string or large IDs.
+        val envelope = mcp_parse_request_envelope_v1(json)
+        if not envelope.valid:
+            val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
+            val response = _md_lsp_error_response(envelope.request_id_raw, envelope.error_code, reason)
+            rt_stdout_write_text(_md_lsp_frame(response))
+            rt_stdout_flush()
+            continue
+        val method = envelope.method
+        val params_json = envelope.params_raw
 
         # Step 5: Dispatch
         if method == "exit":
             running = false
-        elif _md_lsp_has_id(json):
-            val response = md_lsp_handle_request(method, params_json, req_id, workspace)
+        elif envelope.has_id:
+            val response = md_lsp_handle_request_raw(method, params_json, envelope.request_id_raw, workspace)
             if response != "":
                 val framed = _md_lsp_frame(response)
-                rt_stdout_write(framed)
+                rt_stdout_write_text(framed)
+                rt_stdout_flush()
         else:
             md_lsp_handle_notification(method, params_json, workspace)
 
