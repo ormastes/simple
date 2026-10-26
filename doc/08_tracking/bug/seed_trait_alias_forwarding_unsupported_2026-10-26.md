@@ -42,3 +42,9 @@ Green on both engines: `forwarded=hello, world`, `explicit_wins=HEY world`.
 without checking for an explicit definition in the class, so `LoudHost`
 (explicit `greet` + alias) gets a duplicate `greet` from the desugar pass. The
 seed now skips it; the desugar pass should do the same.
+
+## Known limits (review follow-ups)
+
+- The trait must be defined in the same module. An imported trait is a parse error, while the desugar pass silently forwards nothing.
+- `alias` inside a nested (non-top-level) class or inside a mixin body is a parse error, not a silent drop.
+- An explicit `self` parameter on the trait method is not passed as an argument (`self.inner.tag(n)`).
