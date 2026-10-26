@@ -67,3 +67,13 @@ so enabling enforcement unconditionally will reject self-hosted sources; needs a
      accepted by the use-path parser. The two peer-layer specs need that.
 5. Verify: spec 17/17; dependency/member_visibility_spec 10/10; dependency/visibility_spec 20/20;
    mdsoc/feature_layer_matrix_spec 16/16; then a self-host lint/lowering sweep to size the existing private-field fallout.
+
+## Progress 2026-10-27: field visibility plumbing landed in the working tree (enforcement still OFF)
+- Parser now records per-field visibility (`decl_field_visibility`, text codes, `pub(friend)` = "internal"),
+  encoded/decoded in the flat pool (codec `spl-flatpool-v12-field-visibility`, cold cache on first run),
+  and `flat_parser_field_from_nodes` sets `ParserField.visibility`/`is_public` (REQ-PARSER-FIELD-VIS-001).
+- Spec `frontend/flat_pool_field_visibility_spec.spl`: red 0/4 -> green 4/4.
+- Regression: hir/member_visibility_enforcement_spec 6/17 -> 6/17 (unchanged, HIR check not wired);
+  dependency/member_visibility_spec 10/10 -> 10/10; flat_pool_codec_roundtrip 18/18; flat_pool_truncation 13/13.
+  Pre-existing and unchanged: facet_flat_decl_codec 0/2, frontend_shared_parse_cas_v1 2/4, flat_ast_if_else_bridge executed=0.
+- Remaining: HIR enforcement behind opt-in switch, then bulk `pub` migration / ratchet baseline.
