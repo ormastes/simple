@@ -7,7 +7,7 @@ use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_try_productio
 # CompilerDriver MIR lowering and diagnostic methods.
 #
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.mir.mir_verify.{mir_verify_module, mir_verify_finding_is_mandatory_v1}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env, mir_verify_warning_cap}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value, warning_phase_env_var_name}
@@ -462,8 +462,8 @@ impl CompilerDriver:
         recorded, so nothing invalid reaches codegen.
 
         Levels are resolved ONCE here. A malformed SIMPLE_MIR_VERIFY_LEVELS
-        is a build error (fail closed), and when every rule is `off` the
-        walk itself is skipped (receipt state=skipped). Warning lines are
+        is a build error (fail closed). Missing-carrier structural verification
+        remains mandatory even when all configurable rules are `off`. Warning lines are
         capped per rule per build; errors are never capped."""
         log_phase("mir_verify:levels:start")
         val levels = mir_verify_levels_from_env()
@@ -514,6 +514,13 @@ impl CompilerDriver:
             functions_total = functions_total + report.functions_checked
             instructions_total = instructions_total + report.instructions_checked
             for finding in report.findings:
+                # Structural absence is never suppressible or downgradeable:
+                # codegen cannot safely dereference a missing type carrier.
+                if mir_verify_finding_is_mandatory_v1(finding):
+                    findings_total = findings_total + 1
+                    fatal_total = fatal_total + 1
+                    self.ctx.add_error(finding.format())
+                    continue
                 # Per-rule level: registry default (all `warning` for the
                 # warn-first landing) overridden by SIMPLE_MIR_VERIFY_LEVELS
                 # ("MIRV-002=error,MIRV-005e=off,*=warning"). `off` = not

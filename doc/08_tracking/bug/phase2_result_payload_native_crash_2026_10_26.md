@@ -73,3 +73,19 @@ by Astra; source edits still require a rebuilt compiler and real fixture/suite
 execution before acceptance. LLDB exit0 is debugger success, NOT compilation:
 the compiler stopped on a fault, and no output executable exists.
 Evidence: build/tooling-phase2/astra-alt/result-debugger-ready/.
+
+## Reviewed verifier source repair
+
+The speculative diagnostic-loop change was removed. The actual owner now
+checks missing carriers before dereferencing and reports mandatory MIRV-001n.
+Binary/default and SDN rule registries agree; wildcard/named off or warning
+and driver warning-phase cannot admit this structural defect. Result/Tuple
+walks prioritize a missing sibling over an earlier suppressible unresolved
+reason (Astra caught and required this P1 masking fix). Actual module/driver
+SSpec additions cover these combinations and valid controls.
+
+Astra's scoped source review found no remaining P0/P1 in that packet. This is
+not executable qualification: no changed compiler was built, the absent type's
+producer remains unproved, and the original valid Result program must still
+compile and execute rather than merely receive a safer error. All authored
+compiler regressions remain UNRUN under the exhausted shared diagnostic budget.
