@@ -3,11 +3,62 @@
 # The shared output selector is used by the authoritative worker and the
 # coordinator's scheduling preflight. No compiler build or worker is launched.
 use app.cli.native_build_output_plan.{native_build_output_format_v1,
-    native_build_mir_output_requires_full_set_v1, native_build_is_value_consuming_flag}
+    native_build_mir_output_requires_full_set_v1, native_build_is_value_consuming_flag,
+    native_build_apply_failure_policy_v1}
 use compiler.common.driver_core_modes.{driver_output_format_is_both}
 use std.io_runtime.{file_read}
+use app.io.env_ops.{env_get, env_set}
 
 describe "native-build MIR output preflight":
+    it "applies ordered failure flags and preserves inherited env without flags":
+        val previous_go_to_end = env_get("SIMPLE_NATIVE_GO_TO_END") ?? ""
+        val previous_fail_fast = env_get("SIMPLE_COMPILE_FAIL_FAST") ?? ""
+        env_set("SIMPLE_NATIVE_GO_TO_END", "ambient-go-to-end")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--fail-fast", "--go-to-end", "--keep-going"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("0")
+        native_build_apply_failure_policy_v1(["--go-to-end", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        env_set("SIMPLE_NATIVE_GO_TO_END", "ambient-go-to-end")
+        env_set("SIMPLE_COMPILE_FAIL_FAST", "ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output", "--go-to-end", "--entry", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("ambient-go-to-end")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output=--go-to-end", "--entry=--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("ambient-go-to-end")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("ambient-fail-fast")
+        native_build_apply_failure_policy_v1(["--output", "native.o", "--go-to-end",
+            "--entry", "entry.spl", "--fail-fast"])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        native_build_apply_failure_policy_v1([])
+        expect(env_get("SIMPLE_NATIVE_GO_TO_END") ?? "").to_equal("1")
+        expect(env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "").to_equal("1")
+        env_set("SIMPLE_NATIVE_GO_TO_END", previous_go_to_end)
+        env_set("SIMPLE_COMPILE_FAIL_FAST", previous_fail_fast)
+
+    it "validates bootstrap native-build args before mutating failure policy":
+        val bootstrap = file_read("src/app/cli/bootstrap_main.spl")
+        val coordinator_start = bootstrap.index_of("fn run_bootstrap_native_build_coordinator(args: [text])")
+        val coordinator_end = bootstrap.index_of("fn native_build_runtime_bundle_is_removed")
+        expect(coordinator_start >= 0 and coordinator_end > coordinator_start).to_equal(true)
+        val coordinator = bootstrap.substring(coordinator_start, coordinator_end)
+        val validation = coordinator.index_of("cli_native_build_option_error(worker_args, true)")
+        val policy = coordinator.index_of("native_build_apply_failure_policy_v1(worker_args)")
+        val child_route = coordinator.index_of("bootstrap_capsule_shard_child_env(args)")
+        expect(validation >= 0 and policy > validation and child_route > policy).to_equal(true)
+        val stage3_start = bootstrap.index_of("if env_get(\"SIMPLE_BOOTSTRAP_STAGE3\") == \"1\":")
+        val stage3_end = bootstrap.index_of("if env_get(\"SIMPLE_BOOTSTRAP_STAGE4\") != \"1\":")
+        expect(stage3_start >= 0 and stage3_end > stage3_start).to_equal(true)
+        val stage3 = bootstrap.substring(stage3_start, stage3_end)
+        val focused_validation = stage3.index_of("cli_native_build_option_error(worker_args, true)")
+        val focused_policy = stage3.index_of("native_build_apply_failure_policy_v1(worker_args)")
+        val focused_prepass = stage3.index_of("bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir, stage3_allow_mir)")
+        expect(focused_validation >= 0 and focused_policy > focused_validation and
+            focused_prepass > focused_policy).to_equal(true)
+
     it "shares the worker's default dynload and explicit one-binary format":
         expect(driver_output_format_is_both(native_build_output_format_v1("dynload", false, false, false))).to_equal(true)
         expect(driver_output_format_is_both(native_build_output_format_v1("one-binary", false, false, false))).to_equal(false)

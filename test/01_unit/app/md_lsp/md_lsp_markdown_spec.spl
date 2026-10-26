@@ -1,0 +1,52 @@
+use std.spec.*
+use app.md_lsp.md_lsp_markdown.{split_lines, parse_blocks, extract_headings, compute_folding_ranges}
+
+describe "Markdown LSP typed parser views":
+    it "keeps adjacent fenced blocks in separate folding ranges":
+        step("Close one fence before opening the next on the following line")
+        val blocks = parse_blocks(split_lines("```\na\n```\n```\nb\n```"))
+        val ranges = compute_folding_ranges(blocks)
+        expect(ranges.len()).to_equal(2)
+        expect(ranges[0].from_line).to_equal(0)
+        expect(ranges[0].to_line).to_equal(2)
+        expect(ranges[1].from_line).to_equal(3)
+        expect(ranges[1].to_line).to_equal(5)
+
+    it "keeps fenced example headings out of completion candidates":
+        step("Parse a document containing a real heading and a fenced example")
+        val lines = split_lines("# Introduction\n```markdown\n# Example only\n```\n## Details")
+        val blocks = parse_blocks(lines)
+        val headings = extract_headings(blocks)
+        expect(headings.len()).to_equal(2)
+        expect(headings[0].0).to_equal(1)
+        expect(headings[0].1).to_equal("Introduction")
+        expect(headings[1].0).to_equal(2)
+        expect(headings[1].1).to_equal("Details")
+
+    it "ends a section before the next sibling heading":
+        step("Compute folding ranges with a nested section and a sibling section")
+        val blocks = parse_blocks(split_lines("# One\nbody\n## Child\nchild body\n# Two\nlast"))
+        val ranges = compute_folding_ranges(blocks)
+        expect(ranges.len()).to_equal(3)
+        expect(ranges[0].from_line).to_equal(0)
+        expect(ranges[0].to_line).to_equal(3)
+        expect(ranges[1].from_line).to_equal(2)
+        expect(ranges[1].to_line).to_equal(3)
+        expect(ranges[2].from_line).to_equal(4)
+        expect(ranges[2].to_line).to_equal(5)
+
+    it "folds a fenced block including blank lines":
+        step("Parse a fence containing an empty source line")
+        val blocks = parse_blocks(split_lines("before\n```\nx\n\ny\n```\nafter"))
+        val ranges = compute_folding_ranges(blocks)
+        expect(ranges.len()).to_equal(1)
+        expect(ranges[0].from_line).to_equal(1)
+        expect(ranges[0].to_line).to_equal(5)
+        expect(ranges[0].kind).to_equal("region")
+
+    it "does not emit folds for empty or single line documents":
+        step("Compute ranges for documents with no foldable body")
+        val empty = compute_folding_ranges(parse_blocks(split_lines("")))
+        val heading = compute_folding_ranges(parse_blocks(split_lines("# Alone")))
+        expect(empty.len()).to_equal(0)
+        expect(heading.len()).to_equal(0)
