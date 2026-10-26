@@ -6034,11 +6034,35 @@ impl MirLowering:
         if self.nogc_strict and not ownership_known:
             self.error_fatal("unresolved ownership type at constructor storage transfer", Some(source.span))
         false
-    me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
+    me lower_struct_construct(symbol: SymbolId, fallback_struct_name: text, args: [HirCallArg]) -> LocalId:
         """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
         word per field, in declared field order. Named args are matched by name;
         otherwise falls back to positional order. Yields a pointer to the
         constructed storage (see backend translate_aggregate Struct branch)."""
+        var struct_name = fallback_struct_name
+        if val declaration = self.symbols.get_symbol_raw(symbol.id):
+            if declaration.kind == SymbolKind.Struct:
+                # Resolve construction through declaration provenance so two
+                # same-named struct providers keep their registered layouts.
+                struct_name = self.struct_value_layout_key(declaration)
+                if struct_name == "":
+                    # The identity helper already emitted the ambiguity fatal.
+                    var missing_builder = self.builder
+                    val missing_value = missing_builder.emit_const_int(0)
+                    self.builder = missing_builder
+                    return missing_value
+                if not self.struct_field_order.has(struct_name):
+                    self.error_fatal("missing exact struct construction layout '{struct_name}'", Some(declaration.span))
+                    var missing_builder = self.builder
+                    val missing_value = missing_builder.emit_const_int(0)
+                    self.builder = missing_builder
+                    return missing_value
+        if not self.struct_field_order.has(struct_name):
+            self.error_fatal("missing exact struct construction layout '{struct_name}'", nil)
+            var missing_builder = self.builder
+            val missing_value = missing_builder.emit_const_int(0)
+            self.builder = missing_builder
+            return missing_value
         val field_names = self.struct_field_order[struct_name]
         var field_hir_types: [HirType] = []
         if self.struct_field_hir_type.has(struct_name):

@@ -611,10 +611,7 @@ impl MirLowering:
                             var parameter_type_name = ""
                             if val present_parameter_type = optional_parameter_type:
                                 val parameter_type: HirSymbol = present_parameter_type
-                                parameter_type_name = parameter_type.name
-                                match parameter_type.kind:
-                                    case Class: parameter_type_name = mir_class_identity(parameter_type)
-                                    case _: ()
+                                parameter_type_name = self.struct_value_layout_key(parameter_type)
                             val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                             if is_named_struct:
                                 self.struct_value_syms[local.id] = parameter_type_name
@@ -630,10 +627,7 @@ impl MirLowering:
                         case Named(type_symbol, _):
                             val optional_reference_owner: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
                             if val reference_owner = optional_reference_owner:
-                                var reference_owner_name = reference_owner.name
-                                match reference_owner.kind:
-                                    case Class: reference_owner_name = mir_class_identity(reference_owner)
-                                    case _: ()
+                                var reference_owner_name = self.struct_value_layout_key(reference_owner)
                                 if self.struct_field_order.has(reference_owner_name):
                                     self.struct_value_syms[local.id] = reference_owner_name
                         case _: ()
@@ -644,10 +638,9 @@ impl MirLowering:
                     var is_class_param = false
                     if val present_parameter_type = optional_parameter_type:
                         val parameter_type: HirSymbol = present_parameter_type
-                        parameter_type_name = parameter_type.name
+                        parameter_type_name = self.struct_value_layout_key(parameter_type)
                         match parameter_type.kind:
                             case Class:
-                                parameter_type_name = mir_class_identity(parameter_type)
                                 is_class_param = self.class_type_names.has(parameter_type_name)
                             case _: ()
                     val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
@@ -1770,13 +1763,16 @@ impl MirLowering:
         # therefore authoritative when available.
         if self.struct_value_syms.contains(base_local.id):
             val value_name = self.struct_value_syms[base_local.id]
-            if self.struct_field_order.contains(value_name):
+            if self.struct_field_order.contains(value_name) and not self.struct_field_order_conflict_warned.contains(value_name):
                 val value_fields = self.struct_field_order[value_name]
                 var value_idx = 0
                 while value_idx < value_fields.len():
                     if value_fields[value_idx] == field_name:
                         return value_idx
                     value_idx = value_idx + 1
+                if value_name.contains("::"):
+                    self.error_fatal("field '{field_name}' is absent from exact value layout '{value_name}'", Some(base.span))
+                    return 0
 
         if self.result_err_record_owners.contains(base_local.id):
             self.error_fatal("Result Err record field has no exact provider layout: {field_name}", Some(base.span))
@@ -1804,7 +1800,10 @@ impl MirLowering:
                 # Demand-on-read: a provider layout must be this consumer's
                 # before any tier below reads a row for it.
                 self.provider_layout_demand_v1(q_type_symbol.name)
-                val qualified_key = self.composite_layout_key(q_type_symbol)
+                val qualified_key = self.declared_struct_layout_key(self.composite_layout_key(q_type_symbol))
+                if self.struct_field_order_conflict_warned.contains(qualified_key):
+                    self.error_fatal("field '{field_name}' has conflicting exact layout '{qualified_key}'", Some(base.span))
+                    return 0
                 if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):
                     val qualified_fields = self.struct_field_order[qualified_key]
                     var q_idx = 0
@@ -1812,6 +1811,8 @@ impl MirLowering:
                         if qualified_fields[q_idx] == field_name:
                             return q_idx
                         q_idx = q_idx + 1
+                    self.error_fatal("field '{field_name}' is absent from exact struct/class layout '{qualified_key}'", Some(base.span))
+                    return 0
             val sym_id = self.symbol_id_value(found_type_sym)
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
             val optional_fm_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
@@ -1836,6 +1837,8 @@ impl MirLowering:
                 var fm_trusted = true
                 if val present_fm_type_symbol = optional_fm_type_symbol:
                     val fm_type_symbol: HirSymbol = present_fm_type_symbol
+                    if self.struct_field_order_conflict_warned.contains(fm_type_symbol.name):
+                        fm_trusted = false
                     if self.struct_field_order.has(fm_type_symbol.name):
                         val fm_named = self.struct_field_order[fm_type_symbol.name]
                         if fm_named.len() != fields.len():
@@ -1858,7 +1861,7 @@ impl MirLowering:
                         print "[field-idx-collision] type={present_trace_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
             if val present_type_symbol = optional_fm_type_symbol:
                 val type_symbol: HirSymbol = present_type_symbol
-                if self.struct_field_order.has(type_symbol.name):
+                if self.struct_field_order.has(type_symbol.name) and not self.struct_field_order_conflict_warned.contains(type_symbol.name):
                     val named_fields = self.struct_field_order[type_symbol.name]
                     var named_idx = 0
                     while named_idx < named_fields.len():
@@ -1873,6 +1876,10 @@ impl MirLowering:
             if val fallback_symbol = self.symbols.get_symbol_raw(fallback_type_sym.id):
                 if self.provider_layout_missed_v1(fallback_symbol.name):
                     self.error_fatal("provider layout for '{fallback_symbol.name}' was never registered in this consumer (field '{field_name}')", Some(base.span))
+        if self.struct_value_syms.contains(base_local.id):
+            val unresolved_owner = self.struct_value_syms[base_local.id]
+            if self.struct_field_order_conflict_warned.contains(unresolved_owner):
+                self.error_fatal("field '{field_name}' on ambiguous struct/class owner '{unresolved_owner}': no exact layout", Some(base.span))
         if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown
@@ -1890,14 +1897,28 @@ impl MirLowering:
         defaults the second lookup to field index 0.
         """
         if self.struct_value_syms.contains(base_local.id):
-            return Some(self.struct_value_syms[base_local.id])
+            val value_owner = self.struct_value_syms[base_local.id]
+            if not self.struct_field_order_conflict_warned.contains(value_owner):
+                return Some(value_owner)
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
             val optional_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
             if val present_type_symbol = optional_type_symbol:
                 val type_symbol: HirSymbol = present_type_symbol
-                return type_symbol.name
+                var owner = self.declared_struct_layout_key(self.composite_layout_key(type_symbol))
+                if type_symbol.kind == SymbolKind.Class:
+                    owner = mir_class_identity(type_symbol)
+                if self.struct_field_order.has(owner) and not self.struct_field_order_conflict_warned.contains(owner):
+                    return Some(owner)
+                if self.struct_field_order_conflict_warned.contains(type_symbol.name):
+                    self.error_fatal("ambiguous struct/class field owner '{type_symbol.name}': no module-qualified layout matched", Some(base.span))
+                    return nil
+                return Some(type_symbol.name)
+        if self.struct_value_syms.contains(base_local.id):
+            val ambiguous_owner = self.struct_value_syms[base_local.id]
+            if self.struct_field_order_conflict_warned.contains(ambiguous_owner):
+                self.error_fatal("ambiguous struct/class field owner '{ambiguous_owner}': no module-qualified type provenance", Some(base.span))
         nil
 
     fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
