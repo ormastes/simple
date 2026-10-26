@@ -18,6 +18,8 @@
 # No locks: every publication is temp + rename (module_artifacts_v1), and
 # concurrent producers of the same source write identical bytes.
 use std.io_runtime.{file_exists, file_read}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{ParserModule}
@@ -30,6 +32,16 @@ trait SourceReader:
     fn read_tldr(path: text) -> text
     fn update_src(path: text) -> bool
     fn update_tldr(path: text) -> text
+
+    # Async counterparts (cache plan section 4 step 1). The defaults resolve at
+    # once with the sync result, so a reader that has no async backing keeps
+    # today's behaviour; a daemon-backed reader overrides them with a future
+    # that resolves later. A Future carries no waker: its consumer re-polls.
+    fn read_src_async(path: text) -> Future<ParserModule?>:
+        Future.from_value(self.read_src(path))
+
+    fn update_tldr_async(path: text) -> Future<text>:
+        Future.from_value(self.update_tldr(path))
 
 struct FileReader:
     tldr_root: text
@@ -58,4 +70,17 @@ impl SourceReader for FileReader:
 pub fn file_source_reader_v1(tldr_root: text) -> FileReader:
     FileReader(tldr_root: tldr_root)
 
-export SourceReader, FileReader, file_source_reader_v1
+val AWAIT_NOW_MAX_POLLS: i64 = 1000000
+
+fn await_now<T>(f: Future<T>) -> T:
+    """Sync-caller bridge: poll `f` until Ready. A future nobody completes is a
+    bug, so the spin is bounded and panics instead of hanging."""
+    var n = 0
+    while n < AWAIT_NOW_MAX_POLLS:
+        val p: Poll<T> = f.poll()
+        match p:
+            case Poll.Ready(v): return v
+            case Poll.Pending: n = n + 1
+    panic("await_now: future still pending after {AWAIT_NOW_MAX_POLLS} polls")
+
+export SourceReader, FileReader, file_source_reader_v1, await_now

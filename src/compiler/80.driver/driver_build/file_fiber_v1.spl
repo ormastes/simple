@@ -35,6 +35,9 @@ use std.nogc_async_mut.fiber.io_reactor.{FiberIoReactorV1, fiber_io_new, fiber_i
 use std.nogc_sync_mut.io_runtime.{file_size}
 use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, tldr_table_fill_v1}
 use compiler.driver.cache.source_reader_v1.{SourceReader}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 
 val FILE_FIBER_OPEN: i64 = 0
 val FILE_FIBER_READ: i64 = 1
@@ -55,6 +58,11 @@ struct FileFiberEntryV1:
     est_bytes: i64
     content: text
 
+# Outcome of one async parse: the fiber index and the update_tldr error text.
+struct FileFiberAsyncDoneV1:
+    index: i64
+    err: text
+
 class FileFiberRunV1:
     entries: [FileFiberEntryV1]
     stage: [i64]
@@ -72,6 +80,12 @@ class FileFiberRunV1:
     sched: FiberSchedV1
     dep_parks: i64
     fills: i64
+    # async parse (SIMPLE_FILE_WORKERS=1): futures not yet resolved, results
+    # ready to hand out, and how many parses had to wait for a later poll
+    async_idx: [i64]
+    async_fut: [Future<text>]
+    async_done: [FileFiberAsyncDoneV1]
+    async_parks: i64
 
     fn _index_of_key(key: text) -> i64:
         for i in 0..self.entries.len():
@@ -173,6 +187,37 @@ class FileFiberRunV1:
         self.stage[i] = FILE_FIBER_PUBLISH
         self.sched = fiber_sched_wake(self.sched, FILE_FIBER_PARSE_TOKEN_BASE + i)
 
+    me park_async(i: i64, f: Future<text>):
+        """Register the reader's future for fiber `i` (already parked at
+        PARSE). A ready future is handed out by the next poll_async; a pending
+        one counts as a park and is re-polled each round."""
+        val p: Poll<text> = f.poll()
+        match p:
+            case Poll.Ready(err):
+                self.async_done = self.async_done.push(FileFiberAsyncDoneV1(index: i, err: err))
+            case Poll.Pending:
+                self.async_parks = self.async_parks + 1
+                self.async_idx = self.async_idx.push(i)
+                self.async_fut = self.async_fut.push(f)
+
+    me poll_async() -> [FileFiberAsyncDoneV1]:
+        """Poll every waiting future once; returns the parses that resolved."""
+        var out = self.async_done
+        self.async_done = []
+        var keep_idx: [i64] = []
+        var keep_fut: [Future<text>] = []
+        for k in 0..self.async_idx.len():
+            val p: Poll<text> = self.async_fut[k].poll()
+            match p:
+                case Poll.Ready(err):
+                    out = out.push(FileFiberAsyncDoneV1(index: self.async_idx[k], err: err))
+                case Poll.Pending:
+                    keep_idx = keep_idx.push(self.async_idx[k])
+                    keep_fut = keep_fut.push(self.async_fut[k])
+        self.async_idx = keep_idx
+        self.async_fut = keep_fut
+        out
+
     me take_fill_requests() -> [text]:
         self.table.take_fill_requests()
 
@@ -196,7 +241,7 @@ class FileFiberRunV1:
                 val result = self.step(pick.fiber, imports_of)
                 self.sched.external_inflight = self.reactor.in_flight + self.parse_requests.len()
                 self.sched = fiber_sched_complete(self.sched, w, pick.fiber, result)
-        val wait_ms = if fiber_sched_runnable_count(self.sched) > 0 or self.parse_requests.len() > 0: 0 else: 50
+        val wait_ms = if fiber_sched_runnable_count(self.sched) > 0 or self.parse_requests.len() > 0 or self.async_done.len() > 0: 0 else: 50
         val pump = fiber_io_pump(self.reactor, self.sched, wait_ms)
         self.reactor = pump.reactor
         self.sched = pump.sched
@@ -207,6 +252,7 @@ class FileFiberRunV1:
         not fiber_sched_all_done(self.sched) and fiber_sched_runnable_count(self.sched) == 0 and
             self.sched.pending.len() == 0 and
             self.reactor.in_flight == 0 and self.parse_requests.len() == 0 and
+            self.async_idx.len() == 0 and self.async_done.len() == 0 and
             self.table.fill_queue.len() == 0
 
     me fail_stalled():
@@ -230,7 +276,7 @@ fn file_fiber_begin_v1(entries: [FileFiberEntryV1], worker_sockets: [i64], budge
     FileFiberRunV1(entries: entries, stage: stage, op: zeros, fd: zeros, source: sources,
         tldr: texts, error: texts, done_order: [], parse_requests: [], outside_keys: [],
         outside_error: [], table: TldrTableV1.create(), reactor: fiber_io_new(64), sched: sched,
-        dep_parks: 0, fills: 0)
+        dep_parks: 0, fills: 0, async_idx: [], async_fut: [], async_done: [], async_parks: 0)
 
 fn file_fiber_finished_v1(run: FileFiberRunV1) -> bool:
     fiber_sched_all_done(run.sched) or run.stalled()
@@ -243,7 +289,10 @@ fn file_fiber_run_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
         imports_of: fn(text) -> [text], path_of_key: fn(text) -> text,
         worker_sockets: [i64], budget: i64) -> FileFiberRunV1:
     """Host loop over a SourceReader: its update_tldr is the one parse
-    (module_artifacts_emit_v1 for FileReader), read_tldr the result."""
+    (module_artifacts_emit_v1 for FileReader), read_tldr the result. Under the
+    opt-in SIMPLE_FILE_WORKERS=1 the parse goes through update_tldr_async."""
+    if (env_get_nullable("SIMPLE_FILE_WORKERS") ?? "0") == "1":
+        return file_fiber_run_async_v1(entries, reader, imports_of, path_of_key, worker_sockets, budget)
     var run = file_fiber_begin_v1(entries, worker_sockets, budget)
     while not file_fiber_finished_v1(run):
         run.advance(imports_of)
@@ -256,6 +305,25 @@ fn file_fiber_run_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
     file_fiber_end_v1(run)
     run
 
-export FileFiberEntryV1, FileFiberRunV1
-export file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1, file_fiber_run_v1
+fn file_fiber_run_async_v1<R: SourceReader>(entries: [FileFiberEntryV1], reader: R,
+        imports_of: fn(text) -> [text], path_of_key: fn(text) -> text,
+        worker_sockets: [i64], budget: i64) -> FileFiberRunV1:
+    """Same host loop, but the one parse is reader.update_tldr_async: a future
+    that is not ready leaves the fiber parked at PARSE and is re-polled each
+    round; the fiber resumes when it resolves."""
+    var run = file_fiber_begin_v1(entries, worker_sockets, budget)
+    while not file_fiber_finished_v1(run):
+        run.advance(imports_of)
+        for i in run.take_parse_requests():
+            run.park_async(i, reader.update_tldr_async(run.entries[i].path))
+        for d in run.poll_async():
+            val path = run.entries[d.index].path
+            run.parse_done(d.index, if d.err == "": reader.read_tldr(path) else: "", d.err)
+        for key in run.take_fill_requests():
+            run.module_filled(key, tldr_table_fill_v1(run.table, reader, key, path_of_key(key)))
+    file_fiber_end_v1(run)
+    run
+
+export FileFiberEntryV1, FileFiberRunV1, FileFiberAsyncDoneV1
+export file_fiber_begin_v1, file_fiber_finished_v1, file_fiber_end_v1, file_fiber_run_v1, file_fiber_run_async_v1
 export FILE_FIBER_OPEN, FILE_FIBER_READ, FILE_FIBER_PARSE, FILE_FIBER_PUBLISH, FILE_FIBER_DEPS, FILE_FIBER_DONE
