@@ -28,7 +28,13 @@ use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_b
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
 use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1,
-    native_build_focused_capsule_shards_v1, run_native_file_worker_v1}
+    native_build_focused_capsule_shards_v1, run_native_file_worker_v1,
+    native_build_authority_source_roots_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
+    compile_source_inventory_checkout_cache_root_v1}
+use app.io.file_ops.{path_absolute}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{FILE_WORKER_INC_DIR_ENV_V1,
     FILE_WORKER_LINK_PLACED_ENV_V1, FILE_WORKER_INC_PRODUCER_ENV_V1}
 use compiler.driver.driver_build.native_file_worker_incremental_io_v1.{file_worker_inc_commit_v1}
@@ -224,6 +230,32 @@ fn bootstrap_stage4_link_or_place_v1(args: [text]) -> i64:
         val _recorded = file_worker_inc_commit_v1(inc_dir, inc_producer, output, true)
     code
 
+# Shard children inherit the coordinator's published SCV authority. Without it
+# every parse shard cold-acquires and they race one refresh.lock (300 s), so
+# the losers fail with compile-event-refresh-lock-unavailable.
+pub fn bootstrap_coordinator_needs_authority_v1(shard_child: bool, snapshot_root: text) -> bool:
+    not shard_child and snapshot_root == ""
+
+fn bootstrap_coordinator_publish_authority_v1(worker_args: [text]) -> bool:
+    if not bootstrap_coordinator_needs_authority_v1(bootstrap_shard_child_active(),
+            env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""):
+        return true
+    val scv_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+    val source_roots = native_build_authority_source_roots_v1(worker_args, scv_root)
+    if source_roots.len() == 0:
+        print "SCV-E-ADMISSION: source-inventory-scope-unsupported"
+        return false
+    val authority = compiler_source_authority_acquire_v1(scv_root,
+        compile_source_inventory_checkout_cache_root_v1(scv_root), source_roots,
+        (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1")
+    if not authority.valid:
+        print "SCV-E-ADMISSION: " + authority.reason
+        return false
+    if not compiler_source_authority_publish_v1(authority):
+        print "SCV-E-ADMISSION: snapshot-authority-env-publish-failed"
+        return false
+    true
+
 fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     # The pool re-executes this binary with the same argv plus the role flag;
     # without STAGE3/STAGE4 those children land here, not in the capsule branch.
@@ -244,6 +276,8 @@ fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
             env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
             env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""):
         print "[coordinator-route] per-file worker pool + per-module link"
+        if not bootstrap_coordinator_publish_authority_v1(worker_args):
+            return 1
         if not bootstrap_capsule_shard_prepass_routed(args, true, true):
             return 1
     run_bootstrap_stage3_process_route(args)
