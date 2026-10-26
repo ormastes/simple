@@ -6,6 +6,7 @@ use app.io.env_ops.{env_get}
 use app.io.file_ops.{path_absolute}
 use app.io.cli_ops.{cli_kernel_executable_path}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{
@@ -28,8 +29,15 @@ pub fn native_build_closure_request_admit_v1(entry_point: text,
     val identity = entry_absolute.substring(source_root.len() + 1)
     var roots = native_build_snapshot_source_roots_v1(identity, source_dirs)
     if not roots.contains(identity): roots = roots.push(identity)
+    # Match the parent's authenticated selector mapping before strict identity
+    # comparison. Keep the signed request untouched, including root order and
+    # duplicates; invalid or foreign physical roots must fail admission.
+    val canonical = native_build_closure_roots_v1(source_root,
+        env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "", roots)
+    if canonical.is_err():
+        return Err("closure request roots rejected: " + canonical.unwrap_err())
     val request = native_entry_closure_request_read_v1(request_path,
-        env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "", source_root, identity, roots,
+        env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "", source_root, identity, canonical.unwrap(),
         file_hash_sha256(cli_kernel_executable_path()))
     if request.is_err():
         return Err("closure request rejected: " + request.unwrap_err())
