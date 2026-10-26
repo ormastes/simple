@@ -13,13 +13,23 @@ it is not a sampled attribution of the live warm_names stage's elapsed time or
 stable RSS. No claim about actual live symbol cardinalities is made.
 
 The repair snapshots actual scalar keys, filters exactly `0 <= id < high_water`,
-and uses the existing typed bottom-up key sort before warming. Ascending ID
+and uses a private numeric-only bottom-up merge before warming. Ascending ID
 visitation, duplicate owner-path warming, empty owner handling, module key/name
 and flat bootstrap registry warming remain unchanged. No rich values snapshot,
 new process cache, registration rewrite, scope change or SOURCE authority is
 introduced. Scratch arrays now depend on actual stored keys (O(S) space and
 O(S log S) sort), rather than high-water iteration O(H). This allocation tradeoff
 requires paired measurement and does not imply an RSS reduction.
+
+Cycle2 review correction: the initial candidate reused the HIR codec sorter,
+whose nil discrimination formats every compared value. That would introduce
+O(S log S) text allocations at scope0/paused. The corrected private sorter uses
+only relational integer comparisons/indexed scalar writes and independent
+buffers; shared codec nil semantics are untouched. Actual `Dict<i64,...>` keys
+and the same `0 <= id < high_water` comparisons retain the old integer domain.
+Integer3 is explicitly tested; no `== nil` check or text reinterpretation occurs.
+Malformed non-integer/nil dictionary keys are not newly admitted as valid
+symbols; runtime representation of such corrupt input is not qualified here.
 
 The new focused executable spec uses actual SymbolTable registration, checks
 two entries with high-water1000000001, exact ascending visitation versus the
