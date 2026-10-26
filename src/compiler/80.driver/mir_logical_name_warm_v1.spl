@@ -1,0 +1,73 @@
+# Warm only stored symbols; next_symbol_id is an allocation high-water mark,
+# not the dictionary cardinality (explicit imported IDs may leave holes).
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.module_path_naming.{module_logical_name_cache_warm}
+
+# Private integer-only order. Codec key sorting also accepts nil scalars and
+# formats them to distinguish nil from integer3 on staged producers; these
+# are actual eligible raw IDs, so no codec sentinel/text conversion belongs
+# on this scope-free path. Relational comparisons match the old integer loop.
+fn driver_mir_sort_raw_ids_v1(values: [i64]) -> [i64]:
+    var ordered: [i64] = []
+    var scratch: [i64] = []
+    for value in values:
+        ordered.push(value)
+        scratch.push(value)
+    val count = ordered.len()
+    var width = 1
+    while width < count:
+        var start = 0
+        while start < count:
+            val middle = start + (if width < count - start: width else: count - start)
+            val end = middle + (if width < count - middle: width else: count - middle)
+            var left = start
+            var right = middle
+            var destination = start
+            while left < middle and right < end:
+                if ordered[right] < ordered[left]:
+                    scratch[destination] = ordered[right]
+                    right = right + 1
+                else:
+                    scratch[destination] = ordered[left]
+                    left = left + 1
+                destination = destination + 1
+            while left < middle:
+                scratch[destination] = ordered[left]
+                left = left + 1
+                destination = destination + 1
+            while right < end:
+                scratch[destination] = ordered[right]
+                right = right + 1
+                destination = destination + 1
+            start = end
+        var index = 0
+        while index < count:
+            ordered[index] = scratch[index]
+            index = index + 1
+        if width >= count - width: break
+        width = width + width
+    ordered
+
+fn driver_mir_warm_symbol_ids_v1(symbols: SymbolTable) -> [i64]:
+    var eligible: [i64] = []
+    for raw_id in symbols.symbols.keys():
+        if raw_id >= 0 and raw_id < symbols.next_symbol_id:
+            eligible.push(raw_id)
+    # Preserve the old ascending visitation, including duplicate owner paths.
+    driver_mir_sort_raw_ids_v1(eligible)
+
+fn driver_warm_mir_symbol_logical_names_v1(symbols: SymbolTable) -> i64:
+    var visited: i64 = 0
+    # One scalar-key snapshot, O(actual symbols), instead of probing every
+    # absent integer below the high-water mark. No rich values() transport.
+    for raw_id in driver_mir_warm_symbol_ids_v1(symbols):
+        visited = visited + 1
+        # Preserve the old dense loop's exact eligible-ID set, including its
+        # exclusion of negative and reserved/out-of-range dictionary entries.
+        if raw_id < 0 or raw_id >= symbols.next_symbol_id: continue
+        val owner = symbols.symbol_defining_module_scalar_raw(raw_id)
+        if owner != "": module_logical_name_cache_warm(owner)
+    visited
+
+export driver_warm_mir_symbol_logical_names_v1, driver_mir_warm_symbol_ids_v1

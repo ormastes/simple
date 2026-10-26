@@ -1,3 +1,4 @@
+use compiler.driver.mir_logical_name_warm_v1.{driver_warm_mir_symbol_logical_names_v1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use compiler.driver.cache.hir_mono_final_repository_v1.{MonoArchiveFinalRepositoryV1}
 use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_try_production_repository_v1,
@@ -231,19 +232,14 @@ fn _mir_error_is_fatal(message: text) -> bool:
 # persistent HIR strings; other misses stay correct, merely uncached. The flat
 # bootstrap rows carry the registry spelling, which differs from `module.name`
 # under SIMPLE_BOOTSTRAP=1 and is looked up per module over all modules.
-# Symbol ids are dense below next_symbol_id; iterating them avoids
-# materialising a keys() array on the immortal heap.
+# Explicit raw symbol registration can leave sparse IDs. Warm stored scalar
+# keys once, preserving the prior eligible range without a high-water scan.
 fn driver_warm_mir_logical_names_v1(modules: Dict<text, HirModule>):
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
         module_logical_name_cache_warm(module_key)
         module_logical_name_cache_warm(module.name)
-        var raw_id: i64 = 0
-        while raw_id < module.symbols.next_symbol_id:
-            val owner = module.symbols.symbol_defining_module_scalar_raw(raw_id)
-            if owner != "":
-                module_logical_name_cache_warm(owner)
-            raw_id = raw_id + 1
+        val _visited = driver_warm_mir_symbol_logical_names_v1(module.symbols)
     var flat_index: i64 = 0
     while flat_index < bootstrap_hir_module_count():
         module_logical_name_cache_warm(bootstrap_hir_module_name_at(flat_index))
