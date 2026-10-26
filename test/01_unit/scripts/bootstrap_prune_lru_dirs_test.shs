@@ -1,0 +1,24 @@
+#!/bin/sh
+# Keyed bootstrap caches (compiler-tools/<phase>/<snapshot>, ~730 MB each)
+# keep the current key plus the newest others; in-use keys are never removed.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-policy.shs"
+command -v bootstrap_prune_lru_dirs >/dev/null 2>&1 || { echo "FAIL — bootstrap_prune_lru_dirs missing"; exit 1; }
+grep -q 'bootstrap_prune_lru_dirs "$cache_root/compiler-tools/$phase"' "$repo/scripts/bootstrap/bootstrap-phase-verification.shs" ||
+  { echo "FAIL — compiler-tools cache prune not wired"; exit 1; }
+fx=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'chmod -R u+w "$fx" 2>/dev/null; rm -rf "$fx"' EXIT
+p="$fx/compiler-tools/stage2"
+mkdir -p "$p/s1/i/full-cli" "$p/s2/i" "$p/s3/i" "$p/s4/i" "$p/s0/i"
+for d in "$p"/s*/i "$p"/s*/i/*; do touch -t 202601010000 "$d"; done
+touch -t 202601010100 "$p/s0"; : > "$p/s0/i/live.o"
+touch -t 202601010101 "$p/s1"; touch -t 202601010102 "$p/s2"
+touch -t 202601010103 "$p/s3"; touch -t 202601010104 "$p/s4"
+chmod 0500 "$p/s2/i"
+bootstrap_prune_lru_dirs "$p" s1 2 "compiler-tools cache" 2>/dev/null || { echo "FAIL — prune returned nonzero"; exit 1; }
+for k in s1 s4 s0; do [ -d "$p/$k" ] || { echo "FAIL — $k wrongly evicted"; exit 1; }; done
+for k in s2 s3; do [ ! -e "$p/$k" ] || { echo "FAIL — $k not evicted"; exit 1; }; done
+[ -z "$(ls -A "$p" | grep -e evict -e prune)" ] || { echo "FAIL — eviction leftovers"; exit 1; }
+if bootstrap_prune_lru_dirs "$p" s1 0 x 2>/dev/null; then echo "FAIL — keep=0 accepted"; exit 1; fi
+echo "PASS — 5 keyed dirs checked, current + newest + in-use kept, 2 evicted (incl. read-only)"

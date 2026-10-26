@@ -69,3 +69,40 @@ bootstrap_strategy_failure_policy() {
 # Compatibility hook: automatic scope pruning is prohibited. An explicit
 # owned, idle lineage clean is provided by clean-bootstrap-cache.shs.
 bootstrap_prune_stale_seed_scope_dirs() { return 0; }
+
+# Bounded retention for keyed cache directories: under <parent>, keep the
+# <current> child plus the newest others, <keep> children in total. A child
+# with any file modified in the last 6 hours is in use by another lane and is
+# never removed. Eviction renames first so a half-deleted dir is never reused.
+bootstrap_prune_lru_dirs() (
+  [ "$#" -eq 4 ] || return 64
+  lru_parent=$1 lru_current=$2 lru_keep=$3 lru_label=$4
+  case "$lru_keep" in
+    [1-9]|[1-9][0-9]*) ;;
+    *) echo "error: $lru_label keep count must be a positive integer (got '$lru_keep')" >&2; return 1 ;;
+  esac
+  [ -d "$lru_parent" ] || return 0
+  [ ! -d "$lru_parent/$lru_current" ] || touch "$lru_parent/$lru_current"
+  lru_recent="$lru_parent/.prune-recent.$$"
+  touch -d '6 hours ago' "$lru_recent" 2>/dev/null || : > "$lru_recent"
+  lru_kept=0
+  ls -1dt -- "$lru_parent"/* 2>/dev/null | while IFS= read -r lru_d; do
+    [ -d "$lru_d" ] || continue
+    lru_name=${lru_d##*/}
+    case "$lru_name" in *.evict.*) rm -rf "$lru_d"; continue ;; esac
+    [ "$lru_name" != "$lru_current" ] || continue
+    if [ "$lru_kept" -lt "$((lru_keep - 1))" ]; then
+      lru_kept=$((lru_kept + 1)); continue
+    fi
+    if [ -n "$(find "$lru_d" -maxdepth 5 -newer "$lru_recent" -print 2>/dev/null | head -1)" ]; then
+      echo "bootstrap: keeping in-use $lru_label $lru_name" >&2; continue
+    fi
+    if mv "$lru_d" "$lru_d.evict.$$"; then
+      chmod -R u+w "$lru_d.evict.$$" 2>/dev/null
+      rm -rf "$lru_d.evict.$$" && echo "bootstrap: evicted $lru_label $lru_name" >&2
+    else
+      echo "bootstrap: warning: could not evict $lru_label $lru_name" >&2
+    fi
+  done
+  rm -f "$lru_recent"
+)
