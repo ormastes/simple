@@ -1,7 +1,7 @@
 # Native codegen erases a trait-typed field receiver (`self.store.read`) to a bare ambiguous method
 
 - **ID:** native_codegen_trait_field_receiver_erased_ambiguous_2026_10_26
-- **Severity:** P2 · **Status:** open (workaround active)
+- **Severity:** P1 (silent miscall class in seed) · **Status:** open (workaround active)
 - **Producer:** fresh Rust seed (`C:/dev/seedlane/seed/simple.exe`) `native-build --entry-closure src/app/cli/main.spl`
 
 ## Failure
