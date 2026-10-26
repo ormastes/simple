@@ -10,7 +10,8 @@
 //! - BUILDER_BACKINGS: Owns Context + FunctionBuilderContext (Box'd for stable heap addresses)
 //! - ACTIVE_BUILDERS: Owns FunctionBuilder (with transmuted 'static lifetime) + value maps
 //!
-//! The builder is created in begin_function and finalized/dropped in end_function,
+//! The builder is created in begin_function and finalized/dropped in end_function
+//! or discarded without finalization by module cleanup/reset,
 //! always BEFORE the backing data is freed (maintaining lifetime safety).
 //!
 //! # Usage from Simple
@@ -132,11 +133,9 @@ pub fn clear_cranelift_registries() {
     // Drop builders BEFORE backings to maintain safety invariant
     {
         let mut active = ACTIVE_BUILDERS.lock().unwrap();
-        for (_, mut ab) in active.drain() {
-            if let Some(builder) = ab.builder.take() {
-                builder.finalize();
-            }
-        }
+        // Reset is cancellation, not successful completion. Incomplete IR may
+        // contain unsealed/unfilled blocks and must never reach finalize().
+        active.clear();
     }
     BUILDER_BACKINGS.lock().unwrap().clear();
     FINISHED_FUNCS.lock().unwrap().clear();
@@ -289,10 +288,10 @@ fn build_isa_for_triple(triple: Triple) -> Option<(Triple, std::sync::Arc<dyn cr
     Some((triple, isa))
 }
 
-fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+fn triple_for_target(target: i64) -> Triple {
     // When target arch matches host arch, use Triple::host() for correct OS/ABI detection
     // (e.g., windows-gnu vs windows-msvc). Only use explicit triples for cross-compilation.
-    let triple = match target {
+    match target {
         CL_TARGET_X86_64 if cfg!(target_arch = "x86_64") => Triple::host(),
         CL_TARGET_AARCH64 if cfg!(target_arch = "aarch64") => Triple::host(),
         CL_TARGET_X86_64 => "x86_64-unknown-linux-gnu"
@@ -305,9 +304,35 @@ fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn crane
             .parse::<Triple>()
             .unwrap_or_else(|_| Triple::host()),
         _ => Triple::host(),
-    };
+    }
+}
 
-    build_isa_for_triple(triple)
+fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    build_isa_for_triple(triple_for_target(target))
+}
+
+/// JIT relocation policy is distinct from AOT object emission. The vendored
+/// JIT preallocates x86-only PLT entries whenever PIC is enabled, including for
+/// libcalls during JITModule::new. Non-x86 hosts therefore require its supported
+/// non-PIC path. Preserve AOT PIC and x86 JIT PIC behavior.
+fn build_jit_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    let triple = triple_for_target(target);
+    // A callable JIT module must match the host; cross targets belong to AOT.
+    // Refuse before JITModule::new can invoke architecture-specific machinery.
+    if triple.architecture != Triple::host().architecture {
+        return None;
+    }
+    let mut flag_builder = settings::builder();
+    flag_builder.set("opt_level", "speed").ok()?;
+    // JITBuilder::with_flags requires long-range libcall relocations, notably
+    // on AArch64. Its default PIC=true assumes the x86-only PLT implementation;
+    // use with_isa to select the supported non-PIC path on other native hosts.
+    flag_builder.set("use_colocated_libcalls", "false").ok()?;
+    flag_builder.set("is_pic", if cfg!(target_arch = "x86_64") { "true" } else { "false" }).ok()?;
+    configure_target_stack_probes(&mut flag_builder, &triple)?;
+    let isa = cranelift_codegen::isa::lookup(triple.clone()).ok()?
+        .finish(settings::Flags::new(flag_builder)).ok()?;
+    Some((triple, isa))
 }
 
 fn build_aot_isa_and_triple(target: &str) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
@@ -395,7 +420,7 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
         return 0;
     }
 
-    let (_, isa) = match build_isa_and_triple(target) {
+    let (_, isa) = match build_jit_isa_and_triple(target) {
         Some(v) => v,
         None => return 0,
     };
@@ -458,9 +483,9 @@ fn retire_exposed_handles(module: i64, handles: Vec<(bool, i64)>) {
     let owned: Vec<i64> = active.iter().filter_map(|(&handle, builder)|
         (builder.module_handle == module).then_some(handle)).collect();
     for handle in owned {
-        if let Some(mut builder) = active.remove(&handle) {
-            if let Some(builder) = builder.builder.take() { builder.finalize(); }
-        }
+        // Drop the borrowing builder before its backing, without requiring
+        // the unfinished function to satisfy finalization invariants.
+        drop(active.remove(&handle));
         BUILDER_BACKINGS.lock().unwrap().remove(&handle);
     }
 }
@@ -899,7 +924,8 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
 
     // Create FunctionBuilder with transmuted 'static lifetime.
     // SAFETY: backing is Box'd (stable heap address). The builder is always
-    // finalized and dropped in end_function BEFORE the backing is freed.
+    // finalized/dropped in end_function, or dropped by module cleanup/reset, BEFORE
+    // the backing is freed.
     let builder = {
         let func_ptr: *mut Function = &mut backing.ctx.func;
         let fbc_ptr: *mut FunctionBuilderContext = &mut backing.func_builder_ctx;
@@ -2721,3 +2747,7 @@ mod tests {
 #[path = "cranelift_readonly_words_v1.rs"]
 mod readonly_words_v1;
 pub use readonly_words_v1::rt_cranelift_declare_readonly_words_v1;
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[path = "cranelift_abort_tests.rs"]
+mod abort_tests;
