@@ -118,7 +118,7 @@ pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
         name_len: i64, keep: i64, min_age_s: i64) -> i64:
     if keep <= 0 or not dir_exists(parent):
         return 0
-    if dir_exists(parent + "/" + current):
+    if current != "" and dir_exists(parent + "/" + current):
         val _marked = file_write(parent + "/" + current + "/.last-use", "")
     val young_after = time_now_seconds() - min_age_s
     var rows: [text] = []
@@ -129,8 +129,14 @@ pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
         val child = parent + "/" + name
         if not dir_exists(child):
             continue
-        val marker = child + "/.last-use"
-        val used = if file_exists(marker): file_modified_time(marker) else: file_modified_time(child)
+        # Last use = newest of the marker, the dir, and its direct children
+        # (an older compiler never writes the marker; its objects land in a
+        # subdirectory whose mtime moves on every publish).
+        var used = file_modified_time(child)
+        for sub in dir_list(child):
+            val sub_time = file_modified_time(child + "/" + _disk_bound_basename(sub))
+            if sub_time > used:
+                used = sub_time
         val stamp = "{if used > 0: used else: 0}"
         rows.push("0000000000000".substring(0, 13 - stamp.len()) + stamp + "|" + name)
     val ordered = rows.sort()
