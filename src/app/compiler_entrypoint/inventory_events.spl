@@ -1005,8 +1005,17 @@ fn compiler_inventory_refresh_cost_v1(
 # cursor. Only a checkout with neither may be auto cold-initialized; a present
 # but invalid cursor stays a fail-closed refresh error.
 fn compiler_inventory_cursor_present_v1(cache_root: text) -> bool:
-    (compile_source_inventory_read_pointer_content_v1(cache_root) ?? "") != "" or
-        file_exists(compiler_inventory_cursor_path_v1(cache_root))
+    # Raw presence, not the bounded reader: an oversized, empty or linked
+    # CURRENT must stay a fail-closed refresh error, never be replaced.
+    val pointer = cache_root + "/source-inventory/CURRENT"
+    val cursor = compiler_inventory_cursor_path_v1(cache_root)
+    file_exists(pointer) or file_is_regular_no_follow(pointer) or
+        file_exists(cursor) or file_is_regular_no_follow(cursor)
+
+fn _compiler_inventory_extra_root_any_seen_v1(seen: Dict<text, bool>, extra: text) -> bool:
+    for identity in seen.keys():
+        if identity == extra or identity.starts_with(extra + "/"): return true
+    false
 
 fn _compiler_inventory_extra_root_owns_v1(extra_roots: [text], identity: text) -> bool:
     for extra in extra_roots:
@@ -1055,12 +1064,14 @@ fn _compiler_inventory_admit_extra_roots_locked_v1(
     for extra in extra_roots:
         val base = root + "/" + extra
         val paths = if file_is_regular_no_follow(base): [base] else: dir_walk(base)
+        var contributed = 0
         for path in paths:
             val identity = compile_source_inventory_event_path_v1(root, path)
             if seen.has(identity) or not compile_source_inventory_path_valid_v1(identity) or
                     not _compiler_inventory_extra_root_owns_v1(extra_roots, identity):
                 continue
             seen[identity] = true
+            contributed = contributed + 1
             val content = match file_read_regular_no_follow_bounded(
                     path, COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1):
                 case Ok(value): value
@@ -1072,6 +1083,8 @@ fn _compiler_inventory_admit_extra_roots_locked_v1(
                 if old.content_digest == event.content_digest and old.byte_count == event.byte_count:
                     continue
             events.push(event)
+        if contributed == 0 and not _compiler_inventory_extra_root_any_seen_v1(seen, extra):
+            return compiler_inventory_invalid_v1("extra-root-admitted-nothing:{extra}")
     for identity in admitted.keys():
         if not seen.has(identity):
             events.push(compile_source_inventory_filesystem_event_v1("delete", identity, ""))
