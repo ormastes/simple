@@ -96,9 +96,12 @@ static int metadata(void) {
     return puts("E") == EOF || fflush(stdout);
 }
 
-static int detail(int pid, unsigned long long sec, unsigned long long usec) {
+static int detail(int pid, unsigned long long sec, unsigned long long usec,
+                  int want_footprint) {
     struct proc_bsdinfo before, after;
     struct proc_taskinfo task;
+    struct rusage_info_v4 usage;
+    memset(&usage, 0, sizeof(usage));
     errno = 0;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &before, sizeof(before));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
@@ -110,6 +113,12 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     n = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
     if (n != sizeof(task)) return detail_failure("task", pid, n, sec, usec);
+    if (want_footprint) {
+        errno = 0;
+        n = proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage);
+        if (n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
+        if (n) return detail_failure("rusage-footprint", pid, n, sec, usec);
+    }
     errno = 0;
     pid_t sid = getsid(pid);
     if (sid < 0 && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
@@ -120,6 +129,15 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     if (n != sizeof(after)) return detail_failure("bsd-after", pid, n, sec, usec);
     if (after.pbi_start_tvsec != sec || after.pbi_start_tvusec != usec)
         return identity_failure("identity-after", pid, sec, usec, &after);
+    if (want_footprint) {
+        /* Current charged footprint includes compressed accounting. Never use
+         * ri_lifetime_max_phys_footprint for a current process-tree sum. */
+        unsigned long long kib = usage.ri_phys_footprint / 1024 +
+                                 (usage.ri_phys_footprint % 1024 != 0);
+        return printf("R %d %llu %d %llu\n", pid,
+                      (unsigned long long)((task.pti_resident_size + 1023) / 1024),
+                      sid, kib) < 0;
+    }
     return printf("R %d %llu %d\n", pid,
                   (unsigned long long)((task.pti_resident_size + 1023) / 1024), sid) < 0;
 }
@@ -229,7 +247,9 @@ int main(int argc, char **argv) {
         if (!strcmp(line, "M\n")) {
             if (metadata()) return 89;
         } else if (sscanf(line, "R %d %llu:%llu %c", &pid, &sec, &usec, &extra) == 3 && pid > 0) {
-            if (detail(pid, sec, usec) || fflush(stdout)) return 89;
+            if (detail(pid, sec, usec, 0) || fflush(stdout)) return 89;
+        } else if (sscanf(line, "F %d %llu:%llu %c", &pid, &sec, &usec, &extra) == 3 && pid > 0) {
+            if (detail(pid, sec, usec, 1) || fflush(stdout)) return 89;
         } else return 89;
     }
     return ferror(stdin) ? 89 : 0;
