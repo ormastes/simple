@@ -18,6 +18,30 @@ change defaults or replace real execution evidence.
 
 ## Bootstrap failure collection
 
+### Release compiler selection and platform qualification
+
+For release work, use the highest known-success actual phase binary for the
+target platform, with the newest qualifying producer as the tie-breaker within
+that phase. Bind success to the actual binary digest, source revision/digest,
+toolchain/runtime identity, and a receipt proving Hello compilation and
+execution output/exit status. A phase directory, `PHASE` marker, or banner is
+not proof. Skip already-proven lower phases; when a qualifying Phase 3 binary
+exists, use that exact P3 to build P3, then build the Phase 4 full CLI and run
+its required tests. Keep the producer immutable and use private outputs/cache
+with default cache behavior, LLVM/LLD and 24 build jobs for P3 -> P3 and Phase
+4 native builds; preserve worker limits in receipt-bound stage resumes. If a
+candidate is missing or incompatible, record the failure and make only an
+explicit, bounded fallback to a compatible known-success candidate; do not
+silently rebuild lower phases or use the Rust seed.
+
+Prerelease/beta qualification may cover a partial platform matrix only when at
+least one platform binary is genuinely qualified and missing/failed platforms
+are explicit. Zero qualified artifacts or a security/integrity failure cannot
+PASS. Stable releases keep the full required gates. See the
+[release producer-selection policy](../07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+and [qualification guide](../07_guide/infra/release_full_bootstrap.md); these
+docs do not assert current phase admission or define tag-trigger behavior.
+
 For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
 owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).
 A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve

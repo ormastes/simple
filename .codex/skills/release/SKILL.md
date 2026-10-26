@@ -6,6 +6,9 @@ description: Prepare and promote stable or prerelease Simple releases from isola
 # Protected Simple Release
 
 Use [the software-release guide](../../../doc/07_guide/infra/software_release.md) and `release/version.sdn` as the canonical product-version authority.
+For bootstrap producer selection and platform-tier qualification, follow
+[the phase ladder release policy](../../../doc/07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
+and [the release qualification guide](../../../doc/07_guide/infra/release_full_bootstrap.md).
 
 ## Procedure
 
