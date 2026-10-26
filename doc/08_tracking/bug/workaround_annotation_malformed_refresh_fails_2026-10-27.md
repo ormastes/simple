@@ -92,7 +92,7 @@ Native-build is completely blocked on release/1.0.0, preventing:
 ## Expected fix
 
 **For Cause 1** (malformed @workaround doc/... annotations):
-1. Rewrite each of the 11 sites using `@workaround doc/...` as `@workaround bug=<id> ...` per the registry contract, mapping each to the documented bug ID in the referenced doc.
+1. Rewrite each of the 12 sites using `@workaround doc/...` as `@workaround bug=<id> ...` per the registry contract, mapping each to the documented bug ID in the referenced doc.
 2. Verify the mapped bug ID exists in `bug_db.sdn`.
 
 **For Cause 2** (annotation separated from function):
