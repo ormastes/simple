@@ -1,0 +1,35 @@
+"""Flat cache directories are swept oldest-first past their byte cap."""
+
+use std.spec.*
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes}
+use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
+
+fn bound_fixture(label: text) -> text:
+    val dir = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_{label}"
+    dir_create(dir + "/objects", true)
+    dir_create(dir + "/.by-source", true)
+    for name in ["a", "b", "c"]:
+        file_write(dir + "/objects/" + name, "0123456789")
+    file_write(dir + "/.by-source/t.idx", "a\nb\nc\n")
+    file_write(dir + "/objects/inflight.tmp", "0123456789")
+    dir
+
+describe "disk bound":
+    it "sweeps to 75% of the cap once the directory exceeds it":
+        val dir = bound_fixture("over")
+        expect(disk_bound_dir_bytes(dir)).to_equal(30)
+        expect(disk_bound_enforce(dir, 20)).to_equal(2)
+        expect(disk_bound_dir_bytes(dir)).to_equal(10)
+        expect(file_exists(dir + "/objects/c")).to_equal(true)
+        expect(file_exists(dir + "/.by-source/t.idx")).to_equal(true)
+        expect(file_exists(dir + "/objects/inflight.tmp")).to_equal(true)
+        dir_remove_all(dir)
+
+    it "leaves a directory at or under the cap alone":
+        val dir = bound_fixture("under")
+        expect(disk_bound_enforce(dir, 30)).to_equal(0)
+        expect(disk_bound_dir_bytes(dir)).to_equal(30)
+        dir_remove_all(dir)
+
+    it "falls back to the default cap for unset or invalid env":
+        expect(disk_bound_cap_bytes("SIMPLE_DISK_BOUND_SPEC_UNSET_CAP", 77)).to_equal(77)

@@ -1,0 +1,69 @@
+"""Byte bounds for flat on-disk cache directories.
+
+Shared by every cache writer that lives outside the CAS store (HIR, warm
+artifacts, runtime objects): measure a directory and sweep its oldest files
+(by mtime, then path) down to a target. Files under `.by-source/` (per-source
+indexes) and `*.tmp` (in-flight publishes) are never counted or removed.
+"""
+
+use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+
+fn _disk_bound_is_entry(path: text) -> bool:
+    val canonical = path.replace("\\", "/")
+    not canonical.contains("/.by-source/") and not canonical.ends_with(".tmp")
+
+pub fn disk_bound_dir_bytes(dir: text) -> i64:
+    if not dir_exists(dir):
+        return 0
+    var total: i64 = 0
+    for path in dir_walk(dir):
+        if _disk_bound_is_entry(path) and not dir_exists(path):
+            val size = file_size_signed(path)
+            if size > 0:
+                total = total + size
+    total
+
+# Deletes oldest-mtime entries until the directory is at or under
+# target_bytes. Returns the number of files removed. One sort, then delete
+# in (mtime, path) order.
+pub fn disk_bound_sweep(dir: text, target_bytes: i64) -> i64:
+    if not dir_exists(dir):
+        return 0
+    var rows: [text] = []
+    var total: i64 = 0
+    for path in dir_walk(dir):
+        if _disk_bound_is_entry(path) and not dir_exists(path):
+            val size = file_size_signed(path)
+            if size >= 0:
+                val stamp = "{file_modified_time(path)}"
+                val zeros = "000000000000"
+                val pad = zeros.substring(0, 12 - stamp.len())
+                rows.push(pad + stamp + "|{size}|" + path)
+                total = total + size
+    val ordered = rows.sort()
+    var removed = 0
+    for row in ordered:
+        if total <= target_bytes:
+            break
+        val parts = row.split("|")
+        if parts.len() < 3:
+            continue
+        val size = parts[1].to_i64() ?? 0
+        if file_delete(parts[2:].join("|")):
+            total = total - size
+            removed = removed + 1
+    removed
+
+# Cap from env_name (bytes) or fallback.
+pub fn disk_bound_cap_bytes(env_name: text, fallback: i64) -> i64:
+    val raw = (env_get_opt(env_name) ?? "").trim()
+    val parsed = if raw == "": 0 else: raw.to_i64() ?? 0
+    if parsed > 0: parsed else: fallback
+
+# After a publish: if dir is over cap, sweep it to 75% of cap. Returns files
+# removed. One directory walk per call; call once per build, not per file.
+pub fn disk_bound_enforce(dir: text, cap: i64) -> i64:
+    if cap <= 0 or disk_bound_dir_bytes(dir) <= cap:
+        return 0
+    disk_bound_sweep(dir, cap * 3 / 4)
