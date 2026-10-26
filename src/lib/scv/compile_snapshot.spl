@@ -24,6 +24,7 @@ use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
     file_read_regular_no_follow_bounded_bytes,
     secure_temp_dir_raw, file_publish_noreplace_raw, file_modified_time}
 use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size,
     process_is_running
@@ -739,6 +740,7 @@ fn scv_compile_snapshot_acquire_cost_v1(
             canonical_root, planned_destination, planned_revision_id,
             planned_commit_id, planned_tree_id, planned_inventory_digest)
         if reused.valid:
+            scv_compile_snapshot_touch_v1(owned_cache_root, planned_revision_id)
             return reused
         # Content-addressed and failing its own validation (e.g. written with
         # CRLF by an older runtime): it can never become valid, and keeping it
@@ -825,8 +827,9 @@ fn scv_compile_snapshot_acquire_cost_v1(
     # Bound the store: every distinct source tree publishes a full copy
     # (~170 MB on Windows), and nothing else evicted them (1.2 GB measured in
     # one worktree, 2026-10-26).
+    scv_compile_snapshot_touch_v1(owned_cache_root, revision_id)
     scv_compile_snapshot_retain_newest_v1(owned_cache_root, revision_id,
-        scv_compile_snapshot_max_keep_v1())
+        scv_compile_snapshot_max_keep_v1(), scv_compile_snapshot_min_age_v1())
     ScvCompileSnapshotV1(
         valid: true,
         reason: if source_drifted: "ok-source-drifted" else: "ok",
@@ -879,6 +882,7 @@ fn scv_compile_snapshot_gc_v1(
                 receipt == scv_compile_snapshot_receipt_v1(provenance, name) and
                 dir_remove(root, true)):
             file_delete(receipt_path)
+            file_delete("{cache_root}/receipts/{name}.used")
             removed = removed + 1
     removed
 
@@ -891,29 +895,55 @@ fn scv_compile_snapshot_max_keep_v1() -> i64:
             return parsed!
     4
 
-# Evicts the least recently published snapshots (receipt mtime, then name)
-# until at most max_keep remain. `keep` is never evicted; only snapshots
-# that pass scv_compile_snapshot_gc_v1's provenance+receipt check are removed.
+fn scv_compile_snapshot_min_age_v1() -> i64:
+    val raw = env_get("SIMPLE_SCV_SNAPSHOT_MIN_AGE_S")
+    if raw != "":
+        val parsed = raw.to_i64()
+        if parsed != nil and parsed! >= 0:
+            return parsed!
+    600
+
+# Records last use (epoch seconds) so retention is LRU, not first-publish.
+fn scv_compile_snapshot_touch_v1(cache_root: text, name: text):
+    val _written = scv_write_text("{cache_root}/receipts/{name}.used", "{time_now_seconds()}")
+
+fn scv_compile_snapshot_last_use_v1(cache_root: text, name: text) -> i64:
+    val used_path = "{cache_root}/receipts/{name}.used"
+    if file_exists(used_path):
+        val parsed = scv_compile_snapshot_read_text_v1(used_path).trim().to_i64()
+        if parsed != nil and parsed! > 0:
+            return parsed!
+    file_modified_time("{cache_root}/receipts/{name}.receipt")
+
+# Evicts least recently used snapshots (last use, then name) until at most
+# max_keep remain. `keep` and anything used within min_age_s (another lane
+# may be compiling from it) are never evicted; only snapshots that pass
+# scv_compile_snapshot_gc_v1's provenance+receipt check are removed, and an
+# unremovable entry does not count toward the cap being met.
 fn scv_compile_snapshot_retain_newest_v1(
-    cache_root: text, keep: text, max_keep: i64
+    cache_root: text, keep: text, max_keep: i64, min_age_s: i64
 ) -> i64:
     val snapshots_root = "{cache_root}/snapshots"
     if max_keep <= 0 or not dir_exists(snapshots_root):
         return 0
+    val young_after = time_now_seconds() - min_age_s
     var names: [text] = []
     var stamps: [i64] = []
+    var done: [bool] = []
     for name in dir_list(snapshots_root):
         if name.starts_with("."):
             continue
         names.push(name)
-        stamps.push(file_modified_time("{cache_root}/receipts/{name}.receipt"))
+        stamps.push(scv_compile_snapshot_last_use_v1(cache_root, name))
+        done.push(false)
     var live = names.len()
     var removed = 0
     while live > max_keep:
         var victim = -1
         var index = 0
         while index < names.len():
-            if names[index] != "" and names[index] != keep:
+            if not done[index] and names[index] != keep and
+                    (min_age_s <= 0 or stamps[index] <= young_after):
                 if (victim < 0 or stamps[index] < stamps[victim] or
                         (stamps[index] == stamps[victim] and names[index] < names[victim])):
                     victim = index
@@ -922,11 +952,12 @@ fn scv_compile_snapshot_retain_newest_v1(
             break
         var retained: [text] = []
         for name in names:
-            if name != "" and name != names[victim]:
+            if name != names[victim]:
                 retained.push(name)
-        removed = removed + scv_compile_snapshot_gc_v1(cache_root, retained, 1)
-        names[victim] = ""
-        live = live - 1
+        if scv_compile_snapshot_gc_v1(cache_root, retained, 1) > 0:
+            removed = removed + 1
+            live = live - 1
+        done[victim] = true
     removed
 
 fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
@@ -943,6 +974,7 @@ fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
         return false
     if not dir_remove(snapshot.snapshot_root, true):
         return false
+    file_delete(snapshot.receipt_path.replace(".receipt", ".used"))
     file_delete(snapshot.receipt_path)
 
 export ScvCompileSnapshotV1
