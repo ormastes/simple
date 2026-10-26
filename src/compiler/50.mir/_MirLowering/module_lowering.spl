@@ -1,4 +1,5 @@
 use compiler.mir._MirLowering.verification_calls_v1.*
+use compiler.mir.source_region_default_schedule_v1.*
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
@@ -3316,6 +3317,9 @@ impl MirLowering:
             self.verification_prepare_calls_v1(module)
             if self.verification_capture_error != "": return self.builder.module
         self.lower_module_emit_all_v1(module, archive_function_symbols, bootstrap_trace, trace_enabled)
+        if self.source_region_default_schedule_v1 != nil and self.source_region_default_failed_v1():
+            self.source_region_default_publish_failure_v1()
+            return self.builder.module
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
@@ -3336,6 +3340,10 @@ impl MirLowering:
     # (proven transport); no large composite crosses back.
     me lower_module_emit_all_v1(module: HirModule, archive_function_symbols: [i64]?,
             bootstrap_trace: bool, trace_enabled: bool):
+        if self.source_region_default_schedule_v1 != nil:
+            self.source_region_drain_default_schedule_v1(module, archive_function_symbols,
+                bootstrap_trace, trace_enabled)
+            if self.source_region_default_failed_v1(): return
         # Cycle-98: values+index (the ORIGINAL main-loop shape, and the same
         # shape the bootstrap branch uses at self-host scale), NOT keys+index:
         # the cycle-97/98 receipts proved keys() round-trip corrupts aggregate
@@ -3369,9 +3377,59 @@ impl MirLowering:
             # an optional, unwrap via if val, pass that binding.
             val emit_element: HirFunction? = self.lower_emit_fn_values[fni]
             if val emit_fn = emit_element:
+                if self.source_region_default_schedule_v1 != nil:
+                    match self.source_region_default_skip_completed_v1(emit_fn.symbol):
+                        case Ok(skip):
+                            if skip:
+                                fni = fni + 1
+                                continue
+                        case Err(error):
+                            self.source_region_default_latch_v1(error)
+                            return
                 self.lower_module_emit_fn_v1(module, emit_fn,
                         archive_function_symbols, bootstrap_trace, trace_enabled, fni)
             fni = fni + 1
+
+    # Discovery order, not topological order: a callee can first become known
+    # while the root is emitting. Each actual selected body is emitted once.
+    me source_region_drain_default_schedule_v1(module: HirModule, archive_function_symbols: [i64]?,
+            bootstrap_trace: bool, trace_enabled: bool):
+        match self.source_region_default_bind_target_v1(module):
+            case Ok(_): ()
+            case Err(error):
+                self.source_region_default_latch_v1(error)
+                return
+        while not self.source_region_default_failed_v1():
+            val pending = match self.source_region_default_next_v1():
+                case Ok(value): value
+                case Err(error):
+                    self.source_region_default_latch_v1(error)
+                    return
+            val original = match pending:
+                case Some(value): value
+                case _: break
+            match self.source_region_default_validate_filter_v1(original, archive_function_symbols):
+                case Ok(_): ()
+                case Err(error):
+                    self.source_region_default_latch_v1(error)
+                    return
+            match self.source_region_default_begin_function_v1(original):
+                case Ok(_): ()
+                case Err(error):
+                    self.source_region_default_latch_v1(error)
+                    return
+            val index = self.source_region_default_schedule_v1.cursor
+            self.lower_module_emit_fn_v1(module, original, archive_function_symbols,
+                bootstrap_trace, trace_enabled, index)
+            if self.source_region_default_failed_v1(): return
+            match self.source_region_default_complete_function_v1(original):
+                case Ok(_): ()
+                case Err(error):
+                    self.source_region_default_latch_v1(error)
+                    return
+        match self.source_region_finish_default_schedule_v1():
+            case Ok(_): ()
+            case Err(error): self.source_region_default_latch_v1(error)
 
     # Cycle-103: per-function emission step for lower_module_emit_all_v1.
     # fn_ is the by-value param (callee-prologue copy, the proven

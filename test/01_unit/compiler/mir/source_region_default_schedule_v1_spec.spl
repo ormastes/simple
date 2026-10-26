@@ -1,0 +1,235 @@
+# Authored UNRUN. Actual ordinary frontend/lowering mechanics, not archive or
+# SOURCE admission. No synthetic MIR function, default frame or receipt.
+use std.spec.{describe, it, expect, fail}
+use std.io_runtime.{read_file}
+use compiler.common.config.{Logger}
+use compiler.common.loop_resource_account_v1.{MirLoopResourceAccountV1, MirLoopResourceLimitsV1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.source_region_default_schedule_v1.*
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir.hir_expression_artifact_v1.{mir_hir_expression_encode_v1}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.canonical_enum_builtin_site_v1.{CanonicalEnumBuiltinOperationV1}
+
+fn default_schedule_test_account_v1(work: i64 = 1048576) -> MirLoopResourceAccountV1:
+    var limits = MirLoopResourceLimitsV1()
+    limits.max_work = work
+    match MirLoopResourceAccountV1.create(limits):
+        case Ok(account): account
+        case Err(_): fail("actual account factory refused")
+
+fn default_schedule_test_source_v1(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "default_schedule.spl", "default_schedule", Logger(level: 0))
+    var owner = HirLowering.with_filename("default_schedule.spl")
+    val module = owner.lower_module(parsed)
+    expect(owner.errors.len()).to_equal(0)
+    module
+
+fn default_schedule_test_symbol_v1(source: HirModule, name: text) -> SymbolId:
+    val symbol = source.symbols.lookup(name) ?? SymbolId(id: -1)
+    if symbol.id < 0: fail("actual fixture declaration absent")
+    symbol
+
+fn default_schedule_test_prepare_v1(mut owner: MirLowering, source: HirModule,
+        producer: SymbolId, consumer: SymbolId, account: MirLoopResourceAccountV1):
+    match owner.source_region_prepare_default_schedule_v1(source, source.name, producer, consumer, account):
+        case Ok(_): ()
+        case Err(error): fail(error)
+
+fn default_schedule_constructor_counts_v1(field: text) -> (i64, i64, i64):
+    # Lower the production field declaration in a small real constructor.
+    # The fixture's nominal payload is never constructed or treated as a
+    # scheduler authority; only its absent carrier representation is tested.
+    val source = default_schedule_test_source_v1(
+        "class MirSourceRegionDefaultScheduleV1:\n    value: i64\n" +
+        "class ConstructorProbe:\n" + field + "\n" +
+        "fn absent() -> ConstructorProbe:\n    ConstructorProbe()\n")
+    val symbol = default_schedule_test_symbol_v1(source, "absent")
+    var owner = MirLowering.new(source.symbols)
+    var builder = owner.builder
+    builder.canonical_enum_builtin_capture_enabled_v1 = true
+    builder.canonical_enum_builtin_compile_account_v1 = Some(default_schedule_test_account_v1())
+    owner.builder = builder
+    val output = owner.lower_module(source)
+    expect(owner.errors.len()).to_equal(0)
+    expect(owner.builder.canonical_enum_builtin_error_v1).to_equal("")
+    var news = 0
+    for site in owner.builder.canonical_enum_builtin_sites_v1:
+        if site.owner.id == symbol.id and site.operation == CanonicalEnumBuiltinOperationV1.New:
+            news = news + 1
+    var enum_calls = 0
+    var normalization = 0
+    for block in output.functions[symbol].blocks:
+        if (block.label ?? "").starts_with("option_norm_"): normalization = normalization + 1
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str("rt_enum_new"), _):
+                            enum_calls = enum_calls + 1
+                        case _: ()
+                case _: ()
+    (news, enum_calls, normalization)
+
+describe("selected ordinary default scheduling"):
+    it("keeps the actual disabled carrier unboxed while an Optional control allocates"):
+        val types = read_file("src/compiler/50.mir/mir_lowering_types.spl")
+        var declaration = ""
+        var matches = 0
+        for line in types.split("\n"):
+            if line.starts_with("    source_region_default_schedule_v1:"):
+                declaration = line
+                matches = matches + 1
+        expect(matches).to_equal(1)
+        expect(default_schedule_constructor_counts_v1(declaration)).to_equal((0, 0, 0))
+        val control = default_schedule_constructor_counts_v1(
+            "    source_region_default_schedule_v1: MirSourceRegionDefaultScheduleV1? = nil")
+        expect(control.0).to_be_greater_than(0)
+        expect(control.1).to_be_greater_than(0)
+
+    it("discovers an originally earlier helper during root emission and emits every recursive body once"):
+        val program = "fn schedule_a() -> i64:\n    schedule_b()\n" +
+            "fn schedule_b() -> i64:\n    schedule_c()\n" +
+            "fn schedule_c() -> i64:\n    schedule_a()\n"
+        val source = default_schedule_test_source_v1(program)
+        val inventory = source.functions.values()
+        expect(inventory.len()).to_equal(3)
+        # Choose the actual last ordinary inventory element as root. The first
+        # element is necessarily earlier, independent of dictionary ordering.
+        val root = inventory[inventory.len() - 1].symbol
+        val earlier = inventory[0].symbol
+        var owner = MirLowering.new(source.symbols)
+        val account = default_schedule_test_account_v1()
+        default_schedule_test_prepare_v1(owner, source, root, root, account)
+        val output = owner.lower_module(source)
+        expect(owner.errors.len()).to_equal(0)
+        expect(owner.verification_capture_enabled).to_equal(false)
+        expect(owner.source_region_finish_default_schedule_v1()).to_equal(Ok(()))
+        val scope = owner.source_region_default_schedule_v1
+        expect(scope.completed.len()).to_equal(3)
+        expect(scope.completed[0].id).to_equal(root.id)
+        var earlier_count = 0
+        for symbol in scope.completed:
+            if symbol.id == earlier.id: earlier_count = earlier_count + 1
+        expect(earlier_count).to_equal(1)
+        expect(scope.cursor).to_equal(3)
+        val baseline_source = default_schedule_test_source_v1(program)
+        var baseline_owner = MirLowering.new(baseline_source.symbols)
+        val baseline = baseline_owner.lower_module(baseline_source)
+        expect(baseline_owner.errors.len()).to_equal(0)
+        expect(baseline_owner.source_region_default_schedule_v1).to_equal(nil)
+        for symbol in scope.completed:
+            expect(serialize_mir_function(output.functions[symbol])).to_equal(
+                serialize_mir_function(baseline.functions[symbol]))
+        owner.source_region_clear_default_scope_v1()
+        expect(owner.source_region_default_schedule_v1).to_equal(nil)
+
+    it("observes a real omitted field default and discovers its actual callee"):
+        val source = default_schedule_test_source_v1(
+            "fn default_leaf() -> i64:\n    7\n" +
+            "class ScheduledBox:\n    value: i64 = default_leaf()\n" +
+            "fn default_producer() -> ScheduledBox:\n    ScheduledBox()\n" +
+            "fn default_consumer(box: ScheduledBox) -> i64:\n    box.value\n")
+        val producer = default_schedule_test_symbol_v1(source, "default_producer")
+        val consumer = default_schedule_test_symbol_v1(source, "default_consumer")
+        val leaf = default_schedule_test_symbol_v1(source, "default_leaf")
+        var owner = MirLowering.new(source.symbols)
+        val account = default_schedule_test_account_v1()
+        default_schedule_test_prepare_v1(owner, source, producer, consumer, account)
+        owner.lower_module(source)
+        expect(owner.errors.len()).to_equal(0)
+        expect(owner.source_region_finish_default_schedule_v1()).to_equal(Ok(()))
+        val scope = owner.source_region_default_schedule_v1
+        expect(scope.completed.len()).to_equal(3)
+        expect(scope.completed[2].id).to_equal(leaf.id)
+        expect(scope.occurrences.len()).to_equal(1)
+        val occurrence = scope.occurrences[0]
+        expect(occurrence.original.id).to_equal(producer.id)
+        expect(occurrence.ordinal).to_equal(0)
+        expect(occurrence.field_index).to_equal(0)
+        expect(occurrence.artifact).to_equal(nil)
+        val actual_class = source.classes.values()[0]
+        expect(occurrence.target_blob).to_equal(mir_hir_expression_encode_v1(actual_class.fields[0].default).unwrap())
+        expect(account.snapshot().work_used).to_be_greater_than(20)
+        owner.source_region_clear_default_scope_v1()
+
+    it("uses the actual ordinary input body instead of a stale prepared body graph"):
+        val prepared = default_schedule_test_source_v1("fn selected() -> i64:\n    7\n")
+        val current = default_schedule_test_source_v1("fn selected() -> i64:\n    9\n")
+        val selected = default_schedule_test_symbol_v1(current, "selected")
+        var owner = MirLowering.new(current.symbols)
+        default_schedule_test_prepare_v1(owner, prepared, selected, selected, default_schedule_test_account_v1())
+        val output = owner.lower_module(current)
+        expect(owner.errors.len()).to_equal(0)
+        val baseline_source = default_schedule_test_source_v1("fn selected() -> i64:\n    9\n")
+        var baseline_owner = MirLowering.new(baseline_source.symbols)
+        val baseline = baseline_owner.lower_module(baseline_source)
+        expect(serialize_mir_function(output.functions[selected])).to_equal(
+            serialize_mir_function(baseline.functions[selected]))
+        owner.source_region_clear_default_scope_v1()
+
+    it("refuses an unpaid opt-in before installing mutable scratch"):
+        val source = default_schedule_test_source_v1("fn selected() -> i64:\n    7\n")
+        val selected = default_schedule_test_symbol_v1(source, "selected")
+        var owner = MirLowering.new(source.symbols)
+        val account = default_schedule_test_account_v1(4243)
+        val before = account.snapshot()
+        # Factory20 plus first work128+2*allocation2048 requires4244.
+        expect(owner.source_region_prepare_default_schedule_v1(source, source.name,
+            selected, selected, account).is_err()).to_equal(true)
+        expect(owner.source_region_default_schedule_v1).to_equal(nil)
+        expect(account.snapshot().work_used).to_equal(before.work_used)
+
+    it("latches exhaustion and prevents selected and remainder publication"):
+        val source = default_schedule_test_source_v1(
+            "fn selected() -> i64:\n    7\nfn remainder() -> i64:\n    9\n")
+        val selected = default_schedule_test_symbol_v1(source, "selected")
+        val remainder = default_schedule_test_symbol_v1(source, "remainder")
+        val account = default_schedule_test_account_v1()
+        var owner = MirLowering.new(source.symbols)
+        default_schedule_test_prepare_v1(owner, source, selected, selected, account)
+        val left = account.limits().max_work - account.snapshot().work_used
+        expect(account.reserve(work: left)).to_equal(Ok(()))
+        val output = owner.lower_module(source)
+        expect(owner.source_region_default_failed_v1()).to_equal(true)
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
+        expect(output.functions.has(selected)).to_equal(false)
+        expect(output.functions.has(remainder)).to_equal(false)
+        expect(owner.errors.len()).to_equal(1)
+        owner.source_region_default_publish_failure_v1()
+        expect(owner.errors.len()).to_equal(1)
+        owner.source_region_clear_default_scope_v1()
+
+    it("does not mark an extern selection completed or emit the ordinary remainder"):
+        val source = default_schedule_test_source_v1(
+            "extern fn external_selected() -> i64\nfn remainder() -> i64:\n    9\n")
+        val selected = default_schedule_test_symbol_v1(source, "external_selected")
+        val remainder = default_schedule_test_symbol_v1(source, "remainder")
+        var owner = MirLowering.new(source.symbols)
+        default_schedule_test_prepare_v1(owner, source, selected, selected, default_schedule_test_account_v1())
+        val output = owner.lower_module(source)
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
+        expect(owner.source_region_default_failed_v1()).to_equal(true)
+        expect(owner.errors.len()).to_be_greater_than(0)
+        expect(output.functions.has(remainder)).to_equal(false)
+        owner.source_region_clear_default_scope_v1()
+
+    it("refuses an archive-excluded selection before marking it completed"):
+        val source = default_schedule_test_source_v1(
+            "fn selected() -> i64:\n    7\nfn remainder() -> i64:\n    9\n")
+        val selected = default_schedule_test_symbol_v1(source, "selected")
+        val remainder = default_schedule_test_symbol_v1(source, "remainder")
+        var owner = MirLowering.new(source.symbols)
+        default_schedule_test_prepare_v1(owner, source, selected, selected, default_schedule_test_account_v1())
+        val output = owner.lower_module(source, archive_function_symbols: Some([remainder.id]))
+        expect(owner.source_region_default_schedule_v1.completed.len()).to_equal(0)
+        expect(owner.source_region_default_failed_v1()).to_equal(true)
+        expect(output.functions.has(remainder)).to_equal(false)
+        owner.source_region_clear_default_scope_v1()
