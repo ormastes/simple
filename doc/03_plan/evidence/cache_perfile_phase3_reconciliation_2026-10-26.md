@@ -285,9 +285,12 @@ jobs with 64 visible host CPUs, using a distinct output root
 `wt-s3self2/.simple/storage/build/bootstrap-srcobj-p2-20261026`. Its old parent
 sanity evidence records a 900-second timeout. Validation passed under that
 same policy after the default 180-second policy rejected the receipt; no
-receipt was edited. The refresh remains in launcher/preflight, not a completed
-Phase 2 build. The earlier startup process exited before native compilation;
-the root-owned launcher preserves the same output/cache.
+receipt was edited. The root-owned refresh reached the native build owner,
+then exited 1 with `SCV-E-ADMISSION: compile-event-journal-missing` for the new
+checkout. The supported first-checkout cold-initialization path is the next
+repair; no Phase 2 completion is claimed. An earlier startup process exited
+before native compilation. All attempts preserve the same output/cache and
+the refusal logs; the old producer and live Phase 3 are unchanged.
 
 | Acceptance item | Current evidence and next required proof |
 | --- | --- |
