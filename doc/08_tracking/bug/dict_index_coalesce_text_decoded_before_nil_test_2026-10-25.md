@@ -1,5 +1,7 @@
 # `dict[k] ?? d` on Dict<text, text> yields raw 0 on a miss (2026-10-25)
 
+**Status:** open
+
 ## Symptom
 Phase 3 Stage 3 (`simple.r7`, `simple.pu3`), in-process native-build route
 (`native-build src/app/zz_r27_t/h.spl ...`, positional, no `--entry`/`--source`,

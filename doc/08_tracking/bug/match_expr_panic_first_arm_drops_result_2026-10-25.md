@@ -1,4 +1,7 @@
 # A match expression whose FIRST arm is `panic(...)` yields const 0
+
+**Status:** open
+
 ## Open 2026-10-25 — compiler fix in `50.mir/_MirLoweringExpr/switch_operators_calls.spl`; takes effect on the Phase 3 self-rebuild
 
 Date: 2026-10-25. Lane: Phase 3 bootstrap (run-27e), compiler-fix agent.

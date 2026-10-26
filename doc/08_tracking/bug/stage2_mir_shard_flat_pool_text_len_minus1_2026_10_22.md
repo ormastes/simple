@@ -1,3 +1,4 @@
+**Status:** open
 
 ## Handoff 2026-10-23 (lane A): workaround stack at its limit; corrupt module born in the child parse
 
