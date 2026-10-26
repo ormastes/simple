@@ -26,6 +26,9 @@ Canonical array owner cost is computed under locks BEFORE allocations/lookups:
 actual header sizeof, max(length,4)*8 payload, immortal resize bytes/slots and
 oldCapacity*newCapacity collision multiplicity, scoped index equivalent,
 actual active scope/session ledger resize/copy, and insertion/rollback probes.
+Fresh-table zeroing and old-capacity retained rehash writes are charged
+separately (one word per immortal slot, three fields per scoped key); retained
+ledger copy/append and metadata counters are also separate.
 Bound metrics are revalidated from CURRENT dimensions on array_new; insufficient
 work/fields/bytes refuses before header allocation or index lookup. Existing
 canonical registration malloc-under-registry-lock semantics are retained by
@@ -56,4 +59,6 @@ implementations unsupported; no CapLevel parity or complete SOURCE claim.
 Authored native controls: forged tagged address, observation/array/fill one-unit
 short, zero length and copied witness after publication, sparse/tombstone map,
 raw unchanged values, actual mutation, deterministic owner/epoch/backing/cap/
-tombstone changes, SOURCE flag refusal, exactly-once disposal. No jobs run.
+tombstone changes, SOURCE flag refusal, exactly-once disposal, actual registration-growth transition with stale observed
+fees, and delete-heavy output churn with state/byte one-unit-short refusal. No
+jobs run.

@@ -64,7 +64,7 @@ int64_t rt_dict_snapshot_observe_v1(int64_t dictionary,int64_t work,RtDictSnapsh
  * are retained: logical accounting is not a wall-clock or RSS guarantee. */
 static int64_t ds_array_cost_locked(int64_t length,int64_t metric) {
     if (length<0 || length>RT_CORE_ARRAY_MAX_CAP || metric<0 || metric>2) return DS_INVALID;
-    uint64_t cap=length>4 ? (uint64_t)length : 4, work=512,fields=16,bytes=sizeof(RtCoreArray),n;
+    uint64_t cap=length>4 ? (uint64_t)length : 4, work=512,fields=128,bytes=sizeof(RtCoreArray),n;
     if (!ds_product(cap,8,&n) || !ds_add(&bytes,n) || !ds_add(&fields,cap) || !ds_add(&work,cap)) return DS_CAPACITY;
     uint64_t r=rt_core_immortal_registry_cap, next=r;
     /* Overflow-safe equivalent of canonical occupancy thresholds. */
@@ -74,9 +74,12 @@ static int64_t ds_array_cost_locked(int64_t length,int64_t metric) {
         next=r ? r*2 : 256;
         if (r && rt_core_immortal_registry_tombs>rt_core_immortal_registry_len &&
             (rt_core_immortal_registry_len+1)*10<r*5) next=r;
-        if (!ds_product(next,8,&n) || !ds_add(&bytes,n) || !ds_add(&fields,next) ||
+        if (!ds_product(next,8,&n) || !ds_add(&bytes,n) || !ds_add(&fields,next) || !ds_add(&fields,r) ||
             !ds_product(r,next,&n) || !ds_product(n,16,&n) || !ds_add(&work,n) || !ds_add(&work,r)) return DS_CAPACITY;
     }
+    /* Retained insert/rollback/counter writes are separate from fresh-table
+     * zeroing and old-table rehash writes. */
+    if (!ds_add(&fields,16)) return DS_CAPACITY;
     if (!ds_product(next+1,32,&n) || !ds_add(&work,n)) return DS_CAPACITY;
     uint32_t owner=rt_core_transient_scope_for_new_object();
     if (owner) {
@@ -86,9 +89,11 @@ static int64_t ds_array_cost_locked(int64_t length,int64_t metric) {
         uint64_t sn=core_scoped_next_capacity_locked();
         if (sn) {
             if (sn<s || !ds_product(sn,sizeof(RtCoreScopedAllocationKey),&n) || !ds_add(&bytes,n) ||
-                !ds_product(sn,3,&n) || !ds_add(&fields,n) || !ds_product(s,sn,&n) ||
+                !ds_product(sn,3,&n) || !ds_add(&fields,n) ||
+                !ds_product(s,3,&n) || !ds_add(&fields,n) || !ds_product(s,sn,&n) ||
                 !ds_product(n,32,&n) || !ds_add(&work,n) || !ds_add(&work,s)) return DS_CAPACITY;
         }
+        if (!ds_add(&fields,32)) return DS_CAPACITY;
         if (!ds_product(s+(sn ? sn : s)+1,64,&n) || !ds_add(&work,n)) return DS_CAPACITY;
         uint64_t used=owner==rt_core_session_heap_live_id ? rt_core_session_heap_object_len : rt_core_transient_heap_scope_object_len;
         uint64_t slots=owner==rt_core_session_heap_live_id ? rt_core_session_heap_object_cap : rt_core_transient_heap_scope_object_cap;
@@ -97,6 +102,7 @@ static int64_t ds_array_cost_locked(int64_t length,int64_t metric) {
             uint64_t fresh=slots ? slots*2 : 64;
             if (fresh>RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS || !ds_product(fresh,sizeof(RtCoreScopedAllocationKey),&n) ||
                 !ds_add(&bytes,n) || !ds_product(fresh,3,&n) || !ds_add(&fields,n) ||
+                !ds_product(used,3,&n) || !ds_add(&fields,n) ||
                 !ds_product(slots,8,&n) || !ds_add(&work,n)) return DS_CAPACITY;
         }
     }

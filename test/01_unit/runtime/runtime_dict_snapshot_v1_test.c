@@ -79,6 +79,42 @@ int main(void) {
         assert(((SnapshotArrayHeader*)(uintptr_t)(out.array&~INT64_C(7)))->len==0);
         *slot=old; dispose(&out);
     }
+    /* Deterministic registration-growth boundary: retain real ordinary
+     * dictionaries until the allocator owner observes a larger state fee.
+     * Stale observed fields must refuse before publishing the next array. */
+    int transition=0;
+    int64_t old_fields=rt_array_snapshot_bound_v1(0,1); assert(old_fields>0);
+    for(int i=0;i<512 && !transition;++i) {
+        assert(rt_dict_new(0)>0);
+        int64_t now=rt_array_snapshot_bound_v1(0,1); assert(now>0);
+        if(now>old_fields) {
+            RtArraySnapshotV1 rejected={0};
+            int64_t current_work=rt_array_snapshot_bound_v1(0,0);
+            int64_t current_bytes=rt_array_snapshot_bound_v1(0,2);
+            assert(rt_array_snapshot_new_v1(0,current_work,now-1,current_bytes,&rejected)<0);
+            assert(!rejected.array);
+            assert(rt_array_snapshot_new_v1(0,current_work,old_fields,current_bytes,&rejected)<0);
+            assert(!rejected.array);
+            assert(rt_array_snapshot_new_v1(0,current_work,now,current_bytes,&rejected)==0);
+            dispose(&rejected); transition=1;
+        }
+        old_fields=now;
+    }
+    assert(transition);
+    /* Delete-heavy output lifecycle exercises scoped tombstone compaction
+     * costs as well as growth. Every current state metric is checked one-short
+     * before exact fees, independent of which resize policy is selected. */
+    for(int cycle=0;cycle<3;++cycle) {
+        RtArraySnapshotV1 churn[48];
+        for(int i=0;i<48;++i) churn[i]=output(0);
+        for(int i=0;i<48;++i) dispose(&churn[i]);
+        int64_t cw=rt_array_snapshot_bound_v1(0,0),cf=rt_array_snapshot_bound_v1(0,1),cb=rt_array_snapshot_bound_v1(0,2);
+        RtArraySnapshotV1 next={0};
+        assert(rt_array_snapshot_new_v1(0,cw,cf-1,cb,&next)<0 && !next.array);
+        assert(rt_array_snapshot_new_v1(0,cw,cf,cb-1,&next)<0 && !next.array);
+        assert(rt_array_snapshot_new_v1(0,cw,cf,cb,&next)==0);
+        dispose(&next);
+    }
     header->flags|=0x80;
     q=rt_dict_snapshot_observation_bound_v1();
     assert(rt_dict_snapshot_observe_v1(d,q,&untouched)<0);
