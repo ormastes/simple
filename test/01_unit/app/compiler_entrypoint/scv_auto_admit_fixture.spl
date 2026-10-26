@@ -1,4 +1,5 @@
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_admit_extra_roots_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
 use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
 use app.io.file_ops.{path_absolute}
@@ -57,8 +58,12 @@ fn scv_auto_admit_mutation_io() -> text:
     val root = scv_auto_setup("mutation")
     if root == "": return "setup"
     val cache = root + "/build/scv"
-    val first = compiler_source_authority_acquire_v1(root, cache, SCV_AUTO_SELECTORS, false)
+    # Commit the entry rows, then mutate before any snapshot of that
+    # generation has been materialized.
+    val first = compiler_source_authority_acquire_v1(root, cache, ["src/app"], false)
     if not first.valid: return "first:" + first.reason
+    val admitted = compiler_inventory_admit_extra_roots_v1(root, cache, ["build/hw", "build/hw/hello.spl"])
+    if not admitted.valid: return "admit:" + admitted.reason
     if not file_write(root + "/build/hw/hello.spl", "fn main():\n    print(\"mutated\")\n"): return "mutate"
     val frozen = scv_compile_snapshot_acquire_v1(root, cache, SCV_AUTO_SELECTORS)
     if frozen.valid: return "mutated-source-frozen"
